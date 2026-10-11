@@ -89,6 +89,7 @@ import { ScrollToBottomButton } from '../shared/ScrollToBottomButton';
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
 import { VirtualList, type VirtualListApi } from '../../lib/virtual-list/VirtualList';
 import { useSessionHistory } from '../../hooks/useSessionHistory';
+import { useTabBarScroll } from '../../hooks/useTabBarScroll';
 import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
 import { AskPromptCard } from '../shared/AskPromptCard';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
@@ -509,29 +510,20 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     [sidebarTabs, addSidebarTab, setActiveSidebarTab, convertSidebarTab, taskId],
   );
 
-  // 标签栏单行横向滚动：哪边还有未滚动到内容，才渲染哪边的箭头（与附件栏同款规则）
-  const tabBarRef = useRef<HTMLDivElement>(null);
-  const [canScrollTabsLeft, setCanScrollTabsLeft] = useState(false);
-  const [canScrollTabsRight, setCanScrollTabsRight] = useState(false);
-  const updateTabBarArrows = useCallback(() => {
-    const el = tabBarRef.current;
-    if (!el) return;
-    const max = el.scrollWidth - el.clientWidth;
-    setCanScrollTabsLeft(el.scrollLeft > 1);
-    setCanScrollTabsRight(max > 1 && el.scrollLeft < max - 1);
-  }, []);
-  const scrollTabs = useCallback((dir: -1 | 1) => {
-    tabBarRef.current?.scrollBy({ left: dir * 220, behavior: 'smooth' });
-  }, []);
-  // 标签增删 / 会话切换 / 面板展开或调宽导致容器尺寸变化时重算箭头显隐
+  // 标签栏单行横向滚动：按「一个标签页」滚动 + 新建/激活标签自动滚入视野（哪边还有内容才显示箭头）
+  const {
+    ref: tabBarRef,
+    canScrollLeft: canScrollTabsLeft,
+    canScrollRight: canScrollTabsRight,
+    onScroll: onTabBarScroll,
+    scrollByTab: scrollTabs,
+    scrollTabIntoView: scrollTabIntoView,
+  } = useTabBarScroll<HTMLDivElement>();
+
+  // 新建/激活/排序后让当前标签自动滚入视野（已完整可见时为空操作）
   useEffect(() => {
-    const el = tabBarRef.current;
-    if (!el) return;
-    updateTabBarArrows();
-    const observer = new ResizeObserver(() => updateTabBarArrows());
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [sidebarTabs.length, taskId, rightPanelOpen, updateTabBarArrows]);
+    scrollTabIntoView(activeTab?.id);
+  }, [activeTab?.id, sidebarTabs.length, scrollTabIntoView]);
 
   // 隐藏会话标题兜底：store.tasks 无该任务（subagent / agenteam 衍生会话已被侧边栏过滤）时，
   // 直连 /api/tasks/:id 取标题；任务进入 store 后自动让位（task 存在则清空兜底）
@@ -680,10 +672,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       ? 'system'
       : contextTab;
 
-  // 空白页首条消息发送中标记：创建 task（API 往返）到 navigate 期间欢迎页无任何指示，
-  // 会呈现「消息已发出却一片死寂」；此标记让欢迎页在等待期显示「响应中…」。
-  const [blankSending, setBlankSending] = useState(false);
-
   // 空状态：发送消息后创建任务并跳转；任务态：直接发送到当前 session
   const handleSend = useCallback(
     async (text: string, attachments?: string[]) => {
@@ -692,17 +680,19 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       if (taskId) {
         sendMessage(text, { taskId, attachments });
       } else {
-        setBlankSending(true);
-        try {
-          const newTaskId = await sendMessage(text, { attachments });
-          if (newTaskId) {
-            // 空白页创建新会话：面板开合状态随对话转移到新会话，避免 navigate 重挂载后收起
-            useStore.getState().migrateRightPanelState('', newTaskId);
-            navigate(`/task/${newTaskId}`);
-          }
-        } finally {
-          setBlankSending(false);
-        }
+        // 空白页首条消息：sendMessage 同步预分配会话 id、写入乐观任务与用户消息后，
+        // 通过 onSessionReady 立即导航 —— 配合 flushSync 同步应用路由，点发送即刻就是任务页，
+        // 不存在「taskId 为空」的过渡帧（无需居中/底部加载态）。
+        sendMessage(text, {
+          attachments,
+          onSessionReady: (id) => {
+            // 面板开合状态随对话转移到新会话，避免 navigate 重挂载后收起
+            useStore.getState().migrateRightPanelState('', id);
+            // flushSync：同步提交路由更新；否则 navigate 走低优先级 transition，
+            // 期间 taskId 仍为空 → 仍会渲染空白页（欢迎页）一帧
+            navigate(`/task/${id}`, { flushSync: true });
+          },
+        });
       }
     },
     [taskId, sendMessage, navigate, scrollToBottom],
@@ -861,7 +851,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           <SortableContext items={sidebarTabs.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
             <div
               ref={tabBarRef}
-              onScroll={updateTabBarArrows}
+              onScroll={onTabBarScroll}
               className="flex flex-1 items-center gap-1.5 overflow-x-auto no-scrollbar scroll-smooth"
             >
               {sidebarTabs.map((tab) => (
@@ -1293,7 +1283,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               <p className="text-xl font-semibold text-muted-foreground">
                 {t(getGreetingKey())}{t('task.greeting.prompt')}
               </p>
-              {(isGenerating || blankSending) && (
+              {isGenerating && (
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin" />
                   <span className="text-sm">{t('task.thinking')}</span>
@@ -1798,6 +1788,7 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
   return (
     <div
       ref={mergedRef}
+      data-tab-id={tab.id}
       style={style}
       {...attributes}
       {...listeners}

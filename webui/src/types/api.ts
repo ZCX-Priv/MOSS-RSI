@@ -1452,6 +1452,8 @@ export interface TerminalInfo {
   createdAt: number;
   /** 是否原生 PTY（false = 管道降级） */
   pty: boolean;
+  /** 仅剩历史（后端进程已重启，终端本体不存在）：只读回放，不可输入 */
+  offline?: boolean;
 }
 
 /** 终端解释器类型（terminal 工具/WS create 使用） */

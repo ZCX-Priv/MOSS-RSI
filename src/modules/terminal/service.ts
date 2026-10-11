@@ -7,6 +7,7 @@
 import { t } from '../../core/i18n';
 import type { Logger } from '../../core/types';
 import { resolveInterpreter, makeMarker, type InteractiveInterpreter } from './interpreter';
+import { TerminalPersistence, type PersistedTerminal } from './persistence';
 import {
   TERMINAL_LIMITS,
   type InterpreterKind,
@@ -74,6 +75,24 @@ function stripAnsi(s: string): string {
     .replace(/\u001b\][^\u0007]*(\u0007|\u001b\\)/g, '');
 }
 
+/** 转义正则元字符 */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 标记与状态 token 之间可能插入的 ANSI CSI 序列（ConPTY 常见） */
+const ANSI_CSI = '(?:\\u001b\\[[0-9;?]*[A-Za-z])*';
+/** 状态 token：整数（bash $? / cmd %errorlevel% / PS 数值）或 True/False（PS $?） */
+const SENTINEL_TOKEN = '(True|False|-?\\d+)(?!\\d)';
+
+/** 状态 token → 退出码（解析不到返回 undefined） */
+function tokenToExitCode(token: string): number | undefined {
+  if (/^-?\d+$/.test(token)) return parseInt(token, 10);
+  if (token === 'True') return 0;
+  if (token === 'False') return 1;
+  return undefined;
+}
+
 export class TerminalManager implements TerminalService {
   private readonly runtimes = new Map<string, Runtime>();
   /** 会话默认终端 id（terminal 工具缺省执行时复用；人类创建不受影响） */
@@ -81,15 +100,20 @@ export class TerminalManager implements TerminalService {
   private readonly emit: TerminalEmitter;
   private readonly logger: Logger;
   private readonly isWindows: boolean;
+  /** 落盘存储（元数据 + 输出缓冲）：进程重启后 list/snapshot 仍可还原（离线只读） */
+  private readonly storage: TerminalPersistence;
 
-  constructor(deps: { emitter: TerminalEmitter; logger: Logger; isWindows: boolean }) {
+  constructor(deps: { emitter: TerminalEmitter; logger: Logger; isWindows: boolean; dataDir: string }) {
     this.emit = deps.emitter;
     this.logger = deps.logger;
     this.isWindows = deps.isWindows;
+    this.storage = new TerminalPersistence(deps.dataDir);
+    this.storage.loadAll();
   }
 
   async create(opts: TerminalCreateOptions): Promise<TerminalInfo> {
-    if (this.list(opts.sessionId).length >= TERMINAL_LIMITS.maxPerSession) {
+    const live = this.liveInfos(opts.sessionId);
+    if (live.length >= TERMINAL_LIMITS.maxPerSession) {
       throw new Error(t('terminal.tooManyPerSession', { max: TERMINAL_LIMITS.maxPerSession }));
     }
 
@@ -98,7 +122,7 @@ export class TerminalManager implements TerminalService {
     const rows = clamp(Math.floor(opts.rows ?? TERMINAL_LIMITS.defaultRows), 5, 200);
     const cwd = opts.cwd && opts.cwd.trim() ? opts.cwd : process.cwd();
     const id = `term_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const index = this.list(opts.sessionId).length + 1;
+    const index = live.length + 1;
 
     const ptyCtor = (Bun as unknown as { Terminal?: PtyCtor }).Terminal;
     const usePty = typeof ptyCtor === 'function';
@@ -176,6 +200,7 @@ export class TerminalManager implements TerminalService {
       sessionId: opts.sessionId,
       payload: { terminal: rt.info },
     });
+    this.persistNow(opts.sessionId);
     return rt.info;
   }
 
@@ -242,7 +267,15 @@ export class TerminalManager implements TerminalService {
 
   close(id: string): boolean {
     const rt = this.runtimes.get(id);
-    if (!rt) return false;
+    if (!rt) {
+      // 离线历史项：仅清除落盘条目，并通知前端移除标签
+      const persisted = this.storage.getById(id);
+      if (!persisted) return false;
+      const sid = persisted.info.sessionId;
+      this.storage.save(sid, this.snapshotEntries(sid).filter((e) => e.info.id !== id));
+      this.emit(sid, { type: 'terminal.closed', sessionId: sid, payload: { terminalId: id, sessionId: sid } });
+      return true;
+    }
     rt.closed = true;
     for (const w of Array.from(rt.waiters)) {
       clearTimeout(w.timer);
@@ -260,6 +293,11 @@ export class TerminalManager implements TerminalService {
       /* 静默 */
     }
     this.runtimes.delete(id);
+    // 同步清除落盘条目（关闭后刷新不应复活该标签）；同时并入其余在线终端的最新缓冲
+    this.storage.save(
+      rt.info.sessionId,
+      this.snapshotEntries(rt.info.sessionId).filter((e) => e.info.id !== id),
+    );
     // 若关闭的是会话默认终端，同步清掉默认登记（下次 ensureDefault 会重建）
     if (this.defaultIds.get(rt.info.sessionId) === id) {
       this.defaultIds.delete(rt.info.sessionId);
@@ -277,15 +315,21 @@ export class TerminalManager implements TerminalService {
   }
 
   list(sessionId: string): TerminalInfo[] {
-    const out: TerminalInfo[] = [];
-    for (const rt of this.runtimes.values()) {
-      if (rt.info.sessionId === sessionId) out.push(rt.info);
-    }
-    return out;
+    const live = this.liveInfos(sessionId);
+    const liveIds = new Set(live.map((t) => t.id));
+    // 后端已不知道的旧终端（进程重启）：保留为离线只读历史项，标签与历史不丢
+    const dead: TerminalInfo[] = this.storage
+      .list(sessionId)
+      .filter((e) => !liveIds.has(e.info.id))
+      .map((e) => ({ ...e.info, running: false, exitCode: null, offline: true }));
+    return [...live, ...dead].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   snapshot(id: string): string | undefined {
-    return this.runtimes.get(id)?.buffer;
+    const live = this.runtimes.get(id)?.buffer;
+    if (live !== undefined) return live;
+    // 离线历史项：回放落盘缓冲（刷新/后端重启后仍能看到历史输出）
+    return this.storage.getById(id)?.buffer;
   }
 
   async run(id: string, command: string, timeoutMs?: number): Promise<TerminalRunResult> {
@@ -342,9 +386,36 @@ export class TerminalManager implements TerminalService {
       if (rt && rt.info.sessionId === sessionId) this.close(id);
     }
     this.defaultIds.delete(sessionId);
+    // 会话已删除：清掉落盘的历史条目
+    this.storage.remove(sessionId);
   }
 
   // ── 内部 ──
+
+  /** 某会话的在线终端信息（顺序为运行时插入序） */
+  private liveInfos(sessionId: string): TerminalInfo[] {
+    const out: TerminalInfo[] = [];
+    for (const rt of this.runtimes.values()) {
+      if (rt.info.sessionId === sessionId) out.push(rt.info);
+    }
+    return out;
+  }
+
+  /** 组装落盘条目：在线终端（当前 info + buffer）覆盖同 id 的既有历史条目 */
+  private snapshotEntries(sessionId: string): PersistedTerminal[] {
+    const entries = new Map<string, PersistedTerminal>();
+    for (const e of this.storage.list(sessionId)) entries.set(e.info.id, e);
+    for (const rt of this.runtimes.values()) {
+      if (rt.info.sessionId !== sessionId) continue;
+      entries.set(rt.info.id, { info: rt.info, buffer: rt.buffer });
+    }
+    return Array.from(entries.values());
+  }
+
+  /** 立即落盘某会话（创建/退出/关闭等关键节点） */
+  private persistNow(sessionId: string): void {
+    this.storage.save(sessionId, this.snapshotEntries(sessionId));
+  }
 
   private buildEnv(): Record<string, string> {
     const env: Record<string, string> = {};
@@ -399,6 +470,8 @@ export class TerminalManager implements TerminalService {
       payload: { terminalId: rt.info.id, sessionId: rt.info.sessionId, data: text },
     });
     this.settleWaiters(rt);
+    // 高频输出：去抖落盘（刷新/后端重启后仍能看到历史输出）
+    this.storage.scheduleSave(rt.info.sessionId, this.snapshotEntries(rt.info.sessionId));
   }
 
   private append(rt: Runtime, text: string): void {
@@ -413,34 +486,42 @@ export class TerminalManager implements TerminalService {
 
   private settleWaiters(rt: Runtime): void {
     for (const w of Array.from(rt.waiters)) {
-      // 匹配「换行 + 标记」：跳过回显的标记命令行（其中标记前是引号，非换行）
-      const idx = rt.buffer.indexOf(`\n${w.marker}`, w.start);
-      if (idx < 0) continue;
+      const hit = this.findSentinel(rt.buffer, w.start, w.marker);
+      if (!hit) continue;
       clearTimeout(w.timer);
       rt.waiters.delete(w);
       w.resolve({
-        output: rt.buffer.slice(w.start, idx),
+        output: rt.buffer.slice(w.start, hit.index),
         found: true,
-        exitCode: this.parseExitCode(rt.buffer, idx, w.marker),
+        exitCode: hit.exitCode,
       });
     }
   }
 
   /**
-   * 解析标记行尾部的退出状态：
-   * bash/zsh 与 cmd 为数字（`$?` / `%errorlevel%`）；PowerShell `$?` 为 True/False（→ 0/1）。
-   * 解析不到返回 undefined。
+   * 在原始 PTY 输出流中定位「完成标记 + 退出状态」的真实输出行（取最后一个匹配）。
+   *
+   * 不能用「换行 + 标记」判定：ConPTY（Bun.Terminal/Windows）会在输出行前插入光标显示等
+   * ANSI 序列（实测为 `\u001b[?25h`），标记并不紧跟 `\n` —— 旧实现 `indexOf('\n'+marker)`
+   * 恒为 -1，每条命令都等到超时（本 bug 根因）。改为在标记之后匹配退出状态 token：真实输出
+   * 形如 `<marker> 0`；而回显的命令行里标记后跟的是语法片段（`$(if…` / `%errorlevel%` / `%s`），
+   * 不会被误判。取最后一个匹配（回显在前、输出在后）。
    */
-  private parseExitCode(buffer: string, markerIdx: number, marker: string): number | undefined {
-    const rest = buffer.slice(markerIdx + 1); // 跳过标记前的换行
-    const lineEnd = rest.search(/\r?\n/);
-    const line = lineEnd >= 0 ? rest.slice(0, lineEnd) : rest;
-    const after = line.slice(line.indexOf(marker) + marker.length).trim();
-    const token = after.split(/\s+/)[0] ?? '';
-    if (/^-?\d+$/.test(token)) return parseInt(token, 10);
-    if (token === 'True') return 0;
-    if (token === 'False') return 1;
-    return undefined;
+  private findSentinel(
+    buffer: string,
+    from: number,
+    marker: string,
+  ): { index: number; exitCode?: number } | null {
+    const re = new RegExp(escapeRegExp(marker) + ANSI_CSI + '[ \\t]*' + SENTINEL_TOKEN, 'g');
+    re.lastIndex = from;
+    let last: RegExpExecArray | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(buffer)) !== null) {
+      last = m;
+      if (re.lastIndex === m.index) re.lastIndex++; // 零宽保险
+    }
+    if (!last) return null;
+    return { index: last.index, exitCode: tokenToExitCode(last[1]) };
   }
 
   private onExit(rt: Runtime, code: number): void {
@@ -462,5 +543,7 @@ export class TerminalManager implements TerminalService {
       sessionId: rt.info.sessionId,
       payload: { terminalId: rt.info.id, sessionId: rt.info.sessionId, exitCode: code },
     });
+    // 退出：同步落盘（含退出码），刷新/重启后历史与状态一致
+    this.persistNow(rt.info.sessionId);
   }
 }

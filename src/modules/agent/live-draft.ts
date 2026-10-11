@@ -31,9 +31,9 @@ export interface LiveDraft {
   /** 所属 run（前端用于事件隔离） */
   runId?: string;
   /**
-   * 本轮流式 assistant 消息的稳定 id：`<sessionId>#<msgIdBase + turn>`（msgIdBase =
-   * run 开始时的会话消息数，由 engine 传入）—— 跨 run 严格递增保证全局唯一，前端据此
-   * 把「流式草稿」与「历史正式消息」对齐为同一实体；offset 以此为独立空间。
+   * 本轮流式 assistant 消息的稳定 id：`<sessionId>#<msgSeq>`（msgSeq = 会话级单调序号，
+   * 每 turn 消耗一个，由 engine 逐轮传入）—— 同一会话内严格递增保证全局唯一（含跨 run），
+   * 前端据此把「流式草稿」与「历史正式消息」对齐为同一实体；offset 以此为独立空间。
    */
   messageId: string;
   turnIndex: number;

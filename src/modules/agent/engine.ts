@@ -376,12 +376,11 @@ export class AgentEngineImpl implements AgentEngine {
     const session = this.sessions.getOrCreate(sessionId);
     // clientMessageId 随消息持久化：前端本地乐观副本与历史副本据此同身份去重
     this.sessions.addUserMessage(session, userMessage, input.attachments, input.clientMessageId);
-    // messageId 基数：会话级单调序号（每 run 消耗一个，持久化在 session.msgSeq）。
-    // messageId = `<sessionId>#<msgIdBase + turn>` —— 严格递增且不受 messages.length 波动
-    // （压缩折叠 / 撤回恢复 / healDanglingToolCalls 都会中部 splice 使 length 回落，
-    // 旧方案的「#<length+turn>」在长会话压缩后会与历史已落盘的 id 相撞 →
-    // 前端流式分片 attach 到旧消息 / 增量合并原位覆盖旧消息 = 「新消息替换第一条消息」错位）。
-    const msgIdBase = this.sessions.nextMsgSeq(session);
+    // messageId 由会话级单调序号生成（`<sessionId>#<msgSeq>`，每 turn 消耗一个，持久化在
+    // session.msgSeq）—— 严格递增且不受 messages.length 波动（压缩折叠 / 撤回恢复 /
+    // healDanglingToolCalls 都会中部 splice 使 length 回落，用 length 派生 id 会与历史已落盘的
+    // id 相撞 → 前端流式分片 attach 到旧消息 / 原位覆盖 = 「新消息替换旧消息」错位）。
+    // 取号在下方 turn 循环内逐轮进行（见 turnMessageId），保证 run 内与跨 run 均唯一。
     // 记录本次 run 的工作目录（上下文文件相对路径的存在性校验/归一化匹配基准）
     this.sessions.setLastCwd(session, cwd);
     // 活跃置顶：task.id 即 sessionId；无对应任务时静默返回 null
@@ -445,12 +444,15 @@ export class AgentEngineImpl implements AgentEngine {
       }
       turn++;
 
-      // 逐轮重建流式草稿：messageId 含 run 基数（`<sessionId>#<msgIdBase + turn>`），
-      // 跨 run 唯一；每个 messageId 拥有独立 offset 空间 —— 前端据此判定「是否同一轮」
-      // 并精确续接，且永不误命中更早轮次的历史消息。
+      // 逐轮重建流式草稿：messageId = `<sessionId>#<msgSeq>`，每 turn 消耗一个会话级序号。
+      // 逐轮取号（而非「run 基数 + turn」）保证同一会话内所有 run、所有 turn 的 id 严格单调
+      // 唯一 —— 旧方案每 run 只 +1，跨 run 时 base+turn 区间重叠：上一条消息若触发过工具调用
+      // （多 turn），下一条消息会复用其 messageId，前端按 id 去重即把新回复的流式分片全部当作
+      // 「重复分片」丢弃（前端无输出、「响应中」永挂，后端却正常跑的根因）。
+      // 每个 messageId 拥有独立 offset 空间，前端据此判定「是否同一轮」并精确续接。
       // turnMessageId 轮内快照：落盘时一律用它（而非回读 liveDraft —— 打断竞态下新 run
       // 的 begin() 可能已替换草稿，回读会让旧 run 的半截消息写上新 run 的身份 → 重复 id）。
-      const turnMessageId = `${sessionId}#${msgIdBase + turn}`;
+      const turnMessageId = `${sessionId}#${this.sessions.nextMsgSeq(session)}`;
       this.liveDraft.begin(sessionId, turnMessageId, input.runId, turn);
 
       // 构建请求：context 引擎每轮流水线（env 保障 → 压缩决策 → 缓存对齐视图）
@@ -1107,8 +1109,8 @@ export class AgentEngineImpl implements AgentEngine {
     return this.tasks.getTask(id);
   }
 
-  createTask(title: string, groupId?: string): TaskItem {
-    return this.tasks.createTask(title, groupId);
+  createTask(title: string, groupId?: string, id?: string): TaskItem {
+    return this.tasks.createTask(title, groupId, id);
   }
 
   updateTask(id: string, patch: { title?: string; groupId?: string }): TaskItem | null {

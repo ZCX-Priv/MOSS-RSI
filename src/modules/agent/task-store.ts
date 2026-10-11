@@ -148,9 +148,11 @@ export class TaskStore {
     return safeGroupId(groupId) || DEFAULT_GROUP_ID;
   }
 
-  createTask(title: string, groupId?: string): TaskItem {
+  createTask(title: string, groupId?: string, id?: string): TaskItem {
     const now = new Date().toISOString();
-    const id = crypto.randomUUID();
+    // 前端可预分配会话 id（乐观导航：点发送即刻进入任务页，task.id 即 sessionId）。
+    // 传入且未被占用则沿用；缺失或与已有任务冲突时回退新 UUID（绝不覆盖已有任务）。
+    const taskId = id && !this.findTask(id) ? id : crypto.randomUUID();
     const gid = this.validGroupId(groupId) ?? DEFAULT_GROUP_ID;
     const groupTasks = this.tasksByGroup.get(gid) ?? [];
     // 新任务置于分组顶部：取分组内现有最小 order - 1（无任务时 0）
@@ -158,20 +160,20 @@ export class TaskStore {
       ? Math.min(...groupTasks.map(tk => tk.order ?? Number.MAX_SAFE_INTEGER)) - 1
       : 0;
     const task: TaskItem = {
-      id,
+      id: taskId,
       title: title || '新任务',
       groupId: gid,
       createdAt: now,
       updatedAt: now,
-      sessionId: id, // task.id 即 sessionId
+      sessionId: taskId, // task.id 即 sessionId
       order: nextOrder,
     };
     groupTasks.push(task);
     this.tasksByGroup.set(gid, groupTasks);
-    this.index[id] = { groupId: gid, sessionId: id };
+    this.index[taskId] = { groupId: gid, sessionId: taskId };
     this.saveGroupTasks(gid);
     this.saveRoot();
-    this.logger.debug(t('agent.taskCreated', { id }), { title, groupId: gid });
+    this.logger.debug(t('agent.taskCreated', { id: taskId }), { title, groupId: gid });
     return { ...task };
   }
 

@@ -212,5 +212,18 @@ check('TaskInput：+ 附件仍走附件块', 'webui/src/components/shared/TaskIn
   'const uniquePaths = [...new Set(attachments.map((a) => a.path))];',
 ]);
 
+console.log('===== 8. IME 组合期占位符不叠字 =====');
+check('组合期隐藏占位符（data-composing 命令式标记）', 'webui/src/components/shared/MentionEditor.tsx', [
+  'const setComposingFlag = (on: boolean) => {',
+  "root.setAttribute('data-composing', 'true')",
+  "root.removeAttribute('data-composing')",
+  'const composing = isComposingRef.current || native.isComposing;',
+  'setComposingFlag(composing);',
+]);
+check('组合期 CSS 隐藏 ::before', 'webui/src/styles/global.css', [
+  ".mention-editor[data-composing='true']::before",
+  'display: none',
+]);
+
 console.log(`\npass=${pass} fail=${fail}`);
 if (fail > 0) process.exit(1);

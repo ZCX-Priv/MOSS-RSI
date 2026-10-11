@@ -314,11 +314,17 @@ export const api = {
    * 创建任务。deriveGroupName：工作目录名 → 服务端按目录归类建组（前端免一次
    * 「查组/建组」串行往返，发送新任务从 2-3 次请求降到 1 次）。
    */
-  createTask: (title: string, groupId?: string, deriveGroupName?: string) =>
+  createTask: (title: string, groupId?: string, deriveGroupName?: string, id?: string) =>
     request<{ task: TaskItem; group?: TaskGroup }>(
       'POST',
       '/api/tasks',
-      { title, ...(groupId ? { groupId } : {}), ...(deriveGroupName ? { deriveGroupName } : {}) },
+      {
+        title,
+        ...(groupId ? { groupId } : {}),
+        ...(deriveGroupName ? { deriveGroupName } : {}),
+        // 前端预分配会话 id（乐观导航）：后端以此 id 创建任务，保证前后端 id 一致
+        ...(id ? { id } : {}),
+      },
     ).then((resp) => resp.task),
   getTask: async (id: string) => {
     const resp = await request<{ task: TaskItem; messages: unknown[]; todos: TodoItem[]; contextFiles: ContextFile[] }>(

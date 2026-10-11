@@ -16,6 +16,8 @@ class TerminalModule implements Module {
     const manager = new TerminalManager({
       logger: ctx.logger,
       isWindows: ctx.env.isWindows,
+      // 终端元数据 + 输出缓冲落盘目录（~/.moss/terminals）：进程重启后仍可还原标签与历史
+      dataDir: ctx.env.dataDir,
       // 惰性解析 SERVER_INSTANCE：模块初始化顺序无关；未注册时静默丢弃（无 WS 场景）
       emitter: (sessionId, message) => {
         try {

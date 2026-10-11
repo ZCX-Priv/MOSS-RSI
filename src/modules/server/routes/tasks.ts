@@ -69,7 +69,7 @@ type AgentEngineWithTasks = AgentEngine & {
     active?: boolean;
     sessionId?: string;
   } | null;
-  createTask?: (title: string, groupId?: string) => {
+  createTask?: (title: string, groupId?: string, id?: string) => {
     id: string;
     title: string;
     groupId: string;
@@ -206,7 +206,7 @@ export function createCreateTaskHandler(services: ServiceRegistry): RouteHandler
     if (!engine?.createTask) {
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
-    const body = (req.body ?? {}) as { title?: string; groupId?: string; deriveGroupName?: string };
+    const body = (req.body ?? {}) as { title?: string; groupId?: string; deriveGroupName?: string; id?: string };
     if (!body.title) {
       return { status: 400, body: { error: ErrorCode.TASK_TITLE_REQUIRED } };
     }
@@ -218,7 +218,7 @@ export function createCreateTaskHandler(services: ServiceRegistry): RouteHandler
       group = resolveFolderGroup(engine, body.deriveGroupName.trim());
       groupId = group?.id;
     }
-    const task = engine.createTask(body.title, groupId);
+    const task = engine.createTask(body.title, groupId, body.id);
     broadcastWS(services, {
       type: 'task.created',
       payload: { task, ...(group ? { group } : {}) },

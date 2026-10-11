@@ -1581,10 +1581,12 @@ export const useStore = create<Store>((set, get) => ({
   setTerminalList: (sessionId, terminals) =>
     set((state) => {
       const cur = state.terminalsBySession[sessionId];
+      // 活跃项缺失时优先选「在线」终端（离线项为后端重启后的只读历史，不应作为默认激活项）
+      const fallback = terminals.find((t) => !t.offline) ?? terminals[0];
       const activeId =
         cur?.activeId && terminals.some((t) => t.id === cur.activeId)
           ? cur.activeId
-          : terminals[0]?.id;
+          : fallback?.id;
       return {
         terminalsBySession: { ...state.terminalsBySession, [sessionId]: { list: terminals, activeId } },
       };

@@ -54,7 +54,16 @@ export function useTask() {
   const removePendingConfirm = useStore((s) => s.removePendingConfirm);
 
   const sendMessage = useCallback(
-    async (text: string, opts?: { taskId?: string; sessionId?: string; attachments?: string[] }): Promise<string | undefined> => {
+    async (
+      text: string,
+      opts?: {
+        taskId?: string;
+        sessionId?: string;
+        attachments?: string[];
+        /** 新建会话时就绪回调（同步触发）：调用方据此立即导航，实现「点发送即刻进入任务页」 */
+        onSessionReady?: (sessionId: string) => void;
+      },
+    ): Promise<string | undefined> => {
       if (!text.trim()) return undefined;
       // command/skill 的一次性注入渲染在 TaskInput 已完成，此处收到的即为最终文本
       const content = text.trim();
@@ -66,6 +75,8 @@ export function useTask() {
       // 1. 确定 taskId / sessionId
       let taskId = opts?.taskId !== undefined ? opts.taskId : (state.activeTaskId ?? '');
       let sessionId = opts?.sessionId ?? '';
+      // 是否本次新建了会话（空白页首条消息）：决定是否在写入消息后触发即时导航回调
+      let createdNew = false;
 
       // 2. 若无 sessionId，尝试从已有 task 获取或创建新 task
       if (!sessionId) {
@@ -74,32 +85,46 @@ export function useTask() {
           const existingTask = state.tasks.find((t) => t.id === taskId);
           sessionId = existingTask?.sessionId ?? existingTask?.id ?? taskId;
         } else {
-          // 新任务：先创建 task，获取 task.id 作为 sessionId。
-          // 分组派生交给后端（deriveGroupName 一次往返内完成「查组/建组/归类」），
-          // 此前前端串行 listTaskGroups+createTaskGroup+createTask 共 2-3 次往返，
-          // 用户点击发送到看到「响应中」之间出现明显空白延迟。
+          // 新任务：前端预分配会话 id（task.id 即 sessionId），同步完成「乐观任务」写入后，
+          // 由调用方（onSessionReady）立即导航 —— 实现「点发送即刻进入任务页」，无任何中间过渡帧。
+          // 分组派生交给后端（deriveGroupName 一次往返内完成「查组/建组/归类」）。
           // 标题取「剥离附件块 + 命令注入块 + 内联 token 后的正文」（只发附件/只引文件时不显示路径）；
           // 用户正文为空（如只发 /命令）时回退：附件文件名 → 模板正文 → 可见文本（永不回退到含哨兵的原文）
+          const localId =
+            (crypto as { randomUUID?: () => string }).randomUUID?.() ??
+            `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          sessionId = localId;
+          taskId = localId;
+          createdNew = true;
           const lookups = buildMentionLookups(state.commands, state.skills, state.agents);
           const visible = stripInjectBlock(stripAttachmentBlock(content));
-          const title =
+          const title = (
             stripMentionTokens(visible, lookups) ||
             (attachments?.[0] ? fileNameOf(attachments[0]) : '') ||
             stripMentionTokens(stripInjectBlock(content), lookups) ||
-            visible;
-          try {
-            const task = await api.createTask(
-              title.slice(0, 50),
-              undefined,
-              deriveGroupName(state.workingDirectory),
-            );
-            addTask(task);
-            taskId = task.id;
-            sessionId = task.sessionId ?? task.id;
-          } catch {
-            // 后端未就绪，本地生成 sessionId 降级
-            sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          }
+            visible
+          ).slice(0, 50);
+          const groupName = deriveGroupName(state.workingDirectory);
+          // 乐观任务条目：分组先命中「现有同名分组」，否则 default；后端返回后按真实分组校正
+          const optimisticGroupId =
+            state.taskGroups.find((g) => g.name === groupName)?.id ?? 'default';
+          const nowIso = new Date().toISOString();
+          addTask({
+            id: localId,
+            title,
+            groupId: optimisticGroupId,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            sessionId: localId,
+          });
+          // 后台用同一 id 创建任务：成功 → 用后端条目校正分组/顺序；
+          // 失败 → 保留本地乐观会话（降级，仍可正常对话）
+          void api
+            .createTask(title, undefined, groupName, localId)
+            .then((t) => {
+              useStore.getState().updateTask(localId, t);
+            })
+            .catch(() => {});
         }
       }
 
@@ -173,6 +198,10 @@ export function useTask() {
       };
       addMessage(sessionId, userMsg);
       setGenerating(sessionId, true);
+
+      // 新建会话：消息与运行态已写入 store，此刻通知调用方立即导航到任务页
+      //（同一同步栈内触发；配合 navigate 的 flushSync 实现零过渡帧）
+      if (createdNew && taskId) opts?.onSessionReady?.(taskId);
 
       // 6. 通过 WS 发送流式任务请求（带 runId + agentId + 权限模式）
       wsClient.send({

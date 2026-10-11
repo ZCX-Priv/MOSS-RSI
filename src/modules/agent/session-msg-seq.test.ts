@@ -101,4 +101,26 @@ describe('SessionStore.nextMsgSeq（messageId 基数单调性）', () => {
     // 新 run 基数仍从 22 递增（不受 length 回落影响 → 不与已落盘的 #21+ 相撞）
     expect(store.nextMsgSeq(session)).toBe(22);
   });
+
+  it('跨 run messageId 唯一性：逐轮取号不碰撞（旧 base+turn 公式必然碰撞）', () => {
+    const store = makeStore();
+    const sid = 'sess-seq-unique';
+    const session = store.getOrCreate(sid);
+
+    // 旧公式（每 run 只取一次基数，id = base + turn）的缺陷固化：run1 三个 turn、run2 两个 turn，
+    // run2 的 id 会复用 run1 的 #2/#3 → 前端按 messageId 去重把新回复的流式分片全部丢弃
+    // （「响应中」永挂、后端却正常跑的根因）。
+    const legacyIds: string[] = [];
+    const base1 = store.nextMsgSeq(session);
+    for (let turn = 1; turn <= 3; turn++) legacyIds.push(`${sid}#${base1 + turn}`);
+    const base2 = store.nextMsgSeq(session);
+    for (let turn = 1; turn <= 2; turn++) legacyIds.push(`${sid}#${base2 + turn}`);
+    expect(new Set(legacyIds).size).toBeLessThan(legacyIds.length);
+
+    // 新公式（engine 逐 turn 取号，id = msgSeq）：run 内与跨 run 均严格单调唯一。
+    const fixed: string[] = [];
+    for (let turn = 1; turn <= 3; turn++) fixed.push(`${sid}#${store.nextMsgSeq(session)}`);
+    for (let turn = 1; turn <= 2; turn++) fixed.push(`${sid}#${store.nextMsgSeq(session)}`);
+    expect(new Set(fixed).size).toBe(fixed.length);
+  });
 });

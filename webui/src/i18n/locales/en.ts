@@ -988,6 +988,7 @@ export const en = {
     close: 'Close terminal',
     emptyPanel: 'No terminals yet — click + to create one',
     exitedTag: 'exited {{code}}',
+    offlineTag: 'Offline',
   },
   agenteam: {
     title: 'Agenteam',

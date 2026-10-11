@@ -21,9 +21,10 @@ import {
 import { useTheme } from '../../contexts/ThemeContext';
 import { useStore, SYSTEM_WORKING_DIRECTORY } from '../../store';
 import { useTerminals } from '../../hooks/useTerminals';
+import { useTabBarScroll } from '../../hooks/useTabBarScroll';
 import { onTerminalOutput } from '../../lib/terminal-bus';
 import { api } from '../../api/http';
-import type { InterpreterKind, InterpreterOption } from '../../types/api';
+import type { InterpreterKind, InterpreterOption, TerminalInfo } from '../../types/api';
 
 interface TerminalPanelProps {
   /** 会话 id（= taskId） */
@@ -114,32 +115,25 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
     [create, createCwd],
   );
 
-  // ── 标签栏横向滚动箭头（与右侧边栏标签栏同款规则）──
-  const tabBarRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
-  const updateTabBarArrows = useCallback(() => {
-    const el = tabBarRef.current;
-    if (!el) return;
-    const max = el.scrollWidth - el.clientWidth;
-    setCanScrollLeft(el.scrollLeft > 1);
-    setCanScrollRight(max > 1 && el.scrollLeft < max - 1);
-  }, []);
-  const scrollTabs = useCallback((dir: -1 | 1) => {
-    tabBarRef.current?.scrollBy({ left: dir * 200, behavior: 'smooth' });
-  }, []);
+  // ── 标签栏横向滚动（与右侧边栏标签栏同款规则：按一个标签滚动 + 自动滚入视野）──
+  const {
+    ref: tabBarRef,
+    canScrollLeft,
+    canScrollRight,
+    onScroll: onTabBarScroll,
+    scrollByTab: scrollTabs,
+    scrollTabIntoView,
+  } = useTabBarScroll<HTMLDivElement>();
+
+  // 新建/切换终端后让当前标签自动滚入视野（解决「标签建着建着就消失」）
   useEffect(() => {
-    const el = tabBarRef.current;
-    if (!el) return;
-    updateTabBarArrows();
-    const observer = new ResizeObserver(() => updateTabBarArrows());
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [updateTabBarArrows, list.length, activeId]);
+    scrollTabIntoView(activeId);
+  }, [activeId, list.length, scrollTabIntoView]);
 
   /** 创建某终端的 xterm 实例并挂载到宿主 */
   const ensureInstance = useCallback(
-    (id: string): Instance | null => {
+    (info: TerminalInfo): Instance | null => {
+      const id = info.id;
       const existing = instancesRef.current.get(id);
       if (existing) return existing;
       const host = hostRef.current;
@@ -159,6 +153,8 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace',
         theme: xtermTheme(dark),
         allowProposedApi: true,
+        // 离线历史项（后端已重启，终端本体不存在）：只读回放，禁止输入
+        disableStdin: Boolean(info.offline),
       });
       const fit = new FitAddon();
       const links = new WebLinksAddon();
@@ -187,9 +183,13 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
     const map = instancesRef.current;
     const ids = new Set(list.map((t) => t.id));
     for (const term of list) {
-      const inst = ensureInstance(term.id);
+      const inst = ensureInstance(term);
       if (inst && inst.term.options.theme?.background !== xtermTheme(dark).background) {
         inst.term.options.theme = xtermTheme(dark);
+      }
+      // 离线态可能随 terminal.list 刷新而变化：同步只读开关
+      if (inst && inst.term.options.disableStdin !== Boolean(term.offline)) {
+        inst.term.options.disableStdin = Boolean(term.offline);
       }
     }
     for (const [id, inst] of Array.from(map.entries())) {
@@ -279,12 +279,13 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
         )}
         <div
           ref={tabBarRef}
-          onScroll={updateTabBarArrows}
+          onScroll={onTabBarScroll}
           className="no-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto scroll-smooth"
         >
           {list.map((term) => (
             <div
               key={term.id}
+              data-tab-id={term.id}
               className={`group flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors ${
                 term.id === activeId
                   ? 'bg-muted text-foreground'
@@ -299,10 +300,14 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
               >
                 <TerminalIcon className="size-3.5 shrink-0" />
                 <span className="max-w-[140px] truncate">{titleOf(term.id)}</span>
-                {!term.running && (
-                  <span className="shrink-0 text-[10px] text-destructive">
-                    {t('terminal.exitedTag', { code: term.exitCode ?? 0 })}
-                  </span>
+                {term.offline ? (
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{t('terminal.offlineTag')}</span>
+                ) : (
+                  !term.running && (
+                    <span className="shrink-0 text-[10px] text-destructive">
+                      {t('terminal.exitedTag', { code: term.exitCode ?? 0 })}
+                    </span>
+                  )
                 )}
               </button>
               <button

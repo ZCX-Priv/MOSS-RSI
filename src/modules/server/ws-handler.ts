@@ -784,19 +784,19 @@ export class WsHandler {
    */
   private handleTaskCreate(state: ConnectionState, msg: WSMessage): void {
     const agent = this.services.tryResolve<AgentEngine & {
-      createTask?: (title: string, groupId?: string) => unknown;
+      createTask?: (title: string, groupId?: string, id?: string) => unknown;
     }>(ServiceNames.AGENT_ENGINE);
     if (!agent?.createTask) {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_CREATE_TASK_UNAVAILABLE } });
       return;
     }
-    const payload = (msg.payload ?? {}) as { title?: string; groupId?: string };
+    const payload = (msg.payload ?? {}) as { title?: string; groupId?: string; id?: string };
     if (!payload.title || typeof payload.title !== 'string') {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TITLE_REQUIRED } });
       return;
     }
     try {
-      const task = agent.createTask(payload.title, payload.groupId);
+      const task = agent.createTask(payload.title, payload.groupId, payload.id);
       state.conn.send({ type: 'task.created', payload: { task } });
       this.logger.info(t('server.taskCreatedViaWs', { id: (task as { id?: string }).id ?? '' }));
     } catch (err) {

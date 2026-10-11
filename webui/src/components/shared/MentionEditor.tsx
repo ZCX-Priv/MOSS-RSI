@@ -748,8 +748,26 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, [recomputeTrigger]);
 
-  const handleInput = () => {
-    if (isComposingRef.current) return;
+  /** 组合态标记：data-composing 期间 CSS 隐藏占位符（预编辑文本会进 DOM，占位符必须让位） */
+  const setComposingFlag = (on: boolean) => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (on) root.setAttribute('data-composing', 'true');
+    else root.removeAttribute('data-composing');
+  };
+
+  const handleInput = (e: FormEvent<HTMLDivElement>) => {
+    const native = e.nativeEvent as InputEvent;
+    // IME 组合期：预编辑文本已写入 DOM，但组合未提交，绝不能回传 onChange / 触发菜单；
+    // 但仍需同步占位符与高度，否则预编辑文本与 placeholder 叠字（旧 bug：此处直接 return）。
+    // 每次输入都重算组合标记 → 即便个别 IME 漏发 compositionend 也能自愈。
+    const composing = isComposingRef.current || native.isComposing;
+    setComposingFlag(composing);
+    if (composing) {
+      refreshEmptyFlag();
+      autosize();
+      return;
+    }
     // 用户手动编辑：语音草稿锚点失效并重置（下次语音从当前光标重新开始）
     voiceAnchorRef.current = null;
     voiceDraftLenRef.current = 0;
@@ -970,10 +988,12 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
 
   const handleCompositionStart = () => {
     isComposingRef.current = true;
+    setComposingFlag(true);
   };
 
   const handleCompositionEnd = () => {
     isComposingRef.current = false;
+    setComposingFlag(false);
     syncFromDom();
   };
 

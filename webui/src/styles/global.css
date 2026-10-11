@@ -263,6 +263,13 @@ pre,
   color: var(--muted-foreground);
   pointer-events: none;
 }
+/* IME 组合期隐藏占位符：拼音预编辑文本会先写入 DOM（input.isComposing=true），
+   此时不回落 onChange/触发判定，若仅靠 data-empty 会与预编辑文本叠字。
+   data-composing 由 MentionEditor 在组合开始置位、组合结束/普通输入时清除。
+   与上式同优先级（1 类 + 1 属性），靠源码顺序覆盖 ::before。 */
+.mention-editor[data-composing='true']::before {
+  display: none;
+}
 
 .mchip {
   display: inline-flex;

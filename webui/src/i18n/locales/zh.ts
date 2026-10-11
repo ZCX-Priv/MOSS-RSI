@@ -989,6 +989,7 @@ export const zh = {
     close: '关闭终端',
     emptyPanel: '暂无终端，点击 + 新建',
     exitedTag: '已退出 {{code}}',
+    offlineTag: '离线',
   },
   agenteam: {
     title: '专家团',

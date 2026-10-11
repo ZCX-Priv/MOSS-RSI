@@ -75,7 +75,7 @@ export interface Session {
   /** 消息撤回（截断）恢复窗口栈（尾部为最近窗口；支持连续撤回后按栈序逐层恢复） */
   lastTruncations?: TruncationInfo[];
   /**
-   * 会话级消息序号（单调递增；每 run 消耗一个作为 messageId 基数 `<sessionId>#<msgSeq + turn>`）。
+   * 会话级消息序号（单调递增；每 turn 消耗一个，用于生成 `<sessionId>#<msgSeq>`）。
    * 刻意独立于 messages.length：压缩折叠 / 撤回恢复 / healDanglingToolCalls 都会中部
    * splice 使 length 回落，用它派生 id 会与历史已落盘的 id 相撞（前端错位替换的根因）。
    * 首次访问时由 nextMsgSeq 按历史最大 # 后缀惰性初始化。
@@ -569,7 +569,7 @@ export class SessionStore {
   }
 
   /**
-   * 消耗并返回下一个会话级消息序号（engine 把它作为 messageId 基数）。
+   * 消耗并返回下一个会话级消息序号（engine 逐 turn 取号，拼成 `<sessionId>#<msgSeq>`）。
    * 首次调用时做旧数据初始化：取「当前消息数」与「历史 messageId 的最大 # 后缀」的较大值，
    * 保证旧会话（`#<turn>` 每 run 从 1 计数留下的重复 id / `#<length+turn>` 时代的 id）
    * 之后的新 id 严格大于一切已存在的 id，永不回撞。
@@ -589,7 +589,7 @@ export class SessionStore {
     return session.msgSeq;
   }
 
-  /** 添加 assistant 消息（含可能的 tool_calls）；messageId = 本轮流式身份（`<sessionId>#<msgSeq + turn>`） */
+  /** 添加 assistant 消息（含可能的 tool_calls）；messageId = 本轮流式身份（`<sessionId>#<msgSeq>`） */
   addAssistantMessage(
     session: Session,
     content: string,

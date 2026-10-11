@@ -178,7 +178,7 @@ export interface AgentEngine {
    * 创建真实任务（侧边栏可见；task.id 即 sessionId）。
    * automation 等后台模块用它把运行挂到真实任务上。
    */
-  createTask(title: string, groupId?: string): import('./agent/task-store').TaskItem;
+  createTask(title: string, groupId?: string, id?: string): import('./agent/task-store').TaskItem;
 
   /** 列出全部分组（含隐藏分组，供内部按 id/名查找；HTTP 边界另行过滤） */
   listTaskGroups(): import('./agent/task-store').TaskGroup[];
@@ -315,8 +315,8 @@ export interface RunStats {
 
 /**
  * 流式事件携带的续传信息（offset 协议）：
- * - messageId：本轮流式 assistant 消息的稳定 id（`<sessionId>#<msgSeq + turn>`，
- *   msgSeq 为会话级单调序号，每 run 消耗一个），
+ * - messageId：本轮流式 assistant 消息的稳定 id（`<sessionId>#<msgSeq>`，
+ *   msgSeq 为会话级单调序号，每 turn 消耗一个），
  *   逐轮唯一 → 每个 messageId 拥有独立的 offset 空间，前端据此判断「是否同一轮」。
  * - offset：该分片在其所属字段（content / thinking / 工具 arguments）中的起始字符下标。
  * - total：该分片结束后的累计长度（前端自检用）。
