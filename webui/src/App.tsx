@@ -52,6 +52,7 @@ import { useSkills } from './hooks/useSkills';
 import { useAgents } from './hooks/useAgents';
 import { useCommands } from './hooks/useCommands';
 import { useStore } from './store';
+import { applyAppearanceToDom } from './lib/appearance';
 
 export default function App() {
   // 阶段1.6：WS 连接初始化 + 事件分发（单例，全应用只调用一次）
@@ -77,7 +78,6 @@ export default function App() {
   const fontSize = useStore((s) => s.fontSize);
   const uiDensity = useStore((s) => s.uiDensity);
   const cornerRadius = useStore((s) => s.cornerRadius);
-  const sidebarStyle = useStore((s) => s.sidebarStyle);
   // TaskPage 自带含左 trigger 的合并 header，全局移动端 header 仅在其他路由显示
   const isTaskRoute = pathname === '/' || pathname.startsWith('/task');
   // 移动端 header 标题与右侧 button（仅非 TaskPage 路由）
@@ -108,46 +108,11 @@ export default function App() {
     setOverlay(null);
   }, [pathname]);
 
-  // 外观设置 → DOM 同步：主题色覆盖 CSS 变量、字号设 root font-size、密度/圆角/侧栏设 data 属性
+  // 外观设置 → DOM 同步：实现集中在 lib/appearance.ts（main.tsx 亦在首帧前调用一次，
+  // 保证持久化值不闪默认态）；此处仅在设置变化时即时应用
   useEffect(() => {
-    const root = document.documentElement;
-    const ACCENT_PRESETS: Record<string, string> = {
-      blue: 'oklch(0.546 0.245 263.4)',
-      green: 'oklch(0.627 0.194 149.2)',
-      purple: 'oklch(0.541 0.281 293.0)',
-      orange: 'oklch(0.646 0.222 41.0)',
-      rose: 'oklch(0.586 0.225 16.5)',
-      teal: 'oklch(0.6 0.118 184.5)',
-    };
-    const color = accentColor.startsWith('#')
-      ? accentColor
-      : (ACCENT_PRESETS[accentColor] ?? ACCENT_PRESETS.blue);
-    root.style.setProperty('--primary', color);
-    root.style.setProperty('--primary-strong', color);
-    root.style.setProperty('--ring', color);
-    root.style.setProperty('--sidebar-primary', color);
-    root.style.setProperty('--sidebar-ring', color);
-    root.style.setProperty('--chart-1', color);
-    root.style.setProperty('--chart-2', color);
-
-    const FONT_SIZE_MAP: Record<string, string> = {
-      small: '13px',
-      medium: '14px',
-      large: '16px',
-    };
-    root.style.fontSize = FONT_SIZE_MAP[fontSize] ?? FONT_SIZE_MAP.medium;
-
-    root.setAttribute('data-density', uiDensity);
-
-    const RADIUS_MAP: Record<string, string> = {
-      small: '0.375rem',
-      standard: '0.625rem',
-      large: '0.875rem',
-    };
-    root.style.setProperty('--radius', RADIUS_MAP[cornerRadius] ?? RADIUS_MAP.standard);
-
-    root.setAttribute('data-sidebar-style', sidebarStyle);
-  }, [accentColor, fontSize, uiDensity, cornerRadius, sidebarStyle]);
+    applyAppearanceToDom({ accentColor, fontSize, uiDensity, cornerRadius });
+  }, [accentColor, fontSize, uiDensity, cornerRadius]);
 
   return (
     <TooltipProvider>

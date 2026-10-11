@@ -160,10 +160,26 @@ body,
 }
 
 body {
-  font-size: 14px;
+  /* 1rem = 根字号（由外观设置的「字号」档位写入 <html>）；不写死绝对 px，
+    否则设置「小/大」时正文不跟随（此前 body 固定 14px 导致字号设置对正文无效） */
+  font-size: 1rem;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================================
+   界面密度（设置 → 外观 → 界面密度）
+   ============================================================
+   Tailwind v4 的数字间距 utility（p-* / gap-* / size-* / h-* 等）统一编译为
+   calc(var(--spacing) * N)，默认 --spacing: .25rem。此处按档位覆写该变量即整体缩放间距。
+   特异性：html[data-density] (0,1,1) > :root (0,1,0)，无需 !important。
+   注意：--spacing 以 rem 为单位，故也随「字号」档位联动缩放（预期行为）。 */
+html[data-density='compact'] {
+  --spacing: 0.22rem;
+}
+html[data-density='comfortable'] {
+  --spacing: 0.28rem;
 }
 
 /* 全局隐藏原生滚动条；shadcn ScrollArea 自带 overlay 滚动条 */

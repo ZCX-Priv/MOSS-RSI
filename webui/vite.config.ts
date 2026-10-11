@@ -83,10 +83,13 @@ export default defineConfig({
   },
   server: {
     port: 3000,
-    // 监听所有地址（含 IPv4 0.0.0.0）：Vite 默认 host='localhost' 在 Windows 上可能只绑定 IPv6 ::1，
-    // 导致 http://127.0.0.1:3000 访问不了（只有 localhost 能用）。设为 true 后
-    // localhost / 127.0.0.1 / 局域网 IP 均可访问，与 scripts/dev.mjs 横幅提示的 127.0.0.1 对齐。
-    host: true,
+    // 仅绑定回环（IPv4 127.0.0.1）：开发服务器只对本机开放，局域网不可达。
+    // 显式写 127.0.0.1（而非 Vite 默认的 'localhost'）：Windows 上 localhost 可能
+    // 只解析到 IPv6 ::1，写死 IPv4 后 http://127.0.0.1:3000 与 http://localhost:3000
+    // 均可访问（浏览器对 localhost 有 ::1 → 127.0.0.1 回退）。
+    // 不再使用 host:true —— 那会绑定 0.0.0.0 把 dev 暴露到局域网，
+    // 且经 Vite 代理后请求源地址变为回环，会绕过后端远程门卫。
+    host: '127.0.0.1',
     proxy: {
       '/api': {
         target: backendHttp,

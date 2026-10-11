@@ -11,6 +11,7 @@ import { waitForBackendReady } from './api/readiness'
 import { useStore, type PersistedState, LEGACY_DEFAULT_WORKING_DIRECTORY, DEFAULT_WORKING_DIRECTORY } from './store'
 import { isValidRenderSettings } from './render/core/types'
 import { isValidAnimationSettings } from './types/animation'
+import { applyAppearanceToDom } from './lib/appearance'
 import i18n, { type Locale, resolveLocale, LOCALE_STORAGE_KEY } from './i18n'
 import './styles/global.css'
 
@@ -83,6 +84,12 @@ const PERSISTED_KEYS = [
   'moss-animation-settings',
   // 排队消息队列：刷新后队列不丢，任务结束后按序继续投递
   'moss-message-queues',
+  // 外观设置（此前只写不读：刷新后一律回默认，导致「改了没生效」）
+  'moss-accent-color',
+  'moss-font-size',
+  'moss-ui-density',
+  'moss-corner-radius',
+  'moss-right-panel-ratio',
 ] as const;
 
 /**
@@ -163,9 +170,11 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
       data['moss-corner-radius'] === 'small' || data['moss-corner-radius'] === 'standard' || data['moss-corner-radius'] === 'large'
         ? (data['moss-corner-radius'] as 'small' | 'standard' | 'large')
         : undefined,
-    sidebarStyle:
-      data['moss-sidebar-style'] === 'narrow' || data['moss-sidebar-style'] === 'standard' || data['moss-sidebar-style'] === 'wide'
-        ? (data['moss-sidebar-style'] as 'narrow' | 'standard' | 'wide')
+    rightPanelRatio:
+      typeof data['moss-right-panel-ratio'] === 'number' &&
+      (data['moss-right-panel-ratio'] as number) > 0 &&
+      (data['moss-right-panel-ratio'] as number) < 1
+        ? (data['moss-right-panel-ratio'] as number)
         : undefined,
     permissionMode:
       data['moss-permission-mode'] === 'ask' ||
@@ -224,6 +233,8 @@ void resetStaleServiceWorker();
 Promise.all([initTheme(), initLocale(), initPersisted(), waitForBackendReady()]).then((results) => {
   const persisted = results[2];
   useStore.getState().hydratePersisted(buildPersistedState(persisted));
+  // 首帧前同步应用外观（主题色 / 字号 / 密度 / 圆角）：避免先渲染一帧默认外观再跳变
+  applyAppearanceToDom(useStore.getState());
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <ErrorBoundary>

@@ -18,7 +18,11 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
+        // [&>div] 两条：Radix 的内容包裹层默认 `min-width:100%; display:table`，
+        // table 会按内容 min-content 撑开而不收缩，叠加 Viewport 默认 `overflow-x:hidden`，
+        // 窄容器下内容右半会被静默裁切（"只显示一部分"根因）。强制 block + 100% 宽，
+        // 让内容以视口宽度为基准布局；内联 min-width:100% 仍保留，全宽行为不变。
+        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block! [&>div]:w-full!"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

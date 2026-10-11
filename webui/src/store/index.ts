@@ -183,8 +183,11 @@ interface UIState {
   uiDensity: 'compact' | 'standard' | 'comfortable';
   /** 圆角大小 */
   cornerRadius: 'small' | 'standard' | 'large';
-  /** 侧边栏样式 */
-  sidebarStyle: 'narrow' | 'standard' | 'wide';
+  /**
+   * 右侧面板宽度占整窗宽度的比例（0~1）。
+   * 三档预设见 RIGHT_PANEL_PRESETS；拖拽调宽直接改写该比例（精确百分比）。
+   */
+  rightPanelRatio: number;
 
   // --- 执行权限模式（permissionMode=全局默认；permissionModeBySession=会话级覆盖） ---
   permissionMode: PermissionMode;
@@ -196,8 +199,6 @@ interface UIState {
   sidebarTabsBySession: Record<string, SessionSidebarTabs | undefined>;
   /** 右侧面板展开态（会话级内存态：各会话独立互不影响，重挂载不重置；'' key = 空白页） */
   rightPanelOpenBySession: Record<string, boolean | undefined>;
-  /** 右侧面板宽度 px（全局内存态；UI 偏好跨会话共享，拖拽调宽后重挂载不重置） */
-  rightPanelWidth: number;
   /**
    * 文件预览弹层路径（内存态；仅移动端从「非侧边栏」入口触发时使用）。
    * null = 关闭。桌面端统一走右侧边栏标签，不使用该弹层。
@@ -222,7 +223,7 @@ export interface PersistedState {
   fontSize?: 'small' | 'medium' | 'large';
   uiDensity?: 'compact' | 'standard' | 'comfortable';
   cornerRadius?: 'small' | 'standard' | 'large';
-  sidebarStyle?: 'narrow' | 'standard' | 'wide';
+  rightPanelRatio?: number;
   permissionMode?: PermissionMode;
   /** 右侧边栏标签页（会话级持久化；不持久化 '' 键） */
   sidebarTabsBySession?: Record<string, SessionSidebarTabs>;
@@ -412,7 +413,7 @@ interface UIActions {
   setFontSize: (v: UIState['fontSize']) => void;
   setUiDensity: (v: UIState['uiDensity']) => void;
   setCornerRadius: (v: UIState['cornerRadius']) => void;
-  setSidebarStyle: (v: UIState['sidebarStyle']) => void;
+  setRightPanelRatio: (v: number) => void;
 
   // 执行权限模式
   setPermissionMode: (v: UIState['permissionMode'], sessionId?: string) => void;
@@ -477,9 +478,8 @@ interface UIActions {
   /** 原地转换某标签的类型/标题（「开始」页点入口 → 原地变身，不新增标签） */
   convertSidebarTab: (sessionId: string, id: string, type: SidebarTabType, title: string) => void;
 
-  // 右侧面板展开态（会话级）/ 宽度（全局），内存态不持久化
+  // 右侧面板展开态（会话级），内存态不持久化
   setRightPanelOpen: (sessionId: string, v: boolean) => void;
-  setRightPanelWidth: (v: number) => void;
   /** 面板开合状态随对话转移：空白页（''）发送首条消息创建新会话时继承，避免导航重挂载后收起 */
   migrateRightPanelState: (fromSessionId: string, toSessionId: string) => void;
 
@@ -507,6 +507,49 @@ export const DEFAULT_WORKING_DIRECTORY = SYSTEM_WORKING_DIRECTORY;
 
 /** 旧版默认工作目录（C 盘根）：IndexedDB 存量值迁移用 */
 export const LEGACY_DEFAULT_WORKING_DIRECTORY = 'C:\\';
+
+// ============================================================================
+// 右侧面板宽度：占整窗宽度比例（外观设置「右侧面板」三档预设 + 拖拽微调）
+// ============================================================================
+
+/** 三档预设比例（相对整个窗口宽度；窄 < 标准 < 宽，等差约 10.5%） */
+export const RIGHT_PANEL_PRESETS = {
+  narrow: 0.32,
+  standard: 0.425,
+  wide: 0.53,
+} as const;
+
+/** 拖拽可调范围 = 三档预设的「窄 ~ 宽」区间（不允许拖到比「窄」更窄、比「宽」更宽） */
+export const RIGHT_PANEL_RATIO_MIN = RIGHT_PANEL_PRESETS.narrow;
+export const RIGHT_PANEL_RATIO_MAX = RIGHT_PANEL_PRESETS.wide;
+
+/** 对话区宽度上限的基准：右侧面板处于「窄」档时对话区所占宽度 */
+export const CHAT_NARROW_RIGHT_RATIO = RIGHT_PANEL_PRESETS.narrow;
+
+/**
+ * 右侧面板最小像素宽度兜底。因拖拽下限已是 32% 窗宽，该下限仅在窗口宽 < 750px 时才可能生效，
+ * 而 < 768px 已走移动端布局（右侧面板为 Sheet），故桌面端实际不会触发。
+ */
+export const RIGHT_PANEL_MIN_PX = 240;
+
+/** 比例钳制到可拖拽范围 */
+export function clampRightPanelRatio(ratio: number): number {
+  if (!Number.isFinite(ratio)) return RIGHT_PANEL_PRESETS.standard;
+  return Math.min(RIGHT_PANEL_RATIO_MAX, Math.max(RIGHT_PANEL_RATIO_MIN, ratio));
+}
+
+/** 预设项 → 比例（供设置页 Select 使用） */
+export type RightPanelPreset = keyof typeof RIGHT_PANEL_PRESETS;
+
+/** 比例 → 命中哪个预设（误差 < 0.005）；未命中返回 'custom' */
+export function rightPanelPresetOf(ratio: number): RightPanelPreset | 'custom' {
+  for (const [key, value] of Object.entries(RIGHT_PANEL_PRESETS) as Array<
+    [RightPanelPreset, number]
+  >) {
+    if (Math.abs(ratio - value) < 0.005) return key;
+  }
+  return 'custom';
+}
 
 /** 默认右侧边栏「开始」标签（面板启动器：任务摘要 / 终端 / 专家团） */
 function defaultSidebarTab(): SidebarTab {
@@ -637,7 +680,7 @@ export const useStore = create<Store>((set, get) => ({
   fontSize: 'medium',
   uiDensity: 'standard',
   cornerRadius: 'standard',
-  sidebarStyle: 'standard',
+  rightPanelRatio: RIGHT_PANEL_PRESETS.standard,
 
   // --- 执行权限模式 ---
   permissionMode: 'ask',
@@ -663,9 +706,8 @@ export const useStore = create<Store>((set, get) => ({
   // --- 右侧边栏标签页（会话级，IndexedDB 持久化；无记录的会话回退默认「开始」） ---
   sidebarTabsBySession: {},
 
-  // --- 右侧面板展开态/宽度（内存态；默认收起 320px） ---
+  // --- 右侧面板展开态（内存态；默认收起） ---
   rightPanelOpenBySession: {},
-  rightPanelWidth: 320,
   filePreviewDialogPath: null,
 
   // --- Actions: 会话 ---
@@ -1258,9 +1300,10 @@ export const useStore = create<Store>((set, get) => ({
     void idbSet('moss-corner-radius', cornerRadius);
     set({ cornerRadius });
   },
-  setSidebarStyle: (sidebarStyle) => {
-    void idbSet('moss-sidebar-style', sidebarStyle);
-    set({ sidebarStyle });
+  setRightPanelRatio: (ratio) => {
+    const clamped = clampRightPanelRatio(ratio);
+    void idbSet('moss-right-panel-ratio', clamped);
+    set({ rightPanelRatio: clamped });
   },
 
   // --- Actions: 执行权限模式 ---
@@ -1484,7 +1527,6 @@ export const useStore = create<Store>((set, get) => ({
     set((state) => ({
       rightPanelOpenBySession: { ...state.rightPanelOpenBySession, [sessionId]: v },
     })),
-  setRightPanelWidth: (v) => set({ rightPanelWidth: v }),
   showFilePreviewDialog: (path) => set({ filePreviewDialogPath: path }),
   hideFilePreviewDialog: () => set({ filePreviewDialogPath: null }),
   migrateRightPanelState: (fromSessionId, toSessionId) =>
@@ -1534,8 +1576,9 @@ export const useStore = create<Store>((set, get) => ({
       if (patch.cornerRadius === 'small' || patch.cornerRadius === 'standard' || patch.cornerRadius === 'large') {
         next.cornerRadius = patch.cornerRadius;
       }
-      if (patch.sidebarStyle === 'narrow' || patch.sidebarStyle === 'standard' || patch.sidebarStyle === 'wide') {
-        next.sidebarStyle = patch.sidebarStyle;
+      if (typeof patch.rightPanelRatio === 'number') {
+        // 一律收敛到 [窄, 宽]：历史持久化值可能落在区间外（如早期开发态拖出的比例）
+        next.rightPanelRatio = clampRightPanelRatio(patch.rightPanelRatio);
       }
       if (
         patch.permissionMode === 'ask' ||

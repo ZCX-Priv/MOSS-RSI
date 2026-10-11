@@ -10,6 +10,7 @@
 // 参考实践：Max/dsh-pocket-main（DeepSeek Harness 的 dsh-pocket 插件）。
 
 import { t } from '../../core/i18n';
+import { isDevMode } from '../../core/env';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { ServerInstance } from '../server/types';
@@ -119,7 +120,14 @@ class RemoteModule implements Module {
       if (!enabled) {
         this.service.stopTunnel();
       }
-      const hostname = enabled ? '0.0.0.0' : (cfg.security.bindLocalhostOnly ? '127.0.0.1' : cfg.server.host);
+      // dev 模式：remote 开关不改变绑定（始终回环），报告与实际一致
+      const dev = isDevMode();
+      const hostname = dev
+        ? '127.0.0.1'
+        : (enabled ? '0.0.0.0' : (cfg.security.bindLocalhostOnly ? '127.0.0.1' : cfg.server.host));
+      if (dev && enabled) {
+        this.ctx.logger.warn('dev mode: remote access stays loopback-only');
+      }
       this.scheduleRebind(hostname);
       this.ctx.logger.info(t(enabled ? 'remote.enabled' : 'remote.disabled'), { hostname });
       return { status: 200, body: { rebound: true, enabled, hostname } };

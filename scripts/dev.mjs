@@ -3,8 +3,10 @@
 // 使用：node scripts/dev.mjs
 //
 // - 后端：bun run --watch src/main.ts start --foreground --log-level debug
-//   （文件改动自动重启）
-// - 前端：vite（3000 端口，代理 /api 与 /ws 到后端 7766）
+//   （文件改动自动重启；注入 MOSS_DEV=1 → 后端强制仅本机（回环）绑定）
+// - 前端：vite（3000 端口，代理 /api 与 /ws 到后端 7766；仅绑 127.0.0.1，不对局域网开放）
+//
+// dev 仅本机可达：127.0.0.1 / localhost；局域网不可达（含 remote.enabled=true 的情况）。
 //
 // Ctrl+C 优雅退出，关闭所有子进程。
 
@@ -165,13 +167,13 @@ function startBackend() {
   if (bunExe === 'bun') {
     log('backend', 'Warning: bun 将以 shell 方式启动，Ctrl+C 时可能出现"终止批处理操作吗"提示');
   }
-  const child = spawnChild('backend', bunExe, args);
+  const child = spawnChild('backend', bunExe, args, { env: { ...process.env, MOSS_DEV: '1' } });
   child.once('error', err => {
     if (err.code === 'ENOENT') {
       log('backend', `${bunExe} not found, retrying with shell...`);
       const idx = children.indexOf(child);
       if (idx >= 0) children.splice(idx, 1);
-      spawnChild('backend', 'bun', args, { shell: isWin });
+      spawnChild('backend', 'bun', args, { shell: isWin, env: { ...process.env, MOSS_DEV: '1' } });
     }
   });
   return child;
@@ -244,7 +246,7 @@ function startFrontend() {
   const child = spawn(process.execPath, [viteJs], {
     stdio: ['inherit', 'inherit', 'inherit'],
     cwd: uiDir,
-    env: { ...process.env, FORCE_COLOR: '1' },
+    env: { ...process.env, FORCE_COLOR: '1', MOSS_DEV: '1' },
   });
   child.on('exit', (code, signal) => {
     log('ui', `exited (code=${code}, signal=${signal})`);
@@ -312,6 +314,7 @@ async function main() {
   console.log(' UI: http://127.0.0.1:3000');
   console.log('  Tip: 用 "node scripts/dev.mjs" 启动可 0 弹窗（npm run dev 顶层无法消除）');
   console.log('  Tip: 若日志无 "using bun" 行，说明还在跑旧版，请重启 dev');
+  console.log('  Note: dev 仅本机可达（127.0.0.1 / localhost），不对局域网开放');
   console.log('=========================================');
   startBackend();
   log('dev', 'Waiting for backend to be ready...');

@@ -83,6 +83,10 @@ function buildBackend() {
   // --external nativefiledialog-for-bun：该库通过 Bun.dlopen 加载 FFI 二进制（nfd.dll 等），
   // 二进制路径基于 import.meta.dir 解析，若打包进 server.js 会指向 dist/ 找不到二进制，
   // 故标记为 external，运行时从 node_modules 加载，由库自行解析同目录的 .dll/.dylib/.so。
+  // --external sherpa-onnx-node：同理，其原生 .node 绑定必须从磁盘加载；且这是必需项——
+  // 不 external 时 bun 会额外产出一个原生资产文件（sherpa-onnx-*.node），
+  // 而 --outfile 只允许单文件输出，构建会直接失败：
+  //   error: cannot write multiple output files without an output directory
   run(bun.cmd, [
     ...bun.args,
     'build',
@@ -91,6 +95,7 @@ function buildBackend() {
     '--target', 'bun',
     '--format', 'esm',
     '--external', 'nativefiledialog-for-bun',
+    '--external', 'sherpa-onnx-node',
   ]);
   if (!existsSync(BACKEND_OUT)) {
     error(`Backend build output not found: ${BACKEND_OUT}`);

@@ -62,7 +62,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '
 import { SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
-import { useIsMobile } from '@/hooks/use-mobile';
+import { useIsMobile, useWindowWidth } from '@/hooks/use-mobile';
 import { useResizable } from '@/hooks/use-resizable';
 import { useOpenFilePreview } from '@/hooks/useOpenFilePreview';
 import {
@@ -105,7 +105,14 @@ import { StatsBar } from '../shared/StatsBar';
 import { CompactionCard } from '../shared/CompactionCard';
 import { MaxTurnsNoticeCard } from '../shared/MaxTurnsNoticeCard';
 import { OutputLimitNoticeCard } from '../shared/OutputLimitNoticeCard';
-import { useStore, DEFAULT_SIDEBAR_TABS } from '../../store';
+import {
+  useStore,
+  DEFAULT_SIDEBAR_TABS,
+  RIGHT_PANEL_MIN_PX,
+  RIGHT_PANEL_RATIO_MIN,
+  RIGHT_PANEL_RATIO_MAX,
+  CHAT_NARROW_RIGHT_RATIO,
+} from '../../store';
 import { useTask } from '../../hooks/useTask';
 import { useFileIndex } from '../../hooks/useFileIndex';
 import { api } from '../../api/http';
@@ -179,18 +186,34 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // UI 偏好跨会话共享；taskId 为空串（空白页）时读写 '' key，建会话时随对话转移
   const rightPanelOpen = useStore((s) => s.rightPanelOpenBySession[taskId] ?? false);
   const setRightPanelOpen = useStore((s) => s.setRightPanelOpen);
-  const rightPanelWidth = useStore((s) => s.rightPanelWidth);
-  const setRightPanelWidth = useStore((s) => s.setRightPanelWidth);
+  // 右侧面板宽度 = 占整窗比例 × 窗口宽度（外观设置三档预设 + 拖拽微调，比例持久化）
+  const rightPanelRatio = useStore((s) => s.rightPanelRatio);
+  const setRightPanelRatio = useStore((s) => s.setRightPanelRatio);
   const isMobile = useIsMobile();
+  const windowWidth = useWindowWidth();
   // 移动端侧边栏抽屉开合态：展开时顶栏「新建对话」快捷按钮自动隐藏（抽屉内已有同名按钮）
-  const { openMobile } = useSidebar();
+  // width = 左栏展开态宽度，供对话区上限换算（折叠时该栏不占位，但上限仍按展开态取，保证「固定大小」）
+  const { openMobile, width: sidebarWidth } = useSidebar();
 
-  // 右侧面板拖拽调宽（仅桌面端内嵌 aside）
+  // 右侧面板像素宽度：比例 × 窗宽（比例已由 store 钳制在 [窄, 宽] 区间）；
+  // 再用 240px 兜底，防止极端窄窗口下面板不可用
+  const rightPanelPx = Math.max(RIGHT_PANEL_MIN_PX, Math.round(rightPanelRatio * windowWidth));
+
+  // 对话区宽度上限 = 「右侧面板取『窄』档时」对话区所占宽度（下限 320px）。
+  // 面板打开时其宽度恒 ≥ 窄档，故该上限只在面板「收起」时生效：此时对话区触及上限并水平居中，
+  // 不再随面板收起被拉长。移动端不做上限：视口本身已很窄，且左栏为抽屉不占位，加限会凭空产生左右留白。
+  const chatMaxWidth = isMobile
+    ? undefined
+    : Math.max(320, Math.round(windowWidth * (1 - CHAT_NARROW_RIGHT_RATIO) - sidebarWidth));
+
+  // 右侧面板拖拽调宽（仅桌面端内嵌 aside）：范围＝「窄 ~ 宽」，拖动像素宽度换算为精确比例
   const rightResize = useResizable({
     side: 'left',
-    min: 240,
-    max: 560,
-    onChange: setRightPanelWidth,
+    min: Math.round(RIGHT_PANEL_RATIO_MIN * windowWidth),
+    max: Math.round(RIGHT_PANEL_RATIO_MAX * windowWidth),
+    onChange: (px) => {
+      if (windowWidth > 0) setRightPanelRatio(px / windowWidth);
+    },
   });
 
   // 右侧面板标签页拖拽排序
@@ -1024,26 +1047,39 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 {/* 文件标签页：上下文文件轨迹 */}
                 <TabsContent value="files" className="flex-1 min-h-0 overflow-hidden">
                   <ScrollArea className="h-full">
-                    <div className="flex flex-col gap-0.5">
+                    <div className="flex w-full flex-col gap-0.5">
                       {contextFiles.length === 0 ? (
                         <span className="px-2 py-4 text-xs text-muted-foreground">
                           {t('task.noContextFiles')}
                         </span>
                       ) : (
                         contextFiles.map((file) => {
-                          // 文件已被删除（事件 reason）或磁盘上不存在（后端存在性校验 missing）→ 灰色 + 删除线
+                          // 文件已被删除（事件 reason）或磁盘上不存在（后端存在性校验 missing）→ 灰色 + 删除线 + 禁用
                           const removed = file.reason === 'delete' || file.missing === true;
+                          // 分离 文件名 / 目录部分（同时兼容 / 与 \；无分隔符时 dir 为空）
+                          const sepIdx = Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\'));
+                          const name = sepIdx >= 0 ? file.path.slice(sepIdx + 1) : file.path;
+                          const dir = sepIdx >= 0 ? file.path.slice(0, sepIdx) : '';
                           return (
                             <Button
                               key={file.path}
                               variant="ghost"
                               size="xs"
-                              className={cn('justify-start gap-1.5 font-normal', removed && 'opacity-60')}
-                              title={removed ? t('task.fileRemovedFromContext') : undefined}
+                              disabled={removed}
+                              onClick={() => openFilePreview(taskId, file.path, { fromSidebar: true })}
+                              className="w-full min-w-0 justify-start gap-1.5 font-normal"
+                              title={removed ? t('task.fileRemovedFromContext') : file.path}
                             >
-                              <FileText className={cn('size-3.5', removed ? 'text-muted-foreground' : 'text-primary-strong')} />
-                              <span className={cn('truncate', removed && 'text-muted-foreground line-through')}>
-                                {file.path}
+                              <FileText
+                                className={cn('size-3.5 shrink-0', removed ? 'text-muted-foreground' : 'text-primary-strong')}
+                              />
+                              <span className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden text-left">
+                                <span className={cn('max-w-[60%] shrink-0 truncate', removed && 'text-muted-foreground line-through')}>
+                                  {name}
+                                </span>
+                                {dir && (
+                                  <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{dir}</span>
+                                )}
                               </span>
                             </Button>
                           );
@@ -1183,6 +1219,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {/* 文件索引构建进度（构建期间显示，全就绪时隐藏） */}
         <FileIndexProgressBar />
 
+        {/* 对话列：受 max-width 约束 + 水平居中。右侧面板收起（或拖到比「窄」更小）时
+            对话区触及上限并居中，不再被拉长；header 与文件索引进度条保持整宽，
+            以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
+        <div
+          className="mx-auto flex min-h-0 w-full flex-1 flex-col"
+          style={{ maxWidth: chatMaxWidth }}
+        >
         {/* Task Messages（自建虚拟列表：无论会话多长，DOM 中只挂载视口附近的消息；
             relative wrapper 让「返回底部」按钮悬浮于滚动区上方、不随内容滚动） */}
         <div className="relative min-h-0 flex-1">
@@ -1590,6 +1633,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           {/* 运行指标栏（轮/步/耗时累计 + 引擎实时 token/命中） */}
           <StatsBar stats={runStats} contextStats={contextStats} />
         </div>
+        </div>
       </div>
 
       {/* Right Panel — 移动端：Sheet 抽屉；桌面端：内嵌 aside */}
@@ -1616,7 +1660,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             !rightResize.resizing && 'transition-[width,visibility] duration-200 ease-out',
             !rightPanelOpen && 'invisible',
           )}
-          style={{ width: rightPanelOpen ? rightPanelWidth : 0 }}
+          style={{ width: rightPanelOpen ? rightPanelPx : 0 }}
           aria-hidden={!rightPanelOpen}
         >
           <div
@@ -1624,7 +1668,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             className="absolute inset-y-0 -left-[3px] z-10 w-1.5 cursor-col-resize touch-none select-none after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:bg-transparent hover:after:bg-border"
           />
           {/* 内容固定宽度 wrapper：宽度动画期间内容不被挤压变形（外层裁切） */}
-          <div className="flex h-full min-h-0 flex-col overflow-hidden" style={{ width: rightPanelWidth }}>
+          <div className="flex h-full min-h-0 flex-col overflow-hidden" style={{ width: rightPanelPx }}>
             {rightPanelContent}
           </div>
         </aside>

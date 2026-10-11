@@ -2,6 +2,7 @@
 // Server 模块入口：基于 Bun.serve 启动 HTTP + WebSocket 服务。
 
 import { t } from '../../core/i18n';
+import { isDevMode } from '../../core/env';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import { HttpRouter } from './http-router';
@@ -512,6 +513,10 @@ class ServerModule implements Module {
     let port = cfg.server.port;
     const host = computeBindHost(cfg);
 
+    if (isDevMode() && cfg.remote?.enabled) {
+      this.ctx.logger.info('dev mode: forcing loopback bind (remote access is local-only in dev)', { host });
+    }
+
     if (cfg.server.autoPort) {
       port = await this.findFreePort(host, port);
       if (port !== cfg.server.port) {
@@ -550,6 +555,8 @@ class ServerModule implements Module {
    * 端口锁定（禁止 autoPort 漂移——手机端正拿着 URL 访问）；失败时按原 hostname 回滚。
    */
   async rebind(hostname: string): Promise<void> {
+    // dev 模式：任何热重绑都停在回环，禁止切到 0.0.0.0
+    if (isDevMode()) hostname = '127.0.0.1';
     // 并发 rebind 串行化（开关快速连点）
     if (this.rebinding) await this.rebinding;
     this.rebinding = (async (): Promise<void> => {
@@ -722,8 +729,10 @@ class ServerModule implements Module {
   }
 }
 
-/** 计算绑定地址：remote.enabled 优先（0.0.0.0），其次 bindLocalhostOnly，最后 server.host。 */
-function computeBindHost(cfg: { remote?: { enabled?: boolean }; security: { bindLocalhostOnly: boolean }; server: { host: string } }): string {
+/** 计算绑定地址：dev 模式强制回环（仅本机）→ remote.enabled（0.0.0.0）→ bindLocalhostOnly → server.host。 */
+export function computeBindHost(cfg: { remote?: { enabled?: boolean }; security: { bindLocalhostOnly: boolean }; server: { host: string } }): string {
+  // 开发模式：强制仅本机，杜绝把 dev 暴露到网络（优先于 remote.enabled）
+  if (isDevMode()) return '127.0.0.1';
   if (cfg.remote?.enabled) return '0.0.0.0';
   return cfg.security.bindLocalhostOnly ? '127.0.0.1' : cfg.server.host;
 }

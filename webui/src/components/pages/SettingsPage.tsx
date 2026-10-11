@@ -69,7 +69,7 @@ import { useCommands } from '../../hooks/useCommands';
 import { useConfig } from '../../hooks/useConfig';
 import { useFileIndex } from '../../hooks/useFileIndex';
 import { useReducedMotion } from '../../hooks/useAnimationClass';
-import { useStore } from '../../store';
+import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset } from '../../store';
 import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
 import { api } from '../../api/http';
 import { TOOL_ICON_MAP } from '../../lib/tool-icons';
@@ -180,7 +180,7 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.appearance.fontSize', descriptionKey: 'settings.appearance.fontSizeDesc', section: 'appearance' },
   { labelKey: 'settings.appearance.uiDensity', descriptionKey: 'settings.appearance.uiDensityDesc', section: 'appearance' },
   { labelKey: 'settings.appearance.cornerRadius', descriptionKey: 'settings.appearance.cornerRadiusDesc', section: 'appearance' },
-  { labelKey: 'settings.appearance.sidebarStyle', descriptionKey: 'settings.appearance.sidebarStyleDesc', section: 'appearance' },
+  { labelKey: 'settings.appearance.rightPanel', descriptionKey: 'settings.appearance.rightPanelDesc', section: 'appearance' },
 
   // 智能体设置详细项
   { labelKey: 'settings.agent.builtIn', section: 'agent' },
@@ -2477,8 +2477,10 @@ export function AppearanceSettingsSection() {
   const setUiDensity = useStore((s) => s.setUiDensity);
   const cornerRadius = useStore((s) => s.cornerRadius);
   const setCornerRadius = useStore((s) => s.setCornerRadius);
-  const sidebarStyle = useStore((s) => s.sidebarStyle);
-  const setSidebarStyle = useStore((s) => s.setSidebarStyle);
+  const rightPanelRatio = useStore((s) => s.rightPanelRatio);
+  const setRightPanelRatio = useStore((s) => s.setRightPanelRatio);
+  // 三档预设；拖拽产生非预设比例时显示「自定义」
+  const rightPanelPreset = rightPanelPresetOf(rightPanelRatio);
 
   const ACCENT_PRESETS = [
     { id: 'blue', color: 'oklch(0.546 0.245 263.4)' },
@@ -2595,22 +2597,35 @@ export function AppearanceSettingsSection() {
           </Select>
         </div>
 
-        {/* 侧边栏 */}
+        {/* 右侧面板（宽度占整窗比例：窄 / 标准 / 宽；拖拽微调后显示「自定义」） */}
         <div className="flex items-center justify-between gap-4 py-3">
-          <div className="flex flex-col gap-0.5">
-            <div className="text-sm text-foreground">{t('settings.appearance.sidebarStyle')}</div>
-            <div className="text-xs text-muted-foreground">{t('settings.appearance.sidebarStyleDesc')}</div>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <div className="text-sm text-foreground">{t('settings.appearance.rightPanel')}</div>
+            <div className="text-xs text-muted-foreground">{t('settings.appearance.rightPanelDesc')}</div>
           </div>
-          <Select value={sidebarStyle} onValueChange={(v) => setSidebarStyle(v as 'narrow' | 'standard' | 'wide')}>
-            <SelectTrigger className="w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="narrow">{t('settings.appearance.sidebarNarrow')}</SelectItem>
-              <SelectItem value="standard">{t('settings.appearance.sidebarStandard')}</SelectItem>
-              <SelectItem value="wide">{t('settings.appearance.sidebarWide')}</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {Math.round(rightPanelRatio * 1000) / 10}%
+            </span>
+            <Select
+              value={rightPanelPreset}
+              onValueChange={(v) => {
+                if (v !== 'custom') setRightPanelRatio(RIGHT_PANEL_PRESETS[v as RightPanelPreset]);
+              }}
+            >
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="narrow">{t('settings.appearance.rightPanelNarrow')}</SelectItem>
+                <SelectItem value="standard">{t('settings.appearance.rightPanelStandard')}</SelectItem>
+                <SelectItem value="wide">{t('settings.appearance.rightPanelWide')}</SelectItem>
+                <SelectItem value="custom" disabled>
+                  {t('settings.appearance.rightPanelCustom')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </div>
     </div>
