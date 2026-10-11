@@ -1,9 +1,9 @@
 // src/modules/filesys/index.ts
 // Filesys 模块入口：注册 FilesysService 到 ServiceNames.FILESYS。
-// 统一所有模块对文件系统的操作（builtin 工具 + 内部存储 + shell 快照检测）。
+// 统一所有模块对文件系统的操作（builtin 工具 + 内部存储 + 终端命令快照检测）。
 //
 // 依赖：utils 层（fs-atomic/fs）与 core（types），不依赖 file-history/agent/tools 模块
-// （shell-watch 对 file-history 的调用走运行时 tryResolve + 结构类型）。
+// （terminal-watch 对 file-history 的调用走运行时 tryResolve + 结构类型）。
 
 import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
@@ -19,9 +19,9 @@ export type {
   ReadFileResult,
   WriteFileOptions,
   WriteFileResult,
-  ShellSnapshot,
-  ShellChangeReport,
-  ShellWatchConfig,
+  TerminalSnapshot,
+  TerminalChangeReport,
+  TerminalWatchConfig,
 } from './types';
 export { safeSessionId, readJsonStore, writeJsonStore } from './store-io';
 export { hashBuffer, hashText } from './hash';

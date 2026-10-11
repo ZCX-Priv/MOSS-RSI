@@ -1,7 +1,7 @@
 // src/utils/fs-atomic.ts
 // 原子写入实现：tmp + fsync + rename，杜绝中断损坏。
 // 零依赖纯函数层（仅依赖 node:fs/node:path 与 utils/encoding），core 与 modules 均可安全引用。
-// 参考 Claude Code / Qwen Code / avifenesh 设计：
+// 设计：
 //   1. realpath 解析 symlink（防止 rename 替换 symlink 本身）
 //   2. 同目录创建 tmp 文件（保证 rename 同文件系统）
 //   3. fsync 刷盘（持久化保证，可选）

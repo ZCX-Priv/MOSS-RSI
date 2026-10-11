@@ -1,29 +1,29 @@
 // src/modules/context/compiler/env-probe.ts
-// 环境探测（借鉴 ZCode bash-shell-provider / env-info 的能力探测思想）：
-// - shell 探测：默认 shell + 可用 shell 列表（Windows: powershell/pwsh/cmd/git-bash；
+// 环境探测：
+// - 解释器探测：默认解释器 + 可用解释器列表（Windows: powershell/pwsh/cmd/git-bash；
 //   POSIX: SHELL 环境变量 + zsh/bash）。Bun.which 同步探测，进程级缓存。
 // - 工具链版本：node/npm/pnpm/python/git 等并行 spawn 探测（各 800ms 超时），
 //   fire-and-forget 缓存；ensureEnvProbed() await 完整结果（首次 ~1s，之后 0ms）。
 // - 编码：Windows 代码页（chcp）、POSIX LANG/LC_ALL；Intl locale 同步可得。
-// 单一事实源：shell 工具（tools/shell）与系统提示词共用本模块的 shell 探测结果，
-// 保证「模型看到的 shell」与「实际执行的 shell」一致（ZCode 的关键设计）。
-// 全部探测失败安全降级：shell 回退平台默认，工具链/编码为空——绝不阻塞主流程。
+// 单一事实源：terminal 工具（tools/terminal）与系统提示词共用本模块的解释器探测结果，
+// 保证「模型看到的解释器」与「实际执行的解释器」一致。
+// 全部探测失败安全降级：解释器回退平台默认，工具链/编码为空——绝不阻塞主流程。
 
 import { execSync } from 'node:child_process';
 import type { Environment } from '../../../core/types';
 
-/** shell 标识（shell 工具 pref 之外还包括探测到的 git-bash / pwsh / zsh） */
-export type ShellId = 'powershell' | 'pwsh' | 'cmd' | 'git-bash' | 'bash' | 'zsh' | 'sh';
+/** 终端解释器标识（terminal 工具 interpreter 之外还包括探测到的 git-bash / pwsh / zsh） */
+export type TerminalId = 'powershell' | 'pwsh' | 'cmd' | 'git-bash' | 'bash' | 'zsh' | 'sh';
 
-export interface ShellProbe {
-  /** 默认 shell（未显式指定时 shell 工具使用的 shell） */
-  readonly defaultId: ShellId;
-  /** 可用 shell 列表（含默认；按优先级排序） */
-  readonly available: ReadonlyArray<ShellId>;
+export interface TerminalProbe {
+  /** 默认解释器（未显式指定时 terminal 工具使用的解释器） */
+  readonly defaultId: TerminalId;
+  /** 可用解释器列表（含默认；按优先级排序） */
+  readonly available: ReadonlyArray<TerminalId>;
 }
 
 export interface EnvProbeResult {
-  readonly shells: ShellProbe;
+  readonly terminals: TerminalProbe;
   /** 开发工具链版本行（如 "node v22.11.0"；未探测到/未就绪为空数组） */
   readonly devTools: ReadonlyArray<string>;
   /** locale（如 zh-CN） */
@@ -32,7 +32,7 @@ export interface EnvProbeResult {
   readonly encoding: string;
 }
 
-/** Git Bash 常见安装路径（ZCode 同款；which bash 命中 PATH 时也可能指向它） */
+/** Git Bash 常见安装路径（which bash 命中 PATH 时也可能指向它） */
 const GIT_BASH_PATHS = [
   'C:\\Program Files\\Git\\bin\\bash.exe',
   'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
@@ -63,7 +63,7 @@ const PROBE_TIMEOUT_MS = 800;
 // 进程级缓存（探测结果进程内不变 → 静态系统提示词保持字节级稳定）
 // ============================================================================
 
-let shellProbe: ShellProbe | null = null;
+let terminalProbe: TerminalProbe | null = null;
 let encodingDesc: string | null = null;
 let devToolsPromise: Promise<ReadonlyArray<string>> | null = null;
 let devToolsCache: ReadonlyArray<string> | null = null;
@@ -88,12 +88,12 @@ function fileExists(p: string): boolean {
 }
 
 // ============================================================================
-// shell 探测（同步；首次调用微秒级）
+// 解释器探测（同步；首次调用微秒级）
 // ============================================================================
 
-/** Windows shell 探测：powershell/pwsh → cmd（ComSpec 兜底恒存在）→ git-bash（仅列表） */
-function probeShellsWindows(): ShellProbe {
-  const available: ShellId[] = [];
+/** Windows 解释器探测：powershell/pwsh → cmd（ComSpec 兜底恒存在）→ git-bash（仅列表） */
+function probeTerminalsWindows(): TerminalProbe {
+  const available: TerminalId[] = [];
   // PowerShell：优先 powershell.exe，其次 pwsh.exe（PowerShell 7+ 单独安装）
   if (which('powershell') !== null || which('pwsh') !== null) {
     available.push('powershell');
@@ -107,17 +107,17 @@ function probeShellsWindows(): ShellProbe {
     available.push('git-bash');
   }
   // 默认：PowerShell 优先（用户决策）；不存在回退 cmd
-  const defaultId: ShellId = available.includes('powershell') ? 'powershell' : 'cmd';
+  const defaultId: TerminalId = available.includes('powershell') ? 'powershell' : 'cmd';
   if (!available.includes('cmd')) available.push('cmd'); // 兜底保证非空
   return { defaultId, available };
 }
 
-/** POSIX shell 探测：SHELL 环境变量 → zsh/bash → sh 兜底 */
-function probeShellsPosix(): ShellProbe {
-  const available: ShellId[] = [];
+/** POSIX 解释器探测：SHELL 环境变量 → zsh/bash → sh 兜底 */
+function probeTerminalsPosix(): TerminalProbe {
+  const available: TerminalId[] = [];
   const shellEnv = process.env.SHELL ?? '';
   const shellBase = shellEnv.split('/').pop() ?? '';
-  const envKind: ShellId | null = shellBase.includes('zsh')
+  const envKind: TerminalId | null = shellBase.includes('zsh')
     ? 'zsh'
     : shellBase.includes('bash')
       ? 'bash'
@@ -127,16 +127,16 @@ function probeShellsPosix(): ShellProbe {
   if (which('bash') !== null && !available.includes('bash')) available.push('bash');
   if (available.length === 0) available.push('sh');
   // 默认：SHELL 声明的优先，否则 bash，再否则首个可用
-  const defaultId: ShellId = envKind ?? (available.includes('bash') ? 'bash' : available[0]);
+  const defaultId: TerminalId = envKind ?? (available.includes('bash') ? 'bash' : available[0]);
   return { defaultId, available };
 }
 
-/** shell 探测入口（同步；进程级缓存；shell 工具与系统提示词共用——单一事实源） */
-export function probeShells(isWindows: boolean): ShellProbe {
-  if (shellProbe === null) {
-    shellProbe = isWindows ? probeShellsWindows() : probeShellsPosix();
+/** 解释器探测入口（同步；进程级缓存；terminal 工具与系统提示词共用——单一事实源） */
+export function probeTerminals(isWindows: boolean): TerminalProbe {
+  if (terminalProbe === null) {
+    terminalProbe = isWindows ? probeTerminalsWindows() : probeTerminalsPosix();
   }
-  return shellProbe;
+  return terminalProbe;
 }
 
 // ============================================================================
@@ -264,7 +264,7 @@ async function probeDevTools(): Promise<ReadonlyArray<string>> {
 
 /** 确保环境探测完成（prepareRequest 开头 await；首次 ~1s 并行探测，之后 0ms） */
 export async function ensureEnvProbed(env: Environment): Promise<void> {
-  probeShells(env.isWindows);
+  probeTerminals(env.isWindows);
   probeEncoding(env);
   if (devToolsPromise === null) {
     devToolsPromise = probeDevTools();
@@ -275,12 +275,12 @@ export async function ensureEnvProbed(env: Environment): Promise<void> {
 }
 
 /**
- * 同步读取探测结果（buildStaticSystemPrompt / shell 工具共用）。
+ * 同步读取探测结果（buildStaticSystemPrompt / terminal 工具共用）。
  * 工具链未就绪时返回空数组（ensureEnvProbed 之后恒完整；同步降级路径可接受）。
  */
 export function getEnvProbe(env: Environment): EnvProbeResult {
   return {
-    shells: probeShells(env.isWindows),
+    terminals: probeTerminals(env.isWindows),
     devTools: devToolsCache ?? [],
     locale: resolveLocale(),
     encoding: probeEncoding(env),
@@ -299,8 +299,8 @@ function resolveLocale(): string {
 // 展示文案生成（[环境上下文] 消息专用；环境配对：探测到什么写什么，绝不写死）
 // ============================================================================
 
-/** shell 人类可读名（提示词展示用） */
-function shellDisplayName(id: ShellId): string {
+/** 解释器人类可读名（提示词展示用） */
+function terminalDisplayName(id: TerminalId): string {
   switch (id) {
     case 'powershell': return 'PowerShell';
     case 'pwsh': return 'PowerShell 7';
@@ -313,24 +313,24 @@ function shellDisplayName(id: ShellId): string {
 }
 
 /**
- * 生成 shell 环境信息文案（环境配对：探测到什么写什么，绝不写死）。
- * 默认 shell 与 shell 工具（未显式指定 shell 参数时）实际使用的一致（本模块单一事实源）。
+ * 生成终端环境信息文案（环境配对：探测到什么写什么，绝不写死）。
+ * 默认解释器与 terminal 工具（未显式指定 interpreter 时）实际使用的一致（本模块单一事实源）。
  */
-function buildShellInfoText(env: Environment): string {
+function buildTerminalInfoText(env: Environment): string {
   const probe = getEnvProbe(env);
-  const { defaultId, available } = probe.shells;
+  const { defaultId, available } = probe.terminals;
   const lines: string[] = [
-    `- 默认 shell：${shellDisplayName(defaultId)}（shell 工具未指定 shell 参数时使用它，写命令时以此语法为准）`,
+    `- 默认解释器：${terminalDisplayName(defaultId)}（terminal 工具未指定 interpreter 时使用它，写命令时以此语法为准）`,
   ];
   if (available.length > 0) {
-    lines.push(`- 本机可用 shell：${available.map(shellDisplayName).join('、')}`);
+    lines.push(`- 本机可用解释器：${available.map(terminalDisplayName).join('、')}`);
   }
   // 环境配对指引：Windows 上 Git Bash 缺席时明说，防止模型假设 POSIX 可用
   if (env.isWindows && !available.includes('git-bash')) {
     lines.push('- 本机没有检测到 Git Bash：不要使用 POSIX 专有语法（如 $()、单引号转义习惯），PowerShell/CMD 语法与 POSIX 有差异');
   }
   if (!env.isWindows && !available.includes('bash') && !available.includes('zsh')) {
-    lines.push('- 本机没有检测到 bash/zsh：shell 工具将以 /bin/sh 执行，避免使用 bash 专有语法');
+    lines.push('- 本机没有检测到 bash/zsh：terminal 工具将以 /bin/sh 执行，避免使用 bash 专有语法');
   }
   return lines.join('\n');
 }
@@ -352,4 +352,4 @@ function buildEncodingText(env: Environment): string {
   return parts.length > 0 ? parts.join('；') : '（未知）';
 }
 
-export { buildShellInfoText, buildDevToolsText, buildEncodingText };
+export { buildTerminalInfoText, buildDevToolsText, buildEncodingText };

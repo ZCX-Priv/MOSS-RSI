@@ -1,6 +1,6 @@
 // src/modules/remote/auth.ts
 // 远程访问认证：8 位数字密码管理 + 进程级 sessionKey + HttpOnly cookie + 登录速率限制。
-// 移植自 dsh-pocket（Max/dsh-pocket-main/lib/proxy.mjs）的认证段，按 MOSS 模块规范 TS 化。
+// 认证段，按 MOSS 模块规范 TS 化。
 //
 // 设计要点：
 // - 密码与 API authToken 完全独立，分 lan/public 两个作用域（严格分域）；
@@ -38,7 +38,7 @@ export function generatePin(): string {
 }
 
 // ---------------------------------------------------------------------------
-// 登录速率限制（三层，移植 dsh-pocket 改进版方案 A）
+// 登录速率限制（三层）
 // ---------------------------------------------------------------------------
 
 export interface RateLimitStatus {

@@ -1,7 +1,7 @@
 {
   "name": "copy",
-  "description": "复制文件/目录（替代 shell 的 cp/Copy-Item）。支持批量（sources 数组）。目录递归复制（100MB 上限）。覆盖策略：error（默认，目标存在即失败）/ rename（自动重命名避开冲突）/ overwrite（覆盖目标，改前自动备份支持 undo）。复制产生的副本登记为 create 条目（undo = 删除副本）。",
-  "description_en": "Copy files/directories (use instead of shell cp/Copy-Item). Supports batching (sources array). Directories are copied recursively (100MB limit). Overwrite strategies: error (default, fail if destination exists) / rename (auto-rename to avoid conflicts) / overwrite (replace destination with automatic pre-change backup, undo supported). Copies are registered as create entries (undo = delete the copy).",
+  "description": "复制文件/目录（替代 terminal 的 cp/Copy-Item）。支持批量（sources 数组）。目录递归复制（100MB 上限）。覆盖策略：error（默认，目标存在即失败）/ rename（自动重命名避开冲突）/ overwrite（覆盖目标，改前自动备份支持 undo）。复制产生的副本登记为 create 条目（undo = 删除副本）。",
+  "description_en": "Copy files/directories (use instead of terminal cp/Copy-Item). Supports batching (sources array). Directories are copied recursively (100MB limit). Overwrite strategies: error (default, fail if destination exists) / rename (auto-rename to avoid conflicts) / overwrite (replace destination with automatic pre-change backup, undo supported). Copies are registered as create entries (undo = delete the copy).",
   "icon": "copy",
   "annotations": {
     "idempotentHint": false

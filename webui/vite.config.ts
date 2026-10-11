@@ -46,7 +46,7 @@ export default defineConfig({
         // 这是此前「硬刷新/更新拿不到新版本」的致命根因修复——旧配置漏了 html，
         // 导致 index.html 不在 precache，而 vite-plugin-pwa 仍注入
         // NavigationRoute(createHandlerBoundToURL('index.html'))，SW 启动求值时同步抛
-        // non-precached-url → 新 SW 安装/更新必然失败 → 旧 SW 永久接管返回旧 shell。
+        // non-precached-url → 新 SW 安装/更新必然失败 → 旧 SW 永久接管返回旧应用外壳。
         globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
         navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
         // 主 chunk 含 @lobehub/icons 品牌图标（约 +0.8MB raw）+ react-material-icon-theme

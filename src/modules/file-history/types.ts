@@ -4,11 +4,11 @@
 // Layer 2: Snapshot（每轮 LLM 响应后异步快照）
 // Layer 3: JSONL Transcript（append-only 持久化，支持 undo）
 
-/** 文件变更操作类型（move=移动/重命名，undo 为反向 rename；shell-change=shell 检测到的无备份变更） */
-export type FileOperation = 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'shell-change';
+/** 文件变更操作类型（move=移动/重命名，undo 为反向 rename；terminal-change=终端命令检测到的无备份变更；'shell-change' 为旧值兼容读取） */
+export type FileOperation = 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'terminal-change' | 'shell-change';
 
-/** 触发变更的工具名（rollback = 消息撤回联动回滚的 redo 备份条目；shell = shell 快照检测） */
-export type HistoryToolName = 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'shell';
+/** 触发变更的工具名（rollback = 消息撤回联动回滚的 redo 备份条目；terminal = 终端命令快照检测；'shell' 为旧值兼容读取） */
+export type HistoryToolName = 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell';
 
 /**
  * 文件历史条目（JSONL 中每行一个）。
@@ -51,7 +51,7 @@ export interface FileHistoryEntry {
   rollbackOf?: string;
 }
 
-/** 统一追踪请求：所有变更类型（write/edit/delete/move/copy/shell）单一入口 */
+/** 统一追踪请求：所有变更类型（write/edit/delete/move/copy/terminal）单一入口 */
 export interface TrackRequest {
   /** 会话 ID */
   sessionId: string;
@@ -67,10 +67,10 @@ export interface TrackRequest {
   bytesBefore?: number;
   /** 是否目录操作（move/copy 可选提供） */
   isDirectory?: boolean;
-  /** shell 快照检测分类（仅 toolName='shell' 事后回填场景） */
-  shellKind?: 'created' | 'modified' | 'deleted';
-  /** shell 执行前内容（读缓存命中时；null 表示不可得，undo 降级为提示不可恢复） */
-  shellBefore?: Buffer | null;
+  /** 终端快照检测分类（仅 toolName='terminal' 事后回填场景） */
+  terminalKind?: 'created' | 'modified' | 'deleted';
+  /** 终端命令执行前内容（读缓存命中时；null 表示不可得，undo 降级为提示不可恢复） */
+  terminalBefore?: Buffer | null;
 }
 
 /** track() 返回的收据（原 TrackEditResult 泛化）：备份结果 + 条目登记要素 */
@@ -109,7 +109,7 @@ export interface TrackCompletion {
  * 统一变更追踪器：一个变更一个 tracker。
  * 协议：变更前 fh.track(req) → 执行变更 → tracker.commit(after)；
  * 变更失败时不调 commit 即丢弃（孤儿备份由 retention 回收）。
- * shell 场景为事后回填：track 携带 shellBefore，commit 空参数登记。
+ * 终端命令场景为事后回填：track 携带 terminalBefore，commit 空参数登记。
  */
 export interface ChangeTracker {
   /** 只读收据（工具返回 metadata 的 entryId/backedUp/backupPath 来源） */

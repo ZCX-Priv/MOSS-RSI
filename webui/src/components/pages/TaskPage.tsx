@@ -92,7 +92,8 @@ import { useSessionHistory } from '../../hooks/useSessionHistory';
 import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
 import { AskPromptCard } from '../shared/AskPromptCard';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
-import { TerminalView } from '../shared/TerminalView';
+import { TerminalPanel } from '../shared/TerminalPanel';
+import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
 import { FileBrowserPanel } from '../shared/FileBrowserPanel';
 import { FileChangesPanel } from '../shared/FileChangesPanel';
 import { AgenteamPanel } from '../agenteam/AgenteamPanel';
@@ -1105,7 +1106,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           </>
         )}
         {activeTab?.type === 'terminal' && (
-          <TerminalView toolCallId={activeTab.toolCallId} />
+          <TerminalPanel key={taskId} sessionId={taskId || TERMINAL_SCRATCH_SCOPE} />
         )}
         {activeTab?.type === 'agenteam' && <AgenteamPanel />}
         {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}

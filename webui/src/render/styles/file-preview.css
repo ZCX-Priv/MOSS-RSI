@@ -129,7 +129,7 @@
   background: var(--muted);
 }
 
-/* 底部工作表标签（Excel 风格） */
+/* 底部工作表标签 */
 .sheet-tab {
   flex: 0 0 auto;
   max-width: 12rem;

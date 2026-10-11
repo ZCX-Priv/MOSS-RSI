@@ -1,6 +1,6 @@
 // render/data/CsvPreview.tsx
-// CSV/TSV 表格预览：自写 RFC4180 解析 → 统一电子表格观感组件 WorkbookViewer（Excel 风格，
-// 与 xlsx 家族观感一致：行号/列标/公式栏/单元格选中）。
+// CSV/TSV 表格预览：自写 RFC4180 解析 → 统一电子表格观感组件 WorkbookViewer
+// 与 xlsx 家族观感一致：行号/列标/公式栏/单元格选中。
 // 行/列超阈值或解析异常 → 回退 CodeFileViewer（文本 + 行号）。
 // 本组件经 React.lazy 懒加载（FilePreviewPane 分发）。
 

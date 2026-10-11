@@ -1,6 +1,6 @@
 // src/modules/file-history/backup.ts
 // 内容寻址备份：sha256(content) 命名，同内容只存一份。
-// 参考 avifenesh design spec：内容哈希天然去重，节省磁盘空间。
+// 内容哈希天然去重，节省磁盘空间。
 
 import { existsSync, readFileSync, copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -85,7 +85,7 @@ export function readBackup(backupPath: string): Buffer {
 }
 
 /**
- * 按内容哈希备份内存 Buffer（shell 快照检测：磁盘已被 shell 改写，
+ * 按内容哈希备份内存 Buffer（终端快照检测：磁盘已被终端命令改写，
  * "执行前内容"只存在于 filesys 读缓存中，无法用 backupByHash 读盘备份）。
  * 同内容与 backupByHash 共享 <hash>.bak 命名空间（天然去重）。
  */

@@ -1,6 +1,6 @@
 // src/modules/hooks/executor.ts
-// 钩子执行器：shell 命令（JSON stdin/stdout 协议）与 TS 模块（Bun 动态 import）。
-// 决策协议（Claude Code 风格简化版）：
+// 钩子执行器：终端命令（JSON stdin/stdout 协议）与 TS 模块（Bun 动态 import）。
+// 决策协议：
 //   exit 0 = 放行（stdout 可为 JSON {decision,reason} 结构化决策）
 //   exit 2 = 阻止（stderr 作为原因反馈给 LLM）
 //   其他 exit / 超时 / 异常 = fail-open 放行 + 告警（用户扩展不能瘫痪主循环）
@@ -54,16 +54,16 @@ function parseStructuredOutput(stdout: string): HookOutput | null {
   return null;
 }
 
-/** shell 命令执行（带超时） */
-async function execShell(
+/** 终端命令执行（带超时） */
+async function execTerminal(
   command: string,
   input: HookInput,
   timeoutMs: number,
   env: Environment,
 ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
-  const shell = env.isWindows ? 'cmd' : 'sh';
-  const shellArg = env.isWindows ? '/c' : '-c';
-  const proc = Bun.spawn([shell, shellArg, command], {
+  const interpreter = env.isWindows ? 'cmd' : 'sh';
+  const argFlag = env.isWindows ? '/c' : '-c';
+  const proc = Bun.spawn([interpreter, argFlag, command], {
     cwd: input.cwd,
     stdin: 'pipe',
     stdout: 'pipe',
@@ -134,11 +134,11 @@ export async function executeHook(
   const timeoutMs = hook.timeout > 0 ? hook.timeout : opts.defaultTimeout;
 
   try {
-    if (hook.type === 'shell') {
+    if (hook.type === 'terminal') {
       if (!hook.command) {
         return { ok: false, output: null, stdout: '', error: 'empty command', durationMs: 0 };
       }
-      const { exitCode, stdout, stderr, timedOut } = await execShell(
+      const { exitCode, stdout, stderr, timedOut } = await execTerminal(
         expandCommand(hook.command, opts.env, input.cwd),
         input,
         timeoutMs,

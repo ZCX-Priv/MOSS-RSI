@@ -1,5 +1,5 @@
 // src/modules/context/compressor/planner.ts
-// 压缩规划（移植 Reasonix planCompaction/tailStart/foldEconomics）：
+// 压缩规划：
 // - 尾部逐字保留区：从末尾向前累积至 tailKeepRatio × 窗口预算
 // - 边界对齐：保留区开头不能是孤立 tool 消息（其 assistant 已被压缩掉）
 // - head 恒保留区：env-context 锚定消息之前（含）永不压缩

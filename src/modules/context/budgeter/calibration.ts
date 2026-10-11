@@ -1,5 +1,5 @@
 // src/modules/context/budgeter/calibration.ts
-// tokPerChar 校准：从真实 usage 反推 tokens/char 比率（Reasonix tokPerChar 语义）。
+// tokPerChar 校准：从真实 usage 反推 tokens/char 比率。
 // 有效域 (0.05, 2)：忽略异常比率；无校准数据时回退 0.25（~4 chars/token）。
 
 /** 无校准数据时的回退比率（tokens per char） */

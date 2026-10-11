@@ -28,7 +28,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 - **ReAct Agent 引擎** —— 流式文本与思维链输出、多轮工具调用循环、上下文自动压缩与裁剪、工具结果智能折叠
 - **多 LLM Provider 路由** —— 内置 openai-chat / openai-responses / anthropic / gemini 等接口格式，支持 DeepSeek、Anthropic、OpenAI、Gemini、Qwen、GLM、Kimi 等主流模型，按模型自动解析路由，支持 thinking 推理输出
 - **MCP 协议支持** —— 接入任意 Model Context Protocol 外部工具服务器，与内置工具统一调度
-- **内置工具集** —— read / write / edit / delete / shell / glob / grep / todo / ask 等，写操作与命令执行可配置逐次确认
+- **内置工具集** —— read / write / edit / delete / terminal / glob / grep / todo / ask 等，写操作与命令执行可配置逐次确认
 - **Skills 系统** —— 以 Markdown + YAML front-matter 定义的可复用技能，内置头脑风暴、代码评审、讲解、规划、TDD 等技能，支持用户自定义与热重载
 - **自动化任务** —— 基于 cron 表达式与一次性定时（once）的调度，附带完整运行历史与暂停/恢复控制
 - **多 Agent 管理** —— 自定义 Agent 的创建、编辑、删除与默认切换，各 Agent 拥有独立的提示词与模型配置
@@ -212,7 +212,7 @@ moss version                # 查看当前版本
 ```
 
 - `security.authToken`：非空时所有 HTTP 请求需携带 `Authorization: Bearer <token>`
-- `tools.*.requireConfirmation`：为 `write` / `delete` / `shell` 等敏感工具启用逐次确认
+- `tools.*.requireConfirmation`：为 `write` / `delete` / `terminal` 等敏感工具启用逐次确认
 - 配置文件变更后 300ms 防抖自动重载，无需重启服务
 
 ## 技术栈

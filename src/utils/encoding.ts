@@ -1,5 +1,5 @@
 // src/utils/encoding.ts
-// 统一编码处理：UTF-8 严格验证、BOM 处理、shell 输出智能解码。
+// 统一编码处理：UTF-8 严格验证、BOM 处理、终端输出智能解码。
 // 解决 Windows 中文环境下 GBK/CP936 输出被强制按 UTF-8 解码导致的乱码，
 // 以及 BOM 文件读取异常、二进制检测误判中文等问题。
 
@@ -8,7 +8,7 @@ import iconv from 'iconv-lite';
 /**
  * 严格验证字节流是否为合法 UTF-8。
  * 拒绝：非法首字节、overlong 编码、surrogate 半区（U+D800-U+DFFF）、超出 Unicode 范围。
- * 用于 isBinaryFile 判定与 shell 输出解码前的编码探测。
+ * 用于 isBinaryFile 判定与终端输出解码前的编码探测。
  */
 export function isValidUtf8(buf: Buffer): boolean {
   let i = 0;
@@ -142,14 +142,14 @@ function analyzeUtf8(buf: Buffer): Utf8Stats {
 }
 
 /**
- * 解码 shell 子进程输出字节流。
+ * 解码终端子进程输出字节流。
  * 通过分析 UTF-8 序列特征区分真正 UTF-8 中文与 GBK 碰撞字：
  * 1. 合法 UTF-8 + 含 CJK 3字节序列 → UTF-8（chcp 65001 生效的中文输出）
  * 2. 合法 UTF-8 + 只有 2字节序列（无 CJK）→ 可能是 GBK 碰撞，优先 GBK
  * 3. 有非法 UTF-8 字节 → GBK 回退
  * iconv-lite 解码失败时最终回退到 UTF-8（含替换字符 U+FFFD）。
  */
-export function decodeShellOutput(buf: Buffer): string {
+export function decodeTerminalOutput(buf: Buffer): string {
   if (buf.length === 0) return '';
   const stats = analyzeUtf8(buf);
 
@@ -159,7 +159,7 @@ export function decodeShellOutput(buf: Buffer): string {
   }
 
   // 2. 完全合法但只有 2 字节序列（无 CJK）→ 可能是 GBK 碰撞，优先 GBK
-  //    真正的 UTF-8 中文是 3 字节序列；2 字节序列对应拉丁扩展/西里尔等，罕见于 Windows shell 输出
+  //    真正的 UTF-8 中文是 3 字节序列；2 字节序列对应拉丁扩展/西里尔等，罕见于 Windows 终端输出
   //    仅当 GBK 解码出多字中文内容（≥2 个 CJK）才采信 GBK：单字符碰撞
   //    （如 é = 0xC3 0xA9 在 GBK 中恰为「茅」）应回退 UTF-8
   if (stats.valid && stats.twoByteSeqCount > 0 && stats.cjkSeqCount === 0) {

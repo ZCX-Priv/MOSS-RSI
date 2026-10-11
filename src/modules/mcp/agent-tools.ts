@@ -2,8 +2,7 @@
 // MCP 对外暴露的 agent 级工具集（moss_*）。
 //
 // 定位：外部 Agent 通过这组工具「驱动 MOSS」——派发任务、轮询进度、管理自动化、查看会话，
-// 而不是拿 MOSS 的内部工具（read/glob/shell…）替 MOSS 做文件操作。
-// 参考同类实现：codex mcp-server / claude mcp serve / mcp-gemini-server（thin by design）。
+// 而不是拿 MOSS 的内部工具（read/glob/terminal…）替 MOSS 做文件操作。
 //
 // 本文件不依赖 ToolRegistry：工具由暴露层直接持有，避免污染内部工具面，
 // 也让 HTTP 端点与 stdio 入口共用同一份契约。

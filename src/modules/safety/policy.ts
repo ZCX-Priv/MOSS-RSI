@@ -1,15 +1,15 @@
 // src/modules/safety/policy.ts
-// 统一权限决策管线（借鉴 Claude Code permissions.ts hasPermissionsToUseTool，按用户决策裁剪）。
+// 统一权限决策管线（按用户决策裁剪）。
 //
 // 九步流水线（短路返回）：
 //   1. 工具 disabled            → DENY  {disabled}
-//   1.5 shell 命令 .moss 越界   → DENY  {mossAccess}（全局硬规则，skip 也拦）
+//   1.5 终端命令 .moss 越界   → DENY  {mossAccess}（全局硬规则，skip 也拦）
 //   2. mode === 'skip'          → ALLOW {mode}      （用户决策：真全放行，仅查禁用）
 //   3. deny 规则命中(会话>全局)  → DENY  {rule}
 //   4. ask 规则命中(会话>全局)   → ASK   {rule}
 //   5. 沙箱检测：
-//      a. shell BLOCK 级危险命令 → DENY {dangerousCommand}
-//      b. shell CAUTION 级       → ASK/配 deny {cautionCommand}
+//      a. 终端 BLOCK 级危险命令 → DENY {dangerousCommand}
+//      b. 终端 CAUTION 级       → ASK/配 deny {cautionCommand}
 //      c. 写类工具保护路径        → DENY {protectedPath}（含 ~/.moss/config 硬保护）
 //   6. allow 规则命中(会话>全局) → ALLOW {rule}
 //   7. mode === 'auto'          → L0/L1/L2 ? ALLOW : ASK {mode}
@@ -23,14 +23,14 @@ import type {
   PermissionMode,
 } from './types';
 import { matchRule } from './rules';
-import { matchDangerousCommand, matchProtectedPath, isHardProtectedPath, matchMossShellAccess } from './patterns';
+import { matchDangerousCommand, matchProtectedPath, isHardProtectedPath, matchMossTerminalAccess } from './patterns';
 import { SYSTEM_SCOPE } from '../filesys/roots';
 
 /** 内置工具风险分类表（按操作可恢复性；fail-closed：未知工具归 L3） */
 const READONLY_TOOLS = new Set(['read', 'glob', 'grep']);
 const STATE_TOOLS = new Set(['ask', 'todo']);
 const RECOVERABLE_WRITE_TOOLS = new Set(['write', 'edit', 'move', 'delete', 'copy']);
-const UNSAFE_TOOLS = new Set(['shell']);
+const UNSAFE_TOOLS = new Set(['terminal']);
 
 /**
  * 风险分级：按工具名 + 注解综合判定。
@@ -88,7 +88,7 @@ export interface PolicyEnv {
   systemRoot: string;
   /** MOSS 配置目录（~/.moss/config 硬保护） */
   configDir: string;
-  /** MOSS 数据目录（~/.moss；shell 命令 .moss 访问检测用） */
+  /** MOSS 数据目录（~/.moss；终端命令 .moss 访问检测用） */
   dataDir: string;
 }
 
@@ -102,12 +102,12 @@ export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
     return { action: 'deny', reason: { type: 'disabled' } };
   }
 
-  // 1.5 shell 命令 .moss 访问检测（全局硬规则，skip 模式也拦——用户明确要求；
-  // 防止 shell 命令绕过 filesys 层 isMossAccessAllowed 读写 AI 自身配置/存储）
-  if (req.toolName === 'shell') {
+  // 1.5 终端命令 .moss 访问检测（全局硬规则，skip 模式也拦——用户明确要求；
+  // 防止终端命令绕过 filesys 层 isMossAccessAllowed 读写 AI 自身配置/存储）
+  if (req.toolName === 'terminal') {
     const cmd = (req.params as { command?: unknown } | null)?.command;
     if (typeof cmd === 'string' && cmd.trim()) {
-      const hit = matchMossShellAccess(cmd, env.home, env.dataDir);
+      const hit = matchMossTerminalAccess(cmd, env.home, env.dataDir);
       if (hit) {
         return { action: 'deny', reason: { type: 'mossAccess', pattern: hit } };
       }
@@ -121,7 +121,7 @@ export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
 
   const sessionRules = env.sessionRules ?? EMPTY_RULES;
   const globalRules = env.globalRules ?? EMPTY_RULES;
-  const isShell = req.toolName === 'shell';
+  const isTerminal = req.toolName === 'terminal';
   // System 作用域哨兵下规则路径匹配以系统盘根为基准（与 filesys 相对路径解析一致）
   const ruleCwd = req.cwd === SYSTEM_SCOPE ? env.systemRoot : req.cwd;
 
@@ -139,8 +139,8 @@ export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
     }
   }
 
-  // 5a/5b. 危险命令智能拦截（仅 shell）
-  if (isShell && env.blockDangerousCommands) {
+  // 5a/5b. 危险命令智能拦截（仅 terminal）
+  if (isTerminal && env.blockDangerousCommands) {
     const cmd = (req.params as { command?: unknown } | null)?.command;
     if (typeof cmd === 'string' && cmd.trim()) {
       const hit = matchDangerousCommand(cmd);

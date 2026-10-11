@@ -138,7 +138,7 @@ export class HookBus {
         break;
       }
 
-      // SessionStart/Stop 的 stdout 注入上下文（Claude Code 同款语义）
+      // SessionStart/Stop 的 stdout 注入上下文
       if ((event === 'SessionStart' || event === 'Stop') && outcome.stdout.trim() !== '') {
         contextParts.push(outcome.stdout.trim());
       }

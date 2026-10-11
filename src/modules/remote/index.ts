@@ -6,8 +6,6 @@
 // - 通过 ServerInstance.setRequestGuard 注入门卫（fetch 最前拦截，覆盖 HTTP/WS/静态资源//mcp 端点，远程模块下同）
 // - 通过 ServerInstance.addRoute 注册 /api/remote/* 管理路由
 // - 远程总开关切换 → 配置更新 + 延迟热重绑（server.rebind；响应先发出，前端弹窗轮询 health）
-//
-// 参考实践：Max/dsh-pocket-main（DeepSeek Harness 的 dsh-pocket 插件）。
 
 import { t } from '../../core/i18n';
 import { isDevMode } from '../../core/env';

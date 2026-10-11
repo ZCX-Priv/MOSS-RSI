@@ -1,5 +1,5 @@
 // src/modules/agenteam/types.ts
-// agenteam 编排类型定义（参考多智能体编排语义适配 MOSS）。
+// agenteam 编排类型定义。
 // 团队持久化于 ~/.moss/agenteam/<teamId>/，成员执行复用 AgentEngine 的
 // agentId + 持久 session 机制。
 

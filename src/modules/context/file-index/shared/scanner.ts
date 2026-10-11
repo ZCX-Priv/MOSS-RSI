@@ -1,7 +1,7 @@
 // src/modules/context/file-index/shared/scanner.ts
 // 增量扫描：复用 search-core 的 walkFiles（自带 .gitignore 剪枝 + 隐藏文件跳过）
 // 遍历项目，产出与已知快照（pathKey → size/mtimeMs）的差异批次。
-// Everything 式"一次全量扫描 + 增量校正"的扫描侧实现。
+// "一次全量扫描 + 增量校正"的扫描侧实现。
 
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';

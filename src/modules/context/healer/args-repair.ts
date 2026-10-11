@@ -1,5 +1,5 @@
 // src/modules/context/healer/args-repair.ts
-// 工具调用参数 JSON 确定性修复（移植 deepx-code args_repair.go 思路）：
+// 工具调用参数 JSON 确定性修复：
 //   空/null → {}；完整 JSON → 原样；截断 JSON → 前缀扫描闭合补全；
 //   彻底损坏 → {"_raw": ...} 包裹（配合 schema-fix/错误回传兜底）。
 

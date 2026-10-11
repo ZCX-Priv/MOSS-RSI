@@ -79,7 +79,7 @@ export class FileHistoryServiceImpl implements FileHistoryService {
 
   /**
    * 统一变更追踪入口（tracker 对象模式）：按 toolName 分发。
-   * write/edit/delete → 改前备份；move/copy → 无备份收据；shell → 事后回填备份。
+   * write/edit/delete → 改前备份；move/copy → 无备份收据；terminal → 事后回填备份。
    * enabled=false 时返回 no-op tracker（收据空值，commit 无操作）。
    */
   async track(req: TrackRequest): Promise<ChangeTracker> {
@@ -141,9 +141,10 @@ export class FileHistoryServiceImpl implements FileHistoryService {
           },
         });
 
-      case 'shell':
-        // shell：事后回填（执行前内容来自 filesys 读缓存）
-        return this.makeTracker(await this.prepareShellReceipt(req));
+      case 'terminal':
+      case 'shell': // 旧值兼容读取
+        // terminal：事后回填（执行前内容来自 filesys 读缓存）
+        return this.makeTracker(await this.prepareTerminalReceipt(req));
 
       default:
         // write / edit / delete：改前备份（同步阻塞，必须在变更前完成）
@@ -253,14 +254,14 @@ export class FileHistoryServiceImpl implements FileHistoryService {
     };
   }
 
-  /** shell 事后回填收据：kind 映射 operation；shellBefore 非空时按哈希备份（可完整 undo） */
-  private async prepareShellReceipt(req: TrackRequest): Promise<TrackerState> {
+  /** terminal 事后回填收据：kind 映射 operation；terminalBefore 非空时按哈希备份（可完整 undo） */
+  private async prepareTerminalReceipt(req: TrackRequest): Promise<TrackerState> {
     const { sessionId, absPath } = req;
-    const kind = req.shellKind ?? 'modified';
+    const kind = req.terminalKind ?? 'modified';
     const entryId = randomUUID();
     const callerInfo = {
       ...(req.toolCallId ? { toolCallId: req.toolCallId } : {}),
-      toolName: 'shell' as const,
+      toolName: 'terminal' as const,
     };
     const operation: FileOperation =
       kind === 'created' ? 'create' : kind === 'deleted' ? 'delete' : 'edit';
@@ -269,14 +270,14 @@ export class FileHistoryServiceImpl implements FileHistoryService {
     let hash = '';
     let bytesBefore = 0;
 
-    if (kind !== 'created' && req.shellBefore) {
+    if (kind !== 'created' && req.terminalBefore) {
       try {
-        const backup = backupBufferByHash(req.shellBefore, this.backupDir);
+        const backup = backupBufferByHash(req.terminalBefore, this.backupDir);
         backupPath = backup.backupPath;
         hash = backup.hash;
         bytesBefore = backup.bytes;
       } catch (err) {
-        this.logger.warn('file-history: shell backup failed', {
+        this.logger.warn('file-history: terminal backup failed', {
           absPath,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -369,7 +370,7 @@ export class FileHistoryServiceImpl implements FileHistoryService {
 
   async createSnapshot(_sessionId: string): Promise<void> {
     // Layer 2：当前实现为 no-op。
-    // 预留扩展点：未来可在此为会话所有追踪文件创建完整快照（参考 Claude Code）。
+    // 预留扩展点：未来可在此为会话所有追踪文件创建完整快照。
     // 当前 undo 基于 transcript + 备份已足够，无需全量快照。
   }
 

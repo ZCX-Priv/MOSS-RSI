@@ -518,7 +518,7 @@ function SafetyRuleList({
               add();
             }
           }}
-          placeholder="shell(git *)"
+          placeholder="terminal(git *)"
           className="h-8 flex-1 font-mono text-xs"
         />
         <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1" onClick={add} disabled={!draft.trim()}>
@@ -1139,7 +1139,7 @@ export function FileIndexSettings() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      {/* 索引引擎（Everything 式文件列表） */}
+      {/* 索引引擎 */}
       <div className="flex flex-col gap-1">
         <div className="text-sm font-medium text-foreground">{t('settings.fileIndex.indexingTitle')}</div>
         <div className="text-xs text-muted-foreground">{t('settings.fileIndex.indexingDesc')}</div>

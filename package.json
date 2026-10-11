@@ -30,7 +30,7 @@
     "version": "bun src/main.ts version",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:shell": "bun test src/modules/tools/shell",
+    "test:terminal": "bun test src/modules/tools/terminal",
     "test:watch": "bun test --watch",
     "prepublishOnly": "npm run build"
   },

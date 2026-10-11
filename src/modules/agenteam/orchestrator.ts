@@ -3,7 +3,6 @@
 // 职责：团队生命周期（创建/审批/暂停/恢复/删除）、成员任务创建、
 // DAG 调度派发（复用 AgentEngine.run + 持久成员会话）、质量门禁循环、
 // 事件广播（agenteam:team-changed / agenteam:member-event）。
-// 参考多智能体编排语义适配 MOSS 微内核。
 
 import type { EventBus, Environment, Logger } from '../../core/types';
 import { ServiceNames } from '../../core/types';
@@ -36,7 +35,7 @@ import type {
 } from './types';
 import { TERMINAL_TASK_STATUSES } from './types';
 
-/** 普通任务（work/implementation 等非质量门禁类）失败自动重试上限（对齐 dsh maxRepairAttempts 默认） */
+/** 普通任务（work/implementation 等非质量门禁类）失败自动重试上限 */
 const MAX_TASK_RETRY_ATTEMPTS = 2;
 
 /** subagent 隐藏分组固定 id（dir=subagent，平坦存放每次 subagent 会话） */
@@ -583,7 +582,7 @@ export class TeamOrchestrator {
           content: `任务 ${task.id}「${task.subject}」${reportStatus === 'completed' ? '完成' : reportStatus === 'pending' ? '被打回重做' : '失败'}。产出：\n${truncate(outputText, 600)}`,
         });
 
-        // 唤醒队长决策（dsh steerCaptainReport 语义：报告注入 captain 会话新 turn）
+        // 唤醒队长决策（报告注入 captain 会话新 turn）
         const completedCount = fresh.tasks.filter((t) => t.status === 'completed').length;
         const failedCount = fresh.tasks.filter((t) => t.status === 'failed').length;
         this.enqueueCaptainRun(
@@ -702,7 +701,7 @@ export class TeamOrchestrator {
       return;
     }
 
-    // 队长最终汇报（dsh 语义：captain 输出面向用户的总结）
+    // 队长最终汇报（captain 输出面向用户的总结）
     this.enqueueCaptainRun(
       team,
       [
@@ -1027,7 +1026,7 @@ export class TeamOrchestrator {
   }
 
   /**
-   * 发送团队消息（真投递，对齐 dsh 通信语义）：
+   * 发送团队消息（真投递）：
    * - to=成员名：消息入该成员 pendingMessages，kick 时投递（派发 ticket 附带或消息处理 run）
    * - to=captain：消息注入队长决策队列（唤醒队长）
    */
@@ -1068,7 +1067,7 @@ export class TeamOrchestrator {
   // ========================================================================
 
   // ========================================================================
-  // Captain 机制（dsh steer 语义的 MOSS 等价物：串行决策队列）
+  // Captain 机制（MOSS 等价物：串行决策队列）
   // ========================================================================
 
   /**
@@ -1198,7 +1197,7 @@ export class TeamOrchestrator {
   }
 
   /**
-   * 消息处理 run（dsh deliverToMember 语义的 MOSS 等价物）：
+   * 消息处理 run（MOSS 等价物）：
    * 把成员的未读消息作为新 turn 投递给空闲成员，成员阅读并按消息行事/回复。
    */
   private deliverMemberMessages(team: TeamState, member: TeamState['members'][number]): void {

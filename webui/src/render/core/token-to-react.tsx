@@ -46,7 +46,7 @@ function renderInlineTokens(tokens: readonly InlineToken[], closed: boolean, key
         pushNode(<Fragment key={key}>{token.content}</Fragment>);
         break;
       case 'softbreak':
-        // breaks:true（md 单例）下单换行 → <br>；对齐 markdown-it 官方 renderer 行为
+        // breaks:true（md 单例）下单换行 → <br>
         pushNode(<br key={key} />);
         break;
       case 'hardbreak':

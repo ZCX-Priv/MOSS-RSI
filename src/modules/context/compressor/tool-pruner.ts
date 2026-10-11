@@ -1,5 +1,5 @@
 // src/modules/context/compressor/tool-pruner.ts
-// 工具结果微压缩（移植 Reasonix prune.go）：超过阈值时保留头尾、中段替换为修剪标记。
+// 工具结果微压缩：超过阈值时保留头尾、中段替换为修剪标记。
 // 仅作用于发送视图（session 原文不动），模型需要完整内容时可按提示重新读取。
 
 import type { ToolPruningConfig } from '../types';

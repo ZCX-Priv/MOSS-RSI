@@ -1,5 +1,5 @@
 // webui/src/components/shared/ConfirmPromptCard.tsx
-// 确认卡片：渲染 safety 模块决策为 ask 的工具调用（shell/write/edit/delete/MCP 等），
+// 确认卡片：渲染 safety 模块决策为 ask 的工具调用（terminal/write/edit/delete/MCP 等），
 // 提供「允许 / 始终允许(本会话|全局) / 拒绝」三级按钮，调用 replyConfirm 打通链路。
 // confirm 不进入 message.toolCalls（走独立 WS 事件 → store.pendingConfirms），故需独立渲染。
 // 样式与 AskPromptCard 一致，保证视觉统一。
@@ -27,8 +27,8 @@ interface ConfirmPromptCardProps {
 function formatDetails(toolName: string, details: unknown): string {
   if (!details || typeof details !== 'object') return '';
   const d = details as Record<string, unknown>;
-  // shell 工具优先展示 command
-  if (toolName === 'shell' && typeof d.command === 'string') {
+  // terminal 工具优先展示 command
+  if (toolName === 'terminal' && typeof d.command === 'string') {
     const parts = [`$ ${d.command}`];
     if (typeof d.cwd === 'string') parts.push(`(cwd: ${d.cwd})`);
     return parts.join(' ');

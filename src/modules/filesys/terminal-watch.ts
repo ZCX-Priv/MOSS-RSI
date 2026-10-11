@@ -1,9 +1,9 @@
-// src/modules/filesys/shell-watch.ts
-// shell 前后快照检测：shell 工具执行前后各做一次工作区 stat 清单（轻量，只 stat 不读内容），
+// src/modules/filesys/terminal-watch.ts
+// 终端命令前后快照检测：terminal 工具执行前后各做一次工作区 stat 清单（轻量，只 stat 不读内容），
 // diff 出 created/modified/deleted 三分类，并对"读缓存持有执行前内容"的文件做回填备份，
-// 使 shell 造成的文件变更（mv/rm/重定向等）纳入 file-history（可 undo / 可感知）。
+// 使终端命令造成的文件变更（mv/rm/重定向等）纳入 file-history（可 undo / 可感知）。
 //
-// undo 三层降级（尽力而为，无法预知 shell 将改哪些文件，全量预备份不可行）：
+// undo 三层降级（尽力而为，无法预知命令将改哪些文件，全量预备份不可行）：
 //   ① modified/deleted 且缓存命中（peek 拿执行前 buffer）→ 备份执行前内容 → 可完整 undo
 //   ② created → 记 operation='create' 条目（undo = 删除该文件）
 //   ③ modified/deleted 未命中缓存 → 记无备份条目（undo 时提示不可恢复），事件照发
@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { FileCache } from './cache';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
-import type { ShellChangeReport, ShellSnapshot, ShellWatchConfig } from './types';
+import type { TerminalChangeReport, TerminalSnapshot, TerminalWatchConfig } from './types';
 
 /**
  * 快照遍历的固定剪枝集（拷自 tools/shared/search-core 的 ALWAYS_SKIP_DIRS + DEFAULT_IGNORES）。
@@ -57,30 +57,30 @@ function* walkSnapshotFiles(root: string, _maxFiles: number, deadline: number): 
  * 与 FileHistoryService.track 同构：file-history 实现后自动生效；
  * 未实现（旧版本）时降级为仅检测+事件，不备份。
  */
-export interface ShellHistorySupport {
-  /** 统一追踪入口：shell 场景为事后回填（shellBefore 来自读缓存） */
+export interface TerminalHistorySupport {
+  /** 统一追踪入口：终端命令场景为事后回填（terminalBefore 来自读缓存） */
   track(req: {
     sessionId: string;
     absPath: string;
-    toolName: 'shell';
+    toolName: 'terminal';
     toolCallId?: string;
-    shellKind: 'created' | 'modified' | 'deleted';
-    shellBefore: Buffer | null;
+    terminalKind: 'created' | 'modified' | 'deleted';
+    terminalBefore: Buffer | null;
   }): Promise<{ commit(after?: { hashAfter?: string; bytesAfter?: number; diff?: string }): void }>;
 }
 
-export class ShellWatcher {
+export class TerminalWatcher {
   constructor(
     private readonly deps: {
       cache: FileCache;
       logger: Logger;
       services: ServiceRegistry;
-      getConfig: () => ShellWatchConfig;
+      getConfig: () => TerminalWatchConfig;
     },
   ) {}
 
-  /** shell 执行前快照：收集 roots 下全部文件的 stat 清单；禁用或文件数超限返回 null */
-  async begin(cwd: string, extraRoots: readonly string[]): Promise<ShellSnapshot | null> {
+  /** 终端命令执行前快照：收集 roots 下全部文件的 stat 清单；禁用或文件数超限返回 null */
+  async begin(cwd: string, extraRoots: readonly string[]): Promise<TerminalSnapshot | null> {
     const cfg = this.deps.getConfig();
     if (!cfg.enabled) return null;
 
@@ -88,7 +88,7 @@ export class ShellWatcher {
     const ok = this.collectInto([cwd, ...extraRoots], cfg.maxFiles, Number.POSITIVE_INFINITY, entries);
     if (!ok) {
       // 超限：跳过本次检测（大仓库保护），不产生半截快照
-      this.deps.logger.warn('filesys: shell snapshot skipped, file count exceeds limit', {
+      this.deps.logger.warn('filesys: terminal snapshot skipped, file count exceeds limit', {
         maxFiles: cfg.maxFiles,
       });
       return null;
@@ -96,10 +96,10 @@ export class ShellWatcher {
     return { roots: [cwd, ...extraRoots], entries };
   }
 
-  /** shell 执行后 diff + 缓存回填备份。返回变更报告（快照无法 diff 时返回 null） */
-  async end(snap: ShellSnapshot, sessionId: string, toolCallId: string): Promise<ShellChangeReport> {
+  /** 终端命令执行后 diff + 缓存回填备份。返回变更报告（快照无法 diff 时返回 null） */
+  async end(snap: TerminalSnapshot, sessionId: string, toolCallId: string): Promise<TerminalChangeReport> {
     const cfg = this.deps.getConfig();
-    const report: ShellChangeReport = {
+    const report: TerminalChangeReport = {
       created: [],
       modified: [],
       deleted: [],
@@ -113,10 +113,10 @@ export class ShellWatcher {
     const ok = this.collectInto(snap.roots, cfg.maxFiles, deadline, after);
     if (!ok) {
       // 截断保护（超时/超限）：放弃本次 diff。半截 after 与完整 before diff 会把
-      // 大量未扫描文件误判为 deleted（多轮 shell 执行时被放大为成片误报），
+      // 大量未扫描文件误判为 deleted（多轮命令执行时被放大为成片误报），
       // 对齐 begin 的"不产生半截快照"哲学——宁可不跟踪，不可错跟踪。
       report.truncated = true;
-      this.deps.logger.warn('filesys: shell snapshot truncated on end, diff skipped', {
+      this.deps.logger.warn('filesys: terminal snapshot truncated on end, diff skipped', {
         timeoutMs: cfg.timeoutMs,
         maxFiles: cfg.maxFiles,
         sessionId,
@@ -146,9 +146,9 @@ export class ShellWatcher {
           const tracker = await history.track({
             sessionId,
             absPath: path,
-            toolName: 'shell',
-            shellKind: 'created',
-            shellBefore: null,
+            toolName: 'terminal',
+            terminalKind: 'created',
+            terminalBefore: null,
             toolCallId,
           });
           tracker.commit();
@@ -163,9 +163,9 @@ export class ShellWatcher {
           const tracker = await history.track({
             sessionId,
             absPath: path,
-            toolName: 'shell',
-            shellKind: 'modified',
-            shellBefore: buf,
+            toolName: 'terminal',
+            terminalKind: 'modified',
+            terminalBefore: buf,
             toolCallId,
           });
           tracker.commit();
@@ -180,9 +180,9 @@ export class ShellWatcher {
           const tracker = await history.track({
             sessionId,
             absPath: path,
-            toolName: 'shell',
-            shellKind: 'deleted',
-            shellBefore: buf,
+            toolName: 'terminal',
+            terminalKind: 'deleted',
+            terminalBefore: buf,
             toolCallId,
           });
           tracker.commit();
@@ -221,7 +221,7 @@ export class ShellWatcher {
           }
         }
       } catch (err) {
-        this.deps.logger.debug('filesys: shell snapshot walk root failed', {
+        this.deps.logger.debug('filesys: terminal snapshot walk root failed', {
           root,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -230,11 +230,11 @@ export class ShellWatcher {
     return true;
   }
 
-  private resolveHistory(): ShellHistorySupport | null {
+  private resolveHistory(): TerminalHistorySupport | null {
     try {
-      const svc = this.deps.services.tryResolve<Partial<ShellHistorySupport>>(ServiceNames.FILE_HISTORY);
+      const svc = this.deps.services.tryResolve<Partial<TerminalHistorySupport>>(ServiceNames.FILE_HISTORY);
       if (svc && typeof svc.track === 'function') {
-        return svc as ShellHistorySupport;
+        return svc as TerminalHistorySupport;
       }
     } catch {
       /* 服务未注册 */

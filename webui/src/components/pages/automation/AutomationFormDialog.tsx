@@ -135,8 +135,7 @@ export function AutomationFormDialog() {
   const { createAutomation, updateAutomation } = useAutomations();
   const [agents, setAgents] = useState<AgentItem[]>([]);
   const [saving, setSaving] = useState(false);
-  const [pickingCwd, setPickingCwd] = useState(false);
-  /** 内置目录浏览器弹窗开关（无原生对话框的平台，如 Android） */
+  /** 前端文件夹选择器弹窗开关 */
   const [browseCwdOpen, setBrowseCwdOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -198,25 +197,9 @@ export function AutomationFormDialog() {
     setError(null);
   };
 
-  /** 选择工作目录：后端原生文件夹对话框（path 为 null = 用户取消，静默）；成功写入共享最近目录 */
-  const handlePickCwd = async () => {
-    setPickingCwd(true);
-    try {
-      const { path, unsupported } = await api.pickDirectory();
-      if (unsupported) {
-        // 无原生对话框的平台（Android）：改用内置目录浏览器弹窗
-        setBrowseCwdOpen(true);
-        return;
-      }
-      if (path) {
-        setField('cwd', path);
-        addRecentDirectory(path);
-      }
-    } catch {
-      toast.error(t('automation.form.cwdPickFailed'));
-    } finally {
-      setPickingCwd(false);
-    }
+  /** 选择工作目录：打开前端文件夹选择器（默认磁盘页） */
+  const handlePickCwd = () => {
+    setBrowseCwdOpen(true);
   };
 
   /** 当前周期配置生成的 cron（custom 预设时为原始输入） */
@@ -404,8 +387,7 @@ export function AutomationFormDialog() {
                 )}
                 <DropdownMenuSeparator className="mx-2" />
                 <DropdownMenuItem
-                  onSelect={() => void handlePickCwd()}
-                  disabled={pickingCwd}
+                  onSelect={handlePickCwd}
                   className="gap-1.5"
                 >
                   <FolderInput className="size-3.5" />

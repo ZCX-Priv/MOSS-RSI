@@ -2,7 +2,7 @@
 // 静态系统提示组装（缓存对齐布局核心）：
 // - 从 ~/.moss/agent/prompts/main/ 加载基本设定并按序拼接（soul → identity → 其他）
 //   （rules 解析段已移除：rules.md 内容已并入 system.md，见 agent/prompts/main/）
-// - 零动态变量替换：全部环境信息（平台/CWD/设备/编码/模型/shell/工具链/时间）
+// - 零动态变量替换：全部环境信息（平台/CWD/设备/编码/模型/解释器/工具链/时间）
 //   统一由 env-context 消息承载 → system prompt 纯文本拼接，字节级稳定（前缀缓存锚点）
 // - always 用户规则段（rules 引擎注入）插在末尾；规则集内容指纹纳入缓存键
 // - mtime 缓存：文件未变不重复读盘；变更即进入新缓存周期
@@ -19,7 +19,7 @@ import { estimateTextTokens } from '../budgeter/estimator';
 /** 兜底系统提示词（agent/prompts/main/ 下无任何基本设定文件时） */
 export const FALLBACK_SYSTEM_PROMPT = `你是 MOSS，一个运行在真实环境中的交互式 AI 智能体。
 
-你可以使用工具读写文件、执行命令、调用 skill、调用 MCP 服务器。环境信息（平台、工作目录、shell、开发工具链、时间等）以会话首条 [环境上下文] 消息为准。
+你可以使用工具读写文件、执行命令、调用 skill、调用 MCP 服务器。环境信息（平台、工作目录、终端解释器、开发工具链、时间等）以会话首条 [环境上下文] 消息为准。
 
 # 核心原则
 1. **第一性原理**：从根本推理，不浮于表面。

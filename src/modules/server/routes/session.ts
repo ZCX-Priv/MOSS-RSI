@@ -71,6 +71,13 @@ export function createDeleteSessionHandler(services: ServiceRegistry): RouteHand
     }
     const agent = services.tryResolve<AgentEngine & { deleteSession?: (id: string) => void }>('agent.engine');
     agent?.deleteSession?.(sessionId);
+    // 联动清理该会话的持久终端（终端本体在后端进程内存，避免删除会话后残留）
+    try {
+      const terminals = services.tryResolve<{ disposeSession?: (sid: string) => void }>(ServiceNames.TERMINAL);
+      terminals?.disposeSession?.(sessionId);
+    } catch {
+      // 终端服务未注册：忽略
+    }
     return { status: 200, body: { deleted: true, sessionId } };
   };
 }

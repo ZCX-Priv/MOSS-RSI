@@ -176,7 +176,7 @@ export class ToolRegistryImpl implements ToolRegistry {
         }
       }
 
-      // 注入 toolConfig 到 ctx，供工具自身读取（如 shell 的 timeout）
+      // 注入 toolConfig 到 ctx，供工具自身读取（如 terminal 的 timeout）
       const ctxWithConfig: ToolContext = { ...ctx, toolConfig };
       const result = await tool.execute(params, ctxWithConfig);
       return result;

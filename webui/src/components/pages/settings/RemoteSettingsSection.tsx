@@ -1,7 +1,7 @@
 // webui/src/components/pages/settings/RemoteSettingsSection.tsx
 // 远程控制设置分区（/settings/remote）：手机扫码远程访问 webui「派活」与控制 agent。
 // 区块：总开关（热重绑）→ 局域网（二维码/密码/IP 高级）→ 公网隧道（免责声明/进度/二维码/密码）→ 安全提示。
-// 参考 dsh-pocket 设置页实践；移动端优先布局（触控友好、全宽卡片）。
+// 移动端优先布局（触控友好、全宽卡片）。
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';

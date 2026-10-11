@@ -1,9 +1,9 @@
 // src/modules/safety/rules.ts
-// 权限规则匹配器（借鉴 Claude Code shellRuleMatching + bashCommandHelpers）。
+// 权限规则匹配器。
 // 三匹配器：exact（精确）/ prefix（":*" 结尾）/ wildcard（含 *）。
 // 安全约束（源码级）：
-//   1. 复合命令（含 && ; | 换行）仅允许 exact 规则匹配 —— 防 shell(cd *) 放行 "cd / && format c:"
-//   2. deny/ask 匹配前剥离全部前导环境变量 —— "FOO=bar rm" 仍被 deny(shell(rm *)) 拦截
+//   1. 复合命令（含 && ; | 换行）仅允许 exact 规则匹配 —— 防 terminal(cd *) 放行 "cd / && format c:"
+//   2. deny/ask 匹配前剥离全部前导环境变量 —— "FOO=bar rm" 仍被 deny(terminal(rm *)) 拦截
 //   3. allow 匹配前仅剥离安全包装（timeout/time/nice/nohup + SAFE_ENV_VARS 白名单）；
 //      PATH/LD_*/DYLD_*/PYTHONPATH/NODE_OPTIONS 绝不剥离（二进制劫持防护）
 
@@ -21,7 +21,7 @@ const SAFE_ENV_VARS = new Set(['node_env', 'rust_log', 'lang', 'lc_all', 'tz', '
  */
 const BINARY_HIJACK_VARS = /^(path|ld_|dyld_|pythonpath|node_options|perl5lib|rubyopt|java_tool_options)/i;
 
-/** 从 params 提取 shell 命令（仅 shell 类工具有 command 字段） */
+/** 从 params 提取终端命令（仅 terminal 类工具有 command 字段） */
 function extractCommand(params: unknown): string | undefined {
   if (params && typeof params === 'object' && 'command' in params) {
     const cmd = (params as Record<string, unknown>).command;
@@ -109,7 +109,7 @@ function escapeForRegex(s: string): string {
 
 /**
  * 通配符匹配：* → .*。
- * 优化（借鉴 CC）：模式为 "prefix *"（单个尾部 * 且前面是空格）时匹配 "prefix" 本身（尾部可选）。
+ * 优化：模式为 "prefix *"（单个尾部 * 且前面是空格）时匹配 "prefix" 本身（尾部可选）。
  */
 function matchWildcard(pattern: string, text: string): boolean {
   const starCount = (pattern.match(/\*/g) ?? []).length;

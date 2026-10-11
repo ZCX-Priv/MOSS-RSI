@@ -204,7 +204,7 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
   }, [workingDirectory, systemMode, remember]);
 
   // 实时刷新：订阅本会话的文件变更 WS 事件；变更落在当前目录时防抖静默刷新。
-  // 事件源见后端 engine.onFilesysChange（file-created/edited/deleted/moved/shell-changed）。
+  // 事件源见后端 engine.onFilesysChange（file-created/edited/deleted/moved/terminal-changed）。
   useEffect(() => {
     const schedule = (): void => {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
@@ -235,7 +235,7 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
         case 'file-moved':
           paths = [payload.path, payload.destPath].filter((x): x is string => typeof x === 'string');
           break;
-        case 'shell-changed':
+        case 'terminal-changed':
           paths = [
             ...(payload.report?.created ?? []),
             ...(payload.report?.modified ?? []),

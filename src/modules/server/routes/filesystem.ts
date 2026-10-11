@@ -1,15 +1,14 @@
 // src/modules/server/routes/filesystem.ts
-// POST /api/filesystem/pick-directory     —— 调用系统原生文件夹选择对话框，返回真实绝对路径（主路径）
-// POST /api/filesystem/resolve-directory  —— 根据文件夹名搜索同名目录，返回候选绝对路径（回退路径）
-// GET  /api/filesystem/suggest-paths      —— 返回常用目录列表（主目录/桌面/文档/下载/cwd）
+// GET  /api/filesystem/suggest-paths      —— 返回常用位置列表（主目录/桌面/文档/下载/图片/音乐/视频/cwd）+ kind
+// GET  /api/filesystem/drives             —— 驱动器/卷枚举（前端文件夹选择器「此电脑」视图）
+// GET  /api/filesystem/list               —— 列出目录直接子项（前端文件夹选择器 + 文件浏览器）
+// GET  /api/filesystem/search-files       —— 递归模糊搜索文件名（# 文件提及菜单）
+// POST /api/filesystem/pick-file          —— 系统原生多文件选择（附件纯路径引用）
+// POST /api/filesystem/save-attachment    —— 粘贴图片落盘（附件）
+// GET  /api/filesystem/raw|media|text     —— 只读预览（渲染模块）/ 媒体直链 / 文本提取
+// GET/PUT /api/filesys/roots              —— 授权 roots 管理
 //
-// 浏览器安全模型禁止 JS 获取文件夹绝对路径（File System Access API 的 handle.name 只返回文件夹名）。
-// 由于 MOSS 后端在本机运行（127.0.0.1），本接口通过 nativefiledialog-for-bun 库调用系统原生
-// 文件夹选择对话框（FFI 优先：Windows 调 Win32 IFileDialog / macOS AppKit / Linux GTK；FFI 不可用
-// 时回退脚本：PowerShell FolderBrowserDialog / osascript / zenity），拿到用户真实选择的绝对路径返回
-// 前端，彻底解决跨盘符误命中问题。
-// resolve-directory 作为回退：当后端不可用（远程场景）或原生对话框失败时，前端用浏览器 API
-// 取文件夹名再调 resolve-directory 搜索。
+// 目录选择已改为前端选择器（读 drives + list，跨平台、默认磁盘页），不再调用系统原生文件夹对话框。
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
 import type { ConfigService, Environment, ServiceRegistry } from '../../../core/types';
@@ -18,27 +17,12 @@ import { readdirSync, existsSync, statSync, statfsSync, openSync, readSync, clos
 import { isAbsolute, join, normalize, extname, dirname, relative, sep } from 'node:path';
 import { ErrorCode } from '../../../core/error-codes';
 import { SYSTEM_SCOPE } from '../../filesys/roots';
-import { decodeShellOutput } from '../../../utils/encoding';
+import { decodeTerminalOutput } from '../../../utils/encoding';
 import { parseRangeHeader, clampChunk } from './range';
 import { RAW_MIME_MAP, MEDIA_EXTS, isTextualExt, extOfFile } from './preview-mime';
 import type { FilesysService } from '../../filesys/types';
 
-interface ResolveBody {
-  folderName?: string;
-  hint?: string;
-}
-
-interface Candidate {
-  path: string;
-  parent: string;
-}
-
-const MAX_VISIT = 5000;
-const MAX_RESULTS = 20;
-const TIMEOUT_MS = 1500;
-const MAX_DEPTH = 3;
-
-/** 跳过这些巨型/系统目录，避免 BFS 爆炸 */
+/** 跳过这些巨型/系统目录，避免遍历爆炸 */
 const SKIP_NAMES = new Set([
   'node_modules',
   '.git',
@@ -69,102 +53,33 @@ function isDirectorySafe(p: string): boolean {
   }
 }
 
-export function createResolveDirectoryHandler(env: Environment): RouteHandler {
-  return async (req: HttpRequest): Promise<HttpResponse> => {
-    const body = (req.body ?? {}) as ResolveBody;
-    const folderName = body.folderName?.trim();
-    if (!folderName) {
-      return { status: 400, body: { error: ErrorCode.FS_FOLDER_NAME_REQUIRED } };
-    }
-    const hint = body.hint?.trim();
-    const isWin = env.isWindows;
-    const matchName = isWin ? folderName.toLowerCase() : folderName;
-    const nameMatches = (n: string): boolean =>
-      isWin ? n.toLowerCase() === matchName : n === matchName;
-
-    const candidates: Candidate[] = [];
-    const seen = new Set<string>();
-    let visited = 0;
-    const start = Date.now();
-    const timedOut = () => Date.now() - start > TIMEOUT_MS;
-
-    // hint 优先：若 hint 是合法目录，直接探测 hint/folderName
-    if (hint && isDirectorySafe(hint)) {
-      const direct = join(hint, folderName);
-      if (isDirectorySafe(direct)) {
-        return { status: 200, body: { candidates: [], exactMatch: direct } };
-      }
-    }
-
-    // 搜索根：用户主目录子树 + 标准子目录 + 进程 cwd
-    const roots: string[] = [];
-    const pushRoot = (p: string) => {
-      if (isDirectorySafe(p)) roots.push(p);
-    };
-    pushRoot(env.homeDir);
-    pushRoot(join(env.homeDir, 'Desktop'));
-    pushRoot(join(env.homeDir, 'Documents'));
-    pushRoot(join(env.homeDir, 'Downloads'));
-    // Android：追加内置共享存储（用户文件主要落在这里，而非 Termux home）
-    if (env.isAndroid) pushRoot('/storage/emulated/0');
-    pushRoot(process.cwd());
-
-    // BFS（同步遍历 + 时间检查实现软超时）
-    const queue: Array<{ dir: string; depth: number }> = roots.map((r) => ({
-      dir: r,
-      depth: 0,
-    }));
-
-    while (
-      queue.length > 0 &&
-      candidates.length < MAX_RESULTS &&
-      visited < MAX_VISIT &&
-      !timedOut()
-    ) {
-      const { dir, depth } = queue.shift()!;
-      visited++;
-      let entries: Dirent[];
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const ent of entries) {
-        if (candidates.length >= MAX_RESULTS || timedOut()) break;
-        if (!ent.isDirectory()) continue;
-        const lower = ent.name.toLowerCase();
-        if (SKIP_NAMES.has(lower)) continue;
-        const childPath = join(dir, ent.name);
-        const key = isWin ? childPath.toLowerCase() : childPath;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        if (nameMatches(ent.name)) {
-          candidates.push({ path: childPath, parent: dir });
-        }
-        if (depth + 1 < MAX_DEPTH) {
-          queue.push({ dir: childPath, depth: depth + 1 });
-        }
-      }
-    }
-
-    const exactMatch = candidates.length === 1 ? candidates[0].path : null;
-    return { status: 200, body: { candidates, exactMatch } };
-  };
-}
+/** 常用位置类型（前端据此选图标 + i18n 文案） */
+export type SuggestPathKind =
+  | 'home'
+  | 'desktop'
+  | 'documents'
+  | 'downloads'
+  | 'pictures'
+  | 'music'
+  | 'videos'
+  | 'cwd';
 
 export function createSuggestPathsHandler(env: Environment): RouteHandler {
   return async (): Promise<HttpResponse> => {
-    const paths: Array<{ path: string; label: string }> = [];
-    const tryAdd = (p: string, label: string) => {
-      if (isDirectorySafe(p)) paths.push({ path: p, label });
+    const paths: Array<{ path: string; label: string; kind: SuggestPathKind }> = [];
+    const tryAdd = (p: string, label: string, kind: SuggestPathKind) => {
+      if (isDirectorySafe(p)) paths.push({ path: p, label, kind });
     };
-    tryAdd(env.homeDir, '主目录');
-    tryAdd(join(env.homeDir, 'Desktop'), '桌面');
-    tryAdd(join(env.homeDir, 'Documents'), '文档');
-    tryAdd(join(env.homeDir, 'Downloads'), '下载');
+    tryAdd(env.homeDir, '主目录', 'home');
+    tryAdd(join(env.homeDir, 'Desktop'), '桌面', 'desktop');
+    tryAdd(join(env.homeDir, 'Documents'), '文档', 'documents');
+    tryAdd(join(env.homeDir, 'Downloads'), '下载', 'downloads');
+    tryAdd(join(env.homeDir, 'Pictures'), '图片', 'pictures');
+    tryAdd(join(env.homeDir, 'Music'), '音乐', 'music');
+    tryAdd(join(env.homeDir, 'Videos'), '视频', 'videos');
     // Android：内置共享存储（Termux 需先 termux-setup-storage 才有权限）
-    if (env.isAndroid) tryAdd('/storage/emulated/0', '内部存储');
-    tryAdd(process.cwd(), '当前目录');
+    if (env.isAndroid) tryAdd('/storage/emulated/0', '内部存储', 'home');
+    tryAdd(process.cwd(), '当前目录', 'cwd');
     return { status: 200, body: { paths } };
   };
 }
@@ -624,15 +539,8 @@ export function createListDrivesHandler(env: Environment): RouteHandler {
 }
 
 // ============================================================================
-// POST /api/filesystem/pick-directory
-// 通过 nativefiledialog-for-bun 调用系统原生文件夹选择对话框，返回用户真实选择的绝对路径。
-// 库优先用 FFI（Bun.dlopen 加载 nfd.dll/libnfd.dylib/libnfd.so）调用现代原生对话框
-// （Windows IFileDialog / macOS AppKit / Linux GTK），FFI 不可用时回退到脚本
-// （PowerShell FolderBrowserDialog / osascript / zenity）。
-// 跨盘符精准无误（系统对话框能浏览所有盘符/位置），不依赖搜索猜测。
-//
-// Android（Termux/proot）无可用原生对话框：直接返回 { path: null, unsupported: true }，
-// 由前端改用内置目录浏览器弹窗逐级点选。
+// 原生文件对话框接入（nativefiledialog-for-bun）
+// 目录选择已弃用原生对话框（改用前端选择器），此处仅供 pick-file 使用。
 // ============================================================================
 
 type NfdModule = typeof import('nativefiledialog-for-bun');
@@ -647,34 +555,6 @@ async function loadNfd(): Promise<NfdModule | null> {
   } catch {
     return null;
   }
-}
-
-/** 调用系统原生对话框，返回选中的绝对路径；用户取消/失败返回 null */
-async function pickDirectoryNative(_env: Environment): Promise<string | null> {
-  try {
-    const nfd = await loadNfd();
-    if (!nfd) return null; // 无可用后端（含 Android）
-    // nfd.pickFolder：用户取消返回 null，成功返回绝对路径，错误抛 NativeDialogError
-    const folder = await nfd.pickFolder();
-    if (!folder) return null; // 用户取消
-    // 防御性校验：路径必须真实存在且为目录
-    if (!isDirectorySafe(folder)) return null;
-    return folder;
-  } catch {
-    // FFI 加载失败 / 对话框异常 → 返回 null，前端回退
-    return null;
-  }
-}
-
-export function createPickDirectoryHandler(env: Environment): RouteHandler {
-  return async (): Promise<HttpResponse> => {
-    // Android：无原生文件夹对话框 → 标记 unsupported，前端切内置目录浏览器
-    if (env.isAndroid) {
-      return { status: 200, body: { path: null, unsupported: true } };
-    }
-    const path = await pickDirectoryNative(env);
-    return { status: 200, body: { path } };
-  };
 }
 
 // ============================================================================
@@ -1188,7 +1068,7 @@ export function createTextExtractHandler(services: ServiceRegistry): RouteHandle
       if (headBuf.includes(0)) {
         return { status: 415, body: { error: `Not a text file: .${ext}` } };
       }
-      let text = decodeShellOutput(headBuf);
+      let text = decodeTerminalOutput(headBuf);
       let truncated = st.size > TEXT_READ_MAX_BYTES;
       if (text.length > maxChars) {
         text = text.slice(0, maxChars);

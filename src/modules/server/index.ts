@@ -126,9 +126,7 @@ import { createListAutomationsHandler,
   createAutomationHistoryHandler,
 } from './routes/automations';
 import {
-  createResolveDirectoryHandler,
   createSuggestPathsHandler,
-  createPickDirectoryHandler,
   createPickFileHandler,
   createSaveAttachmentHandler,
   createSearchFilesHandler,
@@ -140,6 +138,7 @@ import {
   createMediaHandler,
   createTextExtractHandler,
 } from './routes/filesystem';
+import { createListInterpretersHandler } from './routes/terminal';
 import {
   createContextStatsHandler,
   createContextCompactionsHandler,
@@ -435,13 +434,13 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'POST', pattern: '/api/automations/:id/resume', handler: createResumeAutomationHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/automations/:id/history', handler: createAutomationHistoryHandler(services), auth: true });
 
-    // filesystem（浏览器端文件夹选择：后端原生对话框拿真实绝对路径 + 搜索回退）
-    this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/pick-directory', handler: createPickDirectoryHandler(env), auth: true });
+    // filesystem（目录选择=前端选择器：drives/list/suggest-paths；附件=原生文件对话框）
     this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/pick-file', handler: createPickFileHandler(env, config), auth: true });
     // 粘贴图片落盘：base64 → ~/.moss/agent/attachments/<file>，返回绝对路径（附件路径引用）
     this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/save-attachment', handler: createSaveAttachmentHandler(env, config), auth: true });
-    this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/resolve-directory', handler: createResolveDirectoryHandler(env), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/suggest-paths', handler: createSuggestPathsHandler(env), auth: true });
+    // 终端：本机实测可用的解释器类型（前端「新建终端」菜单数据源）
+    this.router.addRoute({ method: 'GET', pattern: '/api/terminal/interpreters', handler: createListInterpretersHandler(env), auth: true });
     // # 文件提及菜单：工作目录递归文件名搜索
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/search-files', handler: createSearchFilesHandler(env), auth: true });
     // 文件浏览器：列出目标目录直接子项（目录 + 文件；走 filesys roots 权限）

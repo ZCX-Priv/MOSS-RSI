@@ -1,5 +1,5 @@
 // src/modules/context/file-index/index-engine/query.ts
-// 内存 glob 匹配：对索引引擎的内存文件列表直接匹配（Everything 式毫秒级查询），
+// 内存 glob 匹配：对索引引擎的内存文件列表直接匹配（毫秒级查询），
 // 语义与 tools/glob 的 walkFiles 遍历路径完全一致（正/负模式、type 过滤、目录豁免）。
 
 import { Glob } from 'bun';

@@ -131,24 +131,24 @@ export class SafetyService {
   }
 
   /**
-   * 生成「始终允许」规则建议（借鉴 CC bashPermissions suggestion 优先级链）：
-   *   shell: heredoc(<<)→前缀 | 多行→首行 | 单行→2 词前缀 | 兜底→精确命令
+   * 生成「始终允许」规则建议：
+   *   terminal: heredoc(<<)→前缀 | 多行→首行 | 单行→2 词前缀 | 兜底→精确命令
    *   MCP   → mcp__server__tool
    *   其他  → 工具名
    */
   generateRuleSuggestion(toolName: string, params: unknown): string {
-    if (toolName === 'shell' && params && typeof params === 'object' && 'command' in params) {
+    if (toolName === 'terminal' && params && typeof params === 'object' && 'command' in params) {
       const cmd = (params as Record<string, unknown>).command;
       if (typeof cmd === 'string' && cmd.trim()) {
-        return `shell(${suggestShellContent(cmd)})`;
+        return `terminal(${suggestTerminalContent(cmd)})`;
       }
     }
     return toolName;
   }
 }
 
-/** shell 命令的规则 content 建议 */
-function suggestShellContent(command: string): string {
+/** 终端命令的规则 content 建议 */
+function suggestTerminalContent(command: string): string {
   const trimmed = command.trim();
   // heredoc：提取 << 之前的稳定前缀
   const heredocIdx = trimmed.indexOf('<<');

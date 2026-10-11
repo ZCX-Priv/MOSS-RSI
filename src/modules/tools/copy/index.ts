@@ -1,5 +1,5 @@
 // tools/copy/index.ts
-// copy 工具：复制文件/目录（替代 shell 的 cp/Copy-Item）。
+// copy 工具：复制文件/目录（替代 terminal 的 cp/Copy-Item）。
 // 强化点：
 //   1. 副本登记 file-history：新副本为 create 条目（undo = 删除副本）；覆盖时对目标先备份
 //   2. overwrite 三策略（error / rename 自动改名 / overwrite 覆盖前备份）

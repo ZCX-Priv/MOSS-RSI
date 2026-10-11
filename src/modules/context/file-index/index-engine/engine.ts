@@ -1,5 +1,5 @@
 // src/modules/context/file-index/index-engine/engine.ts
-// 索引引擎（Everything 式）：一次全量扫描 → SQLite 快照持久化 → watcher 增量更新。
+// 索引引擎：一次全量扫描 → SQLite 快照持久化 → watcher 增量更新。
 // 内存为主（Map<pathKey, FileEntry>），SQLite 为持久层（启动秒级恢复 + 落盘防抖）。
 // 状态机：disabled → scanning → ready（error 可恢复重试）。
 

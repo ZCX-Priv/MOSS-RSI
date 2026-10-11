@@ -1,7 +1,6 @@
 // src/modules/agenteam/quality-gates.ts
 // 质量门禁：结构化任务（requirements/review/repair 等）的创建校验、
 // 完成评估与失败后自动 follow-up（审查/修复循环）。
-// 参考多智能体编排质量门禁语义精简适配。
 
 import type { TeamState, TeamTask } from './types';
 

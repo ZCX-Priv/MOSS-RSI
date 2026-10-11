@@ -121,7 +121,7 @@ export class HooksEngineServiceImpl {
 
   upsert(cwd: string, scope: HookScope, input: HookUpsertInput, oldId?: string): ScopedHookRecord {
     if (!input.name) throw new Error('name is required');
-    if (input.type === 'shell' && !input.command) throw new Error('command is required for shell hooks');
+    if (input.type === 'terminal' && !input.command) throw new Error('command is required for terminal hooks');
     if (input.type === 'module' && !input.modulePath) throw new Error('modulePath is required for module hooks');
     const dir = scope === 'project' ? projectHooksDir(cwd) : globalHooksDir(this.env);
     const record = upsertHook(dir, input, oldId ? { oldId } : undefined);

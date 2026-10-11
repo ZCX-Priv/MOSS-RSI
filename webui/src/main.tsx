@@ -202,7 +202,7 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
 /**
  * 一次性清理历史坏 Service Worker 与缓存（恢复通道，**仅生产环境**）。
  * 背景：旧版生产 sw.js 因 index.html 未进 precache 而调用 createHandlerBoundToURL('index.html')
- * 抛错，SW 安装/更新必然失败；叠加 skipWaiting:false，旧坏 SW 会长期接管并返回旧 shell，
+ * 抛错，SW 安装/更新必然失败；叠加 skipWaiting:false，旧坏 SW 会长期接管并返回旧应用外壳，
  * 表现为「硬刷新/普通刷新拿不到新版本」。此处主动注销一次并清空 Cache Storage，
  * 让修复后的新 SW 立即生效，无需用户手清站点数据。
  * 用 localStorage 哨兵保证只执行一次、且不触发刷新（幂等、无刷新循环）。

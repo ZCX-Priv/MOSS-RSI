@@ -1,8 +1,8 @@
 // tools/web/html-extract.ts
-// HTML → 可见文本/标题/链接 提取（移植自 modsearch 的 htmlExtract，纯函数无依赖）。
+// HTML → 可见文本/标题/链接 提取（纯函数无依赖）。
 // 设计要点：
 //   - 剥离 script/style 等隐藏元素用扫描而非正则：嵌套量词正则在 2MB 畸形页面上
-//     会灾难性回溯（modsearch 实测 14 秒卡死），扫描式保证线性。
+//     会灾难性回溯（实测 14 秒卡死），扫描式保证线性。
 //   - 实体解码带 codePoint 边界校验：远程页面可以写出代理区/超界码点，
 //     String.fromCodePoint 会抛错或产生坏字符。
 //   - ASCII-only 小写化：Unicode toLowerCase 可能改变字符串长度（İ → i̇），

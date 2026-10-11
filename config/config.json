@@ -50,7 +50,7 @@
     "write":     { "enabled": true, "requireConfirmation": true },
     "edit":      { "enabled": true, "requireConfirmation": false },
     "delete":    { "enabled": true, "requireConfirmation": true },
-    "shell":     { "enabled": true, "timeout": 30000, "requireConfirmation": true },
+    "terminal":  { "enabled": true, "timeout": 30000, "requireConfirmation": true },
     "skill":     { "enabled": true },
     "mcp":       { "enabled": true },
     "memory":    { "enabled": true },

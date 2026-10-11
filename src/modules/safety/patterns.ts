@@ -1,6 +1,6 @@
 // src/modules/safety/patterns.ts
 // 危险命令智能拦截（Windows 务实沙箱）+ 保护路径检测。
-// 借鉴 Claude Code dangerousPatterns + pathValidation，覆盖 Windows/POSIX 双平台。
+// 覆盖 Windows/POSIX 双平台。
 // 匹配策略：命令小写化 → 复合拆段（&& ; | 换行）→ 逐段正则匹配；误报从严（fail-closed）。
 
 import { isPathInside } from '../../utils/fs';
@@ -37,7 +37,7 @@ const BLOCK_PATTERNS: DangerousPattern[] = [
   { level: 'block', label: 'Start-Process -Verb RunAs (提权)', re: /start-process\s+[^|;]*-verb\s+runas/ },
   {
     level: 'block',
-    label: '下载管道执行 (curl/wget | shell)',
+    label: '下载管道执行 (curl/wget | 终端解释器)',
     re: /(curl|wget)[^|;&]*\|\s*(sudo\s+)?(sh|bash|zsh|dash|ksh|powershell|pwsh|cmd)(\s|$)/,
   },
   { level: 'block', label: 'iex / Invoke-Expression (动态执行)', re: /(^|[(\s])(iex|invoke-expression)\s*[((]/ },
@@ -56,7 +56,7 @@ const CAUTION_PATTERNS: DangerousPattern[] = [
 ];
 
 /**
- * 检测 shell 命令是否命中危险模式。
+ * 检测终端命令是否命中危险模式。
  * @returns 命中的模式（block 优先于 caution）；null=安全
  */
 export function matchDangerousCommand(command: string): DangerousPattern | null {
@@ -129,16 +129,16 @@ export function isHardProtectedPath(
   return false;
 }
 
-/** ~/.moss 下允许 shell 访问的子目录（与 filesys/roots.ts isMossAccessAllowed 保持一致） */
+/** ~/.moss 下允许终端命令访问的子目录（与 filesys/roots.ts isMossAccessAllowed 保持一致） */
 const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills'];
 
 /**
- * shell 命令 .moss 访问检测（全局硬规则，与 filesys 层 isMossAccessAllowed 双保险）：
+ * 终端命令 .moss 访问检测（全局硬规则，与 filesys 层 isMossAccessAllowed 双保险）：
  * 命令文本中出现指向 ~/.moss 的路径（~/、$HOME、%USERPROFILE%、$env:USERPROFILE、
  * home/dataDir 绝对路径形态），且目标不在 agent/mcps/skills 白名单内 → 返回命中片段（DENY）。
  * 检测所有匹配：一条命令中任一路径非法即整体拒绝。
  */
-export function matchMossShellAccess(command: string, home: string, dataDir: string): string | null {
+export function matchMossTerminalAccess(command: string, home: string, dataDir: string): string | null {
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // 分隔符弹性：路径中的 / 在正则中同时匹配 / 与 \（Windows 命令两种写法都常见）
   const sepFlex = (p: string) => esc(p).replace(/\//g, '[/\\\\]');

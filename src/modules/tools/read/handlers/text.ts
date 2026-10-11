@@ -1,11 +1,11 @@
 // read/handlers/text.ts
 // 文本文件处理：编码检测（UTF-8/GBK）、minified 检测、三种读取模式。
-// 复用 utils/encoding.ts 的 decodeShellOutput（含 GBK 回退）和 utils/fs.ts 的 classifyFileContent。
+// 复用 utils/encoding.ts 的 decodeTerminalOutput（含 GBK 回退）和 utils/fs.ts 的 classifyFileContent。
 // 路径：read/handlers/text.ts → src/utils = ../../../../../utils
 
 import { readFileSync, type Stats } from 'node:fs';
 import { classifyFileContent, type FileContentKind } from '../../../../utils/fs';
-import { decodeShellOutput, stripBom } from '../../../../utils/encoding';
+import { decodeTerminalOutput, stripBom } from '../../../../utils/encoding';
 import { detectMinified, truncateMinifiedLines } from '../shared/minified';
 import type { ToolResult } from '../../types';
 
@@ -27,7 +27,7 @@ export interface TextParams {
 
 /**
  * 读取文本文件。
- * 自动检测编码：UTF-8 直接使用，非 UTF-8（如 GBK）通过 decodeShellOutput 回退解码。
+ * 自动检测编码：UTF-8 直接使用，非 UTF-8（如 GBK）通过 decodeTerminalOutput 回退解码。
  * 二进制文件（无法解码为文本）返回错误。
  */
 export async function readText(
@@ -55,7 +55,7 @@ export async function readText(
   const buf = cached?.rawBuffer ?? readFileSync(path);
   if (kind === 'legacy-text') {
     try {
-      const decoded = decodeShellOutput(buf);
+      const decoded = decodeTerminalOutput(buf);
       // 解码结果含 CJK 字符才认定为传统中文编码文本，否则按二进制拒绝
       if (decoded && /[\u4e00-\u9fff]/.test(decoded)) {
         return processText(path, stripBom(decoded), params);
@@ -70,7 +70,7 @@ export async function readText(
   }
 
   // kind === 'utf8'：整文件已通过严格 UTF-8 验证，直接解码。
-  // 不走 decodeShellOutput 的 GBK 启发式（其为 shell 输出设计，会把合法 UTF-8
+  // 不走 decodeTerminalOutput 的 GBK 启发式（其为终端输出设计，会把合法 UTF-8
   // 拉丁扩展字符如 é 0xC3 0xA9 按 GBK 碰撞误解码成 CJK 汉字 → 乱码）。
   const content = stripBom(buf.toString('utf8'));
   return processText(path, content, params);
@@ -159,7 +159,7 @@ function preciseMode(
 /**
  * indentation 模式：基于锚点行号，提取包含该行的完整缩进代码块。
  * 算法：以锚点行缩进为基准，向上扩展到更小或同等缩进的起点，
- * 向下扩展到同等缩进范围结束（参考 Roo Code 的 indentation 模式）。
+ * 向下扩展到同等缩进范围结束。
  */
 function indentationMode(path: string, content: string, anchorLine: number): ToolResult {
   const lines = content.split('\n');

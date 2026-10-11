@@ -75,9 +75,9 @@ function baseName(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
-/** 操作类型 → i18n key（shell-change 走驼峰键） */
+/** 操作类型 → i18n key（terminal-change / 旧值 shell-change 走驼峰键） */
 function opKey(op: FileHistoryEntry['operation']): string {
-  return `fileChanges.op.${op === 'shell-change' ? 'shellChange' : op}`;
+  return `fileChanges.op.${op === 'terminal-change' || op === 'shell-change' ? 'terminalChange' : op}`;
 }
 
 /** diff 行着色 */

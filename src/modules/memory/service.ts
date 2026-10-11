@@ -151,7 +151,7 @@ export class MemoryEngineServiceImpl {
     }
 
     return {
-      text: `[记忆 | 相关记忆]\n以下是与当前任务相关的历史记忆（供参考）：\n${parts.join('\n')}`,
+      text: `[记忆 | 相关记忆]\n以下是与当前任务相关的历史记忆：\n${parts.join('\n')}`,
       count: included.length,
       recalledIds: included.map(m => m.id),
       queryChanged,

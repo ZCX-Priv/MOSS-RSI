@@ -1,7 +1,7 @@
 // src/modules/file-history/tracker.test.ts
 // 统一追踪协议单元测试：track/commit 六类 toolName 分发、收据字段、
 // 降级开关（enabled / transcriptEnabled）、copy 正规登记（UUID entryId）、
-// shell 事后回填备份、变更失败不 commit。
+// terminal 事后回填备份、变更失败不 commit。
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
@@ -156,17 +156,17 @@ describe('track/commit 统一协议', () => {
     expect(entries[0].id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('shell 事后回填：beforeBuffer 备份 + commit 登记 edit 条目（toolName=shell）', async () => {
+  it('terminal 事后回填：beforeBuffer 备份 + commit 登记 edit 条目（toolName=terminal）', async () => {
     const svc = makeService();
     const file = join(dataDir, 'sh.txt');
 
     const tracker = await svc.track({
       sessionId: SESSION,
       absPath: file,
-      toolName: 'shell',
+      toolName: 'terminal',
       toolCallId: 'c3',
-      shellKind: 'modified',
-      shellBefore: Buffer.from('before-content', 'utf8'),
+      terminalKind: 'modified',
+      terminalBefore: Buffer.from('before-content', 'utf8'),
     });
     expect(tracker.receipt.backedUp).toBe(true);
     expect(tracker.receipt.backupPath).toContain('.bak');
@@ -176,19 +176,19 @@ describe('track/commit 统一协议', () => {
 
     const entries = svc.listHistory(SESSION);
     expect(entries).toHaveLength(1);
-    expect(entries[0].toolName).toBe('shell');
+    expect(entries[0].toolName).toBe('terminal');
     expect(entries[0].operation).toBe('edit');
     expect(entries[0].hashBefore).toBe(tracker.receipt.hash);
   });
 
-  it('shell created：无备份收据 + create 条目', async () => {
+  it('terminal created：无备份收据 + create 条目', async () => {
     const svc = makeService();
     const tracker = await svc.track({
       sessionId: SESSION,
       absPath: join(dataDir, 'x.txt'),
-      toolName: 'shell',
-      shellKind: 'created',
-      shellBefore: null,
+      toolName: 'terminal',
+      terminalKind: 'created',
+      terminalBefore: null,
     });
     expect(tracker.receipt.backedUp).toBe(false);
     tracker.commit();

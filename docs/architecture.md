@@ -204,7 +204,7 @@ MOSS/
     "read": { "enabled": true },
     "write": { "enabled": true, "requireConfirmation": true },
     "edit": { "enabled": true, "requireConfirmation": false },
-    "shell": { "enabled": true, "timeout": 30000, "requireConfirmation": true },
+    "terminal": { "enabled": true, "timeout": 30000, "requireConfirmation": true },
     "skill": { "enabled": true },
     "mcp": { "enabled": true }
     // ...其他工具

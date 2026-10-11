@@ -1,5 +1,5 @@
 // src/modules/context/compressor/summarizer.ts
-// 摘要生成（Reasonix cache-aligned 语义）：
+// 摘要生成：
 // - 摘要请求 messages = [静态 system 前缀, ...被压缩区消息, 压缩指令]
 //   ——复用主对话的 system 前缀，摘要请求本身命中前缀缓存
 // - 指令从 agent/prompts/compact/compaction.md 加载（{{FOCUS}} 变量），缺失回退内置七段式

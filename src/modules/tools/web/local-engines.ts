@@ -1,6 +1,6 @@
-﻿// tools/web/local-engines.ts
+// tools/web/local-engines.ts
 // 本地免费搜索引擎（无需 API key）：bing + baidu + sogou 三引擎自动回退。
-// 实现移植自 open-webSearch（Max/open-webSearch-main）的 HTTP 抓取方案，
+// 实现 HTTP 抓取方案，
 // 传输层改用 Bun 内置 fetch（redirect: manual 手动处理重定向），解析层用 cheerio。
 // 引擎细节：
 //   - bing：cn.bing.com/search 直连；反爬页（无结果 + captcha 关键词）抛 ChallengeError 降级
@@ -73,7 +73,7 @@ const ENGINE_CHAIN: Array<{ name: 'bing' | 'baidu' | 'sogou'; execute: EngineExe
   { name: 'sogou', execute: searchSogou },
 ];
 
-/** 通用浏览器请求头（Chrome/zh-CN，与 open-webSearch 一致） */
+/** 通用浏览器请求头（Chrome/zh-CN） */
 const BROWSER_HEADERS: Record<string, string> = {
   'user-agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -117,7 +117,7 @@ export async function runLocalSearch(options: LocalSearchOptions): Promise<Local
 // Bing（cn.bing.com，国内直连）
 // ============================================================================
 
-/** Bing 反爬关键词（页面无结果且命中 ≥2 个 → 判定拦截，对齐 open-webSearch） */
+/** Bing 反爬关键词（页面无结果且命中 ≥2 个 → 判定拦截） */
 const BING_BOT_KEYWORDS = [
   'captcha',
   'verification',

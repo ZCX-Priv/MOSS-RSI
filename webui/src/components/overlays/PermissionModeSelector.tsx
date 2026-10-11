@@ -1,5 +1,5 @@
 // UI/src/components/overlays/PermissionModeSelector.tsx
-// 执行权限选择器：DropdownMenu 上拉菜单，参考 ModelSelector 布局。
+// 执行权限选择器：DropdownMenu 上拉菜单。
 // 3 种权限模式（对齐后端 safety 模块）：ask=手动审批 / auto=自动审批 / skip=完全访问。
 // 会话级作用域：当前会话独立记忆（后端 session 持久化，刷新恢复）；新会话用全局默认。
 // 选择随 task.stream 传给后端，由 safety 模块统一决策（真正生效，非 UI 装饰）。

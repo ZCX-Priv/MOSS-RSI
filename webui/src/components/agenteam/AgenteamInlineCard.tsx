@@ -1,5 +1,5 @@
 // webui/src/components/agenteam/AgenteamInlineCard.tsx
-// 对话流内专家团卡片（参考 Max/TeamUI/专家团.png 设计）：
+// 对话流内专家团卡片：
 // 容器卡 = 头部（机器人图标 Bot + 团队名 + 任务数 + 进度点阵 + 阶段徽章）
 //        + 任务行（成员头像 + 成员名 + 序号 + 树形任务描述 + 状态图标）。
 // 数据：工具参数静态计划立即渲染；result 解析出 teamId 后经 useTeamLive 实时刷新。

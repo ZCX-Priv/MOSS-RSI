@@ -1,25 +1,25 @@
 // src/modules/context/compiler/env-context.ts
 // 环境上下文消息（会话首条锚定消息，append-only）：系统提示词保持零变量纯静态，
-// 全部环境信息（平台/工作目录/设备/语言编码/模型/shell 实测/工具链实测/git/时间）集中于此。
+// 全部环境信息（平台/工作目录/设备/语言编码/模型/解释器实测/工具链实测/git/时间）集中于此。
 // - 缓存布局黄金法则：静态在前（system prompt 纯文本拼接）、动态在后（本消息锚定）
 // - 会话创建时生成一次，之后永不修改（修改旧消息 = 破坏前缀）
 // - 时间放最后（用户约定）；跨天继续会话：末尾「追加」日期提示消息（不改动历史）
 // - 旧会话（旧格式 env-context）：不迁移，保持原样（新会话起用新格式）
-// - shell/工具链/编码来自 env-probe（启动实测；工具链经 prepareRequest 开头
+// - 解释器/工具链/编码来自 env-probe（启动实测；工具链经 prepareRequest 开头
 //   await ensureEnvProbed 预热，本消息构建时缓存已就绪）
 
 import { execSync } from 'node:child_process';
 import { hostname, arch, cpus, release } from 'node:os';
 import type { Environment, Platform } from '../../../core/types';
 import type { ContextMessage, ContextSessionLike } from '../types';
-import { buildShellInfoText, buildDevToolsText, buildEncodingText } from './env-probe';
+import { buildTerminalInfoText, buildDevToolsText, buildEncodingText } from './env-probe';
 import { SYSTEM_SCOPE, systemRoot } from '../../filesys/roots';
 
 /** 消息 name 标识 */
 export const ENV_CONTEXT_MSG_NAME = 'env-context';
 export const DAY_ROLLOVER_MSG_NAME = 'day-rollover';
 
-/** git status 快照截断上限（借鉴 claude-code MAX_STATUS_CHARS） */
+/** git status 快照截断上限 */
 const MAX_GIT_STATUS_CHARS = 2000;
 
 /** git 命令超时（ms）：非 git 目录/慢仓库不拖慢会话启动 */
@@ -119,7 +119,7 @@ export function buildEnvContextMessage(
   if (modelDisplayName || model) {
     parts.push(`模型: ${modelDisplayName || model}${model ? `（ID：${model}）` : ''}`);
   }
-  parts.push(`# Shell 环境（启动时实测）\n${buildShellInfoText(env)}`);
+  parts.push(`# 终端环境（启动时实测）\n${buildTerminalInfoText(env)}`);
   parts.push(`# 开发工具链（启动时实测）\n${buildDevToolsText(env)}`);
   const gitSnapshot = buildGitSnapshot(cwd);
   if (gitSnapshot) parts.push(gitSnapshot);

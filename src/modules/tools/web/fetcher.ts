@@ -1,12 +1,12 @@
 // tools/web/fetcher.ts
-// 本地网页抓取（移植自 modsearch 的 httpFetch + network，Bun 运行时适配）。
+// 本地网页抓取（Bun 运行时适配）。
 // 安全设计（SSRF 防护，这是承重面：agent 会毫不犹豫地抓取网页里出现的 URL）：
 //   - 协议仅 http/https；拒绝 URL 内嵌凭证
 //   - 主机名黑名单（localhost / *.localhost / 云元数据主机）
 //   - IP 字面量直接判定私有/保留段；域名经 DNS 解析后逐地址判定，
 //     任一命中即拒绝（VPN/代理把公网域名映射进保留段也会被拦）
 //   - 重定向手动跟随：每一跳重新完整校验，最多 5 跳
-// 已知限制（Bun 与 Node/undici 差异）：modsearch 用 undici 自定义 lookup 把
+// 已知限制（Bun 与 Node/undici 差异）：用 undici 自定义 lookup 把
 // socket 钉死在校验过的 IP 上以封死 DNS rebinding；Bun fetch 不支持 dispatcher，
 // 本实现只能「校验后放行」，校验与连接之间理论上存在 DNS 变化的 TOCTOU 窗口，
 // 属 Bun 下的最优近似，代码注释已如实声明。
@@ -412,7 +412,7 @@ function clampInt(value: number, min: number, max: number): number {
 }
 
 // ============================================================================
-// IPv4 / IPv6 私有与保留段判定（移植自 modsearch network.ts，纯函数）
+// IPv4 / IPv6 私有与保留段判定（纯函数）
 // ============================================================================
 
 function isPrivateIPv4(ipAddress: string): boolean {

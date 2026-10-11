@@ -51,7 +51,7 @@ const EMPTY_FORM: HookForm = {
   name: '',
   event: 'PreToolUse',
   matcher: '',
-  type: 'shell',
+  type: 'terminal',
   command: '',
   modulePath: '',
   timeout: 0,
@@ -137,7 +137,7 @@ export function HooksSettingsSection() {
 
   const save = async () => {
     if (!form.name.trim() || saving) return;
-    if (form.type === 'shell' && !form.command.trim()) return;
+    if (form.type === 'terminal' && !form.command.trim()) return;
     if (form.type === 'module' && !form.modulePath.trim()) return;
     setSaving(true);
     try {
@@ -146,7 +146,7 @@ export function HooksSettingsSection() {
         event: form.event,
         matcher: form.matcher.trim() || null,
         type: form.type,
-        ...(form.type === 'shell' ? { command: form.command } : { modulePath: form.modulePath }),
+        ...(form.type === 'terminal' ? { command: form.command } : { modulePath: form.modulePath }),
         timeout: form.timeout,
         scope: form.scope,
       };
@@ -188,7 +188,7 @@ export function HooksSettingsSection() {
         event: hook.event,
         matcher: hook.matcher,
         type: hook.type,
-        ...(hook.type === 'shell' ? { command: hook.command } : { modulePath: hook.modulePath }),
+        ...(hook.type === 'terminal' ? { command: hook.command } : { modulePath: hook.modulePath }),
         timeout: hook.timeout,
         scope: hook.scope,
         enabled,
@@ -205,7 +205,7 @@ export function HooksSettingsSection() {
     setTestInput(
       JSON.stringify(
         hook.event === 'PreToolUse' || hook.event === 'PostToolUse'
-          ? { toolName: 'shell', toolInput: { command: 'echo test' } }
+          ? { toolName: 'terminal', toolInput: { command: 'echo test' } }
           : hook.event === 'UserPromptSubmit'
             ? { prompt: 'hello' }
             : {},
@@ -380,7 +380,7 @@ export function HooksSettingsSection() {
                           )}
                         </div>
                         <span className="truncate font-mono text-[11px] text-muted-foreground">
-                          {hook.type === 'shell' ? hook.command : hook.modulePath}
+                          {hook.type === 'terminal' ? hook.command : hook.modulePath}
                           {hook.timeout > 0 ? `  (timeout ${hook.timeout}ms)` : ''}
                         </span>
                       </div>
@@ -505,7 +505,7 @@ export function HooksSettingsSection() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="shell">{t('settings.hooks.typeShell')}</SelectItem>
+                      <SelectItem value="terminal">{t('settings.hooks.typeTerminal')}</SelectItem>
                       <SelectItem value="module">{t('settings.hooks.typeModule')}</SelectItem>
                     </SelectContent>
                   </Select>
@@ -523,7 +523,7 @@ export function HooksSettingsSection() {
                   <span className="text-xs text-muted-foreground">{t('settings.hooks.timeoutHint')}</span>
                 </div>
               </div>
-              {form.type === 'shell' ? (
+              {form.type === 'terminal' ? (
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="hook-command">{t('settings.hooks.commandLabel')}</Label>
                   <Input
@@ -559,7 +559,7 @@ export function HooksSettingsSection() {
               disabled={
                 saving ||
                 !form.name.trim() ||
-                (form.type === 'shell' && !form.command.trim()) ||
+                (form.type === 'terminal' && !form.command.trim()) ||
                 (form.type === 'module' && !form.modulePath.trim())
               }
             >

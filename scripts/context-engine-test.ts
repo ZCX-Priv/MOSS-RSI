@@ -84,7 +84,7 @@ function assert(name: string, cond: boolean): void {
       { name: 'read' },
       { name: 'write' },
       { name: 'edit' },
-      { name: 'shell' },
+      { name: 'terminal' },
       { name: 'mcp__github__create_issue' },
       { name: 'mcp__github__list_issues' },
     ],

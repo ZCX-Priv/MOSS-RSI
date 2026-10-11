@@ -21,7 +21,7 @@ export interface ToolResult {
     | { type: 'image'; source: { data: string; mimeType: string } }
   >;
   isError?: boolean;
-  /** 工具元数据（后端 shell 等工具运行时返回，含 command/cwd/exitCode 等） */
+  /** 工具元数据（后端 terminal 等工具运行时返回，含 command/cwd/exitCode 等） */
   metadata?: {
     command?: string;
     cwd?: string;
@@ -59,7 +59,7 @@ export interface SidebarTab {
   /** 标题 i18n key（如 'task.taskSummary' / 'terminal.title'）；
    *  type==='file' 时为文件完整名称（不参与 i18n）；type==='files'|'changes' 时为 i18n key */
   title: string;
-  /** 仅 terminal 类型：绑定特定 toolCallId（可选，缺省显示当前 session 所有 shell 调用） */
+  /** 仅 terminal 类型：绑定特定 toolCallId（可选，缺省显示当前 session 所有 terminal 调用） */
   toolCallId?: string;
   /** 仅 file 类型：文件绝对路径（预览数据源） */
   filePath?: string;
@@ -211,7 +211,7 @@ export interface AppConfig {
     allowedTools: string[];
     /** POST 响应体模式，默认 'sse'（'json' 为兼容逃生舱，长任务有 60s 上限） */
     responseMode?: 'json' | 'sse';
-    /** 是否额外暴露 MOSS 的内部工具（read/glob/shell…），默认 false */
+    /** 是否额外暴露 MOSS 的内部工具（read/glob/terminal…），默认 false */
     exposeInternalTools?: boolean;
     /** moss_task_status 是否附带 LLM 轨迹摘要，默认 true */
     trackSummary?: boolean;
@@ -386,7 +386,7 @@ export type HookEvent =
   | 'Stop'
   | 'SessionEnd';
 
-export type HookType = 'shell' | 'module';
+export type HookType = 'terminal' | 'module';
 
 /** 单个钩子定义 */
 export interface HookItem {
@@ -825,9 +825,9 @@ export interface FileHistoryEntry {
   sessionId: string;
   absPath: string;
   toolCallId: string;
-  toolName: 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'shell';
+  toolName: 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell';
   timestamp: string;
-  operation: 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'shell-change';
+  operation: 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'terminal-change' | 'shell-change';
   hashBefore: string | null;
   hashAfter: string | null;
   backupPath: string | null;
@@ -1397,41 +1397,74 @@ export interface PendingAsk {
 export interface PendingConfirm {
   toolCallId: string;
   sessionId: string;
-  /** 发起确认的工具名（如 shell/write/delete/undo） */
+  /** 发起确认的工具名（如 terminal/write/delete/undo） */
   toolName: string;
   /** 确认提示文案 */
   question: string;
   /** 工具调用参数（供前端展示具体将执行什么） */
   details?: unknown;
-  /** 「始终允许」规则建议（safety 模块生成，如 "shell(git commit *)"；卡片展示+remember 回复） */
+  /** 「始终允许」规则建议（safety 模块生成，如 "terminal(git commit *)"；卡片展示+remember 回复） */
   ruleSuggestion?: string;
   /** 收到时间，用于排序 */
   createdAt: number;
 }
 
 // ============================================================================
-// 文件系统（浏览器端文件夹选择：后端桥接绝对路径解析）
+// 文件系统（前端文件夹选择器 + 附件）
 // ============================================================================
 
-/** 搜索命中的候选目录 */
-export interface DirectoryCandidate {
-  /** 绝对路径 */
-  path: string;
-  /** 父目录绝对路径 */
-  parent: string;
-}
-
-/** resolve-directory 返回结构 */
-export interface ResolveDirectoryResult {
-  candidates: DirectoryCandidate[];
-  /** 唯一命中时的绝对路径，否则为 null */
-  exactMatch: string | null;
-}
+/** 常用位置类型（前端据此选图标 + i18n 文案） */
+export type SuggestPathKind =
+  | 'home'
+  | 'desktop'
+  | 'documents'
+  | 'downloads'
+  | 'pictures'
+  | 'music'
+  | 'videos'
+  | 'cwd';
 
 /** suggest-paths 单项 */
 export interface SuggestPath {
   path: string;
   label: string;
+  kind: SuggestPathKind;
+}
+
+// ============================================================================
+// 持久终端（与后端 src/modules/terminal/types.ts 对齐）
+// ============================================================================
+
+/** 持久终端信息 */
+export interface TerminalInfo {
+  id: string;
+  sessionId: string;
+  title: string;
+  /** 解释器展示名（PowerShell / CMD / Git Bash …） */
+  interpreterLabel: string;
+  /** 解释器类型 */
+  interpreterKind: InterpreterKind;
+  /** 创建者：'ai' = agent 经 terminal 工具创建（标题带 [AI] 前缀）；'user' = 人类创建 */
+  creator: 'user' | 'ai';
+  cwd: string;
+  running: boolean;
+  exitCode: number | null;
+  createdAt: number;
+  /** 是否原生 PTY（false = 管道降级） */
+  pty: boolean;
+}
+
+/** 终端解释器类型（terminal 工具/WS create 使用） */
+export type InterpreterKind = 'powershell' | 'cmd' | 'bash';
+
+/** 本机可用解释器类型（GET /api/terminal/interpreters；「新建终端」菜单数据源） */
+export interface InterpreterOption {
+  kind: InterpreterKind;
+  label: string;
+  /** 本机实测是否可用 */
+  available: boolean;
+  /** 是否为系统默认解释器 */
+  isDefault: boolean;
 }
 
 /** # 文件提及菜单搜索结果（GET /api/filesystem/search-files） */

@@ -14,6 +14,7 @@ import { toast } from 'sonner';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { pendingAssistant, pendingRunId } from './pending-assistant';
+import { handleTerminalMessage } from './terminal-events';
 import {
   clearResyncMark,
   enqueueTextChunk,
@@ -189,6 +190,10 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
 
 export function applyWsMessage(msg: WSMessage): void {
   const s = useStore.getState();
+
+  // 终端类消息：元数据进 store / 高频输出走 terminal-bus，直接消费不进入下方 agent 事件流
+  if (handleTerminalMessage(msg)) return;
+
   const sessionId = msg.sessionId ?? s.activeSessionId ?? '';
 
   // runId 过滤：丢弃旧 run 的事件（防止打断发送时旧流事件污染新流状态）
@@ -719,14 +724,14 @@ export function applyWsMessage(msg: WSMessage): void {
       }
       break;
     }
-    case 'shell-changed': {
+    case 'terminal-changed': {
       const payload = (msg.payload ?? {}) as {
         report?: { created?: string[]; modified?: string[]; deleted?: string[] };
       };
       const r = payload.report;
       if (r) {
         const count = (r.created?.length ?? 0) + (r.modified?.length ?? 0) + (r.deleted?.length ?? 0);
-        if (count > 0) toast.info(`shell 命令修改了 ${count} 个文件`);
+        if (count > 0) toast.info(`终端命令修改了 ${count} 个文件`);
       }
       break;
     }

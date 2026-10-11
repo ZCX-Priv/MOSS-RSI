@@ -1,6 +1,5 @@
 // src/modules/agenteam/scheduler.ts
 // DAG 调度器（纯函数集）：依赖输出收集、就绪任务选择、成员执行票据合成。
-// 参考多智能体编排调度语义适配 MOSS。
 
 import type { TeamMember, TeamState, TeamTask } from './types';
 import { TERMINAL_TASK_STATUSES } from './types';
@@ -190,7 +189,7 @@ export function buildTaskTicket(
   lines.push(formatDependencyOutputs(deps));
   lines.push('');
 
-  // 未读团队消息（captain/队友发来，dsh inbox 语义）
+  // 未读团队消息（captain/队友发来）
   if (pendingMessages && pendingMessages.length > 0) {
     lines.push('=== 你收到的团队消息 ===');
     for (const m of pendingMessages) lines.push(`- ${m}`);

@@ -7,7 +7,7 @@
 // 暴露范围（agent 级定位）：
 //   · 始终暴露 agent 级工具集（moss_*，见 agent-tools.ts）——让别的 Agent 给 MOSS 派任务、
 //     轮询进度、管理自动化、查看会话。
-//   · MOSS 的内部工具（read/glob/grep/shell/memory…）**默认不暴露**（它们是 MOSS 自己用的，
+//   · MOSS 的内部工具（read/glob/grep/terminal/memory…）**默认不暴露**（它们是 MOSS 自己用的，
 //     放出去等于把 MOSS 降级成工具代理）。逃生舱：config.mcpServer.exposeInternalTools=true
 //     ＋ allowedTools 白名单；且仍需排除 requireConfirmation / destructiveHint / ask。
 //
@@ -139,7 +139,7 @@ function projectTool(tool: Tool): ExposedTool {
  *
  * 两段式（agent 级定位的关键）：
  * 1. agent 级工具（moss_*）：始终暴露 —— 它们是「让别的 Agent 驱动 MOSS」的对外契约。
- * 2. 内部工具（MOSS 自己的 read/glob/shell…）：仅当 config.mcpServer.exposeInternalTools
+ * 2. 内部工具（MOSS 自己的 read/glob/terminal…）：仅当 config.mcpServer.exposeInternalTools
  *    为 true 时才考虑，且仍需通过启用/危险/白名单过滤。
  */
 export function collectExposedTools(deps: ExposureDeps): ExposedTool[] {

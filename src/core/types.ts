@@ -244,7 +244,7 @@ export interface AppConfig {
      */
     responseMode?: 'json' | 'sse';
     /**
-     * 是否额外暴露 MOSS 的内部工具（read/glob/grep/shell/memory…），默认 false。
+     * 是否额外暴露 MOSS 的内部工具（read/glob/grep/terminal/memory…），默认 false。
      * /mcp 的定位是「让别的 Agent 驱动 MOSS」（agent 级工具 moss_*），而不是把 MOSS
      * 降级成工具代理。开启后仍需 allowedTools 白名单，且 requireConfirmation /
      * destructiveHint / ask 类工具始终不会暴露。
@@ -267,7 +267,7 @@ export interface AppConfig {
   };
   /** 文件历史服务配置（由 file-history 模块消费） */
   fileHistory?: FileHistoryConfig;
-  /** 虚拟文件系统配置（由 filesys 模块消费：roots/缓存/shell 快照检测） */
+  /** 虚拟文件系统配置（由 filesys 模块消费：roots/缓存/终端快照检测） */
   filesys?: FilesysConfig;
   /** 统一权限决策配置（由 safety 模块消费：模式/规则/危险拦截/保护路径） */
   safety?: SafetyConfig;
@@ -519,6 +519,8 @@ export const ServiceNames = {
   FILE_HISTORY: 'file.history',
   /** 虚拟文件系统服务（由 filesys 模块注册：统一文件 IO / 读缓存 / roots / 变更事件） */
   FILESYS: 'file.sys',
+  /** 终端服务（由 terminal 模块注册：持久终端 PTY 会话管理 + 输出缓冲 + 状态） */
+  TERMINAL: 'terminal.service',
   /** 安全服务（由 safety 模块注册：统一权限决策 + 会话规则 + 规则建议） */
   SAFETY: 'safety.service',
   /** 上下文引擎（由 context 模块注册：拼接/压缩/自愈/预算/治理/遥测） */

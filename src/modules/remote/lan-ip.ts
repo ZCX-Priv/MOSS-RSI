@@ -1,6 +1,6 @@
 // src/modules/remote/lan-ip.ts
 // 局域网 IPv4 智能选择：手机与电脑连同一网络时，选出手机最可能可达的本机地址。
-// 移植自 dsh-pocket（Max/dsh-pocket-main/lib/service.mjs），按 MOSS 规范 TS 化。
+// 按 MOSS 规范 TS 化。
 //
 // os.networkInterfaces() 枚举顺序不可靠：Windows 上 Radmin VPN / Tailscale / vEthernet
 // 等虚拟网卡常排在 WLAN 前面，直接取第一张非回环网卡会生成手机打不开的二维码。

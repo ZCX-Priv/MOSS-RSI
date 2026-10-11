@@ -1,7 +1,7 @@
 {
   "name": "move",
-  "description": "移动或重命名文件/目录（替代 shell 的 mv/Move-Item，全程可 undo）。支持批量（sources 数组）。同盘优先原子 rename；跨盘自动回退递归复制+删除。安全校验：roots 越权、symlink 遍历、Windows 根路径、dev vault（.git）防护、目录大小上限（100MB）。overwrite 策略：error（默认，目标存在即失败）/ rename（自动重命名避开冲突）/ overwrite（覆盖目标，改前自动备份）。",
-  "description_en": "Move or rename files/directories (use instead of shell mv/Move-Item, undo supported throughout). Supports batching (sources array). Prefers atomic rename on the same volume; automatically falls back to recursive copy+delete across volumes. Safety checks: roots escape, symlink traversal, Windows root paths, dev vault (.git) protection, directory size limit (100MB). Overwrite strategies: error (default, fail if destination exists) / rename (auto-rename to avoid conflicts) / overwrite (replace destination with automatic pre-change backup).",
+  "description": "移动或重命名文件/目录（替代 terminal 的 mv/Move-Item，全程可 undo）。支持批量（sources 数组）。同盘优先原子 rename；跨盘自动回退递归复制+删除。安全校验：roots 越权、symlink 遍历、Windows 根路径、dev vault（.git）防护、目录大小上限（100MB）。overwrite 策略：error（默认，目标存在即失败）/ rename（自动重命名避开冲突）/ overwrite（覆盖目标，改前自动备份）。",
+  "description_en": "Move or rename files/directories (use instead of terminal mv/Move-Item, undo supported throughout). Supports batching (sources array). Prefers atomic rename on the same volume; automatically falls back to recursive copy+delete across volumes. Safety checks: roots escape, symlink traversal, Windows root paths, dev vault (.git) protection, directory size limit (100MB). Overwrite strategies: error (default, fail if destination exists) / rename (auto-rename to avoid conflicts) / overwrite (replace destination with automatic pre-change backup).",
   "icon": "folder-input",
   "annotations": {
     "destructiveHint": true,

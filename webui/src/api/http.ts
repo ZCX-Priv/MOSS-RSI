@@ -34,8 +34,8 @@ import type {
   AutomationRun,
   TodoItem,
   ContextFile,
-  ResolveDirectoryResult,
   SuggestPath,
+  InterpreterOption,
   SearchedFile,
   PickedFile,
   DirectoryListing,
@@ -649,10 +649,8 @@ export const api = {
     ),
 
   // ==========================================================================
-  // 文件系统（浏览器端文件夹选择：后端原生对话框拿真实绝对路径 + 搜索回退）
+  // 文件系统（前端文件夹选择器：drives/list/suggest-paths；附件：原生文件对话框）
   // ==========================================================================
-  pickDirectory: () =>
-    request<{ path: string | null; unsupported?: boolean }>('POST', '/api/filesystem/pick-directory'),
   /** 原生多文件选择对话框（附件"纯路径引用"数据源；后端自动授权父目录进 filesys roots） */
   pickFiles: () =>
     request<{ files: PickedFile[]; grantedRoots?: string[] }>('POST', '/api/filesystem/pick-file'),
@@ -663,12 +661,9 @@ export const api = {
       '/api/filesystem/save-attachment',
       payload,
     ),
-  resolveDirectory: (folderName: string, hint?: string) =>
-    request<ResolveDirectoryResult>('POST', '/api/filesystem/resolve-directory', {
-      folderName,
-      hint,
-    }),
   suggestPaths: () => request<{ paths: SuggestPath[] }>('GET', '/api/filesystem/suggest-paths'),
+  /** 本机实测可用的终端解释器类型（「新建终端」菜单数据源；只返回真实存在的类型） */
+  listInterpreters: () => request<{ interpreters: InterpreterOption[] }>('GET', '/api/terminal/interpreters'),
   /** # 文件提及菜单：指定目录递归模糊搜索文件名（上限 50 条） */
   searchFiles: (dir: string, q: string) =>
     request<{ files: SearchedFile[] }>(

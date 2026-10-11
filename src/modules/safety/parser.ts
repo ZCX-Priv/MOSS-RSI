@@ -1,9 +1,9 @@
 // src/modules/safety/parser.ts
-// 权限规则字符串解析器（借鉴 Claude Code permissionRuleParser）。
+// 权限规则字符串解析器。
 // 语法：ToolName | ToolName(content)
 //   - content 中 ( ) \ 需转义为 \( \) \\
 //   - ToolName() 与 ToolName(*) 归一化为工具级规则（等同 ToolName）
-//   - shell 支持三匹配器：exact（无通配）/ prefix（content 以 ":*" 结尾）/ wildcard（含未转义 *）
+//   - terminal 支持三匹配器：exact（无通配）/ prefix（content 以 ":*" 结尾）/ wildcard（含未转义 *）
 
 /** 解析后的规则值 */
 export interface ParsedRule {

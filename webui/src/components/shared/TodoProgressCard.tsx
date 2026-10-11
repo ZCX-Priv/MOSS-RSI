@@ -1,5 +1,5 @@
 // webui/src/components/shared/TodoProgressCard.tsx
-// Todo 进度卡片：依据参考图片设计，展示进度头部 + 三态动画图标。
+// Todo 进度卡片：展示进度头部 + 三态动画图标。
 // 两种变体：sidebar（侧边栏，无关闭按钮）和 inline（任务流内，带关闭按钮）。
 // 两侧共享同一 store 数据源，WS 推送时天然同步。
 

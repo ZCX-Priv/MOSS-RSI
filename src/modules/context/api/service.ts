@@ -164,7 +164,7 @@ export class ContextEngineServiceImpl {
     session: ContextSessionLike,
     opts: PrepareRequestOptions,
   ): Promise<PreparedRequest> {
-    // 环境探测预热（首次 ~1s 并行探测 shell/工具链/编码，之后进程级缓存 0ms）；
+    // 环境探测预热（首次 ~1s 并行探测解释器/工具链/编码，之后进程级缓存 0ms）；
     // 确保 system prompt 中的环境信息自第一帧起完整且字节级稳定（缓存周期不中途切换）
     await ensureEnvProbed(this.env);
     const windowTokens = opts.windowTokens ?? this.resolveWindowTokens(opts.model);

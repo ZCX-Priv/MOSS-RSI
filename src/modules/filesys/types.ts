@@ -8,9 +8,9 @@ import type { FileContentKind } from '../../utils/fs';
 // 配置（config.filesys）
 // ============================================================================
 
-/** shell 前后快照检测配置 */
-export interface ShellWatchConfig {
-  /** 是否启用 shell 执行前后工作区变更检测 */
+/** 终端命令前后快照检测配置 */
+export interface TerminalWatchConfig {
+  /** 是否启用终端命令执行前后工作区变更检测 */
   enabled: boolean;
   /** 快照最大文件数（超出跳过本次检测，防止大仓库性能问题） */
   maxFiles: number;
@@ -28,8 +28,8 @@ export interface FilesysConfig {
   cacheMaxEntries: number;
   /** 单文件超过此字节数不缓存内容（仅缓存派生值），防大文件挤爆预算 */
   cacheMaxFileBytes: number;
-  /** shell 快照检测配置 */
-  shellWatch: ShellWatchConfig;
+  /** 终端快照检测配置 */
+  terminalWatch: TerminalWatchConfig;
 }
 
 export const DEFAULT_FILESYS_CONFIG: FilesysConfig = {
@@ -37,7 +37,7 @@ export const DEFAULT_FILESYS_CONFIG: FilesysConfig = {
   cacheMaxBytes: 64 * 1024 * 1024,
   cacheMaxEntries: 2048,
   cacheMaxFileBytes: 4 * 1024 * 1024,
-  shellWatch: { enabled: true, maxFiles: 20_000, timeoutMs: 3000 },
+  terminalWatch: { enabled: true, maxFiles: 20_000, timeoutMs: 3000 },
 };
 
 // ============================================================================
@@ -96,10 +96,10 @@ export type WriteFileResult =
 // 变更事件
 // ============================================================================
 
-export type FileChangeKind = 'created' | 'edited' | 'deleted' | 'moved' | 'shell-changed';
+export type FileChangeKind = 'created' | 'edited' | 'deleted' | 'moved' | 'terminal-changed';
 
-export interface ShellChangeReport {
-  /** shell 执行后新增的文件 */
+export interface TerminalChangeReport {
+  /** 终端命令执行后新增的文件 */
   created: string[];
   /** 修改的文件 */
   modified: string[];
@@ -118,19 +118,19 @@ export interface FileChangeEvent {
   absPath: string;
   /** moved 时的目标路径 */
   destPath?: string;
-  /** 变更来源（工具名 / 'shell' / 'internal'） */
+  /** 变更来源（工具名 / 'terminal' / 'internal'） */
   source: string;
   sessionId?: string;
   toolCallId?: string;
-  /** kind='shell-changed' 时携带变更报告 */
-  report?: ShellChangeReport;
+  /** kind='terminal-changed' 时携带变更报告 */
+  report?: TerminalChangeReport;
 }
 
 // ============================================================================
-// shell 快照
+// 终端命令快照
 // ============================================================================
 
-export interface ShellSnapshot {
+export interface TerminalSnapshot {
   /** 参与快照的根目录 */
   roots: string[];
   /** 执行前 stat 清单（path → mtime/size） */
@@ -192,11 +192,11 @@ export interface FilesysService {
   /** 当前生效的授权 roots（含归一化：绝对路径 + 必须存在） */
   listRoots(): string[];
 
-  /** shell 执行前快照（禁用或超限返回 null）。 */
-  beginShellSnapshot(cwd: string): Promise<ShellSnapshot | null>;
+  /** 终端命令执行前快照（禁用或超限返回 null）。 */
+  beginTerminalSnapshot(cwd: string): Promise<TerminalSnapshot | null>;
 
-  /** shell 执行后 diff + 缓存回填备份 + 发 shell-changed 事件 */
-  endShellSnapshot(snap: ShellSnapshot, sessionId: string, toolCallId: string): Promise<ShellChangeReport | null>;
+  /** 终端命令执行后 diff + 缓存回填备份 + 发 terminal-changed 事件 */
+  endTerminalSnapshot(snap: TerminalSnapshot, sessionId: string, toolCallId: string): Promise<TerminalChangeReport | null>;
 
   /** 缓存诊断信息 */
   cacheStats(): { entries: number; bytes: number };

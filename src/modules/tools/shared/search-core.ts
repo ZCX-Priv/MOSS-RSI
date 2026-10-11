@@ -1,6 +1,6 @@
 // src/modules/tools/shared/search-core.ts
 // grep / glob 工具共享搜索基础设施：
-//  - TYPE_MAP：文件类型名 → glob 后缀映射（参考 rg --type-list 常用子集）
+//  - TYPE_MAP：文件类型名 → glob 后缀映射
 //  - GitignoreMatcher：.gitignore / .ignore 规则解析与匹配
 //  - walkFiles：异步目录遍历（gitignore 剪枝 / 隐藏文件开关 / 上限保护 / 可取消）
 //  - readFileHead + isBinaryBufferHead：只读前 N 字节做二进制检测

@@ -1,5 +1,5 @@
 // components/shared/AttachmentCard.tsx
-// 发送框附件卡片（对齐设计稿图 1）：图标徽章 + 文件名 + "大写扩展名 大小" 副标题 + 移除按钮。
+// 发送框附件卡片：图标徽章 + 文件名 + "大写扩展名 大小" 副标题 + 移除按钮。
 // 图片附件渲染缩略图（加载中显示环形 spinner），其余按文件类型出彩色图标。
 
 import { Loader2, X } from 'lucide-react';

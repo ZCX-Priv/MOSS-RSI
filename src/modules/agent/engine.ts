@@ -131,7 +131,7 @@ export class AgentEngineImpl implements AgentEngine {
     });
     this.liveDraft = new LiveDraftStore(deps.env, deps.logger);
 
-    // 订阅 filesys 变更事件总线：file-created/edited/deleted/moved/shell-changed 统一转 WS，
+    // 订阅 filesys 变更事件总线：file-created/edited/deleted/moved/terminal-changed 统一转 WS，
     // delete/move/copy 的路径进 contextFiles（修复旧版无任何通知的割裂）。
     // filesys 模块在 kernel 中先于 agent 注册（见 core/kernel.ts 模块顺序）。
     const filesys = deps.services.tryResolve<FilesysService>(ServiceNames.FILESYS);
@@ -202,9 +202,9 @@ export class AgentEngineImpl implements AgentEngine {
             payload: { path: e.absPath, destPath: e.destPath, source: e.source },
           });
           break;
-        case 'shell-changed':
+        case 'terminal-changed':
           server.sendToSession(e.sessionId, {
-            type: 'shell-changed', sessionId: e.sessionId,
+            type: 'terminal-changed', sessionId: e.sessionId,
             payload: { report: e.report },
           });
           break;

@@ -32,6 +32,7 @@ import type {
   RunStats,
   ContextStats,
   HistoryMeta,
+  TerminalInfo,
 } from '../types/api';
 import { DEFAULT_RENDER_SETTINGS, isValidRenderSettings, type RenderSettings } from '../render/core/types';
 import { fileNameOf } from '../render/file/detector';
@@ -197,6 +198,11 @@ interface UIState {
   // --- 右侧边栏标签页（会话级，IndexedDB 持久化） ---
   /** taskId → 标签集合与活跃标签（各会话独立；'' key = 空白页，无记录时回退默认「开始」） */
   sidebarTabsBySession: Record<string, SessionSidebarTabs | undefined>;
+  /**
+   * 持久终端元数据（会话级内存态；终端本体在后端进程内存，刷新后由 terminal.list 复原）。
+   * 值为 { list, activeId }。
+   */
+  terminalsBySession: Record<string, { list: TerminalInfo[]; activeId?: string } | undefined>;
   /** 右侧面板展开态（会话级内存态：各会话独立互不影响，重挂载不重置；'' key = 空白页） */
   rightPanelOpenBySession: Record<string, boolean | undefined>;
   /**
@@ -477,6 +483,23 @@ interface UIActions {
   resetSidebarTabs: (sessionId: string) => void;
   /** 原地转换某标签的类型/标题（「开始」页点入口 → 原地变身，不新增标签） */
   convertSidebarTab: (sessionId: string, id: string, type: SidebarTabType, title: string) => void;
+  /**
+   * 聚焦「终端」标签页（AI 新建终端时自动展示）：
+   * 已有终端标签则激活；否则把「开始」标签原地转成终端；再否则新增；并展开右侧面板。
+   */
+  focusTerminalTab: (sessionId: string) => void;
+
+  // 持久终端（按会话隔离；元数据内存态，实际终端在后端进程，刷新由 terminal.list 复原）
+  /** 覆盖某会话的终端列表（terminal.list 响应） */
+  setTerminalList: (sessionId: string, terminals: TerminalInfo[]) => void;
+  /** 新增/更新一个终端（terminal.created 响应/事件） */
+  addTerminal: (terminal: TerminalInfo) => void;
+  /** 移除一个终端（terminal.closed） */
+  removeTerminal: (terminalId: string) => void;
+  /** 局部更新终端信息（terminal.exit 等） */
+  updateTerminal: (terminalId: string, patch: Partial<TerminalInfo>) => void;
+  /** 设置某会话的活跃终端 id */
+  setActiveTerminal: (sessionId: string, terminalId: string) => void;
 
   // 右侧面板展开态（会话级），内存态不持久化
   setRightPanelOpen: (sessionId: string, v: boolean) => void;
@@ -499,7 +522,7 @@ export type Store = UIState & UIActions;
 // 工作目录：默认路径 + IndexedDB 持久化
 // ============================================================================
 
-/** 系统级（本机）工作目录哨兵：全盘访问（filesys roots 放行，shell 默认目录为主目录） */
+/** 系统级（本机）工作目录哨兵：全盘访问（filesys roots 放行，terminal 默认目录为主目录） */
 export const SYSTEM_WORKING_DIRECTORY = '__system__';
 
 /** 默认工作目录：本机 System 模式 */
@@ -705,6 +728,9 @@ export const useStore = create<Store>((set, get) => ({
 
   // --- 右侧边栏标签页（会话级，IndexedDB 持久化；无记录的会话回退默认「开始」） ---
   sidebarTabsBySession: {},
+
+  // --- 持久终端元数据（会话级；内存态，终端本体在后端进程） ---
+  terminalsBySession: {},
 
   // --- 右侧面板展开态（内存态；默认收起） ---
   rightPanelOpenBySession: {},
@@ -1498,6 +1524,35 @@ export const useStore = create<Store>((set, get) => ({
       return { sidebarTabsBySession: map };
     }),
 
+  // 聚焦终端标签（AI 新建终端自动展示）：已有终端标签→激活；有「开始」→原地转换；否则新增；并展开右侧面板
+  focusTerminalTab: (sessionId) =>
+    set((state) => {
+      const cur = state.sidebarTabsBySession[sessionId] ?? defaultSessionTabs();
+      const existing = cur.tabs.find((t) => t.type === 'terminal');
+      let tabs = cur.tabs;
+      let activeId: string;
+      if (existing) {
+        activeId = existing.id;
+      } else {
+        const startTab = cur.tabs.find((t) => t.type === 'start');
+        if (startTab) {
+          activeId = startTab.id;
+          tabs = cur.tabs.map((t) =>
+            t.id === startTab.id ? { id: t.id, type: 'terminal' as const, title: 'terminal.title', createdAt: t.createdAt } : t,
+          );
+        } else {
+          activeId = newTabId();
+          tabs = [...cur.tabs, { id: activeId, type: 'terminal' as const, title: 'terminal.title', createdAt: Date.now() }];
+        }
+      }
+      const map = { ...state.sidebarTabsBySession, [sessionId]: { tabs, activeId } };
+      persistSidebarTabs(map);
+      return {
+        sidebarTabsBySession: map,
+        rightPanelOpenBySession: { ...state.rightPanelOpenBySession, [sessionId]: true },
+      };
+    }),
+
   reorderSidebarTabs: (sessionId, fromId, toId) =>
     set((state) => {
       const cur = state.sidebarTabsBySession[sessionId] ?? defaultSessionTabs();
@@ -1520,6 +1575,74 @@ export const useStore = create<Store>((set, get) => ({
       const map = { ...state.sidebarTabsBySession, [sessionId]: defaultSessionTabs() };
       persistSidebarTabs(map);
       return { sidebarTabsBySession: map };
+    }),
+
+  // --- Actions: 持久终端元数据（内存态） ---
+  setTerminalList: (sessionId, terminals) =>
+    set((state) => {
+      const cur = state.terminalsBySession[sessionId];
+      const activeId =
+        cur?.activeId && terminals.some((t) => t.id === cur.activeId)
+          ? cur.activeId
+          : terminals[0]?.id;
+      return {
+        terminalsBySession: { ...state.terminalsBySession, [sessionId]: { list: terminals, activeId } },
+      };
+    }),
+  addTerminal: (terminal) =>
+    set((state) => {
+      const cur = state.terminalsBySession[terminal.sessionId];
+      const list = cur?.list ?? [];
+      const exists = list.some((t) => t.id === terminal.id);
+      const next = exists
+        ? list.map((t) => (t.id === terminal.id ? terminal : t))
+        : [...list, terminal];
+      return {
+        terminalsBySession: {
+          ...state.terminalsBySession,
+          // 新建的终端自动激活（对齐 VS Code）；已存在的仅更新信息，不抢焦点
+          [terminal.sessionId]: { list: next, activeId: exists ? cur?.activeId : terminal.id },
+        },
+      };
+    }),
+  removeTerminal: (terminalId) =>
+    set((state) => {
+      let changed = false;
+      const map = { ...state.terminalsBySession };
+      for (const [sid, entry] of Object.entries(map)) {
+        if (!entry) continue;
+        const list = entry.list.filter((t) => t.id !== terminalId);
+        if (list.length !== entry.list.length) {
+          changed = true;
+          const activeId =
+            entry.activeId === terminalId ? list[0]?.id : entry.activeId;
+          map[sid] = { list, activeId };
+        }
+      }
+      return changed ? { terminalsBySession: map } : {};
+    }),
+  updateTerminal: (terminalId, patch) =>
+    set((state) => {
+      let changed = false;
+      const map = { ...state.terminalsBySession };
+      for (const [sid, entry] of Object.entries(map)) {
+        if (!entry) continue;
+        const idx = entry.list.findIndex((t) => t.id === terminalId);
+        if (idx >= 0) {
+          changed = true;
+          const list = [...entry.list];
+          list[idx] = { ...list[idx], ...patch };
+          map[sid] = { ...entry, list };
+        }
+      }
+      return changed ? { terminalsBySession: map } : {};
+    }),
+  setActiveTerminal: (sessionId, terminalId) =>
+    set((state) => {
+      const cur = state.terminalsBySession[sessionId] ?? { list: [] };
+      return {
+        terminalsBySession: { ...state.terminalsBySession, [sessionId]: { ...cur, activeId: terminalId } },
+      };
     }),
 
   // --- Actions: 右侧面板展开态/宽度（内存态，不持久化） ---

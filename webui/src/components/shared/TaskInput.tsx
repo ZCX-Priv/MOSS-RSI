@@ -35,7 +35,6 @@ import { useStore, SYSTEM_WORKING_DIRECTORY } from '../../store';
 import { ModelSelector } from '../overlays/ModelSelector';
 import { PermissionModeSelector } from '../overlays/PermissionModeSelector';
 import { useDirectoryPicker } from '../../hooks/useDirectoryPicker';
-import { DirectoryPickerDialog } from '../overlays/DirectoryPickerDialog';
 import { DirectoryBrowserDialog } from '../overlays/DirectoryBrowserDialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
@@ -158,13 +157,7 @@ export function TaskInput({
   const commands = useStore((s) => s.commands);
   const agents = useStore((s) => s.agents);
   const {
-    inputRef,
     pickDirectory,
-    onInputPicked,
-    isResolving,
-    candidates,
-    selectCandidate,
-    cancel,
     browseOpen,
     onBrowserPicked,
     closeBrowser,
@@ -676,9 +669,7 @@ export function TaskInput({
                     : workingDirectory
                 }
               >
-                {isResolving ? (
-                  <Loader2 className="size-3 shrink-0 animate-spin" />
-                ) : isSystemScope ? (
+                {isSystemScope ? (
                   <Monitor className="size-3 shrink-0" />
                 ) : (
                   <FolderOpen className="size-3 shrink-0" />
@@ -714,15 +705,6 @@ export function TaskInput({
             </DropdownMenuContent>
           </DropdownMenu>
           )}
-          <input
-            ref={inputRef}
-            type="file"
-            webkitdirectory=""
-            directory=""
-            multiple
-            className="hidden"
-            onChange={onInputPicked}
-          />
         </div>
         <div className="flex min-w-0 items-center gap-1.5">
           <ModelSelector />
@@ -767,12 +749,6 @@ export function TaskInput({
         </div>
       </div>
     </Card>
-    <DirectoryPickerDialog
-      open={candidates.length > 0}
-      candidates={candidates}
-      onSelect={selectCandidate}
-      onClose={cancel}
-    />
     <DirectoryBrowserDialog
       open={browseOpen}
       onSelect={onBrowserPicked}

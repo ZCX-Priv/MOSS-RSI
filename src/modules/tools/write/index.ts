@@ -3,7 +3,7 @@
 // 元数据（name/description/icon/annotations/inputSchema/config）见同目录 tool.json。
 // handlers/ 子目录执行实际写入（流式原子写入 + diff + 哈希），shared/ 子目录提供流式写入/diff守卫等公共能力。
 //
-// 强化点（对标 Claude Code / avifenesh 最佳实践）：
+// 强化点：
 // 1. 流式原子写入（createWriteStream 分块 + tmp+fsync+rename，防中断损坏，支持大文件）
 // 2. 改前哈希备份（同内容去重，支持 undo）
 // 3. read-before-overwrite（覆盖已存在文件前强制校验本会话已 read）

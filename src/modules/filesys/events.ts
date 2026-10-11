@@ -1,5 +1,5 @@
 // src/modules/filesys/events.ts
-// filesys 变更事件总线：file-created/edited/deleted/moved/shell-changed 的统一事件源。
+// filesys 变更事件总线：file-created/edited/deleted/moved/terminal-changed 的统一事件源。
 // engine 订阅后转 WS 推送（补齐旧版 delete/move 无通知的割裂）。
 
 import type { FileChangeEvent } from './types';

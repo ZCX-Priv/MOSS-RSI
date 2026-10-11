@@ -162,7 +162,7 @@ const filesysSchema = z.object({
   cacheMaxBytes: z.number().int().positive().default(64 * 1024 * 1024),
   cacheMaxEntries: z.number().int().positive().default(2048),
   cacheMaxFileBytes: z.number().int().positive().default(4 * 1024 * 1024),
-  shellWatch: z
+  terminalWatch: z
     .object({
       enabled: z.boolean().default(true),
       maxFiles: z.number().int().positive().default(20_000),
@@ -258,7 +258,7 @@ const contextSchema = z.object({
       maxInjectPerSession: z.number().int().positive().min(1).max(100).default(20),
     })
     .default({}),
-  // 生命周期钩子引擎（shell + TS 模块）
+  // 生命周期钩子引擎（终端命令 + TS 模块）
   hooks: z
     .object({
       enabled: z.boolean().default(true),
@@ -629,6 +629,8 @@ class ConfigServiceImpl implements ConfigService {
     // 一次性迁移：旧版 daemon.logLevel → logs.level（仅当 logs.level 未显式设置时）；
     // 迁移后删除旧字段，下次写盘自然落盘为新结构
     migrateLegacyLogLevel(raw as Record<string, unknown>);
+    // 一次性迁移：旧 shell 命名 → terminal 命名（tools.shell / filesys.shellWatch / safety 规则前缀 shell(）
+    migrateLegacyShellNaming(raw as Record<string, unknown>);
     const result = appConfigSchema.safeParse(raw);
     if (!result.success) {
       const issues = result.error.issues
@@ -710,6 +712,46 @@ function migrateLegacyLogLevel(raw: Record<string, unknown> | null): void {
     raw.logs = logs;
   }
   delete daemon.logLevel;
+}
+
+/**
+ * 旧 shell 命名 → terminal 命名迁移（原地修改 raw 对象；幂等，失败静默）：
+ * - tools.shell → tools.terminal（保留用户 enabled/timeout/requireConfirmation 等设置）
+ * - filesys.shellWatch → filesys.terminalWatch
+ * - safety.rules.{allow,deny,ask} 中规则 content 前缀 `shell(` → `terminal(`
+ */
+function migrateLegacyShellNaming(raw: Record<string, unknown> | null): void {
+  if (!raw || typeof raw !== 'object') return;
+
+  // tools.shell → tools.terminal
+  const tools = raw.tools as Record<string, unknown> | undefined;
+  if (tools && typeof tools === 'object' && 'shell' in tools && !('terminal' in tools)) {
+    tools.terminal = tools.shell;
+    delete tools.shell;
+  }
+
+  // filesys.shellWatch → filesys.terminalWatch
+  const filesys = raw.filesys as Record<string, unknown> | undefined;
+  if (filesys && typeof filesys === 'object' && 'shellWatch' in filesys && !('terminalWatch' in filesys)) {
+    filesys.terminalWatch = filesys.shellWatch;
+    delete filesys.shellWatch;
+  }
+
+  // safety.rules 前缀 shell( → terminal(
+  const safety = raw.safety as Record<string, unknown> | undefined;
+  const rules = safety?.rules as Record<string, unknown> | undefined;
+  if (rules && typeof rules === 'object') {
+    for (const key of ['allow', 'deny', 'ask'] as const) {
+      const list = rules[key];
+      if (Array.isArray(list)) {
+        rules[key] = list.map((item) =>
+          typeof item === 'string' && item.startsWith('shell(')
+            ? `terminal(${item.slice('shell('.length)}`
+            : item,
+        );
+      }
+    }
+  }
 }
 
 function deepMerge(target: unknown, patch: unknown): unknown {

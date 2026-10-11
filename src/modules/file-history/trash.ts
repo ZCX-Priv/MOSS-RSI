@@ -37,7 +37,7 @@ export interface TrashEntry {
   trashedAt: Date;
 }
 
-/** 生成时间戳后缀防冲突（仿 Finder/file-delete-mcp 行为） */
+/** 生成时间戳后缀防冲突 */
 function timestampSuffix(): string {
   const d = new Date();
   const pad = (n: number): string => String(n).padStart(2, '0');
@@ -93,7 +93,7 @@ function moveEntry(src: string, dest: string): void {
 
 /**
  * 移动文件/目录到回收站，返回 trash 路径与元数据。
- * 同名冲突时追加时间戳后缀（仿 Finder），仍冲突则继续追加序号。
+ * 同名冲突时追加时间戳后缀，仍冲突则继续追加序号。
  *
  * @param absPath 要移入回收站的文件/目录绝对路径
  * @param trashDir 回收站目录（~/.moss/file-history/trash）

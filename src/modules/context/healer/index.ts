@@ -2,7 +2,7 @@
 // 自愈器统一入口：参数修复（args-repair）→ 工具名纠正（tool-match）→
 // schema 校验修正（schema-fix）→ 可执行判定。
 // 修复失败时按 agent/prompts/heal/tool-error.md 模板生成结构化错误文本，
-// 回传给模型下一轮自我纠正（Reasonix「失败回传自纠」语义）。
+// 回传给模型下一轮自我纠正。
 
 import type { Environment } from '../../../core/types';
 import type { HealLogEntry, HealResult, HealerConfig } from '../types';
@@ -77,7 +77,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
         `工具 "${toolName}" 不存在或未注册`,
         ...(repaired.note ? [`参数修复说明: ${repaired.note}`] : []),
       ].map(s => `- ${s}`).join('\n'),
-      USAGE: '请先确认工具名是否正确（可参考系统提示词中的工具列表）。',
+      USAGE: '请先确认工具名是否正确。',
       CANDIDATES:
         match.candidates.length > 0
           ? `相近的可用工具:\n${match.candidates.map(c => `- ${c}`).join('\n')}`
@@ -136,7 +136,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
 /** 从 inputSchema 生成简要用法提示（参数名/类型/必填） */
 function buildUsageHint(name: string, inputSchema: unknown): string {
   if (!inputSchema || typeof inputSchema !== 'object') {
-    return `工具 "${name}" 的参数定义不可用，请参考工具描述。`;
+    return `工具 "${name}" 的参数定义不可用。`;
   }
   const schema = inputSchema as {
     properties?: Record<string, { type?: string | string[]; description?: string }>;

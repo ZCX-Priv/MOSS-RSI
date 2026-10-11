@@ -68,7 +68,7 @@ function readHookFile(file: string, scope: HookScope): ScopedHookRecord | null {
       name: rec.name,
       event: rec.event as HookRecord['event'],
       matcher: typeof rec.matcher === 'string' && rec.matcher !== '' ? rec.matcher : null,
-      type: rec.type === 'module' ? 'module' : 'shell',
+      type: rec.type === 'module' ? 'module' : 'terminal',
       command: rec.command ?? '',
       modulePath: rec.modulePath ?? '',
       timeout: typeof rec.timeout === 'number' ? rec.timeout : 0,

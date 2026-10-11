@@ -24,7 +24,7 @@ import type { FileHistoryService, FilesysService } from '../../contracts';
 import type { ChangeTracker } from '../../file-history/types';
 import type { ToolContext, ToolResult } from '../types';
 
-/** 目录删除（trash/硬删除）最大字节数（超限拒绝，提示改用 shell 工具） */
+/** 目录删除（trash/硬删除）最大字节数（超限拒绝，提示改用 terminal 工具） */
 const MAX_DIR_BYTES = 100 * 1024 * 1024; // 100MB
 
 interface DeleteParams {

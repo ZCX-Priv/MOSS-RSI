@@ -1,6 +1,6 @@
 // webui/src/components/shared/SplashScreen.tsx
 // 入场加载屏（阶段 2）：React 挂载后接管 index.html 的 #moss-boot 骨架，视觉完全一致。
-//   - 版式参考星语 loading：logo 呼吸闪烁 → 下方三颗圆点依次弹跳 → 进度文字
+//   - 版式：logo 呼吸闪烁 → 下方三颗圆点依次弹跳 → 进度文字
 //   - 真实进度引擎：里程碑 target（只增不减）来自真实加载信号，
 //     display 经 rAF 平滑追赶——不虚报、不卡 99%、不突窜 100%
 //   - 每浏览器会话只完整展示一次（sessionStorage 哨兵）

@@ -33,6 +33,7 @@ import agenteam from '../modules/agenteam';
 import update from '../modules/update';
 import agent from '../modules/agent';
 import filesys from '../modules/filesys';
+import terminal from '../modules/terminal';
 import safety from '../modules/safety';
 import fileHistory from '../modules/file-history';
 import daemon from '../modules/daemon';
@@ -56,13 +57,14 @@ const MODULE_DESTROY_TIMEOUT_MS = 10_000;
  * - tools / mcp：加载与连接较慢（工具动态 import / MCP 子进程握手），
  *   排在 server 之后不阻塞端口可用；MCP 连接本身已后台化。
  * - filesys → 无服务依赖（agent 构造时订阅其事件总线，须先于 agent 注册）
+ * - terminal → filesys（cwd 边界由调用方校验）；无其他依赖，须先于 agent/tools 使用前注册
  * - safety → 无服务依赖（agent 执行工具前统一权限决策，须先于 agent 注册）
  * - rules / hooks / memory → 无服务依赖（context/agent 经 tryResolve 消费，须先于二者注册）
  * - context → llm（压缩摘要调用 LLMRouter；agent 每轮请求经其流水线，须先于 agent 注册）
  * - agent → llm, tools, filesys, safety, context, rules, hooks, memory
  * - agenteam → agent（编排服务复用 AgentEngine 派发成员任务；registry 部分无依赖，
  *   但模块整体须后于 agent 注册；server 的 /api/agenteams 路由为请求时 tryResolve，不受影响）
- * - file-history → tools, filesys（shell 快照回填运行时 tryResolve）
+ * - file-history → tools, filesys（终端快照回填运行时 tryResolve）
  * - daemon → server
  * - automation → agent, server
  */
@@ -74,6 +76,7 @@ const MODULE_FACTORIES: Array<{ name: string; create: () => Module }> = [
   { name: 'mcp', create: mcp },
   { name: 'update', create: update },
   { name: 'filesys', create: filesys },
+  { name: 'terminal', create: terminal },
   { name: 'safety', create: safety },
   { name: 'rules', create: rules },
   { name: 'hooks', create: hooks },

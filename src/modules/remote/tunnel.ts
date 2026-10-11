@@ -1,6 +1,6 @@
 // src/modules/remote/tunnel.ts
 // cloudflared 快速隧道：把本机 MOSS server 暴露成公网 https URL（随机 trycloudflare 子域）。
-// 移植自 dsh-pocket（Max/dsh-pocket-main/lib/tunnel.mjs），按 MOSS 规范 TS 化。
+// 按 MOSS 规范 TS 化。
 //
 // - 二进制解析三级回退：PATH 已装 → ~/.moss/remote/bin/ 持久缓存 → 多镜像自动下载
 //   （GitHub 官方 + 国内加速源；大文件 8 段并发分块，探针测速自适应）

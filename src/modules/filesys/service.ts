@@ -1,7 +1,7 @@
 // src/modules/filesys/service.ts
 // FilesysService 实现：统一文件系统操作入口。
 // 读缓存（一次 I/O 全派生）+ roots 越权 + 原子写 + 乐观锁（sha256 一律对原始字节，
-// 修复 BOM 文件 read→edit expectHash 断裂）+ 变更事件 + shell 快照检测。
+// 修复 BOM 文件 read→edit expectHash 断裂）+ 变更事件 + 终端命令快照检测。
 
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -12,14 +12,14 @@ import { FileCache } from './cache';
 import { FilesysEventBus } from './events';
 import { hashBuffer } from './hash';
 import { normalizeRoots, resolveInRoots } from './roots';
-import { ShellWatcher } from './shell-watch';
+import { TerminalWatcher } from './terminal-watch';
 import type {
   FileChangeEvent,
   FilesysConfig,
   FilesysService,
   ReadFileResult,
-  ShellSnapshot,
-  ShellChangeReport,
+  TerminalSnapshot,
+  TerminalChangeReport,
   WriteFileOptions,
   WriteFileResult,
 } from './types';
@@ -30,7 +30,7 @@ const KIND_SAMPLE_BYTES = 8192;
 export class FilesysServiceImpl implements FilesysService {
   private readonly cache: FileCache;
   private readonly bus: FilesysEventBus;
-  private readonly watcher: ShellWatcher;
+  private readonly watcher: TerminalWatcher;
   private readonly getConfig: () => FilesysConfig;
   private readonly logger: Logger;
 
@@ -49,11 +49,11 @@ export class FilesysServiceImpl implements FilesysService {
       maxFileBytes: this.getConfig().cacheMaxFileBytes,
     });
     this.bus = new FilesysEventBus();
-    this.watcher = new ShellWatcher({
+    this.watcher = new TerminalWatcher({
       cache: this.cache,
       logger: deps.logger,
       services: deps.services,
-      getConfig: () => this.getConfig().shellWatch,
+      getConfig: () => this.getConfig().terminalWatch,
     });
   }
 
@@ -232,22 +232,22 @@ export class FilesysServiceImpl implements FilesysService {
     return normalizeRoots(this.getConfig().roots);
   }
 
-  async beginShellSnapshot(cwd: string): Promise<ShellSnapshot | null> {
+  async beginTerminalSnapshot(cwd: string): Promise<TerminalSnapshot | null> {
     return this.watcher.begin(cwd, this.listRoots());
   }
 
-  async endShellSnapshot(
-    snap: ShellSnapshot,
+  async endTerminalSnapshot(
+    snap: TerminalSnapshot,
     sessionId: string,
     toolCallId: string,
-  ): Promise<ShellChangeReport | null> {
+  ): Promise<TerminalChangeReport | null> {
     try {
       const report = await this.watcher.end(snap, sessionId, toolCallId);
       if (report.created.length + report.modified.length + report.deleted.length > 0) {
         this.emitChange({
-          kind: 'shell-changed',
+          kind: 'terminal-changed',
           absPath: snap.roots[0] ?? '',
-          source: 'shell',
+          source: 'terminal',
           sessionId,
           toolCallId,
           report,
@@ -255,7 +255,7 @@ export class FilesysServiceImpl implements FilesysService {
       }
       return report;
     } catch (err) {
-      this.logger.warn('filesys: shell snapshot end failed', {
+      this.logger.warn('filesys: terminal snapshot end failed', {
         error: err instanceof Error ? err.message : String(err),
       });
       return null;

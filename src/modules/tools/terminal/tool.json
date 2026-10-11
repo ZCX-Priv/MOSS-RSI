@@ -1,0 +1,77 @@
+{
+  "name": "terminal",
+  "description": "终端工具（真实 PTY 持久终端）。缺省用法：直接传 command —— 在本会话的「默认终端」内执行并返回本次输出，工作目录、环境变量等状态在命令之间保持。**不要为每条命令新建终端**：连续命令会复用同一个默认终端。仅当需要并行同时运行多个相互独立的命令（例如同时启动多个长任务、或在不同目录并发操作）时，才先用 action='create' 新建额外终端，再用 action='send' + terminalId 在其中执行。其他动作：'restart' 重启默认终端（清空状态或卡死恢复）；'read' 读取终端最近输出与状态；'list' 列出本会话全部终端（标注默认终端）；'kill' 关闭指定终端。参数：cwd 仅在创建/重启终端时生效（已存在的终端保持其工作目录，需要换目录可先 cd 或 restart）；interpreter 仅在默认终端尚未创建或需要另一种解释器时使用，实际可用性以系统提示「终端环境（启动时实测）」段为准，请求不可用时自动回退并在结果尾部回告。命令语法必须匹配所用解释器（PowerShell、CMD、bash 互不兼容）。命令在超时后会被中断（Ctrl+C）并返回已捕获输出。警告：此工具以用户权限执行任意命令。",
+  "description_en": "Terminal tool (real persistent PTY). Default usage: just pass command — it runs inside this session's default terminal and returns that run's output; working directory, environment variables and other state persist between commands. **Do not create a new terminal per command**: consecutive commands reuse the same default terminal. Only when you need to run several independent commands in parallel (e.g. starting multiple long-running tasks, or concurrent work in different directories) should you first use action='create' to make an extra terminal, then action='send' with its terminalId. Other actions: 'restart' restarts the default terminal (reset state or recover from a stuck command); 'read' returns a terminal's recent output and status; 'list' lists all terminals in this session (default marked); 'kill' closes a terminal. Parameters: cwd takes effect only when a terminal is created/restarted (an existing terminal keeps its working directory — use cd or restart to change it); interpreter is only used when the default terminal does not exist yet or a different interpreter is needed, and actual availability is listed in the system prompt's Terminal environment section (probed at startup) with automatic fallback noted in the result. Command syntax must match the interpreter in use (PowerShell, CMD and bash are mutually incompatible). A command that times out is interrupted (Ctrl+C) and the captured output is returned. Warning: this tool executes arbitrary commands with user privileges.",
+  "icon": "terminal",
+  "annotations": {
+    "destructiveHint": true,
+    "requireConfirmation": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "exec",
+          "create",
+          "send",
+          "read",
+          "list",
+          "kill",
+          "restart"
+        ],
+        "description": "操作类型：exec（缺省）=在默认终端内执行 command 并复用该终端；create=新建额外终端（仅并行时用）；send=在 terminalId 内执行 command；restart=重启默认终端；read=读取 terminalId 最近输出；list=列出本会话终端；kill=关闭 terminalId。",
+        "description_en": "Operation: exec (default) = run command in the default terminal and reuse it; create = new extra terminal (parallel use only); send = run command inside terminalId; restart = restart the default terminal; read = recent output of terminalId; list = list session terminals; kill = close terminalId."
+      },
+      "command": {
+        "type": "string",
+        "description": "要执行的命令（action=exec 与 action=send 时必填）",
+        "description_en": "Command to execute (required for action=exec and action=send)"
+      },
+      "terminalId": {
+        "type": "string",
+        "description": "目标终端 id（action=send/read/kill 时必填；来自 create 的返回或 list）",
+        "description_en": "Target terminal id (required for action=send/read/kill; from create result or list)"
+      },
+      "cwd": {
+        "type": "string",
+        "description": "工作目录（默认：agent 工作目录）。仅在创建/重启终端时生效；已存在的终端保持其工作目录。",
+        "description_en": "Working directory (default: agent working directory). Only applied when a terminal is created/restarted; an existing terminal keeps its own working directory."
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "超时时间（毫秒，默认 30000）。超时会向终端发送 Ctrl+C 中断当前命令并返回已捕获输出。",
+        "description_en": "Timeout in milliseconds (default 30000). On timeout the command is interrupted with Ctrl+C and the captured output is returned.",
+        "minimum": 1000,
+        "maximum": 600000
+      },
+      "interpreter": {
+        "type": "string",
+        "enum": [
+          "powershell",
+          "cmd",
+          "bash"
+        ],
+        "description": "解释器类型。仅在默认终端尚未创建或需要另一种解释器时使用；不指定时用系统信息中声明的默认解释器（实测探测）。",
+        "description_en": "Interpreter type. Only used when the default terminal does not exist yet or a different interpreter is needed; defaults to the probed default interpreter declared in system info."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true,
+      "timeout": 30000,
+      "requireConfirmation": true
+    },
+    "schema": {
+      "timeout": {
+        "type": "integer",
+        "min": 1000,
+        "max": 600000
+      }
+    }
+  }
+}

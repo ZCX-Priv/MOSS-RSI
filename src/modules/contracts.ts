@@ -16,7 +16,8 @@ import type {
   ChangeTracker,
   UndoResult,
 } from './file-history/types';
-export type { FilesysService, ShellChangeReport } from './filesys/types';
+export type { FilesysService, TerminalChangeReport } from './filesys/types';
+export type { TerminalService, TerminalInfo, TerminalRunResult, InterpreterKind } from './terminal/types';
 import type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 export type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 
@@ -555,9 +556,9 @@ export interface ServerInstanceLike {
 
 export interface FileHistoryService {
   /**
-   * 统一变更追踪入口（tracker 对象模式）：变更前调用（shell 为事后回填调用）。
+   * 统一变更追踪入口（tracker 对象模式）：变更前调用（terminal 为事后回填调用）。
    * 内部按 toolName 分发：write/edit/delete 做改前备份（文件不存在记 create 收据）；
-   * move/copy 构造无备份收据；shell 按 shellBefore 缓存内容回填备份。
+   * move/copy 构造无备份收据；terminal 按 terminalBefore 缓存内容回填备份。
    * @returns ChangeTracker：变更后调 tracker.commit(after) 登记历史条目；
    *          变更失败不调 commit 即丢弃（孤儿备份由 retention 回收）。
    *          enabled=false 时返回 no-op tracker。
@@ -627,6 +628,6 @@ export interface SafetyService {
   clearSessionRules(sessionId: string): void;
   /** 添加全局持久规则（「始终允许(全局)」→ config.safety.rules + 广播 config:changed） */
   addGlobalRule(list: 'allow' | 'deny' | 'ask', rule: string): Promise<boolean>;
-  /** 生成「始终允许」规则建议（shell 智能前缀 / MCP 全名 / 工具名） */
+  /** 生成「始终允许」规则建议（terminal 智能前缀 / MCP 全名 / 工具名） */
   generateRuleSuggestion(toolName: string, params: unknown): string;
 }

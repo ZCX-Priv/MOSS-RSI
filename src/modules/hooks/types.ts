@@ -1,5 +1,5 @@
 // src/modules/hooks/types.ts
-// 钩子引擎类型契约：生命周期事件钩子（shell 命令 + TS 模块双执行形式）。
+// 钩子引擎类型契约：生命周期事件钩子（终端命令 + TS 模块双执行形式）。
 // 事件：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd。
 // 决策协议：PreToolUse 与 UserPromptSubmit 支持 deny（阻止动作）；其余仅通知。
 
@@ -27,8 +27,8 @@ export const HOOK_EVENTS: readonly HookEvent[] = [
   'SessionEnd',
 ];
 
-/** 钩子执行形式 */
-export type HookType = 'shell' | 'module';
+/** 钩子执行形式（'shell' 为旧值，读取时归一化为 'terminal'） */
+export type HookType = 'terminal' | 'module';
 
 /** 单个钩子定义（一个 JSON 文件，文件名 = 内容哈希） */
 export interface HookRecord {
@@ -40,9 +40,9 @@ export interface HookRecord {
   event: HookEvent;
   /** 工具名匹配（精确名或 glob；null/空 = 匹配全部。仅工具类事件有效） */
   matcher: string | null;
-  /** 执行形式：shell 外部命令 / module TS 模块 */
+  /** 执行形式：terminal 外部命令 / module TS 模块 */
   type: HookType;
-  /** type=shell 时的命令行（支持 ~ 展开与环境变量） */
+  /** type=terminal 时的命令行（支持 ~ 展开与环境变量） */
   command: string;
   /** type=module 时的模块路径（相对 hooks/scripts/） */
   modulePath: string;

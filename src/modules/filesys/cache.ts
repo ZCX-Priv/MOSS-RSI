@@ -68,7 +68,7 @@ export class FileCache {
 
   /**
    * 无校验窥视：直接取缓存条目（不过期）。
-   * 供 shell-watch 拿"执行前内容"——shell 修改后 mtime 已变，get 会判定失效，
+   * 供 terminal-watch 拿"执行前内容"——终端命令修改后 mtime 已变，get 会判定失效，
    * 但旧 buffer 正是我们要的执行前状态。
    */
   peek(absPath: string): FileCacheEntry | null {

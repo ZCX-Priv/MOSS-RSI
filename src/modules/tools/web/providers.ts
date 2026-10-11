@@ -1,6 +1,6 @@
 // tools/web/providers.ts
 // 联网搜索：搜索服务商引擎（智谱 search_pro / 博查 / Tavily）+ 本地免费引擎降级。
-// 架构（对齐 modsearch 多引擎思想 + 用户要求的回退语义）：
+// 架构（用户要求的回退语义）：
 //   - 搜索服务商来自「设置页 → 服务商」体系（api.json providers，kind='search'），
 //     key 唯一来源是服务商配置（不再内置工具级 key / 环境变量）
 //   - 调用链：默认搜索服务商（若配置）→ 失败自动降级本地引擎链（bing→baidu→sogou）

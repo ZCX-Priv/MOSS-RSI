@@ -1,6 +1,6 @@
 // src/modules/context/budgeter/estimator.ts
 // token 估算：跨语言自适应（英文趋势 ~4 字节/token，CJK ~1 rune/token），
-// 消息级估算含 chat framing 与 tool_call 结构开销（移植 Reasonix estimateMessagesTokens）。
+// 消息级估算含 chat framing 与 tool_call 结构开销。
 
 import type { ContextMessage } from '../types';
 
@@ -13,8 +13,7 @@ const TOOLCALL_FRAMING_TOKENS = 8;
  * 跨语言 token 估算：
  * - 拉丁主导（bytes/rune ≈ 1）：~4 字节/token → ceil(bytes/4)
  * - CJK 主导（bytes/rune > 2，即大量多字节字符）：~1 rune/token → runeCount
- * 按字节/字符比率自适应，避免英文场景系统性高估 4 倍（Reasonix 原版取 max
- * 的保守口径会导致英文早压缩；实际比率经 TokenCalibrator 从真实 usage 校准）。
+ * 按字节/字符比率自适应，避免英文场景系统性高估 4 倍（实际比率经 TokenCalibrator 从真实 usage 校准）。
  */
 export function estimateTextTokens(text: string): number {
   if (text.length === 0) return 0;

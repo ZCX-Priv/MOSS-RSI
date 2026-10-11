@@ -65,7 +65,7 @@ export function createCreateHookHandler(services: ServicesLike): RouteHandler {
     }
     const event = parseEvent(body.event);
     if (!event) return { status: 400, body: { error: `event must be one of ${HOOK_EVENTS.join(', ')}` } };
-    const type = body.type === 'module' ? 'module' : 'shell';
+    const type = body.type === 'module' ? 'module' : 'terminal';
     try {
       const cwd = cwdFromQuery(req);
       const record = engine.upsert(cwd, parseScope(body.scope), {
@@ -112,7 +112,7 @@ export function createUpdateHookHandler(services: ServicesLike): RouteHandler {
       const existing = engine.get(cwd, id);
       if (!existing) return { status: 404, body: { error: 'hook not found' } };
       const event = parseEvent(body.event ?? existing.event) ?? existing.event;
-      const type = body.type === 'module' || body.type === 'shell' ? body.type : existing.type;
+      const type = body.type === 'module' || body.type === 'terminal' ? body.type : existing.type;
       const record = engine.upsert(
         cwd,
         parseScope(body.scope ?? existing.scope),

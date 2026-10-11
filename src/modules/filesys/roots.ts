@@ -1,10 +1,10 @@
 // src/modules/filesys/roots.ts
 // roots 机制：cwd（隐含 root）+ 配置的额外授权目录，统一越权拒绝。
-// 参考 MCP filesystem server 的 Roots 设计：允许的根目录列表，动态可配，越界统一拒绝。
+// 允许的根目录列表，动态可配，越界统一拒绝。
 // extraRoots 为空时行为与旧版 resolveWithinCwd 完全一致（零迁移风险）。
 //
 // System 作用域（本机模式）：cwd 为 SYSTEM_SCOPE 哨兵时全盘可访问（跳过 roots 范围检查），
-// 相对路径基于系统盘根解析（与 shell 默认执行目录一致）。
+// 相对路径基于系统盘根解析（与 terminal 默认执行目录一致）。
 // .moss 保护为全局硬规则：~/.moss 下仅 agent/mcps/skills 三个子目录可访问，
 // 与 cwd/权限模式无关（skip 也拦），防止 AI 篡改自身配置/存储实现自我提权。
 

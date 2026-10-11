@@ -1,5 +1,5 @@
 // src/modules/tools/shared/skill-registry.ts
-// Skill 注册表（对齐 Anthropic Agent Skills 开放标准 + greet/icon 扩展）。
+// Skill 注册表（greet/icon 扩展）。
 //
 // 两种格式（~/.moss/skills/ 下）：
 //   1. 目录式（标准）：<name>/SKILL.md（frontmatter: name/description/allowed-tools?/greet?/icon?）

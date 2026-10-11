@@ -5,7 +5,7 @@ import { t } from '../../core/i18n';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { WSMessage, WSMessageHandler, WSConnection } from './types';
-import type { AgentEngine, AgentEvent, GuidanceMessage } from '../contracts';
+import type { AgentEngine, AgentEvent, GuidanceMessage, TerminalService, InterpreterKind } from '../contracts';
 import type { AutomationService } from '../automation';
 import { ErrorCode } from '../../core/error-codes';
 import { VoiceSessionHost } from './voice-session-host';
@@ -272,6 +272,18 @@ export class WsHandler {
         return this.voiceHost.start(connId, (m) => state.conn.send(m), readVoiceModelId(msg));
       case 'voice.stop':
         return this.voiceHost.stop(connId);
+      case 'terminal.list':
+        return this.handleTerminalList(state, msg);
+      case 'terminal.create':
+        return this.handleTerminalCreate(state, msg);
+      case 'terminal.subscribe':
+        return this.handleTerminalSubscribe(state, msg);
+      case 'terminal.input':
+        return this.handleTerminalInput(state, msg);
+      case 'terminal.resize':
+        return this.handleTerminalResize(state, msg);
+      case 'terminal.close':
+        return this.handleTerminalClose(state, msg);
       case 'ping':
         // 前端心跳探活，回 pong 确认连接存活
         state.conn.send({ type: 'pong' });
@@ -846,5 +858,99 @@ export class WsHandler {
         payload: { message: err instanceof Error ? err.message : String(err) },
       });
     }
+  }
+
+  // ========================================================================
+  // 终端（持久 PTY）：人类交互入口；输出经 TerminalService 的 emitter 按会话广播
+  // ========================================================================
+
+  private terminalService(): TerminalService | null {
+    return this.services.tryResolve<TerminalService>(ServiceNames.TERMINAL);
+  }
+
+  /** 列出会话终端（连接先订阅该会话，保证后续 terminal.data 可达） */
+  private handleTerminalList(state: ConnectionState, msg: WSMessage): void {
+    const sessionId = msg.sessionId ?? state.sessionId ?? '';
+    if (sessionId) state.subscribedSessions.add(sessionId);
+    const svc = this.terminalService();
+    const terminals = svc ? svc.list(sessionId) : [];
+    state.conn.send({
+      type: 'terminal.list',
+      sessionId,
+      payload: { sessionId, terminals },
+    });
+  }
+
+  private async handleTerminalCreate(state: ConnectionState, msg: WSMessage): Promise<void> {
+    const svc = this.terminalService();
+    if (!svc) {
+      state.conn.send({ type: 'error', sessionId: msg.sessionId, payload: { message: t('terminal.moduleInitialized') } });
+      return;
+    }
+    const payload = (msg.payload ?? {}) as {
+      sessionId?: string;
+      cwd?: string;
+      cols?: number;
+      rows?: number;
+      title?: string;
+      interpreter?: InterpreterKind;
+      creator?: 'user' | 'ai';
+    };
+    const sessionId = payload.sessionId ?? msg.sessionId ?? state.sessionId ?? '';
+    if (!sessionId) {
+      state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TASK_ID_REQUIRED } });
+      return;
+    }
+    // 先订阅该会话：terminal.created / terminal.data 才能路由到本连接
+    state.subscribedSessions.add(sessionId);
+    try {
+      await svc.create({
+        sessionId,
+        cwd: payload.cwd,
+        cols: payload.cols,
+        rows: payload.rows,
+        title: payload.title,
+        interpreter: payload.interpreter,
+        // 前端创建一律视为人类来源（AI 经 terminal 工具创建，自带 creator='ai'）
+        creator: payload.creator === 'ai' ? 'ai' : 'user',
+      });
+      // terminal.created 由 TerminalService 的 emitter 广播（本连接已订阅）
+    } catch (err) {
+      state.conn.send({
+        type: 'error',
+        sessionId,
+        payload: { message: err instanceof Error ? err.message : String(err) },
+      });
+    }
+  }
+
+  /** 订阅单个终端：回送当前输出缓冲快照（刷新/重连后复原历史） */
+  private handleTerminalSubscribe(state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { terminalId?: string };
+    const terminalId = payload.terminalId;
+    const svc = this.terminalService();
+    if (!svc || !terminalId) return;
+    const data = svc.snapshot(terminalId);
+    if (data !== undefined) {
+      state.conn.send({ type: 'terminal.snapshot', payload: { terminalId, data } });
+    }
+  }
+
+  private handleTerminalInput(state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { terminalId?: string; data?: string };
+    if (!payload.terminalId || typeof payload.data !== 'string') return;
+    this.terminalService()?.write(payload.terminalId, payload.data);
+  }
+
+  private handleTerminalResize(_state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { terminalId?: string; cols?: number; rows?: number };
+    if (!payload.terminalId || typeof payload.cols !== 'number' || typeof payload.rows !== 'number') return;
+    this.terminalService()?.resize(payload.terminalId, payload.cols, payload.rows);
+  }
+
+  private handleTerminalClose(_state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { terminalId?: string };
+    if (!payload.terminalId) return;
+    this.terminalService()?.close(payload.terminalId);
   }
 }

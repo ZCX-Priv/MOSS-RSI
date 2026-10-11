@@ -1,6 +1,6 @@
 // src/modules/remote/service.ts
 // RemoteService：cloudflared 隧道生命周期管理 + 状态快照。
-// 移植自 dsh-pocket（Max/dsh-pocket-main/lib/service.mjs）的隧道段，按 MOSS 规范 TS 化。
+// 隧道段，按 MOSS 规范 TS 化。
 //
 // - 单飞：并发 startTunnel 复用同一次 in-flight，避免 spawn 多个 cloudflared 孤儿进程
 // - 自动恢复：MOSS 重启后按持久化标记自动重拉隧道（cloudflared 子进程随宿主被杀）

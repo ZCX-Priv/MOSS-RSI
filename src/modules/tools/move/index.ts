@@ -1,5 +1,5 @@
 // tools/move/index.ts
-// move 工具：移动/重命名文件或目录（替代 shell 的 mv/Move-Item，全程可 undo）。
+// move 工具：移动/重命名文件或目录（替代 terminal 的 mv/Move-Item，全程可 undo）。
 // 强化点：
 //   1. 同盘 rename 原子移动；跨盘（EXDEV）回退递归 copy + delete
 //   2. file-history move 条目：undo = dest → source 反向 rename

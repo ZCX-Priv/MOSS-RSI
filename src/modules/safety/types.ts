@@ -1,7 +1,7 @@
 // src/modules/safety/types.ts
 // 安全（safety）模块类型定义。
 // 统一权限决策入口：所有工具（builtin/custom/MCP/mcp）执行前必须经过 SafetyPolicy.evaluate。
-// 设计借鉴 Claude Code 权限系统（ccs-map 源码分析），按 MOSS-OS 服务化架构裁剪。
+// 设计按 MOSS-OS 服务化架构裁剪。
 
 /** 权限模式（对齐前端 PermissionModeSelector 现有 UI：3 种） */
 export type PermissionMode = 'ask' | 'auto' | 'skip';
@@ -11,7 +11,7 @@ export type PermissionMode = 'ask' | 'auto' | 'skip';
  *   L0 只读     —— 无副作用（read/glob/grep/list_* 等 + MCP readOnlyHint）
  *   L1 状态     —— 会话内状态，无系统副作用（ask/todo）
  *   L2 可恢复写 —— file-history 备份 + trash 回收站兜底（write/edit/move/delete/copy）
- *   L3 无兜底   —— 任意命令/外部副作用（shell + MCP destructiveHint + 未标注/自定义工具）
+ *   L3 无兜底   —— 任意命令/外部副作用（terminal + MCP destructiveHint + 未标注/自定义工具）
  */
 export type RiskClass = 'L0' | 'L1' | 'L2' | 'L3';
 
@@ -41,7 +41,7 @@ export interface DecisionReason {
 export interface SafetyDecision {
   action: SafetyAction;
   reason: DecisionReason;
-  /** ASK 时附带给确认卡片的「始终允许」规则建议（如 "shell(git commit *)"） */
+  /** ASK 时附带给确认卡片的「始终允许」规则建议（如 "terminal(git commit *)"） */
   ruleSuggestion?: string;
 }
 
@@ -69,7 +69,7 @@ export interface SafetyConfig {
 /** 决策请求（SafetyPolicy.evaluate 入参） */
 export interface SafetyRequest {
   toolName: string;
-  /** 工具参数（用于提取 shell command / 写类工具目标路径） */
+  /** 工具参数（用于提取终端命令 / 写类工具目标路径） */
   params: unknown;
   /** builtin 工具注解 */
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
