@@ -8,9 +8,15 @@
  *  - 事件以 \n\n 分隔
  *  - 每行格式 "data: <text>" 或 "event: <name>" 或 ":comment"
  *  - "data: [DONE]" 表示流结束
+ *
+ * @param opts.idleTimeoutMs 空闲超时（毫秒）。响应头已返回但流中途停滞（弱网半开连接 /
+ *   推理型模型长思考 / 代理空档）超过该时长即取消读取并抛错。默认 15 分钟，
+ *   可由 config.agent.llmStreamIdleTimeoutMs 覆盖（长程 CTF 任务需放宽）；
+ *   上限 1 小时（防止极端值把弱网半开连接无限挂起）。
  */
 export async function* parseSSEStream(
   stream: ReadableStream<Uint8Array>,
+  opts?: { idleTimeoutMs?: number },
 ): AsyncIterable<string> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -35,10 +41,17 @@ export async function* parseSSEStream(
 
   // 空闲超时：响应头已返回但流中途停滞（弱网半开连接）时取消读取，
   // 并向上游抛出明确错误（而非静默截断——静默会让 engine 当作流正常结束，
-  // 用户侧表现为「回复莫名断掉且无任何提示」）。300s 容忍思考型模型的长停顿
+  // 用户侧表现为「回复莫名断掉且无任何提示」）。默认 15 分钟容忍思考型模型的长停顿
   // （长推理 / 长 prefill / 代理空档）；过激的阈值会在模型仍在思考时误切断
   // 与模型 API 的连接，表现为「后端莫名断开与模型的通信」。
-  const IDLE_TIMEOUT_MS = 300_000;
+  const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+  /** 硬上限：即使配置写错也不让弱网半开连接无限挂起 */
+  const MAX_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+  const rawIdle = opts?.idleTimeoutMs;
+  const IDLE_TIMEOUT_MS =
+    typeof rawIdle === 'number' && Number.isFinite(rawIdle) && rawIdle > 0
+      ? Math.min(rawIdle, MAX_IDLE_TIMEOUT_MS)
+      : DEFAULT_IDLE_TIMEOUT_MS;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const resetIdle = (): void => {
     if (idleTimer) clearTimeout(idleTimer);

@@ -15,7 +15,7 @@
 
 import { useStore } from '../store';
 import { pendingAssistant } from './pending-assistant';
-import { diag, diagCount } from './diag';
+import { diag, diagAlways, diagCount } from './diag';
 import type { TaskMessage } from '../types/api';
 
 /** 纯函数：依据服务端 offset 计算「本次应追加的片段」 */
@@ -61,6 +61,8 @@ interface PendingToolArgs {
 const pendingTextMap = new Map<string, PendingText>();
 const pendingToolArgsMap = new Map<string, PendingToolArgs>();
 let rafId: number | null = null;
+/** 超时兜底冲刷定时器（后台标签页/节流环境下 rAF 可能长时间不触发） */
+let flushTimerId: ReturnType<typeof setTimeout> | null = null;
 
 /** 各流式字段的已知长度缓存（key = sessionId|messageId|field）：让每次分片的 offset 校验为 O(1) */
 const lengthCache = new Map<string, number>();
@@ -146,6 +148,14 @@ function lengthKey(sessionId: string, messageId: string, field: string): string 
 /** 会话切换 / 历史重载时清空缓存（避免跨会话/跨轮脏读） */
 export function resetStreamBuffer(sessionId?: string): void {
   if (sessionId) {
+    // 活跃 run 保护：会话仍在生成时，缓冲/长度缓存属于「当前轮」，
+    // 不能被一次迟到的 reset（典型来源：上一轮 onStreamSettled 的异步续体，
+    // 其 catchUpTail 含网络往返）清掉 —— 否则新一轮已入缓冲的分片被丢弃 = 零输出。
+    // 状态取自 store 权威运行态（随终态事件清除），天然不会泄漏。
+    if (useStore.getState().generatingBySession[sessionId] === true) {
+      diagAlways('reset-stream-buffer-skip-active', { sessionId });
+      return;
+    }
     for (const key of Array.from(lengthCache.keys())) {
       if (key.startsWith(`${sessionId}|`)) lengthCache.delete(key);
     }
@@ -308,15 +318,38 @@ export function enqueueToolArgsChunk(opts: {
 }
 
 function scheduleFlush(): void {
-  if (rafId !== null) return;
-  rafId = requestAnimationFrame(() => {
-    rafId = null;
-    flushPending();
-  });
+  if (rafId === null) {
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      flushPending();
+    });
+  }
+  // 超时兜底：后台标签页 / rAF 节流环境下，rAF 可能长时间（甚至到下一个非批处理事件）
+  // 才触发，导致流式内容滞留在缓冲里（用户症状「响应中很久才有内容」）。
+  // 100ms 内必冲刷一次，两路 whichever first，flushPending 幂等。
+  if (flushTimerId === null) {
+    flushTimerId = setTimeout(() => {
+      flushTimerId = null;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      flushPending();
+    }, 100);
+  }
 }
 
 /** 冲刷全部缓冲（低频事件到达前调用，保证「文本先于工具事件写入」的顺序） */
 export function flushPending(): void {
+  // 取消尚未触发的两路调度，避免冲刷后又触发一次空冲刷
+  if (flushTimerId !== null) {
+    clearTimeout(flushTimerId);
+    flushTimerId = null;
+  }
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
   if (pendingTextMap.size > 0) {
     const entries = Array.from(pendingTextMap.values());
     pendingTextMap.clear();

@@ -39,16 +39,28 @@ if (!existsSync(resolve(WEBUI, 'package.json'))) {
 }
 
 log('installing webui dependencies (npm install in webui/)...');
-// 单字符串 + shell：Windows 上 npm 是 npm.cmd（Node 不允许无 shell 直接 spawn .cmd），
-// 且避免 `shell:true` + 参数数组触发的 DEP0190 弃用警告。命令为常量，无注入面。
-const result = spawnSync('npm install --no-audit --no-fund', {
-  cwd: WEBUI,
-  stdio: 'inherit',
-  shell: isWin,
-});
+// 跨平台调用 npm（两个陷阱必须同时避开）：
+//  1) Windows：npm 是 npm.cmd，经 CVE-2024-27980 修复后 Node 不允许无 shell 直接 spawn .cmd
+//     → 必须 shell:true；同时用「单命令串」而非「参数数组」以规避 DEP0190 弃用警告。
+//  2) POSIX（Linux / macOS / Termux）：shell:false 时 Node 会把整串命令（含空格）
+//     当成「可执行文件名」而不拆分参数 → ENOENT、status=null。
+//     这正是旧实现在 Termux 上报 `(exit null)` 的根因；必须用「命令 + 参数数组」形态。
+const NPM_ARGS = ['install', '--no-audit', '--no-fund'];
+const result = isWin
+  ? spawnSync(`npm ${NPM_ARGS.join(' ')}`, { cwd: WEBUI, stdio: 'inherit', shell: true })
+  : spawnSync('npm', NPM_ARGS, { cwd: WEBUI, stdio: 'inherit', shell: false });
 
-if (result.status !== 0) {
-  console.error(`[install-webui] ERROR: npm install failed in webui/ (exit ${result.status})`);
+if (result.error || result.status !== 0) {
+  // 完整原因上报：spawn 失败（error）/ 被信号杀死（signal）/ 普通非零码，三者形态不同
+  const reason = result.error
+    ? `${result.error.code ?? result.error.name}: ${result.error.message}`
+    : result.signal
+      ? `killed by signal ${result.signal}`
+      : `exit ${result.status}`;
+  console.error(`[install-webui] ERROR: npm install failed in webui/ (${reason})`);
+  if (result.error?.code === 'ENOENT') {
+    console.error('[install-webui] npm not found on PATH. Termux: `pkg install nodejs`; then retry.');
+  }
   process.exit(result.status ?? 1);
 }
 

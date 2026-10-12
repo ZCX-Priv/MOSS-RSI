@@ -232,13 +232,34 @@ export class AgentEngineImpl implements AgentEngine {
      * - 工具生命周期事件（start/executing/end）同步草稿中的工具卡片状态，强制落盘。
      * - 其余事件原样透传。
      */
+    // 当前轮的流式身份（emit 闭包使用；循环内逐轮更新）。
+    // 草稿缺失时用它重建，避免分片被静默丢弃——静默丢弃会让整轮文本对前端不可见，
+    // 只在 run 结束的 catchUpTail 拉历史时才出现（用户症状「响应中很久才有内容」）。
+    let currentTurnMessageId = '';
+    let currentTurnIndex = 0;
+    /** 取本轮草稿；缺失则重建（无轮身份时返回 null，由调用方退化为裸分片） */
+    const draftFor = (sessionId: string): LiveDraft | null => {
+      const existing = this.liveDraft.get(sessionId);
+      if (existing) return existing;
+      if (!currentTurnMessageId) return null;
+      return this.liveDraft.begin(sessionId, currentTurnMessageId, input.runId, currentTurnIndex);
+    };
+
     const emit = (event: AgentEvent): void => {
       switch (event.type) {
         case 'assistant-text': {
-          const d = this.liveDraft.get(event.sessionId);
-          // 草稿缺失 = run 已结束（clear 后的迟到分片 / 打断竞态）：
-          // 发出 offset=0 的无 messageId 分片只会让前端把它当「从头开始的新内容」错位拼接 → 直接丢弃。
-          if (!d) return;
+          const d = draftFor(event.sessionId);
+          if (!d) {
+            // 无轮身份（异常窗口）：退化为无 messageId/offset 的裸分片，前端按尾部追加兜底——
+            // 宁可顺序略有风险，也不让整轮内容对用户不可见
+            onEvent({
+              type: 'assistant-text',
+              sessionId: event.sessionId,
+              text: event.text,
+              ...(event.runId ? { runId: event.runId } : {}),
+            });
+            return;
+          }
           const offset = d.contentLength;
           onEvent({
             type: 'assistant-text',
@@ -253,8 +274,16 @@ export class AgentEngineImpl implements AgentEngine {
           return;
         }
         case 'assistant-thinking': {
-          const d = this.liveDraft.get(event.sessionId);
-          if (!d) return; // 同上：run 已结束，错位分片不如不发
+          const d = draftFor(event.sessionId);
+          if (!d) {
+            onEvent({
+              type: 'assistant-thinking',
+              sessionId: event.sessionId,
+              text: event.text,
+              ...(event.runId ? { runId: event.runId } : {}),
+            });
+            return;
+          }
           const offset = d.thinkingLength;
           onEvent({
             type: 'assistant-thinking',
@@ -269,8 +298,17 @@ export class AgentEngineImpl implements AgentEngine {
           return;
         }
         case 'tool-call-delta': {
-          const d = this.liveDraft.get(event.sessionId);
-          if (!d) return; // 同上
+          const d = draftFor(event.sessionId);
+          if (!d) {
+            onEvent({
+              type: 'tool-call-delta',
+              sessionId: event.sessionId,
+              toolCallId: event.toolCallId,
+              argumentsDelta: event.argumentsDelta,
+              ...(event.runId ? { runId: event.runId } : {}),
+            });
+            return;
+          }
           const offset = d.toolCalls.find((tc) => tc.id === event.toolCallId)?.arguments.length ?? 0;
           onEvent({
             type: 'tool-call-delta',
@@ -454,6 +492,9 @@ export class AgentEngineImpl implements AgentEngine {
       // 的 begin() 可能已替换草稿，回读会让旧 run 的半截消息写上新 run 的身份 → 重复 id）。
       const turnMessageId = `${sessionId}#${this.sessions.nextMsgSeq(session)}`;
       this.liveDraft.begin(sessionId, turnMessageId, input.runId, turn);
+      // 同步给 emit 闭包：草稿若被并发 clear，用该身份重建而不是丢弃分片
+      currentTurnMessageId = turnMessageId;
+      currentTurnIndex = turn;
 
       // 构建请求：context 引擎每轮流水线（env 保障 → 压缩决策 → 缓存对齐视图）
       // 服务不可用/异常时降级为纯函数 fallback（静态提示 + 视图构建，无压缩）

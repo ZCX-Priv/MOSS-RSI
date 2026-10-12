@@ -10,7 +10,7 @@ import {
   killProcess,
   writePidFile,
 } from '../utils/pid';
-import { ServiceNames, type LogLevel } from '../core/types';
+import { ServiceNames, type LogLevel, type Logger } from '../core/types';
 import type { ServerInstance } from '../modules/server/types';
 import { startMcpStdio } from '../modules/mcp/stdio';
 import { t } from '../core/i18n';
@@ -133,6 +133,11 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
       foreground: true,
       logLevel: parsed.logLevel,
     });
+
+    // 进程级异常兜底（守护进程保活）必须在服务对外可用后立即生效：
+    // 长程任务（小时级 / 数千轮工具调用）期间任意一处逃逸异常都不应让整台机器上
+    // 所有任务一起丢。仅常驻服务路径注册，`moss mcp`（stdio，客户端托管）保持默认行为。
+    installProcessGuards(ctx.logger);
 
     // 从 ServerInstance 服务读取实际监听端口，写入 PID 文件（修复 moss status 不显示端口的 bug）
     const serverInstance = ctx.services.tryResolve<ServerInstance>(ServiceNames.SERVER_INSTANCE);
@@ -377,6 +382,34 @@ function formatConsoleArg(arg: unknown): string {
   } catch {
     return String(arg);
   }
+}
+
+/**
+ * 注册进程级异常兜底（守护进程保活，仅常驻服务路径调用）。
+ *
+ * 背景：Bun 对未捕获异常 / 未处理拒绝默认终止进程。长程任务（小时级、数千轮工具调用）
+ * 期间任意一处逃逸异常（定时器回调 / 事件监听 / fire-and-forget Promise）都会让守护进程
+ * 直接死掉 —— 用户侧表现为「长任务跑一半自己停了 + 后端没了 + 前端永久停在响应中」。
+ * 这里改为「记录完整堆栈 + 计数 + 不退出」：单点异常不应让整机长任务全部丢失。
+ * 前端另有生成态看门狗兜底（后端权威态对账），因此不必在此广播事件。
+ */
+function installProcessGuards(logger: Logger): void {
+  let crashCount = 0;
+  const report = (kind: string, err: unknown): void => {
+    crashCount++;
+    const detail =
+      err instanceof Error
+        ? { message: err.message, stack: err.stack }
+        : { message: String(err) };
+    logger.error(`process:${kind} (kept alive, total=${crashCount})`, detail);
+    if (crashCount === 20 || crashCount === 100) {
+      logger.error(
+        `process:${kind} 频繁发生（累计 ${crashCount} 次）：守护进程仍在运行但稳定性已受影响，建议导出 ~/.moss/logs 排查`,
+      );
+    }
+  };
+  process.on('uncaughtException', (err) => report('uncaughtException', err));
+  process.on('unhandledRejection', (reason) => report('unhandledRejection', reason));
 }
 
 function printHelp(): void {

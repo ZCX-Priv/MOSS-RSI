@@ -302,6 +302,9 @@ const appConfigSchema = z.object({
     maxTokens: z.number().int().positive(),
     // 0 = 不限制（无限轮）；1-199 仍合法（向后兼容存量配置，UI 侧最小 200）
     maxTurns: z.number().int().min(0),
+    // SSE 流空闲超时（ms）：可选，缺省由 parseSSEStream 用内置默认（15 分钟）兜底。
+    // 存量 config.json 无此字段不会校验失败；上下限防止极端值把弱网半开连接挂死。
+    llmStreamIdleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
     workingDirectory: z.string(),
   }),
   // tools schema 从 manifest 自动构建（单一真相源），新增工具无需手动改此文件
@@ -389,6 +392,8 @@ export function defaultAppConfig(): AppConfig {
       defaultModel: '',
       maxTokens: 8192,
       maxTurns: 0,
+      // 15 分钟：长程任务/推理型模型长思考的空闲容忍度
+      llmStreamIdleTimeoutMs: 900_000,
       workingDirectory: '',
     },
     // tools 默认值从 manifest 自动构建（单一真相源）

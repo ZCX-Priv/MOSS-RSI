@@ -216,6 +216,8 @@ export interface AppConfig {
     maxTokens: number;
     /** 单次 run 的最大轮数；0 = 不限制（无限轮） */
     maxTurns: number;
+    /** SSE 流空闲超时（ms）：推理型模型长思考/长程任务需放宽；缺省用内置默认（15 分钟） */
+    llmStreamIdleTimeoutMs?: number;
     workingDirectory: string;
   };
   // tools 类型从 manifest 自动推导（单一真相源），新增工具无需手动改此文件

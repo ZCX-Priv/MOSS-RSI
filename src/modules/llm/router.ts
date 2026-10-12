@@ -135,7 +135,11 @@ export class LLMRouterImpl implements LLMRouter {
       );
     }
 
-    for await (const chunkText of parseSSEStream(resp.stream)) {
+    // 空闲超时可配置（config.agent.llmStreamIdleTimeoutMs）：长程任务/推理型模型长思考
+    // 需要放宽，避免 5 分钟空档把仍在思考的 run 误判为超时而中断
+    const idleTimeoutMs = this.resolveStreamIdleTimeoutMs();
+
+    for await (const chunkText of parseSSEStream(resp.stream, { idleTimeoutMs })) {
       const delta = provider.transformStreamChunk(chunkText);
       if (delta === null) continue;
       if (Array.isArray(delta)) {
@@ -202,5 +206,18 @@ export class LLMRouterImpl implements LLMRouter {
       return `${base}/models/${cfg.model}:streamGenerateContent?alt=sse`;
     }
     return provider.resolveEndpoint(cfg);
+  }
+
+  /**
+   * 读取 SSE 空闲超时（毫秒）。配置缺失/非法时返回 undefined，
+   * 由 parseSSEStream 使用内置默认值（15 分钟）与硬上限兜底。
+   */
+  private resolveStreamIdleTimeoutMs(): number | undefined {
+    try {
+      const v = this.config.getAppConfig().agent.llmStreamIdleTimeoutMs;
+      return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

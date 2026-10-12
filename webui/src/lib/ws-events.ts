@@ -23,7 +23,7 @@ import {
   replayPendingAfterResync,
   seedStreamLength,
 } from './stream-buffer';
-import { diag } from './diag';
+import { diag, diagAlways } from './diag';
 import i18n from '../i18n';
 import type {
   AgentEvent,
@@ -46,12 +46,29 @@ function genId(): string {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** 需要做 runId 过滤的 agent 事件类型 */
-const AGENT_EVENT_TYPES = new Set([
+/**
+ * 参与 runId 过滤的「流式」事件类型。
+ * 终态事件（done / task.done / task.aborted / error）刻意不在其中：
+ * 它们是运行态状态机的唯一收敛点（generatingBySession 只在这里置 false）。
+ * 若终态信号因 runId 不一致被丢弃，前端将永久停在「响应中」且无自愈路径 —
+ * 故终态事件必须无条件处理（见 applyWsMessage 顶部注释）。
+ */
+const AGENT_STREAM_EVENT_TYPES = new Set([
   'assistant-text', 'assistant-thinking',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
-  'ask', 'error', 'done', 'stats-updated', 'task.done', 'task.aborted',
+  'ask', 'stats-updated',
 ]);
+
+/** 终态事件：不参与 runId 过滤（收敛点不可丢） */
+const AGENT_TERMINAL_EVENT_TYPES = new Set([
+  'done', 'task.done', 'task.aborted', 'error',
+]);
+
+/** 读取事件的 runId（agent 事件 payload 顶层） */
+function eventRunIdOf(msg: WSMessage): string | undefined {
+  const v = (msg.payload as { runId?: unknown } | undefined)?.runId;
+  return typeof v === 'string' ? v : undefined;
+}
 
 // ============================================================================
 // 会话编排回调（由 useSessionHistory 注册）：本模块只负责「通知时机」，
@@ -196,11 +213,33 @@ export function applyWsMessage(msg: WSMessage): void {
 
   const sessionId = msg.sessionId ?? s.activeSessionId ?? '';
 
-  // runId 过滤：丢弃旧 run 的事件（防止打断发送时旧流事件污染新流状态）
-  if (sessionId && AGENT_EVENT_TYPES.has(msg.type)) {
-    const eventRunId = (msg.payload as { runId?: string })?.runId;
+  // runId 过滤（仅流式事件）：丢弃旧 run 的分片，防止「打断发送」时旧流污染新流状态。
+  // 终态事件不丢弃（收敛点不可丢），但若确属已被顶替的旧 run（runId 不一致），
+  // 则只打点观测、不做状态变更（否则会把新 run 的 pending 清掉）；
+  // 真正的兜底收敛由生成态看门狗按后端权威态完成（useGenerationWatchdog）。
+  if (sessionId && AGENT_STREAM_EVENT_TYPES.has(msg.type)) {
+    const eventRunId = eventRunIdOf(msg);
     const currentRunId = pendingRunId.get(sessionId);
-    if (eventRunId && currentRunId && eventRunId !== currentRunId) return;
+    if (eventRunId && currentRunId && eventRunId !== currentRunId) {
+      diagAlways('stream-runid-drop', { type: msg.type, eventRunId, currentRunId, sessionId });
+      return;
+    }
+  }
+  const terminalRunIdMismatch =
+    sessionId !== '' &&
+    AGENT_TERMINAL_EVENT_TYPES.has(msg.type) &&
+    (() => {
+      const eventRunId = eventRunIdOf(msg);
+      const currentRunId = pendingRunId.get(sessionId);
+      return Boolean(eventRunId && currentRunId && eventRunId !== currentRunId);
+    })();
+  if (terminalRunIdMismatch) {
+    diagAlways('terminal-runid-mismatch', {
+      type: msg.type,
+      eventRunId: eventRunIdOf(msg),
+      currentRunId: pendingRunId.get(sessionId),
+      sessionId,
+    });
   }
 
   switch (msg.type) {
@@ -394,6 +433,7 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'error': {
       flushPending(); // 流式文本在终止前全部写入
+      if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       const event = (msg.payload ?? {}) as { message?: string };
       const errorCode = event.message ?? '';
       const localizedMessage = i18n.exists(`errors.${errorCode}`)
@@ -420,6 +460,7 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'done': {
       flushPending();
+      if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       const doneEvent = (msg.payload ?? {}) as Extract<AgentEvent, { type: 'done' }>;
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
@@ -476,6 +517,7 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'task.done': {
       flushPending();
+      if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
         const pending = pendingAssistant.get(sessionId);
@@ -498,6 +540,7 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'task.aborted': {
       flushPending();
+      if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       // 用户主动中断：仅清理流式状态（不写错误消息、不改 generating——
       // 停止按钮场景 useTask.abort 已置 false；打断发送场景新流已置 true）
       if (sessionId) {

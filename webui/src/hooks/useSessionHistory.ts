@@ -17,7 +17,7 @@ import type { RefObject } from 'react';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { useStore } from '../store';
-import { pendingAssistant } from '../lib/pending-assistant';
+import { pendingAssistant, pendingRunId } from '../lib/pending-assistant';
 import { flushPending, onStreamResyncNeeded, resetStreamBuffer } from '../lib/stream-buffer';
 import {
   attachLiveDraft,
@@ -26,7 +26,7 @@ import {
   onSessionSnapshot,
   onStreamSettled,
 } from '../lib/ws-events';
-import { diag } from '../lib/diag';
+import { diag, diagAlways } from '../lib/diag';
 import { withRetry } from '../lib/retry';
 import type { VirtualListApi } from '../lib/virtual-list/VirtualList';
 import type { SessionState, TaskMessage } from '../types/api';
@@ -49,6 +49,13 @@ export interface UseSessionHistoryResult {
 
 /** 首屏空结果重试间隔：等待后端把 task.stream 的 user 消息持久化到内存会话 */
 const FIRST_PAGE_RETRY_DELAY_MS = 250;
+
+/** 生成态看门狗轮询间隔（ms）：仅在本地处于「生成中」时运行 */
+const WATCHDOG_INTERVAL_MS = 15_000;
+/** 宽限期（ms）：发送后「前端已点亮、后端尚未注册 run」存在竞态，期内不做任何降级判定 */
+const WATCHDOG_GRACE_MS = 20_000;
+/** 连续 N 次读到后端「非运行」才判定终态事件丢失（防止单次抖动误收尾） */
+const WATCHDOG_FALSE_STREAK = 2;
 
 export function useSessionHistory(
   taskId: string,
@@ -385,6 +392,78 @@ export function useSessionHistory(
       unsubInvalidated();
     };
   }, [taskId, catchUpTail, reconcileFromState, reload]);
+
+  // ==========================================================================
+  // 生成态看门狗：把「永久卡在响应中」变成「最多 ~30s 自愈」
+  //
+  // 背景：running（前端 generatingBySession）只由权威信号写入，其中终态事件是唯一收敛点。
+  // 一旦终态事件丢失（连接抖动 / 旧 run 迟到 / 后端崩溃重启），前端会永久停在「响应中」，
+  // 只能手动刷新。本看门狗在「本地生成中」时周期向 /state 对账，后端已非运行即强制收尾。
+  //
+  // 保守性（避免误伤刚发出去的新 run）：
+  //   ① 只在本地 generating===true 时运行；
+  //   ② 发送后 20s 宽限期内不做任何判定（避开「前端已点亮、后端尚未注册 run」竞态）；
+  //   ③ 需连续 2 次读到 running===false 才收尾。
+  // ==========================================================================
+  const isGenerating = useStore((s) => s.generatingBySession[taskId] ?? false);
+  useEffect(() => {
+    if (!taskId || !isGenerating) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let falseStreak = 0;
+    const startedAt = Date.now();
+
+    const tick = async (): Promise<void> => {
+      if (disposed) return;
+      if (useStore.getState().generatingBySession[taskId] !== true) return;
+      if (Date.now() - startedAt < WATCHDOG_GRACE_MS) return;
+      let running: boolean;
+      try {
+        const state = await api.getSessionState(taskId);
+        if (disposed) return;
+        running = state.running;
+      } catch {
+        // /state 不可用（后端重启窗口）：保持现状，下个周期再试
+        return;
+      }
+      if (running) {
+        falseStreak = 0;
+        return;
+      }
+      falseStreak++;
+      if (falseStreak < WATCHDOG_FALSE_STREAK) return;
+      // 后端权威态已非运行，本地仍「生成中」= 终态事件丢失 → 强制收敛
+      diagAlways('generation-watchdog-recover', { sessionId: taskId, waitedMs: Date.now() - startedAt });
+      await catchUpTail(taskId, true);
+      if (disposed) return;
+      const st = useStore.getState();
+      st.finalizeStreamingMessages(taskId);
+      st.setGenerating(taskId, false);
+      pendingAssistant.delete(taskId);
+      pendingRunId.delete(taskId);
+    };
+
+    const schedule = (): void => {
+      timer = setTimeout(() => {
+        void tick().finally(() => {
+          if (!disposed) schedule();
+        });
+      }, WATCHDOG_INTERVAL_MS);
+    };
+    schedule();
+
+    // 回前台立即对账一次（后台期间定时器被节流，回来时尽快恢复）
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [taskId, isGenerating, catchUpTail]);
 
   // ==========================================================================
   // WS 重连：重新对齐（覆盖断线期间错过的消息 / 草稿推进 / 运行态变化）

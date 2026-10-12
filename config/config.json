@@ -19,6 +19,7 @@
     "defaultModel": "deepseek-chat",
     "maxTokens": 8192,
     "maxTurns": 0,
+    "llmStreamIdleTimeoutMs": 900000,
     "workingDirectory": ""
   },
   "context": {

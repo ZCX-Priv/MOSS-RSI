@@ -14,6 +14,16 @@ export function diag(name: string, detail?: DiagDetail): void {
   console.debug(`[moss-diag] ${name}`, detail ?? {});
 }
 
+/**
+ * 异常路径专用打点：生产构建也输出（console.warn）。
+ * 仅在状态机异常时触发（分片丢弃 / 终态 runId 不一致 / 看门狗自愈），低频且不污染正常日志；
+ * 目的是让用户在构建产物上也能现场取证（`diag` 在 production 被常量折叠剔除，导致此前无任何线索）。
+ */
+export function diagAlways(name: string, detail?: DiagDetail): void {
+  // eslint-disable-next-line no-console -- 诊断通道
+  console.warn(`[moss-diag] ${name}`, detail ?? {});
+}
+
 /** 计数器型打点：同名事件聚合计数（高频路径避免刷屏，单次输出计数） */
 const counters = new Map<string, number>();
 export function diagCount(name: string, detail?: DiagDetail): void {
