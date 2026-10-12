@@ -238,6 +238,25 @@ export function useTask() {
     finalizeStreamingMessages(sid);
   }, [setGenerating, finalizeStreamingMessages]);
 
+  /** 编辑队列消息：移出队列并把内容（含附件）回填到消息发送框，供用户继续编辑后发送 */
+  const editQueuedMessage = useCallback((sessionId: string, messageId: string) => {
+    const item = useStore.getState().takeFromMessageQueue(sessionId, messageId);
+    if (!item) return;
+    useStore.getState().injectComposer(item.content, item.attachments);
+  }, []);
+
+  /** 中断发送：移出队列 → 中断当前运行 → 立即发送该消息（不等待本轮结束） */
+  const sendQueuedNow = useCallback(
+    async (sessionId: string, messageId: string) => {
+      const item = useStore.getState().takeFromMessageQueue(sessionId, messageId);
+      if (!item) return;
+      // 先 abort（同步把生成态置 false），再发送，避免 sendMessage 再次进入排队分支
+      abort(sessionId);
+      await sendMessage(item.content, { taskId: sessionId, attachments: item.attachments });
+    },
+    [abort, sendMessage],
+  );
+
   const replyAsk = useCallback(
     (toolCallId: string, outcome: AskOutcome) => {
       const ask = useStore.getState().pendingAsks.find((a) => a.toolCallId === toolCallId);
@@ -266,5 +285,5 @@ export function useTask() {
     [removePendingConfirm],
   );
 
-  return { sendMessage, abort, replyAsk, replyConfirm };
+  return { sendMessage, abort, replyAsk, replyConfirm, editQueuedMessage, sendQueuedNow };
 }

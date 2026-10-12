@@ -18,7 +18,7 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { useStore } from '../store';
 import { pendingAssistant, pendingRunId } from '../lib/pending-assistant';
-import { flushPending, onStreamResyncNeeded, resetStreamBuffer } from '../lib/stream-buffer';
+import { flushPending, finishResync, onStreamResyncNeeded, resetStreamBuffer } from '../lib/stream-buffer';
 import {
   attachLiveDraft,
   fetchTailPages,
@@ -85,8 +85,25 @@ export function useSessionHistory(
       useStore.getState().setSyncing(sessionId, true);
       try {
         flushPending();
-        const meta = useStore.getState().historyMetaBySession[sessionId];
-        const after = meta?.newestIndex ?? -1;
+        const st = useStore.getState();
+        // 关键：在发起网络拉取**之前**快照「当前仍在本轮流式的消息 id」。
+        // dropStreaming 只允许丢这些（即刚结束那一轮留下的草稿）；拉取期间新一轮若已开始流式，
+        // 其消息不在快照内 → 必被保留，避免「新轮内容被整体清空 → 缺口连锁丢流」。
+        const streamingBeforeFetch = (st.messagesBySession[sessionId] ?? [])
+          .filter((m) => m.streaming)
+          .map((m) => m.id);
+        const meta = st.historyMetaBySession[sessionId];
+        let after = meta?.newestIndex ?? -1;
+        if (!meta) {
+          // 游标尚未建立（首屏竞态）：用本地已有消息的最大服务端下标兜底，
+          // 避免 after=-1 把「全部历史」当成增量再拉回一次（与本地已有消息拼接会破坏顺序，
+          // 也是「最新先到就显示在最前」的诱因之一）。
+          let maxIdx = -1;
+          for (const m of st.messagesBySession[sessionId] ?? []) {
+            if (typeof m.historyIndex === 'number' && m.historyIndex > maxIdx) maxIdx = m.historyIndex;
+          }
+          after = maxIdx;
+        }
         const res = await fetchTailPages(sessionId, after);
         if (!res) return;
         if (res.newestIndex <= after && res.messages.length === 0) return;
@@ -100,7 +117,7 @@ export function useSessionHistory(
             newestIndex: Math.max(res.newestIndex, after),
             hasMoreBefore: useStore.getState().historyMetaBySession[sessionId]?.hasMoreBefore ?? false,
           },
-          { dropStreaming },
+          { dropStreaming, dropStreamingIds: streamingBeforeFetch },
         );
       } finally {
         useStore.getState().setSyncing(sessionId, false);
@@ -145,11 +162,16 @@ export function useSessionHistory(
     try {
       state = await withRetry(() => api.getSessionState(sessionId));
     } catch {
+      // 对齐失败也必须释放 resync 冷却标记：否则该消息后续所有缺口分片会被永久暂存丢弃
+      finishResync(sessionId);
       return;
     }
     const st = useStore.getState();
     // 会话已切换：丢弃过期结果（避免污染新会话）
-    if (st.activeSessionId && st.activeSessionId !== sessionId) return;
+    if (st.activeSessionId && st.activeSessionId !== sessionId) {
+      finishResync(sessionId);
+      return;
+    }
 
     // ① 权威运行态（只升不降）：true 直接点亮；false **不降级**——
     //    「本地已发送、后端尚未注册 run」窗口内的 /state 竞态会瞬间熄灭刚点亮的「响应中」。
@@ -196,6 +218,8 @@ export function useSessionHistory(
     if (meta && state.newestIndex > meta.newestIndex) {
       await catchUpTail(sessionId, false);
     }
+    // 对齐动作结束（无论是否带回草稿）：释放 resync 冷却标记，后续缺口仍能再次对齐
+    finishResync(sessionId);
   }, [catchUpTail]);
 
   /** 首屏历史（空结果重试版）：新任务发送后 fetch 可能先于 user 消息持久化到达 → 返回空 */

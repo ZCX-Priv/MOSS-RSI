@@ -3,7 +3,27 @@
 // 运行：bun test webui/src/lib/stream-buffer.test.ts（或根目录 npm test）
 
 import { describe, it, expect } from 'bun:test';
-import { nextChunkSlice } from './stream-buffer';
+import {
+  enqueueTextChunk,
+  finishResync,
+  flushPending,
+  nextChunkSlice,
+  onStreamResyncNeeded,
+  resetStreamBuffer,
+} from './stream-buffer';
+import { useStore } from '../store';
+
+// bun 测试环境无 DOM：为 rAF 兜底（stream-buffer 的 scheduleFlush 会调用它）
+const g = globalThis as unknown as {
+  requestAnimationFrame?: (cb: (t: number) => void) => number;
+  cancelAnimationFrame?: (id: number) => void;
+};
+if (typeof g.requestAnimationFrame !== 'function') {
+  g.requestAnimationFrame = (cb) => setTimeout(() => cb(Date.now()), 16) as unknown as number;
+}
+if (typeof g.cancelAnimationFrame !== 'function') {
+  g.cancelAnimationFrame = (id) => clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
+}
 
 describe('nextChunkSlice', () => {
   it('新消息首片（offset 0，当前长度 0）→ 整段追加', () => {
@@ -51,5 +71,39 @@ describe('nextChunkSlice', () => {
       slice: 'x'.repeat(4),
       resync: false,
     });
+  });
+});
+
+// 缺口对齐的健壮性：不再「一次失败、整轮报废」——冷却窗口内不重复请求，
+// 对齐动作结束（finishResync）后仍能再次发起，保证后续分片有机会被重放而不是永久丢弃。
+describe('缺口对齐（resync 冷却 + 释放）', () => {
+  it('gap 触发一次 resync；冷却内不重复；finishResync 后可再次触发', () => {
+    const sid = `test-resync-${Date.now()}`;
+    let calls = 0;
+    const off = onStreamResyncNeeded(() => {
+      calls++;
+    });
+    useStore.getState().setMessages(sid, []);
+    try {
+      // 首片即缺口（offset 5 > 当前长度 0）→ 请求对齐
+      enqueueTextChunk({ sessionId: sid, messageId: 'm-gap', field: 'content', offset: 5, text: 'abcde' });
+      flushPending();
+      expect(calls).toBe(1);
+
+      // 冷却窗口内再次缺口 → 不重复请求（避免风暴）
+      enqueueTextChunk({ sessionId: sid, messageId: 'm-gap', field: 'content', offset: 6, text: 'f' });
+      flushPending();
+      expect(calls).toBe(1);
+
+      // 一次对齐动作结束 → 释放冷却，后续缺口仍能再次对齐
+      finishResync(sid);
+      enqueueTextChunk({ sessionId: sid, messageId: 'm-gap', field: 'content', offset: 7, text: 'g' });
+      flushPending();
+      expect(calls).toBe(2);
+    } finally {
+      off();
+      useStore.getState().setMessages(sid, []);
+      resetStreamBuffer(sid);
+    }
   });
 });

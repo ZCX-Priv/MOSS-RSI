@@ -76,6 +76,7 @@ async function initLocale() {
 const PERSISTED_KEYS = [
   'moss-working-directory',
   'moss-recent-directories',
+  'moss-recent-dir-aliases',
   'moss-send-shortcut',
   'moss-follow-up-behavior',
   'moss-permission-mode',
@@ -146,6 +147,10 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
     recentDirectories: Array.isArray(data['moss-recent-directories'])
       ? (data['moss-recent-directories'] as string[])
       : undefined,
+    recentDirectoryAliases:
+      data['moss-recent-dir-aliases'] && typeof data['moss-recent-dir-aliases'] === 'object'
+        ? (data['moss-recent-dir-aliases'] as Record<string, string>)
+        : undefined,
     sendShortcut:
       typeof data['moss-send-shortcut'] === 'string'
         ? normalizeShortcut(data['moss-send-shortcut'] as string) || undefined

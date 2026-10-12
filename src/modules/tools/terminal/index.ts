@@ -152,9 +152,6 @@ async function handleRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysSe
       ? `\n${t('tools.terminalInterpreterFallback', { requested: p.interpreter, actual: info.interpreterLabel })}`
       : '';
 
-  // 同步聚焦终端页（前端据此打开/激活终端标签并展开面板）
-  svc.focus(info.id);
-
   const startedAt = Date.now();
   const snap = await filesys.beginTerminalSnapshot(info.cwd);
   try {
@@ -278,7 +275,6 @@ async function handlePersistent(
     const rawTimeout = p.timeout ?? (ctx.toolConfig?.timeout as number | undefined) ?? 30_000;
     const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
 
-    svc.focus(terminalId);
     const snap = await filesys.beginTerminalSnapshot(info.cwd);
     const res = await svc.run(terminalId, command, timeoutMs);
     const workspaceNote = await finishSnapshot(filesys, snap, ctx);

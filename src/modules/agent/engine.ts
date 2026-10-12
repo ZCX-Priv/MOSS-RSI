@@ -237,17 +237,41 @@ export class AgentEngineImpl implements AgentEngine {
     // 只在 run 结束的 catchUpTail 拉历史时才出现（用户症状「响应中很久才有内容」）。
     let currentTurnMessageId = '';
     let currentTurnIndex = 0;
+    /**
+     * 每轮流式分片账本：produced = provider 实际产出；emitted = 实际发出的分片。
+     * 用途：一旦出现「前端只显示响应中、内容最后才整块出现」，可直接从日志判定
+     * 是「后端没发出」（emitted < produced）还是「前端丢流」（emitted == produced 但前端无输出）。
+     */
+    const streamAccount = {
+      produced: { text: 0, thinking: 0, toolArgs: 0 },
+      emitted: { text: 0, thinking: 0, toolArgs: 0 },
+      /** 草稿缺失后按本轮身份重建的次数（>0 说明发生了并发 clear/快照竞态） */
+      draftRebuilt: 0,
+      /** 无轮身份、只能退化裸分片的次数（异常窗口，>0 需排查） */
+      bareFallback: 0,
+    };
+    const resetStreamAccount = (): void => {
+      streamAccount.produced = { text: 0, thinking: 0, toolArgs: 0 };
+      streamAccount.emitted = { text: 0, thinking: 0, toolArgs: 0 };
+      streamAccount.draftRebuilt = 0;
+      streamAccount.bareFallback = 0;
+    };
     /** 取本轮草稿；缺失则重建（无轮身份时返回 null，由调用方退化为裸分片） */
     const draftFor = (sessionId: string): LiveDraft | null => {
       const existing = this.liveDraft.get(sessionId);
       if (existing) return existing;
-      if (!currentTurnMessageId) return null;
+      if (!currentTurnMessageId) {
+        streamAccount.bareFallback++;
+        return null;
+      }
+      streamAccount.draftRebuilt++;
       return this.liveDraft.begin(sessionId, currentTurnMessageId, input.runId, currentTurnIndex);
     };
 
     const emit = (event: AgentEvent): void => {
       switch (event.type) {
         case 'assistant-text': {
+          streamAccount.emitted.text += event.text.length;
           const d = draftFor(event.sessionId);
           if (!d) {
             // 无轮身份（异常窗口）：退化为无 messageId/offset 的裸分片，前端按尾部追加兜底——
@@ -274,6 +298,7 @@ export class AgentEngineImpl implements AgentEngine {
           return;
         }
         case 'assistant-thinking': {
+          streamAccount.emitted.thinking += event.text.length;
           const d = draftFor(event.sessionId);
           if (!d) {
             onEvent({
@@ -298,6 +323,7 @@ export class AgentEngineImpl implements AgentEngine {
           return;
         }
         case 'tool-call-delta': {
+          streamAccount.emitted.toolArgs += event.argumentsDelta.length;
           const d = draftFor(event.sessionId);
           if (!d) {
             onEvent({
@@ -495,6 +521,7 @@ export class AgentEngineImpl implements AgentEngine {
       // 同步给 emit 闭包：草稿若被并发 clear，用该身份重建而不是丢弃分片
       currentTurnMessageId = turnMessageId;
       currentTurnIndex = turn;
+      resetStreamAccount();
 
       // 构建请求：context 引擎每轮流水线（env 保障 → 压缩决策 → 缓存对齐视图）
       // 服务不可用/异常时降级为纯函数 fallback（静态提示 + 视图构建，无压缩）
@@ -561,10 +588,12 @@ export class AgentEngineImpl implements AgentEngine {
           switch (delta.type) {
             case 'text':
               assistantText += delta.text;
+              streamAccount.produced.text += delta.text.length;
               emit({ type: 'assistant-text', sessionId, text: delta.text });
               break;
             case 'thinking':
               assistantThinking += delta.text;
+              streamAccount.produced.thinking += delta.text.length;
               emit({ type: 'assistant-thinking', sessionId, text: delta.text });
               break;
             case 'tool_call': {
@@ -577,6 +606,7 @@ export class AgentEngineImpl implements AgentEngine {
               if (delta.toolCallId) existing.id = delta.toolCallId;
               if (delta.name) existing.name = delta.name;
               existing.args += delta.argumentsDelta;
+              streamAccount.produced.toolArgs += (delta.argumentsDelta ?? '').length;
               toolCallAccumulators.set(delta.index, existing);
 
               // 首次收到该 index：推送 tool-call-start（LLM 开始生成工具调用）
@@ -670,6 +700,35 @@ export class AgentEngineImpl implements AgentEngine {
           });
         }
         pushStats();
+
+        // 每轮流式账本：produced 与 emitted 应当一致；不一致说明后端发不出去（草稿竞态/裸兜底），
+        // 一致却前端无输出则说明前端丢流（对照前端 stream-account 日志定位）。
+        // 降噪：不一致/有兜底 → warn；有思考产出（长思考是本症状主体）→ info；普通轮 → debug。
+        const acct = {
+          sessionId,
+          turn,
+          messageId: currentTurnMessageId,
+          produced: streamAccount.produced,
+          emitted: streamAccount.emitted,
+          draftRebuilt: streamAccount.draftRebuilt,
+          bareFallback: streamAccount.bareFallback,
+          ttftMs: Math.round(ttft),
+          turnMs: Math.round(elapsed),
+          aborted: signal?.aborted === true,
+        };
+        const mismatched =
+          streamAccount.produced.text !== streamAccount.emitted.text ||
+          streamAccount.produced.thinking !== streamAccount.emitted.thinking ||
+          streamAccount.produced.toolArgs !== streamAccount.emitted.toolArgs ||
+          streamAccount.draftRebuilt > 0 ||
+          streamAccount.bareFallback > 0;
+        if (mismatched) {
+          this.logger.warn('agent.turnStreamAccounting', acct);
+        } else if (streamAccount.produced.thinking > 0) {
+          this.logger.info('agent.turnStreamAccounting', acct);
+        } else {
+          this.logger.debug('agent.turnStreamAccounting', acct);
+        }
       }
 
       if (signal?.aborted) {

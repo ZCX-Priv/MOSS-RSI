@@ -361,6 +361,8 @@ export interface MentionEditorHandle {
   setVoiceDraft(text: string): void;
   /** 语音输入：固化草稿（内容保留，清空草稿态） */
   commitVoice(): void;
+  /** 覆盖编辑器内容（「编辑队列消息」回填用）：清空后按 wire 格式写入文本（\n→<br>） */
+  setValue(text: string): void;
 }
 
 interface MentionEditorProps {
@@ -726,6 +728,24 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       commitMention,
       setVoiceDraft,
       commitVoice,
+      setValue: (text: string) => {
+        const root = rootRef.current;
+        if (!root) return;
+        root.innerHTML = '';
+        // 复用语音草稿的建节点逻辑：\n → <br>，保证 wire 口径与文本一致
+        for (const node of buildVoiceNodes(text)) root.appendChild(node);
+        syncFromDom();
+        root.focus();
+        // 光标落到末尾，便于用户直接续写
+        const sel = window.getSelection();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(root);
+          range.collapse(false);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      },
     }),
     [syncFromDom, insertTokenAtCaret, commitMention, setVoiceDraft, commitVoice],
   );

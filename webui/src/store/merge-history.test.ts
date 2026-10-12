@@ -118,6 +118,24 @@ describe('mergeHistory catchup（尾部补齐）', () => {
     expect(after[1].streaming).toBe(false);
   });
 
+  it('dropStreaming + dropStreamingIds：只丢快照内的旧草稿，保留拉取期间新一轮产生的流式消息', () => {
+    const sid = newSession();
+    const st = useStore.getState();
+    // sess#1 = 刚结束那一轮留下的草稿（在快照内 → 可丢）；sess#2 = 拉取期间新一轮已开始流式（不在快照内 → 必留）
+    st.setMessages(sid, [userMsg('u1', 'q'), draft('sess#1', 'a'), draft('sess#2', 'b')]);
+
+    st.mergeHistory(sid, [], 'catchup', {
+      total: 2,
+      oldestIndex: 0,
+      newestIndex: 1,
+      hasMoreBefore: false,
+    }, { dropStreaming: true, dropStreamingIds: ['sess#1'] });
+
+    const after = useStore.getState().messagesBySession[sid]!;
+    expect(after.map((m) => m.id)).toEqual(['u1', 'sess#2']);
+    expect(after[1].streaming).toBe(true);
+  });
+
   it('dropStreaming=false（重连对齐）：未确认草稿保留', () => {
     const sid = newSession();
     const st = useStore.getState();
@@ -372,5 +390,73 @@ describe('mergeHistory id 冲突防御（旧格式脏数据兜底）', () => {
     const after = useStore.getState().messagesBySession[sid]!;
     expect(after.map((m) => m.id)).toEqual(['u1', 'sess#9']);
     expect(after[1].content).toBe('完整内容');
+  });
+});
+
+describe('顺序归一（按时间升序；根治「到达顺序」造成的整段倒序）', () => {
+  const t0 = Date.parse('2026-01-01T00:00:00.000Z');
+  const at = (ms: number) => new Date(ms).toISOString();
+  function msg(id: string, ts: number, role: 'user' | 'assistant' = 'assistant'): TaskMessage {
+    return { id, role, content: id, timestamp: at(ts) };
+  }
+
+  it('catchup：base 已是较新消息、rest 为较早历史 → 结果仍按时间升序（不再「新在前」）', () => {
+    const sid = newSession();
+    const st = useStore.getState();
+    // 模拟：最新的流式草稿先到（base = [最新]）
+    st.setMessages(sid, [msg('draft-new', t0 + 3000)]);
+    // 随后才拉回较早历史（rest = 较早两段）
+    st.mergeHistory(sid, [msg('h1', t0), msg('h2', t0 + 1000)], 'catchup', {
+      total: 3,
+      oldestIndex: 0,
+      newestIndex: 2,
+      hasMoreBefore: false,
+    });
+    const after = useStore.getState().messagesBySession[sid]!;
+    expect(after.map((m) => m.id)).toEqual(['h1', 'h2', 'draft-new']);
+  });
+
+  it('addMessage：先入较新、再入较早 → 顺序按时间升序', () => {
+    const sid = newSession();
+    const st = useStore.getState();
+    st.addMessage(sid, msg('newer', t0 + 2000));
+    st.addMessage(sid, msg('older', t0 + 1000));
+    const after = useStore.getState().messagesBySession[sid]!;
+    expect(after.map((m) => m.id)).toEqual(['older', 'newer']);
+  });
+
+  it('tail：较早的 localOnly（interrupted）按时间归位，不再被追加到末尾', () => {
+    const sid = newSession();
+    const st = useStore.getState();
+    st.setMessages(sid, [
+      { ...msg('stale', t0 + 1000), interrupted: true },
+      msg('live', t0 + 5000),
+    ]);
+    // 服务端末页含两条正式消息（其中 h2 晚于 stale）
+    st.mergeHistory(sid, [msg('h1', t0), msg('h2', t0 + 2000)], 'tail', {
+      total: 3,
+      oldestIndex: 0,
+      newestIndex: 2,
+      hasMoreBefore: false,
+    });
+    const after = useStore.getState().messagesBySession[sid]!;
+    expect(after.map((m) => m.id)).toEqual(['h1', 'stale', 'h2']);
+  });
+
+  it('非法/缺失 timestamp 不抛错、顺序稳定（非法视为最早）', () => {
+    const sid = newSession();
+    const st = useStore.getState();
+    st.setMessages(sid, [
+      { id: 'x', role: 'user', content: 'x', timestamp: 'not-a-date' },
+      { id: 'y', role: 'user', content: 'y', timestamp: at(t0) },
+    ]);
+    st.mergeHistory(sid, [], 'catchup', {
+      total: 2,
+      oldestIndex: 0,
+      newestIndex: 1,
+      hasMoreBefore: false,
+    });
+    const after = useStore.getState().messagesBySession[sid]!;
+    expect(after.map((m) => m.id)).toEqual(['x', 'y']);
   });
 });

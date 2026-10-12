@@ -152,6 +152,11 @@ export function TaskInput({
   const workingDirectory = useStore((s) => s.workingDirectory);
   const setWorkingDirectory = useStore((s) => s.setWorkingDirectory);
   const recentDirectories = useStore((s) => s.recentDirectories);
+  /** 最近使用目录的自定义显示名（path → alias） */
+  const recentDirectoryAliases = useStore((s) => s.recentDirectoryAliases);
+  /** 输入框回填通道（「编辑队列消息」用） */
+  const composerInjection = useStore((s) => s.composerInjection);
+  const clearComposerInjection = useStore((s) => s.clearComposerInjection);
   const sendShortcut = useStore((s) => s.sendShortcut);
   const skills = useStore((s) => s.skills);
   const commands = useStore((s) => s.commands);
@@ -253,6 +258,32 @@ export function TaskInput({
   const lastSubmitRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
   /** 触发状态镜像（避免在 setState 更新器里做副作用） */
   const triggerRef = useRef<TriggerMatch | null>(null);
+  /** 已消费的回填序号（去重：同一 seq 只回填一次） */
+  const lastInjectionSeqRef = useRef(0);
+
+  // 「编辑队列消息」回填：文本写入编辑器 + 恢复其附件（消费后清空回填通道）
+  useEffect(() => {
+    if (!composerInjection || composerInjection.seq === lastInjectionSeqRef.current) return;
+    lastInjectionSeqRef.current = composerInjection.seq;
+    editorRef.current?.setValue(composerInjection.text);
+    const inject = composerInjection.attachments;
+    if (inject && inject.length > 0) {
+      setAttachments((prev) => {
+        const existing = new Set(prev.map((a) => a.path));
+        const added = inject
+          .filter((p) => !existing.has(p))
+          .map((p, i) => ({
+            id: `inject-${composerInjection.seq}-${i}-${p}`,
+            path: p,
+            name: p.split(/[\\/]/).filter(Boolean).pop() ?? p,
+            size: 0,
+            kind: getAttachmentKind(p, ''),
+          }));
+        return added.length > 0 ? [...prev, ...added] : prev;
+      });
+    }
+    clearComposerInjection();
+  }, [composerInjection, clearComposerInjection]);
 
   // ---- / 菜单数据源：commands + skills + 最近使用（localStorage） ----
   const recentRef = useRef(readRecentCommands());
@@ -691,10 +722,14 @@ export function TaskInput({
               {recentDirectories.length > 0 && (
                 <div className="max-h-[10.5rem] overflow-y-auto pr-1">
                   {recentDirectories.map((dir) => (
-                    <div key={dir}>
-                      {renderDirItem(dirName(dir), dir, () => setWorkingDirectory(dir))}
-                    </div>
-                  ))}
+                      <div key={dir}>
+                        {renderDirItem(
+                          recentDirectoryAliases[dir]?.trim() || dirName(dir),
+                          dir,
+                          () => setWorkingDirectory(dir),
+                        )}
+                      </div>
+                    ))}
                 </div>
               )}
               <DropdownMenuSeparator className="mx-2" />

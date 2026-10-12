@@ -41,25 +41,20 @@ export function handleTerminalMessage(msg: WSMessage): boolean {
     case 'terminal.created': {
       const p = (msg.payload ?? {}) as TerminalCreatedPayload;
       const term = p.terminal;
-      if (term) {
-        s.addTerminal(term);
-        // AI 新建终端 → 自动同步展示（仅当属于当前展示的会话作用域，避免抢占其他会话视图）
-        const displayedTask = displayedTaskKey(s);
-        if (term.creator === 'ai' && term.sessionId === terminalScopeOf(displayedTask)) {
-          s.focusTerminalTab(displayedTask);
-        }
-      }
+      // 仅登记元数据（含 AI 新建终端）：**绝不自动展开右侧面板 / 切换标签**。
+      // 终端面板一律由用户手动打开（右侧「+」菜单 / 「开始」面板），尊重用户操作。
+      if (term) s.addTerminal(term);
       return true;
     }
     case 'terminal.focus': {
-      // 服务端在 AI 每次执行命令时广播：确保终端页可见并切到该终端
+      // 服务端广播「正在使用的终端」：仅记录应展示的终端 id，不打开面板、不切换标签。
+      // 用户手动打开终端页时，展示的就是这里记录的最新活跃终端。
       const p = (msg.payload ?? {}) as { terminalId?: string; sessionId?: string };
       if (!p.terminalId) return true;
       const displayedTask = displayedTaskKey(s);
       const scope = terminalScopeOf(displayedTask);
-      // 非当前展示会话的终端不抢焦点
+      // 非当前展示会话的终端不抢占活跃项
       if (p.sessionId && p.sessionId !== scope) return true;
-      s.focusTerminalTab(displayedTask);
       s.setActiveTerminal(scope, p.terminalId);
       return true;
     }

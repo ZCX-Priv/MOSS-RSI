@@ -576,8 +576,12 @@ export function VirtualList<T>({
 
   // ===== 渲染 =====
   const prefix = prefixRef.current;
-  const topSpacer = prefix[range.start] ?? 0;
-  const bottomSpacer = Math.max(0, (prefix[prefix.length - 1] ?? 0) - (prefix[range.end] ?? 0));
+  // 钳制渲染区间：items 缩短（会话切换 / 数据回退）时 range 可能残留上一轮的旧值，
+  // 直接 slice 会切到错误区间（错位/空白）。统一夹紧到 [0, items.length]，并保证 start ≤ end。
+  const rangeStart = Math.max(0, Math.min(range.start, items.length));
+  const rangeEnd = Math.max(rangeStart, Math.min(range.end, items.length));
+  const topSpacer = prefix[rangeStart] ?? 0;
+  const bottomSpacer = Math.max(0, (prefix[prefix.length - 1] ?? 0) - (prefix[rangeEnd] ?? 0));
 
   return (
     <div
@@ -589,8 +593,8 @@ export function VirtualList<T>({
     >
       {header}
       <div style={{ height: topSpacer }} aria-hidden="true" />
-      {items.slice(range.start, range.end).map((item, i) => {
-        const index = range.start + i;
+      {items.slice(rangeStart, rangeEnd).map((item, i) => {
+        const index = rangeStart + i;
         const key = itemKey(item);
         const inViewport = index >= visibleRange.start && index < visibleRange.end;
         return (

@@ -16,10 +16,13 @@ import { api } from '../api/http';
 import { pendingAssistant, pendingRunId } from './pending-assistant';
 import { handleTerminalMessage } from './terminal-events';
 import {
-  clearResyncMark,
+  dumpStreamAccounting,
   enqueueTextChunk,
   enqueueToolArgsChunk,
+  finishResync,
   flushPending,
+  noteStreamReceived,
+  noteStreamRunIdDrop,
   replayPendingAfterResync,
   seedStreamLength,
 } from './stream-buffer';
@@ -62,6 +65,11 @@ const AGENT_STREAM_EVENT_TYPES = new Set([
 /** 终态事件：不参与 runId 过滤（收敛点不可丢） */
 const AGENT_TERMINAL_EVENT_TYPES = new Set([
   'done', 'task.done', 'task.aborted', 'error',
+]);
+
+/** 高频流式分片类型：仅这些计入前端分片账本的 received 计数 */
+const STREAM_CHUNK_TYPES = new Set([
+  'assistant-text', 'assistant-thinking', 'tool-call-delta',
 ]);
 
 /** 读取事件的 runId（agent 事件 payload 顶层） */
@@ -196,9 +204,9 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
 
   seedStreamLength(sessionId, draft.messageId, 'content', draft.contentLength);
   seedStreamLength(sessionId, draft.messageId, 'thinking', draft.thinkingLength);
-  // 对齐完成：清除 resync 一次性标记（后续缺口可再次触发对齐），
+  // 对齐完成：释放 resync 冷却标记（后续缺口可再次触发对齐），
   // 并重放暂存的缺口分片（按新长度自然去重，超出部分正常续接）
-  clearResyncMark(sessionId);
+  finishResync(sessionId);
   replayPendingAfterResync(sessionId);
   if (streaming) pendingAssistant.set(sessionId, { ...msg, streaming: true });
 }
@@ -221,9 +229,12 @@ export function applyWsMessage(msg: WSMessage): void {
     const eventRunId = eventRunIdOf(msg);
     const currentRunId = pendingRunId.get(sessionId);
     if (eventRunId && currentRunId && eventRunId !== currentRunId) {
+      noteStreamRunIdDrop(sessionId);
       diagAlways('stream-runid-drop', { type: msg.type, eventRunId, currentRunId, sessionId });
       return;
     }
+    // 账本：先记「收到」（后续是否被 store 应用/丢弃由 stream-buffer 归因）
+    if (STREAM_CHUNK_TYPES.has(msg.type)) noteStreamReceived(sessionId);
   }
   const terminalRunIdMismatch =
     sessionId !== '' &&
@@ -888,6 +899,12 @@ export function applyWsMessage(msg: WSMessage): void {
     default:
       // 未知消息类型忽略
       break;
+  }
+
+  // 一轮结束（终态事件）：输出本轮前端分片账本并清零。
+  // 判定口径：received==0 → 后端没发/WS 没到；received>0 且 applied==0 → 前端丢流（看 dropped* 归因）。
+  if (sessionId && AGENT_TERMINAL_EVENT_TYPES.has(msg.type) && !terminalRunIdMismatch) {
+    dumpStreamAccounting(sessionId);
   }
 }
 

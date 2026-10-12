@@ -32,6 +32,8 @@ import {
   Zap,
   Inbox,
   Users,
+  SquarePen,
+  ArrowUp,
 } from 'lucide-react';
 import {
   Dialog,
@@ -467,7 +469,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const resetSidebarTabs = useStore((s) => s.resetSidebarTabs);
   const convertSidebarTab = useStore((s) => s.convertSidebarTab);
   const toolIconMap = useStore((s) => s.toolIconMap);
-  const { sendMessage, abort } = useTask();
+  const { sendMessage, abort, editQueuedMessage, sendQueuedNow } = useTask();
   // 统一文件预览入口：桌面端 → 右侧边栏标签；移动端 → 仅侧边栏入口走标签，其余走弹层
   const openFilePreview = useOpenFilePreview();
 
@@ -639,6 +641,24 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       (tail.thinking ?? '').trim().length > 0 ||
       (tail.toolCalls?.length ?? 0) > 0);
   const showTailThinking = isGenerating && !tailHasVisibleOutput;
+
+  /**
+   * 「响应中」等待计时：模型长思考（本次实测可达 30–60s）期间显示已等待秒数，
+   * 让「在等模型」可见，避免被误判为卡死；首个分片到达（showTailThinking 转 false）即归零。
+   */
+  const [waitSec, setWaitSec] = useState(0);
+  useEffect(() => {
+    if (!showTailThinking) {
+      setWaitSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setWaitSec(0);
+    const timer = setInterval(() => {
+      setWaitSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [showTailThinking]);
 
   // ===== 右侧面板 Tab 切换状态机 =====
   // 默认"系统"；仅当 LLM 真实读取文件（WS context-updated，read/grep/glob）时自动切到"文件"；
@@ -1268,7 +1288,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 showTailThinking ? (
                   <div className="flex items-center gap-2 px-4 pb-4 text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" />
-                    <span className="text-sm">{t('task.thinking')}</span>
+                    <span className="text-sm">
+                      {waitSec > 0
+                        ? t('task.waitingFirstToken', { sec: waitSec })
+                        : t('task.thinking')}
+                    </span>
                   </div>
                 ) : (
                   <div className="h-2" />
@@ -1286,7 +1310,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               {isGenerating && (
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin" />
-                  <span className="text-sm">{t('task.thinking')}</span>
+                  <span className="text-sm">
+                    {waitSec > 0 ? t('task.waitingFirstToken', { sec: waitSec }) : t('task.thinking')}
+                  </span>
                 </div>
               )}
             </div>
@@ -1512,7 +1538,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                     </div>
                   ),
               },
-              // 队列模块：排队等待发送的消息，仅当队列非空时出现
+              // 队列模块：排队等待发送的消息（合并为一条），仅当队列非空时出现
               ...(messageQueue.length > 0
                 ? [
                     {
@@ -1520,38 +1546,59 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                       icon: Inbox,
                       title: t('hub.queueModule'),
                       badge: messageQueue.length,
-                      render: () => (
-                        <div className="flex flex-col gap-2">
-                          {messageQueue.map((msg) => (
-                            <div
-                              key={msg.id}
-                              className="group flex items-start gap-2 rounded-lg border border-border bg-muted/30 p-2"
-                            >
-                              <Inbox className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                                <span className="truncate text-xs text-foreground">
-                                  {stripMentionTokens(
-                                    stripAttachmentBlock(stripInjectBlock(msg.content)),
-                                    lookups,
-                                  ) ||
-                                    (msg.attachments?.[0] ? fileNameOf(msg.attachments[0]) : msg.content)}
-                                </span>
-                                <span className="text-[10px] text-muted-foreground">
-                                  {new Date(msg.timestamp).toLocaleTimeString()}
-                                </span>
+                      render: () => {
+                        const queued = messageQueue[0];
+                        if (!queued) return null;
+                        const text =
+                          stripMentionTokens(
+                            stripAttachmentBlock(stripInjectBlock(queued.content)),
+                            lookups,
+                          ) ||
+                          (queued.attachments?.[0] ? fileNameOf(queued.attachments[0]) : queued.content);
+                        const iconBtn =
+                          'flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground';
+                        return (
+                          <div className="flex flex-col gap-2">
+                            {/* 头行：图标 + 计数 + 右侧三键（编辑 / 删除 / 中断发送） */}
+                            <div className="flex items-center gap-2">
+                              <Inbox className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-[11px] font-semibold text-foreground">
+                                {messageQueue.length}
+                              </span>
+                              <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => editQueuedMessage(taskId, queued.id)}
+                                  className={iconBtn}
+                                  title={t('hub.editQueued')}
+                                >
+                                  <SquarePen className="size-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeFromMessageQueue(taskId, queued.id)}
+                                  className={iconBtn}
+                                  title={t('hub.deleteQueued')}
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void sendQueuedNow(taskId, queued.id)}
+                                  className={iconBtn}
+                                  title={t('hub.sendQueuedNow')}
+                                >
+                                  <ArrowUp className="size-3.5" />
+                                </button>
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => removeFromMessageQueue(taskId, msg.id)}
-                                className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-                                title={t('hub.removeFromQueue')}
-                              >
-                                <X className="size-3.5" />
-                              </button>
                             </div>
-                          ))}
-                        </div>
-                      ),
+                            {/* 正文：合并后的完整内容（换行 + 分隔符已保留） */}
+                            <div className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted/30 p-2 text-xs leading-relaxed text-foreground">
+                              {text}
+                            </div>
+                          </div>
+                        );
+                      },
                     },
                   ]
                 : []),
@@ -2228,7 +2275,23 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       )}
       {/* thinking 折叠区 */}
       {message.thinking && (
-        <details className="group">
+        <details
+          className="group"
+          // 流式中自动展开思考内容（长思考可见，避免「一片响应中」的错觉）；
+          // 用户一旦手动折叠，本次流式内不再强制展开（data-user-collapsed 标记，流式结束后复位）。
+          ref={(el) => {
+            if (!el) return;
+            if (!message.thinkingStreaming) {
+              el.dataset.userCollapsed = '';
+              return;
+            }
+            if (el.dataset.userCollapsed !== '1' && !el.open) el.open = true;
+          }}
+          onToggle={(e) => {
+            const el = e.currentTarget;
+            if (message.thinkingStreaming && !el.open) el.dataset.userCollapsed = '1';
+          }}
+        >
           <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
             <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
             {message.thinkingStreaming ? (

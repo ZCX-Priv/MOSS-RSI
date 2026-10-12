@@ -10,8 +10,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ArrowLeft,
-  ArrowRight,
   ArrowUp,
   Folder,
   HardDrive,
@@ -27,16 +25,32 @@ import {
   FileText,
   Download,
   FolderOpen,
+  MoreHorizontal,
+  Pencil,
+  PencilLine,
+  Trash2,
+  PanelLeft,
 } from 'lucide-react';
 import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
+import { cn } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { FileTypeIcon } from '@/components/shared/FileTypeIcon';
 import { useStore } from '@/store';
 import { api } from '@/api/http';
@@ -131,6 +145,17 @@ function suggestIcon(kind: SuggestPathKind) {
 export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBrowserDialogProps) {
   const { t } = useTranslation();
   const recentDirectories = useStore((s) => s.recentDirectories);
+  const recentDirectoryAliases = useStore((s) => s.recentDirectoryAliases);
+  const renameRecentDirectory = useStore((s) => s.renameRecentDirectory);
+  const updateRecentDirectoryPath = useStore((s) => s.updateRecentDirectoryPath);
+  const removeRecentDirectory = useStore((s) => s.removeRecentDirectory);
+
+  /** 最近使用的管理弹窗（重命名别名 / 修改路径 / 删除） */
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [editPathTarget, setEditPathTarget] = useState<string | null>(null);
+  const [editPathValue, setEditPathValue] = useState('');
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   const [view, setView] = useState<BrowserView>('drives');
   const [drives, setDrives] = useState<DriveInfo[]>([]);
@@ -143,9 +168,10 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('name');
   const [sortAsc, setSortAsc] = useState(true);
-  /** 目录历史（后退/前进） */
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
+  /** 目录侧栏展开态：移动端默认收起（抽屉覆盖），桌面端默认展开 */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** 移动端判定（抽屉覆盖模式） */
+  const isMobile = useIsMobile();
 
   const sep: Sep = listing?.sep ?? (navigator.userAgent.includes('Windows') ? '\\' : '/');
 
@@ -178,46 +204,35 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
     }
   }, []);
 
-  /** 加载目录；push=true 时记录历史 */
-  const loadDirectory = useCallback(
-    async (path: string, push = true) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const resp = await api.listDirectory(path);
-        setListing(resp);
-        setView('dir');
-        setSelectedPath(null);
-        setNameInput(baseName(resp.path));
-        setSearch('');
-        if (push) {
-          setHistory((h) => {
-            const next = h.slice(0, historyIndex + 1);
-            next.push(resp.path);
-            setHistoryIndex(next.length - 1);
-            return next;
-          });
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [historyIndex],
-  );
+  /** 加载目录（不再维护前进/后退历史栈） */
+  const loadDirectory = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await api.listDirectory(path);
+      setListing(resp);
+      setView('dir');
+      setSelectedPath(null);
+      setNameInput(baseName(resp.path));
+      setSearch('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   // 打开时重置到「此电脑」并载入磁盘 + 常用位置
   useEffect(() => {
     if (!open) return;
-    setHistory([]);
-    setHistoryIndex(-1);
+    // 每次打开按断点重置侧栏默认态（移动端收起 / 桌面端展开）
+    setSidebarOpen(!isMobile);
     void loadDrives();
     setView('drives');
     api.suggestPaths()
       .then((r) => setSuggestions(r.paths))
       .catch(() => setSuggestions([]));
-  }, [open, loadDrives]);
+  }, [open, isMobile, loadDrives]);
 
   const goDrives = useCallback(() => {
     setView('drives');
@@ -228,31 +243,13 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
     setError(null);
   }, []);
 
-  const goBack = useCallback(() => {
-    if (historyIndex <= 0) return;
-    const idx = historyIndex - 1;
-    setHistoryIndex(idx);
-    void loadDirectory(history[idx], false);
-  }, [history, historyIndex, loadDirectory]);
-
-  const goForward = useCallback(() => {
-    if (historyIndex >= history.length - 1) return;
-    const idx = historyIndex + 1;
-    setHistoryIndex(idx);
-    void loadDirectory(history[idx], false);
-  }, [history, historyIndex, loadDirectory]);
-
   const goUp = useCallback(() => {
     if (view === 'drives' || !listing) return;
     if (listing.parent) void loadDirectory(listing.parent);
     else goDrives();
   }, [view, listing, loadDirectory, goDrives]);
 
-  const [canBack, canForward, canUp] = [
-    historyIndex > 0,
-    historyIndex < history.length - 1,
-    view === 'dir' && !!listing && !loading,
-  ];
+  const canUp = view === 'dir' && !!listing && !loading;
 
   /** 排序 + 搜索过滤后的条目 */
   const rows = useMemo<DirectoryEntry[]>(() => {
@@ -319,27 +316,91 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
     sortKey === key ? (sortAsc ? ' ▲' : ' ▼') : '';
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent size="xl" className="h-[72dvh] max-h-[72dvh]">
+      <DialogContent
+        // 移动端：全屏铺满（无圆角、无最大宽度）；桌面端：固定高度居中卡片
+        className="h-[100dvh] max-h-[100dvh] w-full max-w-none rounded-none sm:h-[72dvh] sm:max-h-[72dvh] sm:max-w-5xl sm:rounded-xl"
+      >
         <DialogHeader>
           <DialogTitle>{t('directoryPicker.browseTitle')}</DialogTitle>
         </DialogHeader>
-        <DialogBody className="flex-row gap-0 overflow-hidden p-0">
-          {/* 左栏 */}
-          <aside className="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto border-r border-border p-2">
+        <DialogBody className="relative flex-row gap-0 overflow-hidden p-0">
+          {/* 移动端遮罩：点击后收起目录抽屉 */}
+          {sidebarOpen && (
+            <div
+              className="absolute inset-0 z-20 bg-black/40 sm:hidden"
+              aria-hidden="true"
+              onClick={() => setSidebarOpen(false)}
+            />
+          )}
+          {/* 位置栏：桌面端为可收起左列；移动端为内嵌左滑抽屉。
+              纯 div 实现（不用 Sheet），避免与主页面侧边栏抽屉冲突。 */}
+          <aside
+            className={cn(
+              'flex-col gap-3 overflow-y-auto border-border p-2',
+              'max-sm:absolute max-sm:inset-y-0 max-sm:left-0 max-sm:z-30 max-sm:w-64 max-sm:max-w-[80%] max-sm:border-r max-sm:bg-card max-sm:shadow-lg',
+              'sm:w-56 sm:shrink-0 sm:border-r',
+              sidebarOpen ? 'flex' : 'hidden',
+            )}
+          >
             <NavGroup title={t('directoryPicker.quickAccess')}>
               {recentDirectories.length === 0 ? (
                 <div className="px-2 py-1 text-[11px] text-muted-foreground">{t('directoryPicker.noRecent')}</div>
               ) : (
-                recentDirectories.map((dir) => (
-                  <NavItem
-                    key={dir}
-                    icon={<Folder className="size-4 shrink-0 text-primary-strong" />}
-                    label={baseName(dir)}
-                    title={dir}
-                    onClick={() => void loadDirectory(dir)}
-                  />
-                ))
+                recentDirectories.map((dir) => {
+                  const alias = recentDirectoryAliases[dir]?.trim();
+                  return (
+                    <div key={dir} className="group flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        title={dir}
+                        onClick={() => void loadDirectory(dir)}
+                        className="flex min-w-0 flex-1 items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
+                      >
+                        <Folder className="size-4 shrink-0 text-primary-strong" />
+                        <span className="min-w-0 flex-1 truncate">{alias || baseName(dir)}</span>
+                      </button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            title={t('directoryPicker.recentManage')}
+                            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100 focus:opacity-100 data-[state=open]:opacity-100"
+                          >
+                            <MoreHorizontal className="size-3.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8}>
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              setRenameValue(alias ?? '');
+                              setRenameTarget(dir);
+                            }}
+                            className="gap-2 text-xs"
+                          >
+                            <Pencil className="size-3.5 shrink-0 text-muted-foreground" />
+                            {t('directoryPicker.recentRename')}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              setEditPathValue(dir);
+                              setEditPathTarget(dir);
+                            }}
+                            className="gap-2 text-xs"
+                          >
+                            <PencilLine className="size-3.5 shrink-0 text-muted-foreground" />
+                            {t('directoryPicker.recentEditPath')}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => setRemoveTarget(dir)} className="gap-2 text-xs text-destructive">
+                            <Trash2 className="size-3.5 shrink-0" />
+                            {t('directoryPicker.recentRemove')}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  );
+                })
               )}
             </NavGroup>
 
@@ -383,11 +444,15 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
           <div className="flex min-w-0 flex-1 flex-col">
             {/* 工具条 */}
             <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-2">
-              <Button variant="ghost" size="icon-sm" title={t('directoryPicker.back')} disabled={!canBack} onClick={goBack}>
-                <ArrowLeft className="size-4" />
-              </Button>
-              <Button variant="ghost" size="icon-sm" title={t('directoryPicker.forward')} disabled={!canForward} onClick={goForward}>
-                <ArrowRight className="size-4" />
+              {/* 目录侧栏展开/收起（位于「上一级」左侧） */}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title={t('directoryPicker.toggleSidebar')}
+                aria-pressed={sidebarOpen}
+                onClick={() => setSidebarOpen((v) => !v)}
+              >
+                <PanelLeft className="size-4" />
               </Button>
               <Button variant="ghost" size="icon-sm" title={t('directoryPicker.up')} disabled={!canUp} onClick={goUp}>
                 <ArrowUp className="size-4" />
@@ -536,7 +601,7 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
           </div>
         </DialogBody>
 
-        <DialogFooter className="items-center justify-between sm:justify-between">
+        <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <span className="shrink-0 text-xs text-muted-foreground">{t('directoryPicker.filename')}</span>
             <input
@@ -549,17 +614,107 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
               }}
             />
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center justify-end gap-2">
             <Button variant="outline" onClick={onClose}>{t('directoryPicker.cancel')}</Button>
             <Button disabled={!canSelect} onClick={confirm}>{t('directoryPicker.selectFolderBtn')}</Button>
           </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    {/* 「最近使用」管理：重命名（自定义别名） */}
+    <Dialog open={renameTarget !== null} onOpenChange={(v) => !v && setRenameTarget(null)}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>{t('directoryPicker.recentRename')}</DialogTitle>
+          <DialogDescription>{t('directoryPicker.recentRenameDesc')}</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <Input
+            value={renameValue}
+            autoFocus
+            placeholder={t('directoryPicker.recentRenamePlaceholder')}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              if (renameTarget) renameRecentDirectory(renameTarget, renameValue);
+              setRenameTarget(null);
+            }}
+          />
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setRenameTarget(null)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              if (renameTarget) renameRecentDirectory(renameTarget, renameValue);
+              setRenameTarget(null);
+            }}
+          >
+            {t('common.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* 「最近使用」管理：修改路径 */}
+    <Dialog open={editPathTarget !== null} onOpenChange={(v) => !v && setEditPathTarget(null)}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>{t('directoryPicker.recentEditPath')}</DialogTitle>
+          <DialogDescription>{t('directoryPicker.recentEditPathDesc')}</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <Input
+            value={editPathValue}
+            autoFocus
+            className="font-mono"
+            placeholder={t('directoryPicker.recentPathPlaceholder')}
+            onChange={(e) => setEditPathValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              if (editPathTarget) updateRecentDirectoryPath(editPathTarget, editPathValue);
+              setEditPathTarget(null);
+            }}
+          />
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setEditPathTarget(null)}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              if (editPathTarget) updateRecentDirectoryPath(editPathTarget, editPathValue);
+              setEditPathTarget(null);
+            }}
+          >
+            {t('common.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* 「最近使用」管理：删除（仅移出列表，不动磁盘目录） */}
+    <ConfirmDialog
+      open={removeTarget !== null}
+      title={t('directoryPicker.recentRemove')}
+      description={t('directoryPicker.recentRemoveConfirm', { path: removeTarget ?? '' })}
+      destructive
+      confirmText={t('common.delete')}
+      onConfirm={() => {
+        if (removeTarget) removeRecentDirectory(removeTarget);
+        setRemoveTarget(null);
+      }}
+      onOpenChange={(o) => !o && setRemoveTarget(null)}
+    />
+    </>
   );
 }
 
-/** 左栏分组 */
+/** 位置分组（竖排：标题在上、项在下；抽屉与左列共用） */
 function NavGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">

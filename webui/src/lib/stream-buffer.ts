@@ -15,7 +15,7 @@
 
 import { useStore } from '../store';
 import { pendingAssistant } from './pending-assistant';
-import { diag, diagAlways, diagCount } from './diag';
+import { diagAlways, diagCount } from './diag';
 import type { TaskMessage } from '../types/api';
 
 /** 纯函数：依据服务端 offset 计算「本次应追加的片段」 */
@@ -69,8 +69,15 @@ const lengthCache = new Map<string, number>();
 /** resync 请求回调（由会话编排 hook 注册：触发一次尾部增量拉取） */
 type ResyncHandler = (sessionId: string) => void;
 const resyncHandlers = new Set<ResyncHandler>();
-/** 已请求过 resync 的会话（attachLiveDraft 完成对齐后清除，同一 run 内允许再次触发） */
-const resyncRequested = new Set<string>();
+/**
+ * 已请求 resync 的时刻（key = sessionId|messageId）：**冷却**语义而非一次性。
+ * 旧实现用「一次性标记 + 仅在 attachLiveDraft 时清除」，一旦那次对齐没能走到 attachLiveDraft
+ * （/state 无草稿、请求异常、会话已切换），标记永不释放 → 该消息之后每个分片都被暂存丢弃
+ * （整轮不可见、内容最后整块出现的根因之一）。改为时间戳冷却后，后续缺口仍能再次发起对齐。
+ */
+const resyncRequestedAt = new Map<string, number>();
+/** 同一消息的 resync 冷却时长：窗口内不重复请求（避免风暴），窗口外允许再次对齐 */
+const RESYNC_COOLDOWN_MS = 1000;
 /**
  * 缺口分片暂存（key 同 lengthKey）：gap 触发 resync 时把分片存起来，
  * 对齐完成（attachLiveDraft 全量覆盖 + 重播种长度）后重放——按新长度自然去重，
@@ -79,8 +86,58 @@ const resyncRequested = new Set<string>();
 const pendingAfterResync = new Map<string, PendingText>();
 /** 缺口重放的每字段重试计数（防止草稿持续滞后时无限循环） */
 const resyncReplayRetries = new Map<string, number>();
-/** 重放次数上限：超过即放弃该分片（服务端正式消息会在 done 后整体覆盖对齐） */
+/** 重放次数上限：超过即改为「强制追加」兜底（见 applyText），绝不再静默丢弃整轮 */
 const MAX_REPLAY_RETRIES = 3;
+
+// ============================================================================
+// 分片账本（异常取证）：区分「没收到」与「收到但被丢」，并给出丢弃原因计数。
+// 每次一轮结束（终态事件）时由 dumpStreamAccounting 输出一行并从零开始。
+// ============================================================================
+interface StreamAccount {
+  /** 前端 WS 实际收到的流式分片数（在 ws-events 入口计数，含后续被丢弃的） */
+  received: number;
+  /** 真正写入 store 的片段数 */
+  applied: number;
+  /** 因「重复分片」丢弃 */
+  droppedDuplicate: number;
+  /** 因「缺口」暂存（待对齐后重放） */
+  droppedGap: number;
+  /** 缺口重试耗尽后强制追加（保命路径，正常应为 0） */
+  gapForcedAppend: number;
+  /** 因 runId 不匹配被过滤丢弃（在 ws-events 计数） */
+  droppedRunId: number;
+}
+const accounts = new Map<string, StreamAccount>();
+function accountOf(sessionId: string): StreamAccount {
+  let a = accounts.get(sessionId);
+  if (!a) {
+    a = { received: 0, applied: 0, droppedDuplicate: 0, droppedGap: 0, gapForcedAppend: 0, droppedRunId: 0 };
+    accounts.set(sessionId, a);
+  }
+  return a;
+}
+
+/** 记录「收到一个流式分片」（ws-events 入口调用） */
+export function noteStreamReceived(sessionId: string, n = 1): void {
+  accountOf(sessionId).received += n;
+}
+
+/** 记录「因 runId 不匹配被过滤丢弃」（ws-events 入口调用） */
+export function noteStreamRunIdDrop(sessionId: string): void {
+  accountOf(sessionId).droppedRunId++;
+}
+
+/**
+ * 一轮结束时输出账本（生产也输出：仅在异常/对账时触发，低频）。
+ * 判定口径：received==0 → 后端没发/WS 没到；received>0 且 applied==0 → 前端丢流（看 dropped* 归因）。
+ */
+export function dumpStreamAccounting(sessionId: string): void {
+  const a = accounts.get(sessionId);
+  if (!a) return;
+  accounts.delete(sessionId);
+  if (a.received === 0 && a.droppedRunId === 0) return; // 无流式事件（纯工具/错误轮）：不产生噪音
+  diagAlways('stream-account', { sessionId, ...a });
+}
 
 export function onStreamResyncNeeded(handler: ResyncHandler): () => void {
   resyncHandlers.add(handler);
@@ -89,8 +146,9 @@ export function onStreamResyncNeeded(handler: ResyncHandler): () => void {
 
 function requestResync(sessionId: string): void {
   const key = `${sessionId}|${pendingAssistant.get(sessionId)?.serverMessageId ?? ''}`;
-  if (resyncRequested.has(key)) return;
-  resyncRequested.add(key);
+  const last = resyncRequestedAt.get(key) ?? 0;
+  if (Date.now() - last < RESYNC_COOLDOWN_MS) return; // 冷却期内不重复请求
+  resyncRequestedAt.set(key, Date.now());
   diagCount('gap-resync-requested', { sessionId });
   for (const h of resyncHandlers) {
     try {
@@ -102,13 +160,13 @@ function requestResync(sessionId: string): void {
 }
 
 /**
- * resync 完成对齐后调用（由 attachLiveDraft 触发）：清除「已请求」标记，
- * 使同一 run 内后续缺口仍能再次触发对齐——否则一次性标记会让第二次缺口
- * 起的所有分片被永久按重复丢弃（回复终止的根因之一）。
+ * 一次对齐动作结束（成功 / 无草稿 / 异常）时调用：清冷却标记，使后续缺口仍能再次对齐。
+ * 由 attachLiveDraft（有草稿）与 reconcileFromState 的 finally（无草稿/异常）共同调用，
+ * 保证「对齐失败」也不会让该消息的后续分片被永久丢弃。
  */
-export function clearResyncMark(sessionId: string): void {
-  for (const key of Array.from(resyncRequested.keys())) {
-    if (key.startsWith(`${sessionId}|`)) resyncRequested.delete(key);
+export function finishResync(sessionId: string): void {
+  for (const key of Array.from(resyncRequestedAt.keys())) {
+    if (key.startsWith(`${sessionId}|`)) resyncRequestedAt.delete(key);
   }
 }
 
@@ -132,11 +190,8 @@ export function replayPendingAfterResync(sessionId: string): void {
   for (const op of ops) {
     const retryKey = lengthKey(op.sessionId, op.messageId, op.field);
     const retries = (resyncReplayRetries.get(retryKey) ?? 0) + 1;
-    if (retries > MAX_REPLAY_RETRIES) {
-      diag('resync-replay-giveup', { sessionId, messageId: op.messageId, field: op.field });
-      continue;
-    }
     resyncReplayRetries.set(retryKey, retries);
+    // 超过上限不再丢弃：由 applyText 内部走「强制追加」保命路径（宁可顺序风险也不丢整轮）
     applyText(op);
   }
 }
@@ -145,41 +200,61 @@ function lengthKey(sessionId: string, messageId: string, field: string): string 
   return `${sessionId}|${messageId}|${field}`;
 }
 
-/** 会话切换 / 历史重载时清空缓存（避免跨会话/跨轮脏读） */
-export function resetStreamBuffer(sessionId?: string): void {
+/**
+ * 会话切换 / 历史重载 / 一轮结束时清空缓存（避免跨会话/跨轮脏读）。
+ *
+ * @param opts.preserveMessageIds 需要**保留**其键的 messageId 列表。
+ *   缺省时自动保留「当前仍在 streaming 的消息」——这样上一轮 onStreamSettled 的迟到 reset
+ *   （其 catchUpTail 含网络往返）不会清掉新一轮已入缓冲的分片；
+ *   而刚结束那一轮的消息此时已 streaming=false，仍会被正确清掉（语义不变）。
+ */
+export function resetStreamBuffer(sessionId?: string, opts?: { preserveMessageIds?: string[] }): void {
   if (sessionId) {
-    // 活跃 run 保护：会话仍在生成时，缓冲/长度缓存属于「当前轮」，
-    // 不能被一次迟到的 reset（典型来源：上一轮 onStreamSettled 的异步续体，
-    // 其 catchUpTail 含网络往返）清掉 —— 否则新一轮已入缓冲的分片被丢弃 = 零输出。
-    // 状态取自 store 权威运行态（随终态事件清除），天然不会泄漏。
+    // 活跃 run 保护：会话仍在生成时，缓冲/长度缓存属于「当前轮」，整体跳过（最保守）
     if (useStore.getState().generatingBySession[sessionId] === true) {
       diagAlways('reset-stream-buffer-skip-active', { sessionId });
       return;
     }
+    const preserve = new Set(
+      opts?.preserveMessageIds ??
+        (useStore.getState().messagesBySession[sessionId] ?? [])
+          .filter((m) => m.streaming)
+          .map((m) => m.id),
+    );
+    const isPreserved = (key: string): boolean => {
+      if (preserve.size === 0) return false;
+      const rest = key.slice(sessionId.length + 1);
+      const mid = rest.slice(0, rest.indexOf('|'));
+      return preserve.has(mid);
+    };
     for (const key of Array.from(lengthCache.keys())) {
-      if (key.startsWith(`${sessionId}|`)) lengthCache.delete(key);
+      if (key.startsWith(`${sessionId}|`) && !isPreserved(key)) lengthCache.delete(key);
     }
     for (const key of Array.from(pendingTextMap.keys())) {
-      if (key.startsWith(`${sessionId}|`)) pendingTextMap.delete(key);
+      if (key.startsWith(`${sessionId}|`) && !isPreserved(key)) pendingTextMap.delete(key);
     }
     for (const key of Array.from(pendingToolArgsMap.keys())) {
-      if (key.startsWith(`${sessionId}|`)) pendingToolArgsMap.delete(key);
+      if (key.startsWith(`${sessionId}|`) && !isPreserved(key)) pendingToolArgsMap.delete(key);
     }
-    for (const key of Array.from(resyncRequested)) {
-      if (key.startsWith(`${sessionId}|`)) resyncRequested.delete(key);
-    }
-    for (const key of Array.from(pendingAfterResync.keys())) {
-      if (key.startsWith(`${sessionId}|`)) pendingAfterResync.delete(key);
-    }
-    for (const key of Array.from(resyncReplayRetries.keys())) {
-      if (key.startsWith(`${sessionId}|`)) resyncReplayRetries.delete(key);
+    // resync 冷却 / 缺口暂存 / 重试计数：仅当没有需要保留的消息时才整体清理
+    // （否则会丢掉新一轮正在等待对齐的暂存分片）
+    if (preserve.size === 0) {
+      for (const key of Array.from(resyncRequestedAt.keys())) {
+        if (key.startsWith(`${sessionId}|`)) resyncRequestedAt.delete(key);
+      }
+      for (const key of Array.from(pendingAfterResync.keys())) {
+        if (key.startsWith(`${sessionId}|`)) pendingAfterResync.delete(key);
+      }
+      for (const key of Array.from(resyncReplayRetries.keys())) {
+        if (key.startsWith(`${sessionId}|`)) resyncReplayRetries.delete(key);
+      }
     }
     return;
   }
   lengthCache.clear();
   pendingTextMap.clear();
   pendingToolArgsMap.clear();
-  resyncRequested.clear();
+  resyncRequestedAt.clear();
   pendingAfterResync.clear();
   resyncReplayRetries.clear();
 }
@@ -371,22 +446,53 @@ function applyText(op: PendingText): void {
   // 先按「已知长度」判定重复/缺口，再决定是否创建消息：
   // 完全重复的分片（重放）不会平白创建一条空消息。
   const known = currentLength(op.sessionId, op.messageId, op.field);
+  const rk = lengthKey(op.sessionId, op.messageId, op.field);
   const { slice, resync } = nextChunkSlice(known ?? 0, op.offset, op.text);
   if (resync) {
+    // 保命兜底：多次对齐后仍缺口 → 不再丢弃，信任 store 当前长度直接追加。
+    // 宁可极端情况下顺序略有风险，也不让整轮内容对用户不可见（有 stream-account 账本可观测）。
+    const tried = resyncReplayRetries.get(rk) ?? 0;
+    if (tried >= MAX_REPLAY_RETRIES) {
+      accountOf(op.sessionId).gapForcedAppend++;
+      diagAlways('stream-gap-forced-append', {
+        sessionId: op.sessionId,
+        messageId: op.messageId,
+        field: op.field,
+        known,
+        offset: op.offset,
+      });
+      const forced = adoptOrCreateStreamingMessage(op.sessionId, op.messageId);
+      if (!forced) return;
+      st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, op.text, op.thinkingStreaming);
+      lengthCache.set(rk, (known ?? 0) + op.text.length);
+      accountOf(op.sessionId).applied++;
+      const pendingForced = pendingAssistant.get(op.sessionId);
+      if (pendingForced && pendingForced.id === op.messageId) {
+        pendingAssistant.set(op.sessionId, {
+          ...pendingForced,
+          [op.field]: (pendingForced[op.field] ?? '') + op.text,
+          thinkingStreaming: op.field === 'thinking' ? op.thinkingStreaming : false,
+        });
+      }
+      return;
+    }
     resetLengthCacheForMessage(op.sessionId, op.messageId);
     // 暂存缺口分片：对齐完成后重放（按新长度自然去重），不再永久静默丢弃
-    pendingAfterResync.set(lengthKey(op.sessionId, op.messageId, op.field), op);
+    pendingAfterResync.set(rk, op);
+    accountOf(op.sessionId).droppedGap++;
     requestResync(op.sessionId);
     return;
   }
   if (!slice) {
+    accountOf(op.sessionId).droppedDuplicate++;
     diagCount('apply-text-duplicate-drop', { messageId: op.messageId, field: op.field });
     return;
   }
   const msg = adoptOrCreateStreamingMessage(op.sessionId, op.messageId);
   if (!msg) return;
   st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, slice, op.thinkingStreaming);
-  lengthCache.set(lengthKey(op.sessionId, op.messageId, op.field), (known ?? 0) + slice.length);
+  lengthCache.set(rk, (known ?? 0) + slice.length);
+  accountOf(op.sessionId).applied++;
   const pending = pendingAssistant.get(op.sessionId);
   if (pending && pending.id === op.messageId) {
     pendingAssistant.set(op.sessionId, {
@@ -417,6 +523,7 @@ function applyToolArgs(op: PendingToolArgs): void {
     ? toolCalls.map((tc) => (tc.id === op.toolCallId ? { ...tc, arguments: tc.arguments + slice } : tc))
     : [...toolCalls, { id: op.toolCallId, name: '', arguments: slice, status: 'generating' as const }];
   st.updateMessage(op.sessionId, op.messageId, { toolCalls: updated });
+  accountOf(op.sessionId).applied++;
   if (pending && pending.id === op.messageId) {
     pendingAssistant.set(op.sessionId, { ...pending, toolCalls: updated });
   }

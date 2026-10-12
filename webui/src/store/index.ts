@@ -55,6 +55,62 @@ export interface AgenteamEventEntry {
   lastAt: number;
 }
 
+/** 排队消息（每会话至多一条；多次发送会被合并到同一条，用换行 + 分隔符分隔） */
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  timestamp: string;
+  /** 附件绝对路径（出队发送时透传） */
+  attachments?: string[];
+}
+
+/** 多条排队消息合并时的分隔符（换行 + 分隔线，保证可读且便于区分来源） */
+const QUEUE_MERGE_SEPARATOR = '\n\n---\n\n';
+
+/** 合并两批附件路径（去重、保序；空则返回空对象以便展开） */
+function mergeAttachments(a?: string[], b?: string[]): { attachments?: string[] } {
+  const uniq = Array.from(new Set([...(a ?? []), ...(b ?? [])]));
+  return uniq.length > 0 ? { attachments: uniq } : {};
+}
+
+/** 清理不在 dirs 中的「最近使用」别名；无需变更时返回原对象引用（避免多余写盘） */
+function pruneAliases(aliases: Record<string, string>, dirs: string[]): Record<string, string> {
+  const keep = new Set(dirs);
+  const out: Record<string, string> = {};
+  let changed = false;
+  for (const [k, v] of Object.entries(aliases)) {
+    if (keep.has(k)) out[k] = v;
+    else changed = true;
+  }
+  return changed ? out : aliases;
+}
+
+/** 消息时间戳（ms）；非法/缺失视为 0（排在最早，稳定排序下保持相对位置） */
+function tsOf(m: TaskMessage): number {
+  const t = Date.parse(m.timestamp);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * 归一为「时间升序」：把消息顺序从「到达顺序」改为「消息时间顺序」。
+ *
+ * 背景（倒序根因）：历史合并过去一律按到达顺序拼接（catchup `[...base, ...rest]`、
+ * tail `[...resolved, ...localOnly]`、prepend `[...rest, ...base]`）。当「较新的消息先到、
+ * 较早的历史后到」时（如刷新时半截草稿先 addMessage、随后 catchUpTail 才拉回更早历史），
+ * 数组会变成「新在前、旧在后」→ 整段倒序。此处以时间升序作为**单一事实来源**统一归一。
+ *
+ * 时间相同则用服务端绝对下标（historyIndex）兜底，再相同则保持原相对顺序（sort 稳定）。
+ */
+function orderChronologically(list: TaskMessage[]): TaskMessage[] {
+  return [...list].sort((a, b) => {
+    const d = tsOf(a) - tsOf(b);
+    if (d !== 0) return d;
+    const ha = a.historyIndex ?? Number.MAX_SAFE_INTEGER;
+    const hb = b.historyIndex ?? Number.MAX_SAFE_INTEGER;
+    return ha - hb;
+  });
+}
+
 interface UIState {
   // --- 会话 / 消息 ---
   activeSessionId: string | null;
@@ -88,6 +144,8 @@ interface UIState {
   workingDirectory: string;
   /** 最近成功使用的目录（绝对路径），最多 5 条，新条目置顶 */
   recentDirectories: string[];
+  /** 最近使用目录的自定义显示名（path → alias；仅影响列表显示） */
+  recentDirectoryAliases: Record<string, string>;
 
   // --- 服务商（模型挂在服务商下；currentModel 为模型 id） ---
   providers: ProviderItem[];
@@ -169,11 +227,13 @@ interface UIState {
 
   // --- 跟进行为（任务进行中发送消息时的处理方式） ---
   followUpBehavior: 'queue' | 'guide';
-  /** 排队消息队列（sessionId → 待发送消息列表；attachments 为附件绝对路径，出队发送时透传） */
-  messageQueueBySession: Record<
-    string,
-    Array<{ id: string; content: string; timestamp: string; attachments?: string[] }>
-  >;
+  /** 排队消息队列（sessionId → 待发送消息；合并语义：每会话至多一条，多条用分隔符合并） */
+  messageQueueBySession: Record<string, QueuedMessage[]>;
+  /**
+   * 输入框回填通道（「编辑队列消息」用）：TaskInput 监听 seq 变化把 text 写入编辑框。
+   * seq 自增，保证「同一文本二次回填」也能触发一次消费。
+   */
+  composerInjection: { text: string; attachments?: string[]; seq: number } | null;
 
   // --- 外观设置（IndexedDB 持久化） ---
   /** 主题色（预设 ID 或自定义 oklch/hex 字符串） */
@@ -236,10 +296,9 @@ export interface PersistedState {
   renderSettings?: RenderSettings;
   animationSettings?: AnimationSettings;
   /** 排队消息队列（sessionId → 待发送消息）：刷新后不丢，按序继续投递 */
-  messageQueues?: Record<
-    string,
-    Array<{ id: string; content: string; timestamp: string; attachments?: string[] }>
-  >;
+  messageQueues?: Record<string, QueuedMessage[]>;
+  /** 最近使用目录的自定义显示名（path → alias） */
+  recentDirectoryAliases?: Record<string, string>;
 }
 
 // ============================================================================
@@ -262,13 +321,15 @@ interface UIActions {
    * - 'prepend'：向前并入更早的一页（保持已有消息）
    * - 'catchup'：尾部增量补齐（并入后追加），本地与服务端同 id 的消息原位 patch
    *   （流式草稿 → 正式内容，key 不漂移零重挂载）；dropStreaming 时移除服务端未确认的草稿
+   *   （dropStreamingIds 给定时**只**移除这些 id —— 由调用方传入「拉取前仍在流式的快照集合」，
+   *   避免把拉取期间新一轮产生的流式消息一并丢掉）
    */
   mergeHistory: (
     sessionId: string,
     messages: TaskMessage[],
     mode: 'tail' | 'prepend' | 'catchup',
     page?: { total: number; oldestIndex: number; newestIndex: number; hasMoreBefore: boolean },
-    opts?: { dropStreaming?: boolean },
+    opts?: { dropStreaming?: boolean; dropStreamingIds?: string[] },
   ) => void;
   /** 仅更新分页元数据（加载态 / 游标推进，不动消息） */
   patchHistoryMeta: (sessionId: string, patch: Partial<HistoryMeta>) => void;
@@ -305,6 +366,12 @@ interface UIActions {
   setInput: (input: string) => void;
   setWorkingDirectory: (cwd: string) => void;
   addRecentDirectory: (dir: string) => void;
+  /** 从「最近使用」移除一条（并清理其别名） */
+  removeRecentDirectory: (dir: string) => void;
+  /** 设置/清空某条「最近使用」的自定义显示名（空串 = 清除别名） */
+  renameRecentDirectory: (dir: string, alias: string) => void;
+  /** 修改某条「最近使用」的目标路径（保留其在列表中的位置与别名） */
+  updateRecentDirectoryPath: (oldPath: string, newPath: string) => void;
 
   // 服务商
   setProviders: (providers: ProviderItem[]) => void;
@@ -407,12 +474,16 @@ interface UIActions {
 
   // 跟进行为
   setFollowUpBehavior: (v: UIState['followUpBehavior']) => void;
-  addToMessageQueue: (
-    sessionId: string,
-    message: { id: string; content: string; timestamp: string; attachments?: string[] },
-  ) => void;
+  /** 入队（合并语义）：该会话已有队列项则合并到同一条，否则新建 */
+  addToMessageQueue: (sessionId: string, message: QueuedMessage) => void;
+  /** 移出并返回某条队列消息（供「编辑回填」使用）；不存在返回 null */
+  takeFromMessageQueue: (sessionId: string, messageId: string) => QueuedMessage | null;
   removeFromMessageQueue: (sessionId: string, messageId: string) => void;
   clearMessageQueue: (sessionId: string) => void;
+  /** 把文本回填到消息发送框（「编辑」队列消息用；seq 自增触发一次消费） */
+  injectComposer: (text: string, attachments?: string[]) => void;
+  /** 消费后清空回填通道 */
+  clearComposerInjection: () => void;
 
   // 外观设置
   setAccentColor: (v: string) => void;
@@ -635,6 +706,8 @@ export const useStore = create<Store>((set, get) => ({
   input: '',
   workingDirectory: DEFAULT_WORKING_DIRECTORY,
   recentDirectories: [],
+  /** 最近使用目录的自定义显示名（path → alias） */
+  recentDirectoryAliases: {},
 
   // --- 服务商 ---
   providers: [],
@@ -697,6 +770,7 @@ export const useStore = create<Store>((set, get) => ({
   // --- 跟进行为 ---
   followUpBehavior: 'queue',
   messageQueueBySession: {},
+  composerInjection: null,
 
   // --- 外观设置 ---
   accentColor: 'blue',
@@ -782,12 +856,16 @@ export const useStore = create<Store>((set, get) => ({
       messagesBySession: { ...state.messagesBySession, [sessionId]: messages },
     })),
   addMessage: (sessionId, message) =>
-    set((state) => ({
-      messagesBySession: {
-        ...state.messagesBySession,
-        [sessionId]: [...(state.messagesBySession[sessionId] ?? []), message],
-      },
-    })),
+    set((state) => {
+      const current = state.messagesBySession[sessionId] ?? [];
+      // 归一为时间升序：较晚到达的「较早消息」也能落到正确位置（不依赖后续 mergeHistory）
+      return {
+        messagesBySession: {
+          ...state.messagesBySession,
+          [sessionId]: orderChronologically([...current, message]),
+        },
+      };
+    }),
 
   mergeHistory: (sessionId, messages, mode, page, opts) =>
     set((state) => {
@@ -844,7 +922,13 @@ export const useStore = create<Store>((set, get) => ({
         if (opts?.dropStreaming) {
           // 一轮正常结束：服务端未确认的本地草稿（未命中 patch 且仍 streaming）移除，
           // 防止残留 spinner；已 patch 的消息 streaming 已置 false，天然保留。
-          next = [...base.filter((m) => !m.streaming), ...rest];
+          // dropStreamingIds 给定时只丢这些 id（「拉取前仍在流式的快照」）：
+          // 拉取期间新一轮已开始流式时，其消息不在快照里 → 被完整保留，避免整轮内容被清空。
+          const dropIds = opts.dropStreamingIds ? new Set(opts.dropStreamingIds) : null;
+          next = [
+            ...base.filter((m) => !(m.streaming && (dropIds ? dropIds.has(m.id) : true))),
+            ...rest,
+          ];
         } else {
           // 重连对齐：保留本地草稿（若服务端有正式副本则已被 patch 收尾）
           next = [...base, ...rest];
@@ -876,6 +960,10 @@ export const useStore = create<Store>((set, get) => ({
         }
         next = [...resolved, ...localOnly];
       }
+
+      // 归一为时间升序（单一事实来源）：三种模式的拼接都可能是「到达顺序」，
+      // 这里统一纠正为「消息时间顺序」，根治「最新先到就显示在最前」的整段倒序。
+      next = orderChronologically(next);
 
       const prevMeta = state.historyMetaBySession[sessionId];
       let meta: HistoryMeta;
@@ -1013,8 +1101,44 @@ export const useStore = create<Store>((set, get) => ({
       if (!trimmed) return state;
       const rest = state.recentDirectories.filter((d) => d !== trimmed);
       const next = [trimmed, ...rest].slice(0, 5);
+      // 仅保留仍在列表中的别名（容量上限淘汰的条目一并清理）
+      const aliases = pruneAliases(state.recentDirectoryAliases, next);
       void idbSet('moss-recent-directories', next);
-      return { recentDirectories: next };
+      if (aliases !== state.recentDirectoryAliases) void idbSet('moss-recent-dir-aliases', aliases);
+      return { recentDirectories: next, recentDirectoryAliases: aliases };
+    }),
+  removeRecentDirectory: (dir) =>
+    set((state) => {
+      const next = state.recentDirectories.filter((d) => d !== dir);
+      const aliases = pruneAliases(state.recentDirectoryAliases, next);
+      void idbSet('moss-recent-directories', next);
+      void idbSet('moss-recent-dir-aliases', aliases);
+      return { recentDirectories: next, recentDirectoryAliases: aliases };
+    }),
+  renameRecentDirectory: (dir, alias) =>
+    set((state) => {
+      const trimmed = alias.trim();
+      const aliases = { ...state.recentDirectoryAliases };
+      if (trimmed) aliases[dir] = trimmed;
+      else delete aliases[dir];
+      void idbSet('moss-recent-dir-aliases', aliases);
+      return { recentDirectoryAliases: aliases };
+    }),
+  updateRecentDirectoryPath: (oldPath, newPath) =>
+    set((state) => {
+      const trimmed = newPath.trim();
+      if (!trimmed || oldPath === trimmed) return state;
+      // 替换路径：先去重（改成一个已存在的路径时避免出现重复项），再原地替换
+      const next = state.recentDirectories
+        .filter((d) => d !== trimmed)
+        .map((d) => (d === oldPath ? trimmed : d));
+      const aliases = { ...state.recentDirectoryAliases };
+      const oldAlias = aliases[oldPath];
+      delete aliases[oldPath];
+      if (oldAlias) aliases[trimmed] = oldAlias;
+      void idbSet('moss-recent-directories', next);
+      void idbSet('moss-recent-dir-aliases', aliases);
+      return { recentDirectories: next, recentDirectoryAliases: aliases };
     }),
 
   // --- Actions: 服务商 ---
@@ -1284,14 +1408,37 @@ export const useStore = create<Store>((set, get) => ({
   },
   addToMessageQueue: (sessionId, message) =>
     set((state) => {
-      const messageQueueBySession = {
-        ...state.messageQueueBySession,
-        [sessionId]: [...(state.messageQueueBySession[sessionId] ?? []), message],
-      };
+      const prev = state.messageQueueBySession[sessionId] ?? [];
+      const existing = prev[0];
+      // 合并语义：每会话至多一条。多条排队消息用「换行 + 分隔符」拼接到同一条，
+      // 附件去重合并，时间戳刷新为最新（后续按时间排序/展示都以最新为准）。
+      const merged: QueuedMessage = existing
+        ? {
+            id: existing.id,
+            content: `${existing.content}${QUEUE_MERGE_SEPARATOR}${message.content}`,
+            timestamp: message.timestamp,
+            ...mergeAttachments(existing.attachments, message.attachments),
+          }
+        : message;
+      const messageQueueBySession = { ...state.messageQueueBySession, [sessionId]: [merged] };
       // 队列是客户端行为（何时续发由本端决定），持久化到 IndexedDB 保证刷新后不丢
       void idbSet('moss-message-queues', messageQueueBySession);
       return { messageQueueBySession };
     }),
+  takeFromMessageQueue: (sessionId, messageId) => {
+    // 需要返回被移除的项（供「编辑」回填），故用 get() 读取当前队列再 set
+    const state = get();
+    const queue = state.messageQueueBySession[sessionId] ?? [];
+    const item = queue.find((m) => m.id === messageId) ?? null;
+    if (!item) return null;
+    const messageQueueBySession = {
+      ...state.messageQueueBySession,
+      [sessionId]: queue.filter((m) => m.id !== messageId),
+    };
+    void idbSet('moss-message-queues', messageQueueBySession);
+    set({ messageQueueBySession });
+    return item;
+  },
   removeFromMessageQueue: (sessionId, messageId) =>
     set((state) => {
       const queue = state.messageQueueBySession[sessionId] ?? [];
@@ -1308,6 +1455,16 @@ export const useStore = create<Store>((set, get) => ({
       void idbSet('moss-message-queues', rest);
       return { messageQueueBySession: rest };
     }),
+  injectComposer: (text, attachments) =>
+    set((state) => ({
+      composerInjection: {
+        text,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        // seq 自增：同文本二次回填也能触发 TaskInput 的一次消费
+        seq: (state.composerInjection?.seq ?? 0) + 1,
+      },
+    })),
+  clearComposerInjection: () => set({ composerInjection: null }),
 
   // --- Actions: 外观设置 ---
   setAccentColor: (accentColor) => {
@@ -1680,8 +1837,17 @@ export const useStore = create<Store>((set, get) => ({
       if (Array.isArray(patch.recentDirectories)) {
         const dirs = patch.recentDirectories.filter(
           (d): d is string => typeof d === 'string',
-        );
-        next.recentDirectories = dirs.slice(0, 5);
+        ).slice(0, 5);
+        next.recentDirectories = dirs;
+        // 别名：仅保留仍在最近列表中的键（键为路径）
+        if (patch.recentDirectoryAliases && typeof patch.recentDirectoryAliases === 'object') {
+          const keep = new Set(dirs);
+          const aliases: Record<string, string> = {};
+          for (const [k, v] of Object.entries(patch.recentDirectoryAliases)) {
+            if (keep.has(k) && typeof v === 'string' && v.trim()) aliases[k] = v;
+          }
+          next.recentDirectoryAliases = aliases;
+        }
       }
       if (typeof patch.sendShortcut === 'string' && patch.sendShortcut.length > 0) {
         next.sendShortcut = patch.sendShortcut;
@@ -1733,17 +1899,15 @@ export const useStore = create<Store>((set, get) => ({
         next.animationSettings = patch.animationSettings;
       }
       if (patch.messageQueues && typeof patch.messageQueues === 'object') {
-        const queues: Record<
-          string,
-          Array<{ id: string; content: string; timestamp: string; attachments?: string[] }>
-        > = {};
+        const queues: Record<string, QueuedMessage[]> = {};
         for (const [sid, list] of Object.entries(patch.messageQueues)) {
           if (!Array.isArray(list)) continue;
           const items = list.filter(
-            (m): m is { id: string; content: string; timestamp: string; attachments?: string[] } =>
+            (m): m is QueuedMessage =>
               !!m && typeof m.id === 'string' && typeof m.content === 'string',
           );
-          if (items.length > 0) queues[sid] = items;
+          // 合并语义：每会话至多一条（旧版多条目数据只保留首条，避免残留多条）
+          if (items.length > 0) queues[sid] = [items[0]];
         }
         next.messageQueueBySession = queues;
       }
