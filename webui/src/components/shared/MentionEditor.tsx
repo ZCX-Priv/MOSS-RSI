@@ -768,6 +768,23 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, [recomputeTrigger]);
 
+  /**
+   * DOM 兜底同步（占位符 / 高度）：无论输入、删除、粘贴、剪切、撤销、IME、execCommand
+   * 哪条路径改动了 DOM，都保证 data-empty 与高度最终一致——彻底消除「某条路径漏调
+   * syncFromDom 导致占位符判定停在旧值」的一整类 bug（含 Android Chrome 的事件差异）。
+   * 只观察 childList + characterData（不观察 attributes）：自身写 style.height / data-* 不自激。
+   */
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const mo = new MutationObserver(() => {
+      refreshEmptyFlag();
+      autosize();
+    });
+    mo.observe(root, { childList: true, characterData: true, subtree: true });
+    return () => mo.disconnect();
+  }, [refreshEmptyFlag, autosize]);
+
   /** 组合态标记：data-composing 期间 CSS 隐藏占位符（预编辑文本会进 DOM，占位符必须让位） */
   const setComposingFlag = (on: boolean) => {
     const root = rootRef.current;
@@ -779,9 +796,16 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   const handleInput = (e: FormEvent<HTMLDivElement>) => {
     const native = e.nativeEvent as InputEvent;
     // IME 组合期：预编辑文本已写入 DOM，但组合未提交，绝不能回传 onChange / 触发菜单；
-    // 但仍需同步占位符与高度，否则预编辑文本与 placeholder 叠字（旧 bug：此处直接 return）。
-    // 每次输入都重算组合标记 → 即便个别 IME 漏发 compositionend 也能自愈。
-    const composing = isComposingRef.current || native.isComposing;
+    // 但仍需同步占位符与高度，否则预编辑文本与 placeholder 叠字。
+    //
+    // 组合判定以事件自带的 isComposing 为准（权威）：Android(Chrome) 上 compositionend
+    // 可能缺失或与 input 乱序，若沿用「isComposingRef.current || native.isComposing」，
+    // 一旦 ref 卡 true，后续所有 input 都会走组合分支直接 return —— 既不回 onChange 也不刷新
+    // data-empty，表现为「IME 提交后占位符不消失 / 删空后占位符不出现 / 发送按钮失灵」。
+    const flag = (native as InputEvent).isComposing as boolean | undefined;
+    const composing = flag === undefined ? isComposingRef.current : flag;
+    // 自愈：事件已声明「非组合」而引用仍为 true（IME 漏发 compositionend）→ 清掉卡死状态
+    if (flag === false && isComposingRef.current) isComposingRef.current = false;
     setComposingFlag(composing);
     if (composing) {
       refreshEmptyFlag();
@@ -792,6 +816,13 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     voiceAnchorRef.current = null;
     voiceDraftLenRef.current = 0;
     syncFromDom();
+  };
+
+  // 失焦兜底：清掉可能残留的组合标记，避免 data-composing 卡住导致占位符永不显示
+  const handleBlur = () => {
+    isComposingRef.current = false;
+    setComposingFlag(false);
+    refreshEmptyFlag();
   };
 
   /**
@@ -1034,6 +1065,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       onPaste={handlePaste}
       onCopy={handleCopy}
       onCut={handleCut}
+      onBlur={handleBlur}
       onCompositionStart={handleCompositionStart}
       onCompositionEnd={handleCompositionEnd}
       className={cn(

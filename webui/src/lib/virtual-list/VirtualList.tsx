@@ -148,6 +148,14 @@ export function VirtualList<T>({
   const atBottomRef = useRef(true);
   /** 贴底跟随状态机：true = 内容增长/布局变化后自动贴底；用户主动上滑即置 false */
   const stickyRef = useRef(true);
+  /** 上一帧 scrollTop：仅「scrollTop 相对上一帧变小」（用户主动上滑/拖条/键盘上翻）才脱离跟随 */
+  const lastScrollTopRef = useRef(0);
+  /**
+   * 我方程序化设置的预期 scrollTop（贴底 / scrollToBottom('auto')）。
+   * 这类滚动会触发 scroll 事件；用它与实际 scrollTop 对齐来识别「自身滚动」，
+   * 避免内容在滚动后继续增长时把跟随态误判为脱离（「返回底部」按钮误显的根因）。
+   */
+  const selfScrollTopRef = useRef<number | null>(null);
   /** prepend 后抑制 startReached，直到用户实际滚离顶部 */
   const suppressStartRef = useRef(false);
   /** initialBottom 是否已执行（会话内一次） */
@@ -230,6 +238,8 @@ export function VirtualList<T>({
         requestAnimationFrame(() => {
           const s = scrollerRef.current;
           if (s && followRef.current && stickyRef.current) {
+            // scrollTop 会被浏览器钳制到 scrollHeight - clientHeight，预期值必须同口径
+            selfScrollTopRef.current = Math.max(0, s.scrollHeight - s.clientHeight);
             s.scrollTop = s.scrollHeight;
           }
         });
@@ -261,6 +271,10 @@ export function VirtualList<T>({
     }
     const sc = scrollerRef.current;
     if (!sc) return;
+    // 收尾校准：把「上一帧 scrollTop」与「自身滚动预期」同步到当前位置，
+    // 避免下一帧用户滚动时用陈旧基准误判方向。
+    selfScrollTopRef.current = null;
+    lastScrollTopRef.current = sc.scrollTop;
     const dist = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
     const ab = dist <= thresholdRef.current;
     if (ab !== atBottomRef.current) {
@@ -416,6 +430,8 @@ export function VirtualList<T>({
     syncMeasure();
     runLayout();
     if (followRef.current && stickyRef.current) {
+      // 同上：预期值按钳制后的 scrollTop 记录
+      selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
       sc.scrollTop = sc.scrollHeight;
     }
   }, [range, visibleRange, layoutSeq]);
@@ -428,6 +444,9 @@ export function VirtualList<T>({
     // 上一个会话可能被用户上滑过（sticky=false）——新会话必须恢复贴底语义
     stickyRef.current = true;
     bottomDoneRef.current = false;
+    // 清掉跨会话的滚动基准，避免新会话首帧被误判为「用户上滑」
+    lastScrollTopRef.current = 0;
+    selfScrollTopRef.current = null;
     // 新会话必然贴底：显式通知宿主（组件不重挂，宿主 atBottom 会残留上一会话的 false）
     if (!atBottomRef.current) {
       atBottomRef.current = true;
@@ -463,22 +482,32 @@ export function VirtualList<T>({
       rafScrollRef.current = null;
       const sc = scrollerRef.current;
       if (!sc) return;
-      const dist = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+      const top = sc.scrollTop;
+      const dist = sc.scrollHeight - top - sc.clientHeight;
+      // 识别「自身程序滚动」（贴底 / scrollToBottom('auto')）触发的 scroll 事件：
+      // 与预期 scrollTop 对齐则视为自身滚动，跳过 atBottom/sticky 改写。
+      // 不做这层识别时，「滚动后内容继续增长」会让距离读成增长值 → 跟随态被误关、按钮误显。
+      const expected = selfScrollTopRef.current;
+      if (expected !== null && Math.abs(expected - top) > 2) selfScrollTopRef.current = null;
+      const selfInitiated = expected !== null && Math.abs(expected - top) <= 2;
       // 程序滚动窗口期（平滑滚到底途中）：不让平滑过程中的中间态改写 atBottom/sticky，
       // 否则按钮会「先消失→中途闪现→再消失」，贴底也会被中间态误判为脱跟。
-      if (!programmaticRef.current) {
-        // 对外 atBottom（宽阈值：按钮显隐）
-        const ab = dist <= thresholdRef.current;
+      if (!programmaticRef.current && !selfInitiated) {
+        // 仅「用户主动上滑」（scrollTop 相对上一帧变小）才脱离贴底跟随。
+        // 内容增长（工具卡片展开 / 流式输出涌入）不改变 scrollTop，绝不脱离跟随。
+        if (top < lastScrollTopRef.current - 1) stickyRef.current = false;
+        // 真贴底（严阈值）→ 恢复跟随（内容缩短被浏览器钳制 scrollTop 也能自愈恢复）。
+        if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
+        // 对外 atBottom（按钮显隐）：跟随中恒为「在底部」（距离变大只是内容变多，
+        // 不代表用户离开了底部）；仅在脱离跟随后按几何距离判定。
+        const ab = stickyRef.current ? true : dist <= thresholdRef.current;
         if (ab !== atBottomRef.current) {
           atBottomRef.current = ab;
           bottomCbRef.current?.(ab);
         }
-        // sticky 状态机：远离底部（覆盖滚动条拖动/键盘/任何来源的滚动）→ 退出跟随；
-        // 真贴底（严阈值）→ 恢复跟随。程序贴底（sticky 拉回）也会走这里，dist≈0 不受影响。
-        if (dist > thresholdRef.current) stickyRef.current = false;
-        if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
       }
-      if (sc.scrollTop > START_REACH_THRESHOLD) suppressStartRef.current = false;
+      lastScrollTopRef.current = top;
+      if (top > START_REACH_THRESHOLD) suppressStartRef.current = false;
       if (prefixRef.current.length > 1) {
         const r = computeRange(prefixRef.current, sc.scrollTop, sc.clientHeight, overscanRef.current);
         setRange((prev) => (prev.start === r.start && prev.end === r.end ? prev : r));
@@ -560,8 +589,13 @@ export function VirtualList<T>({
         atBottomRef.current = true;
         bottomCbRef.current?.(true);
       }
-      // 平滑滚动期间开程序窗口期（屏蔽中间态改写）；瞬时定位无中间态，无需窗口
-      if (effective === 'smooth') openProgrammatic();
+      // 平滑滚动期间开程序窗口期（屏蔽中间态改写）；瞬时定位无中间态，用自身滚动预期对齐
+      if (effective === 'smooth') {
+        selfScrollTopRef.current = null;
+        openProgrammatic();
+      } else {
+        selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
+      }
       sc.scrollTo({ top: sc.scrollHeight, behavior: effective });
     },
   }), [scheduleLayout, openProgrammatic]);

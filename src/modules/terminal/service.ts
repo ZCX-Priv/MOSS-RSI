@@ -361,8 +361,15 @@ export class TerminalManager implements TerminalService {
         }, timeout),
       };
       rt.waiters.add(waiter);
-      this.submit(rt, command);
-      this.submit(rt, rt.interpreter.markerCommand(marker));
+      try {
+        this.submit(rt, command);
+        this.submit(rt, rt.interpreter.markerCommand(marker));
+      } catch {
+        // 提交失败（PTY/管道已关闭等中断场景）：立即以「未完成」收尾，避免空等到超时
+        clearTimeout(waiter.timer);
+        rt.waiters.delete(waiter);
+        resolve({ output: rt.buffer.slice(start), found: false });
+      }
     });
 
     // 清理：去 ANSI；剔除含完成标记的行（回显的标记命令行）
@@ -470,8 +477,10 @@ export class TerminalManager implements TerminalService {
       payload: { terminalId: rt.info.id, sessionId: rt.info.sessionId, data: text },
     });
     this.settleWaiters(rt);
-    // 高频输出：去抖落盘（刷新/后端重启后仍能看到历史输出）
-    this.storage.scheduleSave(rt.info.sessionId, this.snapshotEntries(rt.info.sessionId));
+    // 高频输出：去抖落盘（刷新/后端重启后仍能看到历史输出）。
+    // 传入「惰性构建器」：snapshotEntries 会复制整会话缓冲，必须延后到写盘时执行，
+    // 否则每个输出分片都复制一次完整缓冲（O(分片×缓冲) 二次开销）。
+    this.storage.scheduleSave(rt.info.sessionId, () => this.snapshotEntries(rt.info.sessionId));
   }
 
   private append(rt: Runtime, text: string): void {

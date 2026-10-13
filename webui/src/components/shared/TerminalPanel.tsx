@@ -242,6 +242,35 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
     return () => ro.disconnect();
   }, []);
 
+  // 移动端（Android Chrome）在「用户手势内」聚焦当前终端——切换标签时的 rAF focus() 非手势调用，
+  // Android 不会唤起软键盘，导致「输入不了命令」。tap 到终端区域时同步聚焦。
+  const focusActive = useCallback(() => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    try {
+      instancesRef.current.get(id)?.term.focus();
+    } catch { /* 静默 */ }
+  }, []);
+
+  // 软键盘弹出/收起会改变可视区高度：重算终端尺寸（fit + resize），避免内容被遮挡、
+  // 光标跑出可视区、以及尺寸错乱导致的「无法滚动」。visualViewport 仅在移动端可用。
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      const id = activeIdRef.current;
+      if (!id) return;
+      const inst = instancesRef.current.get(id);
+      if (!inst) return;
+      try {
+        inst.fit.fit();
+        resizeRef.current(id, inst.term.cols, inst.term.rows);
+      } catch { /* 静默 */ }
+    };
+    vv.addEventListener('resize', onResize);
+    return () => vv.removeEventListener('resize', onResize);
+  }, []);
+
   // 卸载：清理全部实例
   useEffect(() => {
     const map = instancesRef.current;
@@ -348,8 +377,13 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
         />
       </div>
 
-      {/* 终端宿主：每终端一个绝对定位 div，仅活跃可见 */}
-      <div ref={hostRef} className="relative min-h-0 flex-1 overflow-hidden">
+      {/* 终端宿主：每终端一个绝对定位 div，仅活跃可见。
+          onPointerDown：移动端在用户手势内聚焦当前终端（唤起软键盘并接收键盘输入）。 */}
+      <div
+        ref={hostRef}
+        onPointerDown={focusActive}
+        className="relative min-h-0 flex-1 overflow-hidden"
+      >
         {list.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
             <TerminalIcon className="size-6" />

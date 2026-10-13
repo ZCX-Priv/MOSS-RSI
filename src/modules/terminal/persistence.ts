@@ -88,17 +88,23 @@ export class TerminalPersistence {
     this.writeFile(sessionId, trimmed);
   }
 
-  /** 高频输出：先去抖更新缓存，再延迟落盘（最多丢 SAVE_DEBOUNCE_MS 内的尾部输出） */
-  scheduleSave(sessionId: string, entries: PersistedTerminal[]): void {
-    const trimmed = this.trim(entries);
-    this.cache.set(sessionId, new Map(trimmed.map((e) => [e.info.id, e])));
+  /**
+   * 高频输出：去抖落盘。构建函数 `build` 只在去抖到期时执行一次。
+   *
+   * build 必须是惰性的：调用方（TerminalManager.onData）会为**每个输出分片**调用本方法，
+   * 若在此处就把 entries 构建好（复制整会话全部终端缓冲），输出量大时呈
+   * O(分片数 × 缓冲长度) 的二次开销，是「长命令/脚本特别慢」的放大因素之一。
+   */
+  scheduleSave(sessionId: string, build: () => PersistedTerminal[]): void {
     const prev = this.timers.get(sessionId);
     if (prev) clearTimeout(prev);
     this.timers.set(
       sessionId,
       setTimeout(() => {
         this.timers.delete(sessionId);
-        this.writeFile(sessionId, Array.from(this.cache.get(sessionId)?.values() ?? []));
+        const trimmed = this.trim(build());
+        this.cache.set(sessionId, new Map(trimmed.map((e) => [e.info.id, e])));
+        this.writeFile(sessionId, trimmed);
       }, SAVE_DEBOUNCE_MS),
     );
   }

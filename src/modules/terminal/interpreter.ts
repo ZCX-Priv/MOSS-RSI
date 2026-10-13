@@ -1,8 +1,7 @@
 // src/modules/terminal/interpreter.ts
 // 交互式解释器解析：为持久终端挑选可用的交互式解释器程序（复用 env-probe 的实测结果作单一事实源）。
 
-import { statSync } from 'node:fs';
-import { probeTerminals } from '../context/compiler/env-probe';
+import { probeTerminals, resolveGitBashPath } from '../context/compiler/env-probe';
 import type { InterpreterKind } from './types';
 
 /** 交互式解释器启动配置 */
@@ -29,28 +28,6 @@ export interface InterpreterOption {
   available: boolean;
   /** 是否为系统默认解释器 */
   isDefault: boolean;
-}
-
-/** 解析 Git Bash 可执行路径（PATH 中的 bash → 常见安装路径） */
-function resolveGitBashBin(): string | null {
-  try {
-    const hit = Bun.which('bash');
-    if (hit) return hit;
-  } catch {
-    // Bun.which 异常忽略
-  }
-  const candidates = [
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-  ];
-  for (const p of candidates) {
-    try {
-      if (statSync(p).isFile()) return p;
-    } catch {
-      // 继续
-    }
-  }
-  return null;
 }
 
 /** PowerShell 交互式配置（优先 powershell.exe，缺失回退 pwsh.exe） */
@@ -116,7 +93,8 @@ export function resolveInterpreter(isWindows: boolean, pref?: InterpreterKind): 
       return available.has('cmd') ? cmdInterpreter() : defaultCfg;
     }
     if (pref === 'bash') {
-      const gitBash = available.has('git-bash') ? resolveGitBashBin() : null;
+      // 走共享解析器（从 git.exe 反推任意盘符的 Git Bash，修复 D 盘安装被漏判的问题）
+      const gitBash = available.has('git-bash') ? resolveGitBashPath() : null;
       if (gitBash) return posixInterpreter(gitBash, 'Git Bash', 'bash');
       return defaultCfg;
     }

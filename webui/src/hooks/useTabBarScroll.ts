@@ -51,6 +51,14 @@ export function useTabBarScroll<T extends HTMLElement>() {
 
   /** 记录最近一次请求滚入视野的标签 id（容器由隐藏转可见时补滚） */
   const lastIdRef = useRef<string | null>(null);
+  /**
+   * 上一次观察到的容器宽度。
+   * 仅用「由隐藏转可见」（0 → >0）这一种尺寸变化来触发「当前标签滚入视野」；
+   * 其余尺寸变化（面板调宽、标签增删、**左右箭头挂载/卸载引起的 flex 宽度变化**）
+   * 只重算箭头显隐，不再滚动——否则点箭头滚动 → 箭头翻转 → 容器宽度变化 →
+   * ResizeObserver 触发 → 滚回当前标签（表现为「先滚动又弹回」）。
+   */
+  const prevWidthRef = useRef(0);
 
   /** 让某标签完整进入视野（新建/激活时调用；已完整可见则不滚动） */
   const scrollTabIntoView = useCallback((id: string | null | undefined) => {
@@ -72,15 +80,24 @@ export function useTabBarScroll<T extends HTMLElement>() {
     }
   }, []);
 
-  // 容器尺寸变化（面板展开/调宽/标签增删）时：重算箭头；由隐藏转可见时补一次「当前标签滚入视野」
+  // 容器尺寸变化（面板展开/调宽/标签增删）时：重算箭头；
+  // 仅当「由隐藏转可见」（上次宽度 <= 0 且本次 > 0）时补一次「当前标签滚入视野」
+  //（此前在隐藏态调用滚动是空操作，转为可见后需要补滚一次）。
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     syncArrows();
+    prevWidthRef.current = el.clientWidth;
     const ro = new ResizeObserver(() => {
       syncArrows();
       const node = ref.current;
-      if (node && node.clientWidth > 0 && lastIdRef.current) scrollTabIntoView(lastIdRef.current);
+      if (!node) return;
+      const width = node.clientWidth;
+      const wasHidden = prevWidthRef.current <= 0;
+      prevWidthRef.current = width;
+      if (wasHidden && width > 0 && lastIdRef.current) {
+        scrollTabIntoView(lastIdRef.current);
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();

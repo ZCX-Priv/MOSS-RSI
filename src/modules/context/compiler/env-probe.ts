@@ -87,6 +87,41 @@ function fileExists(p: string): boolean {
   }
 }
 
+/**
+ * 从 git.exe 路径反推 Git Bash 的 bash.exe。
+ * Git for Windows 目录约定：<root>\cmd\git.exe 与 <root>\bin\git.exe 并存，
+ * bash 在 <root>\bin\bash.exe（或 <root>\usr\bin\bash.exe）。
+ */
+function deriveBashFromGit(gitPath: string): string[] {
+  const norm = gitPath.replace(/\//g, '\\');
+  const m = /^(.*)\\cmd\\git\.exe$/i.exec(norm) ?? /^(.*)\\bin\\git\.exe$/i.exec(norm);
+  if (m) return [`${m[1]}\\bin\\bash.exe`];
+  const mingw = /^(.*)\\mingw64\\bin\\git\.exe$/i.exec(norm);
+  if (mingw) return [`${mingw[1]}\\usr\\bin\\bash.exe`, `${mingw[1]}\\bin\\bash.exe`];
+  return [];
+}
+
+/**
+ * 解析 Git Bash 的 bash.exe 真实路径（单一事实源：env-probe 与 terminal 解释器共用）。
+ *
+ * 关键缺陷修复：Git 可能装在**任意盘符**（实测本机为 `D:\Program Files\Git`），
+ * 旧实现只硬编码 `C:\Program Files\Git\...` 候选 → 探测为「不可用」→ 请求 `interpreter:bash`
+ * 时被静默回退到 PowerShell/CMD → 模型用 bash 语法却跑在 PowerShell 上，表现为
+ * 「bash 命令执行不正常」。
+ *
+ * 解析顺序：PATH 中 git.exe 反推 → PATH 中的 bash → 常见安装路径。
+ */
+export function resolveGitBashPath(): string | null {
+  const git = which('git');
+  if (git) {
+    for (const c of deriveBashFromGit(git)) if (fileExists(c)) return c;
+  }
+  const onPath = which('bash');
+  if (onPath && fileExists(onPath)) return onPath;
+  for (const p of GIT_BASH_PATHS) if (fileExists(p)) return p;
+  return null;
+}
+
 // ============================================================================
 // 解释器探测（同步；首次调用微秒级）
 // ============================================================================
@@ -102,8 +137,8 @@ function probeTerminalsWindows(): TerminalProbe {
   if (process.env.ComSpec || which('cmd') !== null) {
     available.push('cmd');
   }
-  // Git Bash：PATH 中的 bash（Windows 上通常即 Git Bash）+ 常见安装路径
-  if (which('bash') !== null || GIT_BASH_PATHS.some(fileExists)) {
+  // Git Bash：从 git.exe 反推真实 bash 路径（任意盘符）+ PATH 中的 bash + 常见安装路径
+  if (resolveGitBashPath() !== null) {
     available.push('git-bash');
   }
   // 默认：PowerShell 优先（用户决策）；不存在回退 cmd

@@ -8,8 +8,9 @@
 //   ② created → 记 operation='create' 条目（undo = 删除该文件）
 //   ③ modified/deleted 未命中缓存 → 记无备份条目（undo 时提示不可恢复），事件照发
 
-import { readdirSync, statSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isPathInside } from '../../utils/fs';
 import type { FileCache } from './cache';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
@@ -28,14 +29,25 @@ const SNAPSHOT_SKIP_DIRS = new Set([
   '.moss', '.trash',
 ]);
 
-/** 轻量目录遍历：固定剪枝 + 超时检查，产出文件绝对路径（条目上限由调用方统计判断） */
-function* walkSnapshotFiles(root: string, _maxFiles: number, deadline: number): Generator<string> {
+/** 是否文件系统根（Windows 盘根 / POSIX '/'）——全盘扫描无意义且代价巨大，直接跳过 */
+function isFileSystemRoot(p: string): boolean {
+  return /^[A-Za-z]:[\\/]?$/.test(p) || p === '/' || p === '\\';
+}
+
+/**
+ * 轻量目录遍历：固定剪枝 + 超时检查，产出文件绝对路径（条目上限由调用方统计判断）。
+ * **异步（fs/promises）**：分片 `await` 让出事件循环，扫描期间 PTY 输出仍可被读取——
+ * 旧实现用同步 readdirSync/statSync，会在事件循环上阻塞数秒到数十秒（实测默认工作目录
+ * C:\ 扫 1.3 万文件 >15s 仍未结束），导致命令「跑完却迟迟无结果 / 脚本超时」。
+ */
+async function* walkSnapshotFiles(root: string, deadline: number): AsyncGenerator<string> {
   const stack: string[] = [root];
   while (stack.length > 0) {
+    if (Date.now() > deadline) return;
     const dir = stack.pop()!;
     let entries;
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       continue; // 无权限/竞态删除
     }
@@ -79,21 +91,34 @@ export class TerminalWatcher {
     },
   ) {}
 
-  /** 终端命令执行前快照：收集 roots 下全部文件的 stat 清单；禁用或文件数超限返回 null */
+  /** 终端命令执行前快照：收集 roots 下全部文件的 stat 清单；禁用/根目录/超限返回 null */
   async begin(cwd: string, extraRoots: readonly string[]): Promise<TerminalSnapshot | null> {
     const cfg = this.deps.getConfig();
     if (!cfg.enabled) return null;
+    // 文件系统根（默认工作目录 C:\ 场景）无法做有意义的 diff，且全盘扫描代价巨大 → 直接跳过
+    if (isFileSystemRoot(cwd)) return null;
+
+    // 附加 roots 过滤：去掉文件系统根，以及与 cwd 互为祖先/自身的项（避免重复扫描同一棵大树）
+    const roots: string[] = [cwd];
+    for (const r of extraRoots) {
+      if (isFileSystemRoot(r)) continue;
+      if (r === cwd || isPathInside(cwd, r) || isPathInside(r, cwd)) continue;
+      roots.push(r);
+    }
 
     const entries = new Map<string, { mtimeMs: number; size: number }>();
-    const ok = this.collectInto([cwd, ...extraRoots], cfg.maxFiles, Number.POSITIVE_INFINITY, entries);
+    // 与 end 同源的真实 deadline：此前为 Infinity，大目录会无限阻塞事件循环（性能事故根因）
+    const deadline = Date.now() + cfg.timeoutMs;
+    const ok = await this.collectInto(roots, cfg.maxFiles, deadline, entries);
     if (!ok) {
-      // 超限：跳过本次检测（大仓库保护），不产生半截快照
-      this.deps.logger.warn('filesys: terminal snapshot skipped, file count exceeds limit', {
+      // 超时/超限：跳过本次检测（大仓库保护），不产生半截快照
+      this.deps.logger.warn('filesys: terminal snapshot skipped, truncated or exceeds limit', {
         maxFiles: cfg.maxFiles,
+        timeoutMs: cfg.timeoutMs,
       });
       return null;
     }
-    return { roots: [cwd, ...extraRoots], entries };
+    return { roots, entries };
   }
 
   /** 终端命令执行后 diff + 缓存回填备份。返回变更报告（快照无法 diff 时返回 null） */
@@ -110,7 +135,7 @@ export class TerminalWatcher {
     const deadline = Date.now() + cfg.timeoutMs;
 
     const after = new Map<string, { mtimeMs: number; size: number }>();
-    const ok = this.collectInto(snap.roots, cfg.maxFiles, deadline, after);
+    const ok = await this.collectInto(snap.roots, cfg.maxFiles, deadline, after);
     if (!ok) {
       // 截断保护（超时/超限）：放弃本次 diff。半截 after 与完整 before diff 会把
       // 大量未扫描文件误判为 deleted（多轮命令执行时被放大为成片误报），
@@ -202,19 +227,19 @@ export class TerminalWatcher {
    * 超时判定必须在调用方循环内做：walkSnapshotFiles 超时直接 return（generator 正常
    * 结束），否则半截清单被当作完整结果返回（历史缺陷：截断被静默吞掉）。
    */
-  private collectInto(
+  private async collectInto(
     roots: readonly string[],
     maxFiles: number,
     deadline: number,
     into: Map<string, { mtimeMs: number; size: number }>,
-  ): boolean {
+  ): Promise<boolean> {
     for (const root of roots) {
       try {
-        for (const abs of walkSnapshotFiles(root, maxFiles, deadline)) {
+        for await (const abs of walkSnapshotFiles(root, deadline)) {
           if (into.size > maxFiles) return false;
           if (Date.now() > deadline) return false;
           try {
-            const s = statSync(abs);
+            const s = await stat(abs);
             into.set(abs, { mtimeMs: s.mtimeMs, size: s.size });
           } catch {
             /* walk 与 stat 之间被删除：忽略 */
