@@ -90,6 +90,12 @@ export interface TaskMessage {
   streaming?: boolean;
   /** thinking 是否仍在输出（独立于 streaming，用于 thinking 区转圈） */
   thinkingStreaming?: boolean;
+  /** 思考耗时（毫秒；完成后由后端持久化提供，刷新/重进会话仍可见） */
+  thinkingMs?: number;
+  /** 思考开始时刻（ISO；前端本地记录，仅流式期用于实时秒数） */
+  thinkingStartedAt?: string;
+  /** 思考结束时刻（ISO；前端本地记录，用于后端 thinkingMs 回补前的冻结兜底） */
+  thinkingEndedAt?: string;
   /** 该消息内 todo 工具调用完成时的 todos 快照（任务流内卡片按此渲染，避免共享实时状态） */
   todoSnapshot?: TodoItem[];
   /** 是否为错误消息（用于错误卡片渲染） */
@@ -140,6 +146,8 @@ export interface LiveDraftPayload {
   toolCalls: Array<{ id: string; name: string; arguments: string; status?: ToolCall['status'] }>;
   contentLength: number;
   thinkingLength: number;
+  /** 首个 thinking 分片时刻（ISO；刷新恢复后据此续算思考已用时） */
+  thinkingStartedAt?: string;
   startedAt: string;
   updatedAt: string;
   /** 进程重启后的残留草稿（无活跃 run） */

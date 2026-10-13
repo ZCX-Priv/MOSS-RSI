@@ -42,6 +42,8 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
       toolCallId?: string;
       name?: string;
       thinking?: string;
+      /** 后端持久化的思考耗时（ms） */
+      thinkingMs?: number;
       todoSnapshot?: TaskMessage['todoSnapshot'];
       isError?: boolean;
       metadata?: Record<string, unknown>;
@@ -133,6 +135,7 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
         ? { serverMessageId: m.messageId }
         : {}),
       thinking: m.thinking,
+      ...(typeof m.thinkingMs === 'number' ? { thinkingMs: m.thinkingMs } : {}),
       toolCalls: m.toolCalls,
       todoSnapshot: m.todoSnapshot,
       // 历史恢复保留错误标记（否则刷新后错误消息变成普通正文渲染）

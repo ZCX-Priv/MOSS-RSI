@@ -575,6 +575,13 @@ export class AgentEngineImpl implements AgentEngine {
       const turnStart = performance.now();
       let ttftMs = -1;
       let turnUsage = { prompt: 0, completion: 0, cached: 0 };
+      // 思考计时：首个 thinking 分片 → 首个非思考内容分片（text/tool_call）；未捕获到结束时间则用当前时间兜底
+      let thinkingStartMs = -1;
+      let thinkingEndMs = -1;
+      const computeThinkingMs = (): number | undefined =>
+        thinkingStartMs >= 0
+          ? Math.max(0, Math.round((thinkingEndMs >= 0 ? thinkingEndMs : performance.now()) - thinkingStartMs))
+          : undefined;
 
       try {
         for await (const delta of llm.stream(req, signal)) {
@@ -587,16 +594,21 @@ export class AgentEngineImpl implements AgentEngine {
 
           switch (delta.type) {
             case 'text':
+              // 首个非思考内容分片：思考阶段结束
+              if (thinkingStartMs >= 0 && thinkingEndMs < 0) thinkingEndMs = performance.now();
               assistantText += delta.text;
               streamAccount.produced.text += delta.text.length;
               emit({ type: 'assistant-text', sessionId, text: delta.text });
               break;
             case 'thinking':
+              if (thinkingStartMs < 0) thinkingStartMs = performance.now();
               assistantThinking += delta.text;
               streamAccount.produced.thinking += delta.text.length;
               emit({ type: 'assistant-thinking', sessionId, text: delta.text });
               break;
             case 'tool_call': {
+              // 首个工具调用分片：思考阶段结束
+              if (thinkingStartMs >= 0 && thinkingEndMs < 0) thinkingEndMs = performance.now();
               const wasNew = !toolCallAccumulators.has(delta.index);
               const existing = toolCallAccumulators.get(delta.index) ?? {
                 id: delta.toolCallId,
@@ -660,6 +672,7 @@ export class AgentEngineImpl implements AgentEngine {
               undefined,
               assistantThinking || undefined,
               turnMessageId,
+              computeThinkingMs(),
             );
           }
           break;
@@ -676,6 +689,7 @@ export class AgentEngineImpl implements AgentEngine {
           undefined,
           assistantThinking || undefined,
           turnMessageId,
+          computeThinkingMs(),
         );
         break;
       } finally {
@@ -755,6 +769,7 @@ export class AgentEngineImpl implements AgentEngine {
         toolCalls.length > 0 ? toolCalls : undefined,
         assistantThinking || undefined,
         turnMessageId,
+        computeThinkingMs(),
       );
 
       // 无工具调用：本轮结束

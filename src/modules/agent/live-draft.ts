@@ -42,6 +42,8 @@ export interface LiveDraft {
   toolCalls: LiveDraftToolCall[];
   contentLength: number;
   thinkingLength: number;
+  /** 首个 thinking 分片时刻（ISO；前端刷新恢复后据此续算思考已用时） */
+  thinkingStartedAt?: string;
   startedAt: string;
   updatedAt: string;
   /** 进程重启后从磁盘读到的残留草稿（无活跃 run）：前端渲染为「上次中断的回复」 */
@@ -111,6 +113,13 @@ export class LiveDraftStore {
     if (!d || !text) return;
     d.thinking += text;
     d.thinkingLength += text.length;
+    // 首个思考分片：记录思考起始时刻（刷新续算已用时用；强制写盘保证不丢）
+    if (!d.thinkingStartedAt) {
+      d.thinkingStartedAt = new Date().toISOString();
+      d.updatedAt = d.thinkingStartedAt;
+      this.persist(sessionId, true);
+      return;
+    }
     d.updatedAt = new Date().toISOString();
     this.persistIfDue(sessionId);
   }
@@ -235,8 +244,9 @@ export class LiveDraftStore {
               status: tc.status === 'executing' || tc.status === 'done' ? tc.status : 'generating',
             }))
         : [],
-      contentLength: typeof parsed.contentLength === 'number' ? parsed.contentLength : (parsed.content?.length ?? 0),
+      contentLength: typeof parsed.contentLength === 'number' ? parsed.contentLength : (parsed.thinking?.length ?? 0),
       thinkingLength: typeof parsed.thinkingLength === 'number' ? parsed.thinkingLength : (parsed.thinking?.length ?? 0),
+      ...(typeof parsed.thinkingStartedAt === 'string' ? { thinkingStartedAt: parsed.thinkingStartedAt } : {}),
       startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
     };
@@ -273,6 +283,7 @@ export class LiveDraftStore {
         toolCalls: d.toolCalls,
         contentLength: d.contentLength,
         thinkingLength: d.thinkingLength,
+        ...(d.thinkingStartedAt ? { thinkingStartedAt: d.thinkingStartedAt } : {}),
         startedAt: d.startedAt,
         updatedAt: d.updatedAt,
       }, { fsync: false });

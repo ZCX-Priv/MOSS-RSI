@@ -111,6 +111,25 @@ function orderChronologically(list: TaskMessage[]): TaskMessage[] {
   });
 }
 
+/**
+ * 思考计时打点：随 thinkingStreaming 的「开始/结束」翻转补齐本地时刻。
+ * - 开始（true）：首个 thinking 分片时记录 thinkingStartedAt（实时秒数基准）
+ * - 结束（true→false）：记录 thinkingEndedAt（后端 thinkingMs 回补前的冻结兜底）
+ * 已存在则不改写（一次思考一段计时）。
+ */
+function stampThinkingTiming(
+  m: TaskMessage,
+  nextThinkingStreaming: boolean,
+): Partial<TaskMessage> {
+  if (nextThinkingStreaming) {
+    return m.thinkingStartedAt ? {} : { thinkingStartedAt: new Date().toISOString() };
+  }
+  if (m.thinkingStreaming && !m.thinkingEndedAt) {
+    return { thinkingEndedAt: new Date().toISOString() };
+  }
+  return {};
+}
+
 interface UIState {
   // --- 会话 / 消息 ---
   activeSessionId: string | null;
@@ -1034,7 +1053,16 @@ export const useStore = create<Store>((set, get) => ({
       messagesBySession: {
         ...state.messagesBySession,
         [sessionId]: (state.messagesBySession[sessionId] ?? []).map((m) =>
-          m.id === messageId ? { ...m, ...patch } : m,
+          m.id === messageId
+            ? {
+                ...m,
+                ...patch,
+                // thinkingStreaming 显式翻转时补齐思考计时打点（tool-call-start 等路径置 false）
+                ...(patch.thinkingStreaming !== undefined
+                  ? stampThinkingTiming(m, patch.thinkingStreaming)
+                  : {}),
+              }
+            : m,
         ),
       },
     })),
@@ -1053,7 +1081,7 @@ export const useStore = create<Store>((set, get) => ({
         ...state.messagesBySession,
         [sessionId]: (state.messagesBySession[sessionId] ?? []).map((m) =>
           m.id === messageId
-            ? { ...m, [field]: (m[field] ?? '') + text, thinkingStreaming }
+            ? { ...m, [field]: (m[field] ?? '') + text, thinkingStreaming, ...stampThinkingTiming(m, thinkingStreaming) }
             : m,
         ),
       },
@@ -1084,7 +1112,13 @@ export const useStore = create<Store>((set, get) => ({
           const finalizedToolCalls = m.toolCalls?.map((tc) =>
             tc.status === 'done' ? tc : { ...tc, status: 'done' as const },
           );
-          return { ...m, streaming: false, thinkingStreaming: false, toolCalls: finalizedToolCalls };
+          return {
+            ...m,
+            streaming: false,
+            thinkingStreaming: false,
+            toolCalls: finalizedToolCalls,
+            ...stampThinkingTiming(m, false),
+          };
         }),
       },
     })),

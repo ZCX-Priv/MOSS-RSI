@@ -940,6 +940,7 @@ export const en = {
     newTerminalTab: 'New Terminal Tab',
     thinkingStreaming: 'Thinking',
     thinkingDone: 'Thinking done',
+    thinkingElapsed: '{{sec}}s',
     toolCallArguments: 'Arguments',
     errorResult: 'Error result',
     result: 'Result',

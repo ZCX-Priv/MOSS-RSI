@@ -596,6 +596,7 @@ export class SessionStore {
     toolCalls?: AgentMessage['toolCalls'],
     thinking?: string,
     messageId?: string,
+    thinkingMs?: number,
   ): void {
     session.messages.push({
       role: 'assistant',
@@ -603,6 +604,7 @@ export class SessionStore {
       toolCalls,
       thinking,
       messageId,
+      ...(thinkingMs != null ? { thinkingMs } : {}),
       timestamp: new Date().toISOString(),
     });
     session.updatedAt = new Date().toISOString();

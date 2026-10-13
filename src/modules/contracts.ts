@@ -397,6 +397,11 @@ export interface AgentMessage {
   }>;
   toolCallId?: string;
   thinking?: string;
+  /**
+   * 本轮流式思考耗时（毫秒）：首个 thinking 分片到首个非思考内容分片之间的时长。
+   * 落盘用于前端刷新/重进会话后展示「已完成思考 · Ns」。
+   */
+  thinkingMs?: number;
   /** 工具名（role=tool 时，部分 provider 用 name 区分工具来源） */
   name?: string;
   /** 工具结果是否为错误（role=tool 时；持久化用于前端刷新恢复错误样式） */

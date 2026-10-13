@@ -941,6 +941,7 @@ export const zh = {
     newTerminalTab: '新建终端标签',
     thinkingStreaming: '思考中',
     thinkingDone: '已完成思考',
+    thinkingElapsed: '{{sec}}s',
     toolCallArguments: '参数',
     errorResult: '错误结果',
     result: '结果',

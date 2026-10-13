@@ -183,6 +183,8 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
     timestamp: draft.startedAt,
     streaming,
     thinkingStreaming: false,
+    // 思考起始时刻（草稿落盘）：刷新/重连恢复后据此续算思考已用时
+    ...(draft.thinkingStartedAt ? { thinkingStartedAt: draft.thinkingStartedAt } : {}),
     ...(draft.stale ? { interrupted: true } : {}),
   };
 
@@ -195,6 +197,7 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
       toolCalls: msg.toolCalls,
       streaming,
       thinkingStreaming: false,
+      ...(draft.thinkingStartedAt ? { thinkingStartedAt: draft.thinkingStartedAt } : {}),
       ...(draft.stale ? { interrupted: true } : {}),
     });
   } else {

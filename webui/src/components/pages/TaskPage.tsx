@@ -51,6 +51,7 @@ import type { OverlayType } from '../../types';
 import { cn } from '@/lib/utils';
 import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-block';
 import { stripInjectBlock } from '@/lib/inject-block';
+import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
@@ -2146,6 +2147,34 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   // 超长正文截断渲染（防止单条巨型文本布局卡死）；展开后完整渲染。
   // 流式生成中超限时显示尾部（正在生成的内容在末尾），结束后恢复头部截断。
   const [expanded, setExpanded] = useState(false);
+  // 显式思考：流式思考期间每 100ms 刷新一次「当前时刻」，驱动状态行秒数递增（0.1s 分辨率；非思考消息不启动定时器）
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!message.thinkingStreaming) return;
+    setNowMs(Date.now());
+    const id = setInterval(() => setNowMs(Date.now()), 100);
+    return () => clearInterval(id);
+  }, [message.thinkingStreaming]);
+  // 思考已用时（毫秒；渲染时经 formatThinkingSeconds 格式化）：
+  // ① 完成后优先用后端持久化的 thinkingMs（刷新/重进会话仍可见）
+  // ② 否则用本地记录的 thinkingStartedAt（流式中实时计时，完成后用 thinkingEndedAt 冻结兜底）
+  // ③ 都没有（旧数据）→ 不显示秒数
+  let thinkMs: number | null = null;
+  if (message.thinkingMs != null) {
+    thinkMs = Math.max(0, message.thinkingMs);
+  } else if (message.thinkingStartedAt) {
+    const started = Date.parse(message.thinkingStartedAt);
+    if (Number.isFinite(started)) {
+      if (message.thinkingStreaming) {
+        thinkMs = Math.max(0, nowMs - started);
+      } else if (message.thinkingEndedAt) {
+        const ended = Date.parse(message.thinkingEndedAt);
+        if (Number.isFinite(ended)) thinkMs = Math.max(0, ended - started);
+      }
+    }
+  }
+  // 思考预览：仅流式期间展示最新片段（单行截断交给 CSS）
+  const thinkPreview = message.thinkingStreaming ? thinkingPreview(message.thinking) : '';
   // 命令注入块（LLM 可见、UI 不可见）先剥离：气泡/附件解析/正文/复制都在「可见文本」上进行，
   // 刷新后从会话 JSON 重新加载同样走这里 → 不会突然显现模板正文
   const visibleContent = stripInjectBlock(message.content);
@@ -2273,33 +2302,34 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           <span>{t('task.interruptedReply')}</span>
         </div>
       )}
-      {/* thinking 折叠区 */}
+      {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时） */}
       {message.thinking && (
-        <details
-          className="group"
-          // 流式中自动展开思考内容（长思考可见，避免「一片响应中」的错觉）；
-          // 用户一旦手动折叠，本次流式内不再强制展开（data-user-collapsed 标记，流式结束后复位）。
-          ref={(el) => {
-            if (!el) return;
-            if (!message.thinkingStreaming) {
-              el.dataset.userCollapsed = '';
-              return;
-            }
-            if (el.dataset.userCollapsed !== '1' && !el.open) el.open = true;
-          }}
-          onToggle={(e) => {
-            const el = e.currentTarget;
-            if (message.thinkingStreaming && !el.open) el.dataset.userCollapsed = '1';
-          }}
-        >
+        <details className="group">
           <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-            <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+            <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
             {message.thinkingStreaming ? (
-              <Loader2 className="size-3.5 animate-spin" />
+              <Loader2 className="size-3.5 shrink-0 animate-spin" />
             ) : (
-              <Atom className="size-3.5" />
+              <Atom className="size-3.5 shrink-0" />
             )}
-            <span>{message.thinkingStreaming ? t('task.thinkingStreaming') : t('task.thinkingDone')}</span>
+            <span className="shrink-0">
+              {message.thinkingStreaming ? t('task.thinkingStreaming') : t('task.thinkingDone')}
+            </span>
+            {thinkMs != null && (
+              <>
+                <span className="shrink-0">·</span>
+                <span className="shrink-0 tabular-nums">
+                  {t('task.thinkingElapsed', { sec: formatThinkingSeconds(thinkMs) })}
+                </span>
+              </>
+            )}
+            {/* 预览仅在折叠态展示：展开后全文可见，隐藏预览避免重复 */}
+            {thinkPreview && (
+              <span className="group-open:hidden flex min-w-0 items-center gap-1.5">
+                <span className="shrink-0">·</span>
+                <span className="min-w-0 truncate text-muted-foreground/70">{thinkPreview}</span>
+              </span>
+            )}
           </summary>
           <div className="mt-1">
             <MarkdownRenderer

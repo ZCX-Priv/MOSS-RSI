@@ -154,6 +154,20 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
         remember({ root: resp.root, path: resp.path, view: 'dir' });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
+        // 失败也要把地址栏推进到「正在尝试进入」的目标路径：
+        // 否则地址栏停留在上一级，与实际访问的目录不一致，用户无从得知报错的是哪个目录。
+        // 不写位置记忆（remember），重新打开标签仍回到上次有效位置。
+        if (target) {
+          if (systemMode) {
+            setSubPath(target);
+          } else {
+            const baseRoot = root ?? listingRef.current?.root ?? '';
+            if (baseRoot) {
+              const sep: Sep = listingRef.current?.sep ?? (target.includes('\\') ? '\\' : '/');
+              setSubPath(toSuffixDisplay(baseRoot, target, sep));
+            }
+          }
+        }
       } finally {
         setLoading(false);
       }
