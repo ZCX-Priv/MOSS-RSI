@@ -861,7 +861,6 @@ export const en = {
       prompt: ', what would you like to do today?',
     },
     thinking: 'Thinking...',
-    waitingFirstToken: 'Waiting for the first chunk ({{sec}}s)',
     backToBottom: 'Back to bottom',
     // History pagination (virtualized list, load earlier on scroll up)
     loadingEarlier: 'Loading earlier messages…',

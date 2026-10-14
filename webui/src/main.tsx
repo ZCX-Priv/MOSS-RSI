@@ -91,6 +91,8 @@ const PERSISTED_KEYS = [
   'moss-ui-density',
   'moss-corner-radius',
   'moss-right-panel-ratio',
+  // 右侧面板宽度是否为手动拖拽产生（true → 设置项显示「自定义」）
+  'moss-right-panel-custom',
 ] as const;
 
 /**
@@ -181,6 +183,7 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
       (data['moss-right-panel-ratio'] as number) < 1
         ? (data['moss-right-panel-ratio'] as number)
         : undefined,
+    rightPanelCustom: data['moss-right-panel-custom'] === true ? true : undefined,
     permissionMode:
       data['moss-permission-mode'] === 'ask' ||
       data['moss-permission-mode'] === 'auto' ||

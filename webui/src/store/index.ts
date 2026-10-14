@@ -268,6 +268,8 @@ interface UIState {
    * 三档预设见 RIGHT_PANEL_PRESETS；拖拽调宽直接改写该比例（精确百分比）。
    */
   rightPanelRatio: number;
+  /** 右侧面板宽度是否由「手动拖拽」产生（true → 设置项显示「自定义」；选中预设后复位） */
+  rightPanelCustom: boolean;
 
   // --- 执行权限模式（permissionMode=全局默认；permissionModeBySession=会话级覆盖） ---
   permissionMode: PermissionMode;
@@ -309,6 +311,8 @@ export interface PersistedState {
   uiDensity?: 'compact' | 'standard' | 'comfortable';
   cornerRadius?: 'small' | 'standard' | 'large';
   rightPanelRatio?: number;
+  /** 右侧面板是否为「手动拖拽」产生的宽度（true → 设置项显示「自定义」） */
+  rightPanelCustom?: boolean;
   permissionMode?: PermissionMode;
   /** 右侧边栏标签页（会话级持久化；不持久化 '' 键） */
   sidebarTabsBySession?: Record<string, SessionSidebarTabs>;
@@ -509,7 +513,7 @@ interface UIActions {
   setFontSize: (v: UIState['fontSize']) => void;
   setUiDensity: (v: UIState['uiDensity']) => void;
   setCornerRadius: (v: UIState['cornerRadius']) => void;
-  setRightPanelRatio: (v: number) => void;
+  setRightPanelRatio: (v: number, manual?: boolean) => void;
 
   // 执行权限模式
   setPermissionMode: (v: UIState['permissionMode'], sessionId?: string) => void;
@@ -635,9 +639,6 @@ export const RIGHT_PANEL_PRESETS = {
 /** 拖拽可调范围 = 三档预设的「窄 ~ 宽」区间（不允许拖到比「窄」更窄、比「宽」更宽） */
 export const RIGHT_PANEL_RATIO_MIN = RIGHT_PANEL_PRESETS.narrow;
 export const RIGHT_PANEL_RATIO_MAX = RIGHT_PANEL_PRESETS.wide;
-
-/** 对话区宽度上限的基准：右侧面板处于「窄」档时对话区所占宽度 */
-export const CHAT_NARROW_RIGHT_RATIO = RIGHT_PANEL_PRESETS.narrow;
 
 /**
  * 右侧面板最小像素宽度兜底。因拖拽下限已是 32% 窗宽，该下限仅在窗口宽 < 750px 时才可能生效，
@@ -797,6 +798,7 @@ export const useStore = create<Store>((set, get) => ({
   uiDensity: 'standard',
   cornerRadius: 'standard',
   rightPanelRatio: RIGHT_PANEL_PRESETS.standard,
+  rightPanelCustom: false,
 
   // --- 执行权限模式 ---
   permissionMode: 'ask',
@@ -1517,10 +1519,12 @@ export const useStore = create<Store>((set, get) => ({
     void idbSet('moss-corner-radius', cornerRadius);
     set({ cornerRadius });
   },
-  setRightPanelRatio: (ratio) => {
+  setRightPanelRatio: (ratio, manual = false) => {
     const clamped = clampRightPanelRatio(ratio);
     void idbSet('moss-right-panel-ratio', clamped);
-    set({ rightPanelRatio: clamped });
+    // manual=true（拖拽）→ 标记「自定义」；false（选择预设）→ 复位
+    void idbSet('moss-right-panel-custom', manual);
+    set({ rightPanelRatio: clamped, rightPanelCustom: manual });
   },
 
   // --- Actions: 执行权限模式 ---
@@ -1904,6 +1908,9 @@ export const useStore = create<Store>((set, get) => ({
       if (typeof patch.rightPanelRatio === 'number') {
         // 一律收敛到 [窄, 宽]：历史持久化值可能落在区间外（如早期开发态拖出的比例）
         next.rightPanelRatio = clampRightPanelRatio(patch.rightPanelRatio);
+      }
+      if (typeof patch.rightPanelCustom === 'boolean') {
+        next.rightPanelCustom = patch.rightPanelCustom;
       }
       if (
         patch.permissionMode === 'ask' ||

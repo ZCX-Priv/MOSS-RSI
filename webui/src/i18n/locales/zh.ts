@@ -862,7 +862,6 @@ export const zh = {
       prompt: '，今天想做些什么？',
     },
     thinking: '响应中...',
-    waitingFirstToken: '等待模型首个分片（已 {{sec}}s）',
     backToBottom: '返回底部',
     // 历史分页（虚拟列表上滑加载更早）
     loadingEarlier: '正在加载更早的消息…',

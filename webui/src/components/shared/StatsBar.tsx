@@ -4,7 +4,6 @@
 //   与近样本平均命中率，与右侧上下文面板同源同刻）；引擎不可用/无样本时降级 runStats 累计值
 // 常驻显示（无数据时按 0 值渲染）。
 
-import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
@@ -21,28 +20,12 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-/** 数值项：值变化时短暂高亮脉冲（细腻反馈；流式期间与动画关闭时跳过防闪烁） */
-function StatItem({ label, value, pulse, warning }: { label: string; value: string; pulse?: boolean; warning?: boolean }) {
-  const [hot, setHot] = useState(false);
-  const prev = useRef(value);
-  useEffect(() => {
-    if (prev.current === value) return;
-    prev.current = value;
-    if (!pulse) return;
-    setHot(true);
-    const timer = setTimeout(() => setHot(false), 400);
-    return () => clearTimeout(timer);
-  }, [value, pulse]);
+/** 数值项（值变化时不再高亮脉冲：已去掉「变蓝闪一下」特效） */
+function StatItem({ label, value, warning }: { label: string; value: string; warning?: boolean }) {
   return (
     <span className="anim-stat whitespace-nowrap tabular-nums">
       {label}{' '}
-      <span
-        className={cn(
-          'text-foreground/80 transition-colors duration-150',
-          warning && 'text-amber-500 dark:text-amber-400',
-          hot && 'text-primary-strong',
-        )}
-      >
+      <span className={cn('text-foreground/80', warning && 'text-amber-500 dark:text-amber-400')}>
         {value}
       </span>
     </span>
@@ -71,14 +54,6 @@ const EMPTY_STATS: RunStats = {
 export function StatsBar({ stats, contextStats }: { stats?: RunStats; contextStats?: ContextStats }) {
   const { t } = useTranslation();
   const s = stats ?? EMPTY_STATS;
-  // 数值脉冲开关：动画分开关开启（总开且非系统减弱动态）且当前会话非流式生成
-  const statAnimOn = useStore(
-    (st) => st.animationSettings.enabled && st.animationSettings.stat && !st.prefersReducedMotion,
-  );
-  const generating = useStore(
-    (st) => st.generatingBySession[st.activeSessionId ?? ''] ?? false,
-  );
-  const pulse = statAnimOn && !generating;
   // 轮数上限（agent.maxTurns；0=无限）：有限时第一项切换为本次 run 进度 X/N
   const maxTurns = useStore((st) => st.appConfig?.agent.maxTurns) ?? 0;
   const finiteTurns = maxTurns > 0;
@@ -104,19 +79,18 @@ export function StatsBar({ stats, contextStats }: { stats?: RunStats; contextSta
             ? t('stats.turnsProgress', { current: runTurns, max: maxTurns })
             : t('stats.turnsSteps', { turns: s.turns, steps: s.steps })
         }
-        pulse={pulse}
         warning={nearTurnLimit}
       />
       <Separator />
-      <StatItem label={t('stats.llmLabel')} value={fmtMs(s.llmMs)} pulse={pulse} />
+      <StatItem label={t('stats.llmLabel')} value={fmtMs(s.llmMs)} />
       <Separator />
-      <StatItem label={t('stats.toolLabel')} value={fmtMs(s.toolMs)} pulse={pulse} />
+      <StatItem label={t('stats.toolLabel')} value={fmtMs(s.toolMs)} />
       <Separator />
-      <StatItem label={t('stats.cacheLabel')} value={t('stats.percent', { pct: cacheHitPct })} pulse={pulse} />
+      <StatItem label={t('stats.cacheLabel')} value={t('stats.percent', { pct: cacheHitPct })} />
       <Separator />
-      <StatItem label={t('stats.inputLabel')} value={t('stats.tokCount', { count: fmtTokens(inputTokens) })} pulse={pulse} />
+      <StatItem label={t('stats.inputLabel')} value={t('stats.tokCount', { count: fmtTokens(inputTokens) })} />
       <Separator />
-      <StatItem label={t('stats.outputLabel')} value={t('stats.tokCount', { count: fmtTokens(outputTokens) })} pulse={pulse} />
+      <StatItem label={t('stats.outputLabel')} value={t('stats.tokCount', { count: fmtTokens(outputTokens) })} />
     </div>
   );
 }

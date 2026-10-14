@@ -2478,9 +2478,10 @@ export function AppearanceSettingsSection() {
   const cornerRadius = useStore((s) => s.cornerRadius);
   const setCornerRadius = useStore((s) => s.setCornerRadius);
   const rightPanelRatio = useStore((s) => s.rightPanelRatio);
+  const rightPanelCustom = useStore((s) => s.rightPanelCustom);
   const setRightPanelRatio = useStore((s) => s.setRightPanelRatio);
-  // 三档预设；拖拽产生非预设比例时显示「自定义」
-  const rightPanelPreset = rightPanelPresetOf(rightPanelRatio);
+  // 手动拖拽过 → 一律显示「自定义」；否则按当前比例命中三档预设
+  const rightPanelPreset = rightPanelCustom ? 'custom' : rightPanelPresetOf(rightPanelRatio);
 
   const ACCENT_PRESETS = [
     { id: 'blue', color: 'oklch(0.546 0.245 263.4)' },

@@ -121,7 +121,6 @@ import {
   RIGHT_PANEL_MIN_PX,
   RIGHT_PANEL_RATIO_MIN,
   RIGHT_PANEL_RATIO_MAX,
-  CHAT_NARROW_RIGHT_RATIO,
 } from '../../store';
 import { useTask } from '../../hooks/useTask';
 import { useFileIndex } from '../../hooks/useFileIndex';
@@ -211,6 +210,12 @@ function waitNextSessionTruncated(sessionId: string, timeoutMs = 1500): Promise<
 }
 
 /**
+ * 对话区（消息列表 + 发送框）固定最大宽度：固定上限内自适应。
+ * 可用宽度更小时列自身 w-full 自动收缩；不再按窗宽比例动态计算，避免小窗口下被压得过窄。
+ */
+const CHAT_MAX_WIDTH_PX = 768;
+
+/**
  * 回复结尾判定见 `webui/src/lib/reply-end.ts`（纯函数，已被单测覆盖）：
  * - replyEndIds：所有「一段 AI 回复的结尾」消息 id → 这些消息才挂「复制」按钮
  * - lastReplyEndId：最新的一段回复结尾 → 仅它挂「重新生成 / 诊断(Harness)」
@@ -230,19 +235,14 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const isMobile = useIsMobile();
   const windowWidth = useWindowWidth();
   // 移动端侧边栏抽屉开合态：展开时顶栏「新建对话」快捷按钮自动隐藏（抽屉内已有同名按钮）
-  // width = 左栏展开态宽度，供对话区上限换算（折叠时该栏不占位，但上限仍按展开态取，保证「固定大小」）
-  const { openMobile, width: sidebarWidth } = useSidebar();
+  const { openMobile } = useSidebar();
 
   // 右侧面板像素宽度：比例 × 窗宽（比例已由 store 钳制在 [窄, 宽] 区间）；
   // 再用 240px 兜底，防止极端窄窗口下面板不可用
   const rightPanelPx = Math.max(RIGHT_PANEL_MIN_PX, Math.round(rightPanelRatio * windowWidth));
 
-  // 对话区宽度上限 = 「右侧面板取『窄』档时」对话区所占宽度（下限 320px）。
-  // 面板打开时其宽度恒 ≥ 窄档，故该上限只在面板「收起」时生效：此时对话区触及上限并水平居中，
-  // 不再随面板收起被拉长。移动端不做上限：视口本身已很窄，且左栏为抽屉不占位，加限会凭空产生左右留白。
-  const chatMaxWidth = isMobile
-    ? undefined
-    : Math.max(320, Math.round(windowWidth * (1 - CHAT_NARROW_RIGHT_RATIO) - sidebarWidth));
+  // 对话区宽度：固定上限 CHAT_MAX_WIDTH_PX + w-full 自适应（可用宽度不足时自动收缩、居中）。
+  const chatMaxWidth = CHAT_MAX_WIDTH_PX;
 
   // 右侧面板拖拽调宽（仅桌面端内嵌 aside）：范围＝「窄 ~ 宽」，拖动像素宽度换算为精确比例
   const rightResize = useResizable({
@@ -250,7 +250,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     min: Math.round(RIGHT_PANEL_RATIO_MIN * windowWidth),
     max: Math.round(RIGHT_PANEL_RATIO_MAX * windowWidth),
     onChange: (px) => {
-      if (windowWidth > 0) setRightPanelRatio(px / windowWidth);
+      // manual=true：拖拽产生的宽度 → 设置项显示「自定义」
+      if (windowWidth > 0) setRightPanelRatio(px / windowWidth, true);
     },
   });
 
@@ -680,24 +681,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       (tail.thinking ?? '').trim().length > 0 ||
       (tail.toolCalls?.length ?? 0) > 0);
   const showTailThinking = isGenerating && !tailHasVisibleOutput;
-
-  /**
-   * 「响应中」等待计时：模型长思考（本次实测可达 30–60s）期间显示已等待秒数，
-   * 让「在等模型」可见，避免被误判为卡死；首个分片到达（showTailThinking 转 false）即归零。
-   */
-  const [waitSec, setWaitSec] = useState(0);
-  useEffect(() => {
-    if (!showTailThinking) {
-      setWaitSec(0);
-      return;
-    }
-    const startedAt = Date.now();
-    setWaitSec(0);
-    const timer = setInterval(() => {
-      setWaitSec(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [showTailThinking]);
 
   // ===== 右侧面板 Tab 切换状态机 =====
   // 默认"系统"；仅当 LLM 真实读取文件（WS context-updated，read/grep/glob）时自动切到"文件"；
@@ -1342,9 +1325,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {/* 文件索引构建进度（构建期间显示，全就绪时隐藏） */}
         <FileIndexProgressBar />
 
-        {/* 对话列：受 max-width 约束 + 水平居中。右侧面板收起（或拖到比「窄」更小）时
-            对话区触及上限并居中，不再被拉长；header 与文件索引进度条保持整宽，
-            以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
+        {/* 对话列：固定最大宽度（CHAT_MAX_WIDTH_PX）+ 水平居中；可用宽度不足时由 w-full 自动收缩。
+            header 与文件索引进度条保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
         <div
           className="mx-auto flex min-h-0 w-full flex-1 flex-col"
           style={{ maxWidth: chatMaxWidth }}
@@ -1400,11 +1382,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 showTailThinking ? (
                   <div className="flex items-center gap-2 px-4 pb-4 text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" />
-                    <span className="text-sm">
-                      {waitSec > 0
-                        ? t('task.waitingFirstToken', { sec: waitSec })
-                        : t('task.thinking')}
-                    </span>
+                    <span className="text-sm">{t('task.thinking')}</span>
                   </div>
                 ) : (
                   <div className="h-2" />
@@ -1422,9 +1400,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               {isGenerating && (
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin" />
-                  <span className="text-sm">
-                    {waitSec > 0 ? t('task.waitingFirstToken', { sec: waitSec }) : t('task.thinking')}
-                  </span>
+                  <span className="text-sm">{t('task.thinking')}</span>
                 </div>
               )}
             </div>
@@ -2650,12 +2626,6 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
                     })()
                   )}
                   <span>{tc.name}</span>
-                  {tc.status === 'generating' && (
-                    <span className="text-muted-foreground/60">{t('terminal.generating')}</span>
-                  )}
-                  {tc.status === 'executing' && (
-                    <span className="text-muted-foreground/60">{t('terminal.executing')}</span>
-                  )}
                 </summary>
                 <div className="mt-1 flex flex-col gap-2 rounded-md border border-border p-2 text-xs max-h-[300px] overflow-auto no-scrollbar">
                   {tc.arguments && (

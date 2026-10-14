@@ -1078,7 +1078,7 @@ const TaskRow = memo(function TaskRow({
       {/* 普通模式不提供拖拽手柄：仅管理模式（列表管理按钮）下可拖拽排序/移组 */}
       {/* 状态指示器：运行中/出错时常显，hover 时被菜单按钮覆盖；标题 pr-5 为其预留空间 */}
       <span
-        className="pointer-events-none absolute right-0.25 top-1/2 z-[5] flex size-4 -translate-y-1/2 items-center justify-center"
+        className="pointer-events-none absolute right-0.75 top-1/2 z-[5] flex size-4 -translate-y-1/2 items-center justify-center"
         aria-label={generating ? t('sidebar.statusRunning') : errored ? t('sidebar.statusError') : undefined}
       >
         {generating ? (
@@ -1094,7 +1094,7 @@ const TaskRow = memo(function TaskRow({
             size="icon-xs"
             className={cn(
               'absolute top-1/2 z-10 -translate-y-1/2 opacity-0 transition-opacity group-hover/item:opacity-100 data-[state=open]:opacity-100',
-              // 运行中/出错：状态指示器常显占右侧 1~17px，三点左移至 right-5（20px）避免叠在圆圈上；
+              // 运行中/出错：状态指示器常显占右侧 3~19px，三点左移至 right-5（20px）避免叠在圆圈上；
               // 空闲：指示器不显示，三点贴边仅内收 2px（right-0.5，rem 自适应字号）
               generating || errored ? 'right-5' : 'right-0.5',
             )}
