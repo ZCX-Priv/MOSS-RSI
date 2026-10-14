@@ -97,6 +97,20 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
       });
       continue;
     }
+    // 系统错误消息（模型请求失败）：驱动红色错误卡片；保留原始 provider 错误文本供「诊断」用
+    if (m.name === 'system-error') {
+      const errMeta = m.metadata as { providerError?: string } | undefined;
+      result.push({
+        id: msgId,
+        role: 'assistant',
+        content: m.content ?? '',
+        isError: true,
+        errorDetail: errMeta?.providerError ?? m.content ?? '',
+        timestamp: m.timestamp ?? new Date().toISOString(),
+        ...(typeof m.index === 'number' ? { historyIndex: m.index } : {}),
+      });
+      continue;
+    }
     if (m.role === 'tool') {
       const entry = {
         toolCallId: m.toolCallId ?? '',

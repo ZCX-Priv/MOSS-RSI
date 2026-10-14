@@ -27,6 +27,7 @@ import {
   seedStreamLength,
 } from './stream-buffer';
 import { diag, diagAlways } from './diag';
+import { emitInsightEvent } from './insight-bus';
 import i18n from '../i18n';
 import type {
   AgentEvent,
@@ -43,6 +44,7 @@ import type {
   ContextStats,
   LiveDraftPayload,
   SessionSubscribedPayload,
+  InsightEvent,
 } from '../types/api';
 
 function genId(): string {
@@ -103,6 +105,27 @@ export function onHistoryInvalidated(handler: (sessionId: string) => void): () =
 
 function emitHistoryInvalidated(sessionId: string): void {
   for (const h of invalidatedHandlers) {
+    try {
+      h(sessionId);
+    } catch {
+      // 单个回调异常不影响其他
+    }
+  }
+}
+
+const truncatedHandlers = new Set<(sessionId: string) => void>();
+
+/**
+ * 订阅：本会话「撤回/截断」事件已处理完毕（本地消息已按截断点删除）。
+ * 「重新生成」据此等待删除落地后再重发，避免乐观新消息被同一次删除误删（竞态）。
+ */
+export function onSessionTruncated(handler: (sessionId: string) => void): () => void {
+  truncatedHandlers.add(handler);
+  return () => truncatedHandlers.delete(handler);
+}
+
+function emitSessionTruncated(sessionId: string): void {
+  for (const h of truncatedHandlers) {
     try {
       h(sessionId);
     } catch {
@@ -445,21 +468,31 @@ export function applyWsMessage(msg: WSMessage): void {
       if (event.stats) s.setRunStats(sessionId, event.stats);
       break;
     }
+    case 'insight.diagnose.event': {
+      // AI 诊断流式事件：仅投递到诊断弹窗订阅者（不落 store、不参与会话状态机）
+      emitInsightEvent((msg.payload ?? {}) as InsightEvent);
+      break;
+    }
     case 'error': {
       flushPending(); // 流式文本在终止前全部写入
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
-      const event = (msg.payload ?? {}) as { message?: string };
+      const event = (msg.payload ?? {}) as { message?: string; providerError?: string; messageId?: string };
       const errorCode = event.message ?? '';
       const localizedMessage = i18n.exists(`errors.${errorCode}`)
         ? i18n.t(`errors.${errorCode}`)
         : (errorCode || i18n.t('errors.UNKNOWN'));
+      // 原始 provider 错误文本（用于错误卡片正文 + 「诊断」弹窗输入；与刷新后历史恢复字段一致）
+      const errorDetail = event.providerError ?? localizedMessage;
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
         s.addMessage(sessionId, {
-          id: genId(),
+          // 稳定身份：与后端持久化 system-error 消息同 id（`<sid>#<turn>#error`）→
+          // catchUpTail 合并时原位 patch，实时与刷新后只渲染一条错误卡片。
+          id: event.messageId ?? genId(),
           role: 'assistant',
           content: localizedMessage,
           isError: true,
+          errorDetail,
           timestamp: new Date().toISOString(),
         });
         s.setGenerating(sessionId, false);
@@ -614,6 +647,8 @@ export function applyWsMessage(msg: WSMessage): void {
       // 服务端消息数组已变化 → 分页游标失效，交由编排层按末页整体重载
       useStore.getState().resetHistory(sessionId);
       emitHistoryInvalidated(sessionId);
+      // 通知「重新生成」：本地删除已落地，可以安全重发（消除竞态）
+      emitSessionTruncated(sessionId);
       break;
     }
     case 'session-restored': {

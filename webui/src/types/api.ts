@@ -100,6 +100,8 @@ export interface TaskMessage {
   todoSnapshot?: TodoItem[];
   /** 是否为错误消息（用于错误卡片渲染） */
   isError?: boolean;
+  /** 错误详情（原始 provider 错误文本；错误卡片正文 + 「诊断」弹窗的输入） */
+  errorDetail?: string;
   /** 压缩卡片数据（上下文引擎压缩完成时插入消息流；驱动 CompactionCard 渲染） */
   compaction?: CompactionRecord;
   /** 轮数触顶提示卡数据（达到 agent.maxTurns 上限时插入；驱动 MaxTurnsNoticeCard 渲染 + 继续按钮） */
@@ -152,6 +154,72 @@ export interface LiveDraftPayload {
   updatedAt: string;
   /** 进程重启后的残留草稿（无活跃 run） */
   stale?: boolean;
+}
+
+// ============================================================================
+// AI 诊断（WebSocket 流式：insight.diagnose / insight.diagnose.event）
+// ============================================================================
+
+export type InsightKind = 'cause' | 'harness' | 'resource';
+
+/** 取证/分析步骤（链路中逐条展示「读取了/做了什么」） */
+export interface InsightStep {
+  id: string;
+  /** 步骤类型（前端据此前缀做 i18n：insight.step.<kind>） */
+  kind: string;
+  /** 已读取/产出的数据摘要（数字为主，语言无关） */
+  detail: string;
+  status: 'running' | 'done' | 'error';
+}
+
+/** 诊断流式事件（与后端 InsightEvent 同构） */
+export interface InsightEvent {
+  requestId: string;
+  kind: InsightKind;
+  phase: 'step' | 'thinking' | 'text' | 'done' | 'error';
+  step?: InsightStep;
+  text?: string;
+  message?: string;
+}
+
+// ============================================================================
+// 资源管理器（GET /api/system-monitor/snapshot）
+// ============================================================================
+
+export type MossProcessGroup = 'server' | 'terminal' | 'child' | 'other';
+
+export interface MossProcessInfo {
+  pid: number;
+  ppid: number;
+  name: string;
+  cpuPercent: number;
+  rssBytes: number;
+  isMoss: boolean;
+  group: MossProcessGroup;
+}
+
+export interface ResourceSnapshot {
+  cpu: { usagePercent: number; cores: number; model: string; mossPercent: number };
+  memory: { totalBytes: number; usedBytes: number; usedPercent: number; mossBytes: number };
+  disk: {
+    drive: string;
+    totalBytes: number;
+    freeBytes: number;
+    usedPercent: number;
+    categories: Array<{ key: string; bytes: number }>;
+  };
+  network: {
+    interfaces: Array<{
+      name: string;
+      address?: string;
+      rxBytes: number;
+      txBytes: number;
+      rxRate: number;
+      txRate: number;
+    }>;
+  };
+  moss: { pid: number; processes: MossProcessInfo[] };
+  sampledAt: string;
 }
 
 /** GET /api/session/:id/state（刷新/重连恢复「不丢状态」的契约） */

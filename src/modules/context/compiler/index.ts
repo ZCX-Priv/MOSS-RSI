@@ -20,5 +20,6 @@ export {
   COMPACTION_SUMMARY_MSG_NAME,
   SKILL_INJECT_MSG_NAME,
   MAX_TURNS_NOTICE_MSG_NAME,
+  SYSTEM_ERROR_MSG_NAME,
 } from './view-builder';
 export type { BuildViewOptions, BuiltView } from './view-builder';

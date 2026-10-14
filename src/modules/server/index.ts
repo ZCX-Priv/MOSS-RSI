@@ -72,7 +72,8 @@ import {
   createQueryLogsHandler,
   createCleanupLogsHandler,
 } from './routes/logs';
-import { createTruncatePreviewHandler, createTruncateHandler, createTruncateRestoreHandler } from './routes/truncate';
+import { createTruncatePreviewHandler, createTruncateHandler, createTruncateRestoreHandler, createRegenerateTargetHandler } from './routes/truncate';
+import { createSystemMonitorSnapshotHandler } from './routes/system-monitor';
 import {
   createListFileHistoryHandler,
   createUndoFileHistoryHandler,
@@ -222,7 +223,7 @@ class ServerModule implements Module {
     this.ctx = ctx;
     this.assets = new StaticAssets(ctx.env);
     this.router = new HttpRouter(ctx.config, ctx.logger, this.assets);
-    this.wsHandler = new WsHandler(ctx.services, ctx.logger);
+    this.wsHandler = new WsHandler(ctx.services, ctx.logger, ctx.env);
     this.mcpExpose = new McpExpose({ config: ctx.config, services: ctx.services, logger: ctx.logger });
 
     this.registerRoutes();
@@ -328,6 +329,8 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/sessions/:id/truncate-preview', handler: createTruncatePreviewHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/sessions/:id/truncate', handler: createTruncateHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/sessions/:id/truncate-restore', handler: createTruncateRestoreHandler(services), auth: true });
+    // 「重新生成」重跑起点（服务端在完整历史上定位最后的真实用户消息）
+    this.router.addRoute({ method: 'POST', pattern: '/api/sessions/:id/regenerate-target', handler: createRegenerateTargetHandler(services), auth: true });
 
     this.router.addRoute({ method: 'GET', pattern: '/api/mcp/servers', handler: createListMcpServersHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/mcp/tools', handler: createListMcpToolsHandler(services), auth: true });
@@ -462,6 +465,11 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/logs/files', handler: createLogFilesHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/logs', handler: createQueryLogsHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/logs/cleanup', handler: createCleanupLogsHandler(services), auth: true });
+
+    // system-monitor（资源管理器：系统总量 + MOSS 自身占用进程树）
+    this.router.addRoute({ method: 'GET', pattern: '/api/system-monitor/snapshot', handler: createSystemMonitorSnapshotHandler(env), auth: true });
+
+    // AI 诊断（链路式流式）改走 WebSocket（ws-handler: insight.diagnose），不再提供 HTTP 接口。
 
     // context（上下文引擎：统计 / 压缩历史 / 手动压缩 / 摘要模型列表 / 文件索引）
     this.router.addRoute({ method: 'GET', pattern: '/api/context/summary-models', handler: createSummaryModelsHandler(services), auth: true });

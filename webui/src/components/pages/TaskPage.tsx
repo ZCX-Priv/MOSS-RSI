@@ -34,6 +34,7 @@ import {
   Users,
   SquarePen,
   ArrowUp,
+  Stethoscope,
 } from 'lucide-react';
 import {
   Dialog,
@@ -51,7 +52,9 @@ import type { OverlayType } from '../../types';
 import { cn } from '@/lib/utils';
 import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-block';
 import { stripInjectBlock } from '@/lib/inject-block';
+import { onSessionTruncated } from '@/lib/ws-events';
 import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
+import { computeReplyEnds } from '@/lib/reply-end';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
@@ -65,6 +68,8 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '
 import { SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
+import { SystemErrorCard, MessageActions } from '@/components/pages/SystemErrorCard';
+import { InsightDialog } from '@/components/insight/InsightDialog';
 import { useIsMobile, useWindowWidth } from '@/hooks/use-mobile';
 import { useResizable } from '@/hooks/use-resizable';
 import { useOpenFilePreview } from '@/hooks/useOpenFilePreview';
@@ -182,6 +187,34 @@ interface TaskPageProps {
   onOpenOverlay?: (overlay: OverlayType) => void;
 }
 
+/**
+ * 等待指定会话下一次「撤回/截断」事件落地（本地消息已按截断点删除）。
+ * 「重新生成」先登记等待，再调截断；截断事件处理完后再重发 → 乐观新消息不会被同一次删除误删。
+ * 超时兜底：WS 不可用时 1.5s 后放行。
+ */
+function waitNextSessionTruncated(sessionId: string, timeoutMs = 1500): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let off: (() => void) | null = null;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (off) off();
+      clearTimeout(timer);
+      resolve();
+    };
+    off = onSessionTruncated((sid) => {
+      if (sid === sessionId) finish();
+    });
+    const timer = setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * 回复结尾判定见 `webui/src/lib/reply-end.ts`（纯函数，已被单测覆盖）：
+ * - replyEndIds：所有「一段 AI 回复的结尾」消息 id → 这些消息才挂「复制」按钮
+ * - lastReplyEndId：最新的一段回复结尾 → 仅它挂「重新生成 / 诊断(Harness)」
+ */
 export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const { t } = useTranslation();
   const { taskId = '' } = useParams<{ taskId: string }>();
@@ -449,6 +482,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   } | null>(null);
   /** 执行中 */
   const [truncating, setTruncating] = useState(false);
+  // ===== AI 错误诊断弹窗 =====
+  const [diagnosisOpen, setDiagnosisOpen] = useState(false);
+  const [diagnosisError, setDiagnosisError] = useState('');
+  // Harness 缺陷诊断弹窗（操作栏「诊断」按钮触发；与错误诊断弹窗相互独立）
+  const [harnessOpen, setHarnessOpen] = useState(false);
   const context = useStore((s) => s.contextBySession[taskId]);
   /** 上下文引擎统计（token 构成/缓存命中/压缩状态/系统分段；stats API + WS 事件维护） */
   const contextStats = useStore((s) => s.contextStatsBySession[taskId]);
@@ -794,6 +832,54 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     );
   }, [t]);
 
+  /** 打开 AI 错误诊断弹窗（入参为原始 provider 错误文本） */
+  const handleDiagnose = useCallback((errorDetail: string) => {
+    setDiagnosisError(errorDetail);
+    setDiagnosisOpen(true);
+  }, []);
+
+  /** 打开 Harness 缺陷诊断弹窗（操作栏「诊断」按钮触发；基于当前会话任务流链路 + 日志） */
+  const handleDiagnoseHarness = useCallback(() => {
+    setHarnessOpen(true);
+  }, []);
+
+  /**
+   * 统一 AI 回复操作栏「重新生成」：
+   * 1) 由**服务端**在完整历史上定位「最后一条真实用户消息」为重跑起点
+   *    （前端只加载最后一页，本地可能找不到该 user 消息 → 旧实现会静默失败）；
+   * 2) 截断到该 user 消息（rollbackFiles:false —— 仅软删除消息，不回滚此前工具产生的文件变更）；
+   * 3) 以原内容 + 附件重发，重新走一次 run。
+   */
+  const handleRegenerate = useCallback(
+    async (_message: TaskMessage) => {
+      if (!taskId || isGenerating) return;
+      let target: { timestamp: string; content: string; attachments?: string[] };
+      try {
+        target = (await api.getRegenerateTarget(taskId)).userMessage;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('task.regenerateFailed'));
+        return;
+      }
+      try {
+        // 1) 先登记等待本会话下一次「撤回/截断」事件落地（避免乐观新消息被同一次删除误删）
+        const truncated = waitNextSessionTruncated(taskId);
+        // 2) 后端截断到该 user 消息（不回滚此前工具产生的文件变更）
+        await api.truncateSession(taskId, target.timestamp, target.content, { rollbackFiles: false });
+        // 3) 等本地删除落地后再重发
+        await truncated;
+        // 清除撤回备份：本条消息即将被重发，避免「恢复」把旧消息重复插回
+        useStore.getState().setTruncateBackup(taskId, undefined);
+        sendMessage(target.content, {
+          taskId,
+          ...(target.attachments?.length ? { attachments: target.attachments } : {}),
+        });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('task.regenerateFailed'));
+      }
+    },
+    [taskId, isGenerating, sendMessage, t],
+  );
+
   // ===== 手动压缩流程 =====
   /** 点击压缩按钮：拉取预览并弹确认框（运行中禁用由按钮 disabled 保证） */
   const handleCompactClick = useCallback(async () => {
@@ -1136,37 +1222,62 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   );
 
   /**
+   * 回复结尾索引（一次性 O(n) 预计算；见 lib/reply-end.ts）：
+   * - replyEndIds：所有「一段 AI 回复的结尾」消息 id → 这些消息才挂「复制」按钮
+   * - lastReplyEndId：最新的一段回复结尾 → 仅它挂「重新生成 / 诊断(Harness)」
+   */
+  const { replyEndIds, lastReplyEndId } = useMemo(() => computeReplyEnds(messages), [messages]);
+
+  /**
    * 消息条目渲染（稳定引用）：避免 TaskPage 任意状态变化都让虚拟列表整片重渲。
    * inViewport（精确视口内）→ deferContent=false：可见项首帧直接渲染终态（完整 Markdown/思考），
    * 不再先出「纯文本占位」再升级；overscan 区条目仍走占位→渐进水合（升级发生在视口外，不可见）。
    */
   const renderItem = useCallback(
-    (msg: TaskMessage, _index: number, inViewport: boolean) => (
-      <div className="px-4 pb-4">
-        <MessageErrorBoundary>
-          <MessageBubble
-            message={msg}
-            todos={todos}
-            toolIconMap={toolIconMap}
-            toolResults={toolResultIndex}
-            truncateDisabled={isGenerating}
-            onTruncate={handleTruncateClick}
-            onCopy={handleCopyMessage}
-            onContinue={handleContinue}
-            continueDisabled={isGenerating}
-            onOpenAttachment={openAttachment}
-            deferContent={!inViewport}
-          />
-        </MessageErrorBoundary>
-      </div>
-    ),
+    (msg: TaskMessage, _index: number, inViewport: boolean) => {
+      // 复制按钮：每条「总 AI 消息」（每段回复结尾）都带
+      const showActions = replyEndIds.has(msg.id);
+      // 重新生成 / 诊断(Harness)：仅最新的一段回复结尾
+      const isLastReply = msg.id === lastReplyEndId;
+      return (
+        <div className="px-4 pb-4">
+          <MessageErrorBoundary>
+            <MessageBubble
+              message={msg}
+              todos={todos}
+              toolIconMap={toolIconMap}
+              toolResults={toolResultIndex}
+              truncateDisabled={isGenerating}
+              onTruncate={handleTruncateClick}
+              onCopy={handleCopyMessage}
+              onRegenerate={handleRegenerate}
+              regenerateDisabled={isGenerating}
+              showActions={showActions}
+              showRegenerate={isLastReply}
+              showDiagnose={isLastReply}
+              onDiagnose={handleDiagnose}
+              onDiagnoseHarness={handleDiagnoseHarness}
+              onContinue={handleContinue}
+              continueDisabled={isGenerating}
+              onOpenAttachment={openAttachment}
+              deferContent={!inViewport}
+            />
+          </MessageErrorBoundary>
+        </div>
+      );
+    },
     [
       todos,
       toolIconMap,
       toolResultIndex,
+      replyEndIds,
+      lastReplyEndId,
       isGenerating,
       handleTruncateClick,
       handleCopyMessage,
+      handleRegenerate,
+      handleDiagnose,
+      handleDiagnoseHarness,
       handleContinue,
       openAttachment,
     ],
@@ -1423,6 +1534,27 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* AI 错误诊断弹窗（仅错误报告；链路式流式）：错误卡头部「错误诊断」按钮触发 */}
+        <InsightDialog
+          open={diagnosisOpen}
+          onOpenChange={setDiagnosisOpen}
+          title={t('task.errorDiagnoseTitle')}
+          kind="cause"
+          icon={<Stethoscope className="size-4 text-destructive" />}
+          {...(taskId ? { sessionId: taskId } : {})}
+          providerError={diagnosisError}
+        />
+
+        {/* Harness 缺陷诊断弹窗（链路式流式）：操作栏「诊断」按钮触发（基于当前会话任务流链路 + 日志） */}
+        <InsightDialog
+          open={harnessOpen}
+          onOpenChange={setHarnessOpen}
+          title={t('task.harnessDiagnoseTitle')}
+          kind="harness"
+          icon={<Stethoscope className="size-4 text-primary-strong" />}
+          {...(taskId ? { sessionId: taskId } : {})}
+        />
 
         {/* 手动压缩确认框：预估压缩范围/收益/保留尾部 */}
         <Dialog open={compactDialogOpen} onOpenChange={(open) => !compacting && setCompactDialogOpen(open)}>
@@ -2129,6 +2261,20 @@ interface MessageBubbleProps {
   truncateDisabled?: boolean;
   onTruncate?: (message: TaskMessage) => void;
   onCopy?: (content: string) => void;
+  /** 统一 AI 回复操作栏「重新生成」：重跑该回复所对应的用户消息（回滚到该 user 消息后重发） */
+  onRegenerate?: (message: TaskMessage) => void;
+  /** 生成中禁用重新生成（防并发 run） */
+  regenerateDisabled?: boolean;
+  /** 是否渲染操作栏（每条「总 AI 消息」= 每段回复结尾都为 true；复制按钮据此出现） */
+  showActions?: boolean;
+  /** 是否展示「重新生成」按钮（仅最新一段回复结尾为 true） */
+  showRegenerate?: boolean;
+  /** 是否展示「诊断(Harness)」按钮（仅最新一段回复结尾为 true；错误卡不展示） */
+  showDiagnose?: boolean;
+  /** 错误卡片「诊断」：打开 AI 错误诊断弹窗（入参为原始 provider 错误文本） */
+  onDiagnose?: (errorDetail: string) => void;
+  /** 操作栏「诊断」：打开 Harness 缺陷诊断弹窗 */
+  onDiagnoseHarness?: () => void;
   /** 轮数触顶卡「继续执行」：发送继续消息起新 run（轮数重新计数） */
   onContinue?: () => void;
   /** 生成中禁用继续按钮（防并发 run） */
@@ -2142,7 +2288,7 @@ interface MessageBubbleProps {
    */
   deferContent?: boolean;
 }
-const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
   const { t } = useTranslation();
   // 超长正文截断渲染（防止单条巨型文本布局卡死）；展开后完整渲染。
   // 流式生成中超限时显示尾部（正在生成的内容在末尾），结束后恢复头部截断。
@@ -2292,9 +2438,25 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       (tc) => tc.name !== 'todo' && tc.name !== 'ask' && !isAgentCall(tc),
     ) ?? [];
 
+  // 模型请求失败「系统错误卡片」：实时（WS error）与历史恢复（system-error 消息）同构渲染。
+  // 顶部固定标题 + 右侧「错误诊断」按钮；底部操作栏（复制 + 重新生成）仅在回复结尾出现，且不含 Harness 诊断。
+  if (message.isError) {
+    return (
+      <SystemErrorCard
+        message={message}
+        onCopy={onCopy}
+        onRegenerate={onRegenerate ? () => onRegenerate(message) : undefined}
+        regenerateDisabled={regenerateDisabled}
+        showActions={showActions}
+        showRegenerate={showRegenerate}
+        onDiagnose={onDiagnose}
+      />
+    );
+  }
+
   // assistant 消息
   return (
-    <div className="flex flex-col gap-2">
+    <div className="group/message flex flex-col gap-2">
       {/* 上次进程中断遗留的未完成回复：明确标注（避免被误认为完整回答） */}
       {message.interrupted && (
         <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
@@ -2557,11 +2719,17 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           })}
         </div>
       )}
-      {/* 错误消息（无背景无边框，保持红色文字；历史恢复经 http.ts 保留 isError） */}
-      {message.isError && (
-        <div className="whitespace-pre-wrap break-words text-xs text-destructive">
-          {message.content}
-        </div>
+      {/* 统一 AI 回复操作栏：仅在「一段回复的结尾」渲染（复制每条都有；重新生成/诊断仅最新一段） */}
+      {showActions && !message.streaming && (visibleContent.trim().length > 0 || (message.toolCalls?.length ?? 0) > 0) && (
+        <MessageActions
+          content={visibleContent}
+          onCopy={onCopy}
+          onRegenerate={onRegenerate ? () => onRegenerate(message) : undefined}
+          regenerateDisabled={regenerateDisabled}
+          showRegenerate={showRegenerate}
+          showDiagnose={showDiagnose}
+          onDiagnose={onDiagnoseHarness}
+        />
       )}
     </div>
   );

@@ -13,6 +13,7 @@ import type { TodoItem } from '../tools/todo/shared/store';
 import type { PermissionMode } from '../safety/types';
 import type { Environment, Logger } from '../../core/types';
 import type { CompactionRecord, EnvContextInfo, SessionContextTelemetry, SessionMemoryState, SessionRulesState } from '../context/types';
+import { SYSTEM_ERROR_MSG_NAME } from '../context/compiler/view-builder';
 
 /** 上下文文件轨迹（与前端 ContextFile 对齐） */
 export interface ContextFile {
@@ -628,6 +629,30 @@ export class SessionStore {
       isError: extra?.isError,
       metadata: extra?.metadata,
       ...(images && images.length > 0 ? { images } : {}),
+      timestamp: new Date().toISOString(),
+    });
+    session.updatedAt = new Date().toISOString();
+    this.markDirty(session);
+  }
+
+  /**
+   * 添加「模型请求失败」系统错误消息（持久化）。
+   * 纯 UI 展示：name = system-error，view-builder 构建发送视图时排除，永不发给 LLM；
+   * 刷新后由历史恢复渲染为红色错误卡片（不再依赖前端临时事件）。
+   */
+  addSystemErrorMessage(
+    session: Session,
+    content: string,
+    metadata: { providerError: string; errorCode?: string },
+    messageId?: string,
+  ): void {
+    session.messages.push({
+      role: 'assistant',
+      name: SYSTEM_ERROR_MSG_NAME,
+      content,
+      isError: true,
+      metadata,
+      ...(messageId ? { messageId } : {}),
       timestamp: new Date().toISOString(),
     });
     session.updatedAt = new Date().toISOString();

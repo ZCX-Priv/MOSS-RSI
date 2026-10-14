@@ -20,6 +20,7 @@ import {
   FolderPlus,
   Loader2,
   CircleAlert,
+  Activity,
 } from 'lucide-react';
 import {
   DndContext,
@@ -791,10 +792,31 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
         )}
       </SidebarContent>
 
-      {/* Footer: 用户菜单（设置模式下隐藏） */}
+      {/* Footer: 资源管理器 + 用户菜单（设置）同组；样式与设置入口对齐；设置模式下隐藏 */}
       {!isSettingsRoute && (
         <SidebarFooter>
-          <UserMenu />
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                size="lg"
+                className="gap-2"
+                tooltip={t('sidebar.resourceManager')}
+                isActive={pathname === '/system-monitor'}
+                onClick={() => {
+                  closeMobile();
+                  navigate('/system-monitor');
+                }}
+              >
+                <Activity className="size-4" />
+                <div className="flex min-w-0 flex-col gap-0 leading-none group-data-[collapsible=icon]:hidden">
+                  <span className="truncate text-sm font-medium">{t('sidebar.resourceManager')}</span>
+                </div>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <UserMenu />
+            </SidebarMenuItem>
+          </SidebarMenu>
         </SidebarFooter>
       )}
     </UISidebar>

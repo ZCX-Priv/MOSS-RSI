@@ -225,8 +225,14 @@ export interface AgentEngine {
    * 执行消息撤回（截断）：软删除目标用户消息及其后全部消息，
    * 并联动 file-history 回滚该区间内 AI 产生的文件变更（回滚前自动备份，支持 redo）。
    * 成功后向该 session 推送 session-truncated WS 事件。
+   * @param options.rollbackFiles 是否联动 file-history 回滚文件变更（默认 true）；传 false 时不回滚（供「重新生成」使用）
    */
-  truncateFrom(sessionId: string, messageTimestamp: string, content: string): Promise<TruncateResult | null>;
+  truncateFrom(
+    sessionId: string,
+    messageTimestamp: string,
+    content: string,
+    options?: { rollbackFiles?: boolean },
+  ): Promise<TruncateResult | null>;
 
   /**
    * 恢复最近一次消息撤回（redo）：清除软删除标记 + 从回滚备份恢复文件。
@@ -340,7 +346,7 @@ export type AgentEvent =
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string }
   | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; greet?: string; icon?: string; message?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
-  | { type: 'error'; sessionId: string; message: string; runId?: string }
+  | { type: 'error'; sessionId: string; message: string; runId?: string; providerError?: string; messageId?: string }
   | { type: 'done'; sessionId: string; finishReason: string; runId?: string };
 
 export interface AgentRunResult {
@@ -439,7 +445,7 @@ export interface TruncateResult {
   /** 是否回滚了文件变更 */
   fileRollbackPerformed: boolean;
   /** 文件回滚被跳过的原因（诚实降级：不再静默跳过，前端如实提示） */
-  rollbackSkippedReason?: 'no-file-history' | 'no-timestamp';
+  rollbackSkippedReason?: 'no-file-history' | 'no-timestamp' | 'skipped-by-caller';
 }
 
 /** 消息撤回恢复（redo）结果 */

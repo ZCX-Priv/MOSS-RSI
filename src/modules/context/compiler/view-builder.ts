@@ -27,6 +27,8 @@ export const COMPACTION_SUMMARY_MSG_NAME = 'compaction-summary';
 export const SKILL_INJECT_MSG_NAME = 'skill-inject';
 /** 轮数触顶提示消息 name（agent engine 写入 session；纯 UI 展示，永不发给 LLM） */
 export const MAX_TURNS_NOTICE_MSG_NAME = 'max-turns-notice';
+/** 模型请求失败的错误消息 name（agent engine 写入 session；纯 UI 展示，永不发给 LLM） */
+export const SYSTEM_ERROR_MSG_NAME = 'system-error';
 /** paths 规则注入锚定消息 name（与 rules 模块一致；恒保留锚定） */
 export const ACTIVE_RULES_MSG_NAME = 'active-rules';
 /** L1 关键事实锚定消息 name（与 memory 模块一致；恒保留锚定） */
@@ -116,9 +118,13 @@ export function buildRequestView(
   staticSystemPrompt: string,
   opts: BuildViewOptions,
 ): BuiltView {
-  // ===== 1. 可见消息（未软删、未压缩；触顶提示消息纯 UI 不发 LLM） =====
+  // ===== 1. 可见消息（未软删、未压缩；触顶提示/系统错误消息纯 UI 不发 LLM） =====
   const visible = session.messages.filter(
-    m => !m.deletedAt && !m.compacted && m.name !== MAX_TURNS_NOTICE_MSG_NAME,
+    m =>
+      !m.deletedAt &&
+      !m.compacted &&
+      m.name !== MAX_TURNS_NOTICE_MSG_NAME &&
+      m.name !== SYSTEM_ERROR_MSG_NAME,
   );
 
   // ===== 2. 视图消息准备（微压缩 + skill 占位替换；全部新建对象不动原消息） =====

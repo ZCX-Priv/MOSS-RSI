@@ -2,13 +2,14 @@
 // WebSocket 消息分发：处理前端 WS 消息，转发 Agent 事件到客户端。
 
 import { t } from '../../core/i18n';
-import type { Logger, ServiceRegistry } from '../../core/types';
+import type { Environment, Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { WSMessage, WSMessageHandler, WSConnection } from './types';
 import type { AgentEngine, AgentEvent, GuidanceMessage, TerminalService, InterpreterKind } from '../contracts';
 import type { AutomationService } from '../automation';
 import { ErrorCode } from '../../core/error-codes';
 import { VoiceSessionHost } from './voice-session-host';
+import { runInsightDiagnose, type InsightEvent, type InsightKind } from './insight-diagnose';
 
 /** 从语音指令 payload 读取可选 modelId（缺省用服务端默认模型） */
 function readVoiceModelId(msg: WSMessage): string | undefined {
@@ -176,6 +177,7 @@ export class WsHandler {
   private readonly messageHandlers: WSMessageHandler[] = [];
   private readonly logger: Logger;
   private readonly services: ServiceRegistry;
+  private readonly env: Environment;
   /**
    * 运行中任务：sessionId → AbortController（handler 级，与连接解耦）。
    * WS 断连不再中止任务（弱网闪断/心跳重连曾直接杀死后台任务且前端无从感知——
@@ -191,10 +193,13 @@ export class WsHandler {
   private readonly batcher: EventBatcher;
   /** 语音会话宿主（每条连接一个流式识别会话） */
   private readonly voiceHost: VoiceSessionHost;
+  /** AI 诊断运行中的请求：requestId → AbortController（前端关闭弹窗可取消） */
+  private readonly insightRuns = new Map<string, AbortController>();
 
-  constructor(services: ServiceRegistry, logger: Logger) {
+  constructor(services: ServiceRegistry, logger: Logger, env: Environment) {
     this.services = services;
     this.logger = logger;
+    this.env = env;
     this.batcher = new EventBatcher((msg) => {
       this.sendToSubscribers(String(msg.sessionId), msg);
     });
@@ -288,6 +293,10 @@ export class WsHandler {
         // 前端心跳探活，回 pong 确认连接存活
         state.conn.send({ type: 'pong' });
         return;
+      case 'insight.diagnose':
+        return this.handleInsightDiagnose(state, msg);
+      case 'insight.diagnose.cancel':
+        return this.handleInsightDiagnoseCancel(msg);
       default:
         return;
     }
@@ -609,6 +618,61 @@ export class WsHandler {
     if (controller) {
       controller.abort();
       this.logger.info(t('server.taskAborted', { sessionId: msg.sessionId ?? '' }));
+    }
+  }
+
+  /**
+   * AI 诊断（链路式流式）：不落会话消息，事件仅回本连接。
+   * 前端按 requestId 订阅 insight.diagnose.event；kind=cause/harness/resource 各为一次独立生成。
+   */
+  private handleInsightDiagnose(state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as {
+      requestId?: string;
+      kind?: InsightKind;
+      sessionId?: string;
+      providerError?: string;
+    };
+    const requestId = payload.requestId;
+    const kind = payload.kind;
+    if (!requestId || (kind !== 'cause' && kind !== 'harness' && kind !== 'resource')) {
+      state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_MESSAGE_REQUIRED } });
+      return;
+    }
+    // 同一 requestId 重复发起：中止旧流
+    this.insightRuns.get(requestId)?.abort();
+    const controller = new AbortController();
+    this.insightRuns.set(requestId, controller);
+
+    const emit = (e: InsightEvent): void => {
+      state.conn.send({ type: 'insight.diagnose.event', payload: e });
+    };
+
+    void runInsightDiagnose(
+      { services: this.services, env: this.env, logger: this.logger },
+      {
+        requestId,
+        kind,
+        ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+        ...(payload.providerError ? { providerError: payload.providerError } : {}),
+      },
+      emit,
+      controller.signal,
+    ).finally(() => {
+      // 仅当仍为本次请求时清理（避免被同 id 新请求覆盖后误删）
+      if (this.insightRuns.get(requestId) === controller) {
+        this.insightRuns.delete(requestId);
+      }
+    });
+  }
+
+  /** 取消 AI 诊断（前端关闭弹窗） */
+  private handleInsightDiagnoseCancel(msg: WSMessage): void {
+    const requestId = ((msg.payload ?? {}) as { requestId?: string }).requestId;
+    if (!requestId) return;
+    const controller = this.insightRuns.get(requestId);
+    if (controller) {
+      controller.abort();
+      this.insightRuns.delete(requestId);
     }
   }
 

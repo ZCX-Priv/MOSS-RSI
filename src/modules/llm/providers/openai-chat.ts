@@ -178,15 +178,31 @@ function normalizeUsage(u: OpenAIChatUsage): UnifiedUsage {
 /**
  * 统一消息 → OpenAI Chat 消息数组。
  * tool 消息的 content 只支持字符串，图片改由紧随其后的 user 消息承载。
+ *
+ * 关键约束：assistant.tool_calls 之后必须紧跟覆盖全部 tool_call_id 的连续 tool 消息。
+ * 因此承载图片的 user 消息**不能**插在工具块中间——否则会切断 tool 块，
+ * 使靠后的 tool 结果不再紧邻其 assistant，provider 判定「tool 消息不足」并返回 HTTP 400。
+ * 这里改为「延迟发射」：工具块内的图片 user 消息先累积，待工具块结束（遇到非 tool 消息
+ * 或遍历结束）后统一追加，保证 tool_calls ↔ tool 消息配对完整。
  */
 function toOpenAIMessages(msgs: UnifiedMessage[]): unknown[] {
   const out: unknown[] = [];
+  let pendingImageMsgs: Array<Record<string, unknown>> = [];
+  const flush = (): void => {
+    if (pendingImageMsgs.length > 0) {
+      out.push(...pendingImageMsgs);
+      pendingImageMsgs = [];
+    }
+  };
   for (const msg of msgs) {
+    // 非 tool 消息：工具块结束，先补发累积的图片承载消息
+    if (msg.role !== 'tool') flush();
     out.push(toOpenAIMessage(msg));
     if (msg.role === 'tool' && msg.images && msg.images.length > 0) {
-      out.push({ role: 'user', content: contentWithImages('[图片]', msg.images) });
+      pendingImageMsgs.push({ role: 'user', content: contentWithImages('[图片]', msg.images) });
     }
   }
+  flush();
   return out;
 }
 

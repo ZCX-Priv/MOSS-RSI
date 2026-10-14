@@ -79,6 +79,26 @@ function fileExistsAsFile(p: string, base: string): boolean {
   }
 }
 
+/**
+ * 从消息数组挑选「最后一条真实用户消息」→「重新生成」的重跑起点。
+ * 判据：role='user' 且未软删除、且 name 为空（排除 env-context / memory-l1 / active-rules /
+ * max-turns-notice 等内部锚定消息——它们同样带 role='user' 但有 name）。纯函数，便于单测。
+ */
+export function pickLastUserMessage(
+  messages: AgentMessage[],
+): { timestamp: string; content: string; attachments?: string[] } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'user' || m.deletedAt || m.name) continue;
+    return {
+      timestamp: m.timestamp ?? '',
+      content: m.content,
+      ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments } : {}),
+    };
+  }
+  return null;
+}
+
 export class AgentEngineImpl implements AgentEngine {
   private readonly sessions: SessionStore;
   private readonly tasks: TaskStore;
@@ -679,18 +699,28 @@ export class AgentEngineImpl implements AgentEngine {
         }
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(t('agent.llmStreamFailed'), { error: msg, turn });
-        onEvent({ type: 'error', sessionId, message: msg });
+        // 稳定错误消息身份：与同轮正常 assistant 消息（`<sid>#<turn>`）区分。
+        // 前端 WS 临时错误消息与持久化历史消息据此同 id → mergeHistory 原位 patch，
+        // 实时与刷新后都只有一条错误卡片（根治「运行时两条、刷新后一条」）。
+        const errorMessageId = `${turnMessageId}#error`;
+        onEvent({ type: 'error', sessionId, message: msg, providerError: msg, messageId: errorMessageId });
         finishReason = 'error';
         // 把已收集的文本作为最终输出
         finalText = assistantText || `Error: ${msg}`;
-        this.sessions.addAssistantMessage(
-          session,
-          finalText,
-          undefined,
-          assistantThinking || undefined,
-          turnMessageId,
-          computeThinkingMs(),
-        );
+        // 已有正文：保留为正常 assistant 消息（部分输出不丢失）；无正文：不伪造普通消息
+        if (assistantText) {
+          this.sessions.addAssistantMessage(
+            session,
+            assistantText,
+            undefined,
+            assistantThinking || undefined,
+            turnMessageId,
+            computeThinkingMs(),
+          );
+        }
+        // 持久化「模型请求失败」错误消息：刷新后经历史恢复仍渲染为红色错误卡片。
+        // （旧实现仅在流内落一条普通 assistant 消息，刷新后按普通正文渲染 → 丢失错误样式）
+        this.sessions.addSystemErrorMessage(session, msg, { providerError: msg }, errorMessageId);
         break;
       } finally {
         // 轮统计（正常/中断/异常路径统一在此结算；finally 先于 break 生效）
@@ -810,10 +840,12 @@ export class AgentEngineImpl implements AgentEngine {
             signal,
             permissionMode,
           });
-          // 工具执行完毕后检查 abort，避免继续下一轮
+          // 工具执行完毕后检查 abort：这里**不能** break，
+          // 否则尚未执行的 tc 会缺失 tool 结果，assistant.tool_calls 悬挂 → HTTP 400。
+          // 改为 continue，让下一轮循环顶部为每个剩余 tc 统一补错误 tool 结果。
           if (signal?.aborted) {
             finishReason = 'aborted';
-            break;
+            continue;
           }
         } catch (err) {
           this.logger.error(t('agent.executeToolCallThrew'), {
@@ -832,6 +864,31 @@ export class AgentEngineImpl implements AgentEngine {
           stats.steps++;
           stats.toolMs += performance.now() - toolStart;
           pushStats();
+        }
+      }
+
+      // 兜底自愈：确保本轮每个 tool_call_id 都有对应 tool 消息。
+      // 正常路径下 executeToolCall 会为每个 tc 落一条 tool 结果，此处不会触发；
+      // 但若未来新增异常路径漏写，这里会补齐缺失项并告警，从根上杜绝
+      // 「assistant.tool_calls 后 tool 消息不足」导致的 HTTP 400。
+      const persistedToolIds = new Set<string>();
+      for (const m of this.sessions.get(sessionId)!.messages) {
+        if (m.role === 'tool' && m.toolCallId) persistedToolIds.add(m.toolCallId);
+      }
+      const missingToolIds = toolCalls.filter(tc => !persistedToolIds.has(tc.id));
+      if (missingToolIds.length > 0) {
+        this.logger.warn('agent: detected dangling tool_calls, auto-appending error tool results', {
+          sessionId,
+          missing: missingToolIds.map(tc => tc.id),
+        });
+        for (const tc of missingToolIds) {
+          this.sessions.addToolMessage(
+            this.sessions.get(sessionId)!,
+            tc.id,
+            'Error: tool result missing (auto-repaired)',
+            tc.name,
+            { isError: true },
+          );
         }
       }
 
@@ -958,6 +1015,16 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   /**
+   * 最近一条「真实用户消息」→「重新生成」的重跑起点。
+   * 由服务端在**完整历史**上定位，避免前端只加载最后一页时找不到触发本轮回复的 user 消息。
+   */
+  getLastUserMessage(
+    sessionId: string,
+  ): { timestamp: string; content: string; attachments?: string[] } | null {
+    return pickLastUserMessage(this.sessions.get(sessionId)?.messages ?? []);
+  }
+
+  /**
    * 会话历史分页视图：游标 = 「过滤软删除后的数组下标」。
    * 会话消息只在尾部追加，截断/恢复也只影响尾部 —— 头部下标天然稳定，
    * 因此 before/after 游标在分页、上滑加载、断线补齐下都不会错位。
@@ -1064,7 +1131,12 @@ export class AgentEngineImpl implements AgentEngine {
     return { messagesToRemove, fileChanges, ...(rollbackSkippedReason ? { rollbackSkippedReason } : {}) };
   }
 
-  async truncateFrom(sessionId: string, messageTimestamp: string, content: string): Promise<TruncateResult | null> {
+  async truncateFrom(
+    sessionId: string,
+    messageTimestamp: string,
+    content: string,
+    options?: { rollbackFiles?: boolean },
+  ): Promise<TruncateResult | null> {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
     // 栈式恢复窗口：不物理清除旧软删除（嵌套撤回语义——旧窗口保持可恢复），
@@ -1088,7 +1160,12 @@ export class AgentEngineImpl implements AgentEngine {
     }
     // 跳过原因显式化（诚实降级）：不再静默跳过文件回滚
     let rollbackSkippedReason: TruncateResult['rollbackSkippedReason'];
-    if (from && to) {
+    // rollbackFiles === false 时跳过文件回滚（仅软删除消息）。
+    // 供「重新生成」使用：重跑该 user 消息不应把此前工具产生的文件变更回滚掉。
+    const rollbackFiles = options?.rollbackFiles !== false;
+    if (!rollbackFiles) {
+      rollbackSkippedReason = 'skipped-by-caller';
+    } else if (from && to) {
       const fh = this.resolveFileHistory();
       if (fh) {
         fileRollbackPerformed = true;

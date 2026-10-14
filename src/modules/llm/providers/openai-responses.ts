@@ -213,41 +213,84 @@ export function toOpenAIResponsesThinking(t: ThinkingConfig): Record<string, unk
 /**
  * 统一消息 → Responses API input 数组。
  * function_call_output 只支持字符串 output，图片改由紧随其后的 user message 承载。
+ *
+ * 关键约束：assistant 的 function_call 之后必须紧跟覆盖全部 call_id 的连续 function_call_output。
+ * 因此承载图片的 user message**不能**插在工具块中间——否则会切断工具块，
+ * 使靠后的 function_call_output 不再与其 function_call 配对，provider 返回 HTTP 400。
+ * 这里改为「延迟发射」：工具块内的图片 user message 先累积，待工具块结束
+ * （遇到非 tool 消息或遍历结束）后统一追加，保证 function_call ↔ output 配对完整。
  */
 function toResponsesInputs(msgs: UnifiedMessage[]): unknown[] {
   const out: unknown[] = [];
+  let pendingImageMsgs: Array<Record<string, unknown>> = [];
+  const flush = (): void => {
+    if (pendingImageMsgs.length > 0) {
+      out.push(...pendingImageMsgs);
+      pendingImageMsgs = [];
+    }
+  };
   for (const msg of msgs) {
-    out.push(toResponsesInput(msg));
+    // 非 tool 消息：工具块结束，先补发累积的图片承载消息
+    if (msg.role !== 'tool') flush();
+    out.push(...toResponsesInput(msg));
     if (msg.role === 'tool' && msg.images && msg.images.length > 0) {
-      out.push({ type: 'message', role: 'user', content: contentWithImages('[图片]', msg.images) });
+      pendingImageMsgs.push({ type: 'message', role: 'user', content: contentWithImages('[图片]', msg.images) });
     }
   }
+  flush();
   return out;
 }
 
-function toResponsesInput(msg: UnifiedMessage): unknown {
+/**
+ * 单条统一消息 → 一个或多个 Responses input 项。
+ *
+ * 关键：assistant 的 tool_calls 必须展开为独立的 `function_call` 项，
+ * 否则后续的 `function_call_output` 找不到配对的 `call_id`，Responses API 返回 400
+ * （「No tool call found for function call output ...」）。
+ */
+function toResponsesInput(msg: UnifiedMessage): unknown[] {
   // system 消息在 Responses API 中用 instructions 字段，或作为 input 中的 system 项
   if (msg.role === 'system') {
-    return { type: 'system', content: msg.content };
+    return [{ type: 'system', content: msg.content }];
   }
   if (msg.role === 'tool') {
     // 工具结果：function_call_output
-    return {
-      type: 'function_call_output',
-      call_id: msg.toolCallId,
-      output: msg.content,
-    };
+    return [
+      {
+        type: 'function_call_output',
+        call_id: msg.toolCallId,
+        output: msg.content,
+      },
+    ];
+  }
+  // assistant 带工具调用：正文（若非空）放进 message，工具调用逐个展开为 function_call
+  if (msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0) {
+    const items: unknown[] = [];
+    if (msg.content) {
+      items.push({ type: 'message', role: 'assistant', content: msg.content });
+    }
+    for (const tc of msg.toolCalls) {
+      items.push({
+        type: 'function_call',
+        call_id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      });
+    }
+    return items;
   }
   // user 带图片：多模态内容块
   if (msg.role === 'user' && msg.images && msg.images.length > 0) {
-    return { type: 'message', role: 'user', content: contentWithImages(msg.content, msg.images) };
+    return [{ type: 'message', role: 'user', content: contentWithImages(msg.content, msg.images) }];
   }
   // user / assistant
-  return {
-    type: 'message',
-    role: msg.role,
-    content: msg.content,
-  };
+  return [
+    {
+      type: 'message',
+      role: msg.role,
+      content: msg.content,
+    },
+  ];
 }
 
 /** 文本 + 图片 → Responses API 输入内容块（input_text / input_image） */

@@ -5,6 +5,7 @@ import { Plus, RefreshCw, Search } from 'lucide-react';
 import type { OverlayType } from './types';
 import { Sidebar } from './components/layout/Sidebar';
 import { TaskPage } from './components/pages/TaskPage';
+import { SystemMonitorPage } from './components/pages/SystemMonitorPage';
 import {
   PluginMarketPage,
   SkillsTab,
@@ -226,6 +227,8 @@ export default function App() {
                 根治「发送后任务页整页重挂 + 浮出动画起点黑帧」；刷新/前进后退保持任务页 */}
             <Route path="/" element={<Navigate to="/task" replace />} />
             <Route path="/task/:taskId?" element={<TaskPage />} />
+            {/* 资源管理器（系统总量 + MOSS 自身占用；桌面/移动自适应） */}
+            <Route path="/system-monitor" element={<SystemMonitorPage />} />
             <Route path="/plugins" element={<PluginMarketPage />}>
               <Route index element={<Navigate to="skills" replace />} />
               <Route path="skills" element={<SkillsTab />} />

@@ -69,6 +69,7 @@ import type {
   SessionState,
   VoiceStatus,
   VoiceModelStatus,
+  ResourceSnapshot,
 } from '../types/api';
 import i18n from '../i18n';
 
@@ -208,7 +209,7 @@ export const api = {
       `/api/sessions/${encodeURIComponent(id)}/truncate-preview?messageTimestamp=${encodeURIComponent(messageTimestamp)}&content=${encodeURIComponent(content)}`,
     ),
   /** execute truncate (soft delete messages + rollback file changes) */
-  truncateSession: (id: string, messageTimestamp: string, content: string) =>
+  truncateSession: (id: string, messageTimestamp: string, content: string, opts?: { rollbackFiles?: boolean }) =>
     request<{
       sessionId: string;
       removedCount: number;
@@ -216,11 +217,11 @@ export const api = {
       rollbackFailed: Array<{ absPath: string; error: string }>;
       truncatedBeforeTimestamp: string;
       fileRollbackPerformed: boolean;
-      rollbackSkippedReason?: 'no-file-history' | 'no-timestamp';
+      rollbackSkippedReason?: 'no-file-history' | 'no-timestamp' | 'skipped-by-caller';
     }>(
       'POST',
       `/api/sessions/${encodeURIComponent(id)}/truncate`,
-      { messageTimestamp, content },
+      { messageTimestamp, content, ...(opts?.rollbackFiles !== undefined ? { rollbackFiles: opts.rollbackFiles } : {}) },
     ),
   /** restore last truncate (redo) */
   restoreTruncate: (id: string) =>
@@ -228,6 +229,15 @@ export const api = {
       'POST',
       `/api/sessions/${encodeURIComponent(id)}/truncate-restore`,
     ),
+  /**
+   * 「重新生成」重跑起点：服务端在完整历史上返回最后一条真实用户消息。
+   * 前端只加载最后一页时，本地可能找不到触发本轮回复的 user 消息 → 由服务端定位。
+   */
+  getRegenerateTarget: (id: string) =>
+    request<{
+      sessionId: string;
+      userMessage: { timestamp: string; content: string; attachments?: string[] };
+    }>('POST', `/api/sessions/${encodeURIComponent(id)}/regenerate-target`, {}),
 
   // ==========================================================================
   // 上下文引擎（token 构成 / 缓存命中 / 压缩历史 / 手动压缩 / 摘要模型）
@@ -715,4 +725,12 @@ export const api = {
     request<{ started: boolean }>('POST', `/api/voice/models/${encodeURIComponent(id)}/install`),
   uninstallVoiceModel: (id: string) =>
     request<{ ok: boolean }>('DELETE', `/api/voice/models/${encodeURIComponent(id)}`),
+
+  // ==========================================================================
+  // 资源管理器（system-monitor）
+  // ==========================================================================
+  /** 系统资源快照（资源管理器轮询数据源） */
+  getResourceSnapshot: () => request<ResourceSnapshot>('GET', '/api/system-monitor/snapshot'),
 };
+// 说明：AI 诊断（错误原因 / Harness / 资源解读）已改为 WebSocket 流式通道
+// （insight.diagnose / insight.diagnose.event），不再提供 HTTP API。

@@ -20,7 +20,7 @@ function req(messages: UnifiedMessage[]): UnifiedRequest {
 }
 
 describe('多模态图片映射', () => {
-  test('openai-chat：user 图片 → content parts；tool 图片 → 追加 user 消息', () => {
+  test('openai-chat：user 图片 → content parts；tool 图片 → 工具块之后追加 user 消息', () => {
     const body = new OpenAIChatProvider().transformRequest(
       req([
         { role: 'user', content: '看', images: [IMG] },
@@ -44,9 +44,73 @@ describe('多模态图片映射', () => {
     const toolIdx = body.messages.findIndex(m => m.role === 'tool');
     // tool 消息 content 仍为字符串（OpenAI Chat 不支持数组）
     expect(body.messages[toolIdx].content).toBe('[image: image/png]');
-    // 紧随其后追加承载图片的 user 消息
+    // 图片 user 消息在工具块之后（单 tool 时即紧随其后）
     expect(body.messages[toolIdx + 1].role).toBe('user');
     expect(JSON.stringify(body.messages[toolIdx + 1])).toContain('data:image/png;base64,AAAA');
+  });
+
+  test('openai-chat：多 tool + 中间 tool 带图片 → tool 消息连续覆盖全部 id，图片 user 消息在工具块之后', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      req([
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } },
+            { id: 'tc2', type: 'function', function: { name: 'grep', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', content: '[image: image/png]', toolCallId: 'tc1', images: [IMG] },
+        { role: 'tool', content: 'ok', toolCallId: 'tc2' },
+      ]),
+      cfg('openai-chat'),
+    ) as { messages: Array<Record<string, unknown>> };
+
+    const assistantIdx = body.messages.findIndex(m => Array.isArray(m.tool_calls));
+    expect(assistantIdx).toBeGreaterThanOrEqual(0);
+    // assistant.tool_calls 之后必须紧跟覆盖全部 tool_call_id 的连续 tool 消息
+    expect(body.messages[assistantIdx + 1].role).toBe('tool');
+    expect(body.messages[assistantIdx + 1].tool_call_id).toBe('tc1');
+    expect(body.messages[assistantIdx + 2].role).toBe('tool');
+    expect(body.messages[assistantIdx + 2].tool_call_id).toBe('tc2');
+    // 图片 user 消息被延迟到整个工具块之后
+    expect(body.messages[assistantIdx + 3].role).toBe('user');
+    expect(JSON.stringify(body.messages[assistantIdx + 3])).toContain('data:image/png;base64,AAAA');
+  });
+
+  test('openai-responses：多 tool + 中间 tool 带图片 → function_call/function_call_output 连续配对，图片 user 消息在工具块之后', () => {
+    const body = new OpenAIResponsesProvider().transformRequest(
+      req([
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: '调用工具',
+          toolCalls: [
+            { id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } },
+            { id: 'tc2', type: 'function', function: { name: 'grep', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', content: '[image: image/png]', toolCallId: 'tc1', images: [IMG] },
+        { role: 'tool', content: 'ok', toolCallId: 'tc2' },
+      ]),
+      cfg('openai-responses'),
+    ) as { input: Array<Record<string, unknown>> };
+
+    const fcIdx1 = body.input.findIndex(i => i.type === 'function_call' && i.call_id === 'tc1');
+    const fcIdx2 = body.input.findIndex(i => i.type === 'function_call' && i.call_id === 'tc2');
+    const outIdx1 = body.input.findIndex(i => i.type === 'function_call_output' && i.call_id === 'tc1');
+    const outIdx2 = body.input.findIndex(i => i.type === 'function_call_output' && i.call_id === 'tc2');
+    // assistant.tool_calls 必须展开为 function_call 项（否则 output 找不到配对会 400）
+    expect(fcIdx1).toBeGreaterThanOrEqual(0);
+    expect(fcIdx2).toBeGreaterThanOrEqual(0);
+    expect(body.input[fcIdx1]).toMatchObject({ type: 'function_call', call_id: 'tc1', name: 'read' });
+    // 两个 function_call_output 必须连续，且都排在 function_call 之后（中间不得插入 user 消息）
+    expect(outIdx1).toBeGreaterThan(fcIdx2);
+    expect(outIdx2).toBe(outIdx1 + 1);
+    // 图片 user 消息被延迟到整个工具块之后
+    expect(body.input[outIdx2 + 1].role).toBe('user');
+    expect(JSON.stringify(body.input[outIdx2 + 1])).toContain('data:image/png;base64,AAAA');
   });
 
   test('anthropic：tool_result.content 内嵌 image block（不新增 user 消息）', () => {
