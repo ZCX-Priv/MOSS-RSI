@@ -84,14 +84,21 @@ export function createSummaryModelsHandler(services: ServicesLike): RouteHandler
   };
 }
 
-/** 文件索引状态（?cwd= 缺省取服务进程 cwd） */
+/** 文件索引状态（?cwd= 缺省取服务进程 cwd；索引开启时顺带主动建运行时/扫描） */
 export function createFileIndexStatusHandler(services: ServicesLike): RouteHandler {
   return async (req: HttpRequest): Promise<HttpResponse> => {
     const engine = resolveEngine(services);
     if (!engine) return { status: 503, body: { error: 'context engine unavailable' } };
     const url = new URL(req.url, 'http://localhost');
     const cwd = url.searchParams.get('cwd') || process.cwd();
-    const status = await engine.getFileIndex().status(cwd);
+    const svc = engine.getFileIndex();
+    if (svc.getConfig().indexing.enabled) {
+      // 无既有运行时则触发建库扫描（幂等、不阻塞本次状态读取；后续 WS/轮询反映进度）
+      void svc.ensureProject(cwd).catch(() => {
+        // 触发失败静默
+      });
+    }
+    const status = await svc.status(cwd);
     return { status: 200, body: status };
   };
 }

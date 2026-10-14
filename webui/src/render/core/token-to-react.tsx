@@ -9,6 +9,8 @@ import { CodeBlock } from '../code/CodeBlock';
 import { MathSpan } from '../math/MathSpan';
 import { FilePreviewCard } from '../file/FilePreviewCard';
 import { useRenderSettings } from './settings';
+import { useStore } from '../../store';
+import { useOpenFilePreview } from '../../hooks/useOpenFilePreview';
 
 /** link/image 安全协议过滤：只放行 http(s)/mailto/锚点/相对路径 */
 function safeUrl(url: string | undefined): string | null {
@@ -16,6 +18,102 @@ function safeUrl(url: string | undefined): string | null {
   const trimmed = url.trim();
   if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(trimmed)) return trimmed;
   return null;
+}
+
+/** 文件扩展名形态（裸相对路径判定用，避免把普通文本链接误判为文件） */
+const FILE_EXT_RE = /\.[A-Za-z0-9]{1,8}$/;
+/** 协议/scheme 前缀（http:、mailto:、C: 等；用于排除非相对路径） */
+const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+/** 归一化绝对路径分隔符为 '/'（Windows 展示与后端均接受正斜杠） */
+function normalizeAbs(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * 链接是否形如文件引用（与 cwd 无关的形态判定）：
+ * file:///、盘符绝对（C:\ 或 C:/）、/根相对、./ ../ 相对、含路径分隔符且带扩展名的裸相对。
+ */
+export function isFileLikeHref(href: string): boolean {
+  if (!href) return false;
+  const raw = href.trim();
+  if (/^file:\/\//i.test(raw)) return true;
+  if (/^[A-Za-z]:[\\/]/.test(raw)) return true;
+  if (raw.startsWith('./') || raw.startsWith('../')) return true;
+  if (raw.startsWith('/')) return !raw.startsWith('//'); // 排除协议相对 //host
+  if (raw.includes('/') || raw.includes('\\')) {
+    return !SCHEME_RE.test(raw) && FILE_EXT_RE.test(raw);
+  }
+  return false;
+}
+
+/**
+ * 解析文件引用 href → 可预览的绝对路径（相对路径基于 cwd）；非文件/无法解析返回 null。
+ */
+export function resolveFileHref(href: string, cwd: string): string | null {
+  if (!isFileLikeHref(href)) return null;
+  let raw = href.trim();
+  if (/^file:\/\//i.test(raw)) {
+    raw = raw.replace(/^file:\/\//i, '');
+    // Windows file URL：file:///C:/a/b.ts 去掉后为 /C:/a/b.ts → 去除盘符前的多余前导斜杠
+    raw = raw.replace(/^\/([A-Za-z]:[\\/])/, '$1');
+  }
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // 非法编码保留原样
+  }
+  if (raw === '') return null;
+
+  // 盘符绝对：C:/a/b.ts 或 C:\a\b.ts
+  if (/^[A-Za-z]:[\\/]/.test(raw)) return normalizeAbs(raw);
+
+  const base = cwd && cwd !== '__system__' ? normalizeAbs(cwd) : '';
+  if (base === '') return null; // 无基准无法解析相对路径
+
+  // 根相对：以 cwd 所在盘符（如 C:/）为根
+  if (raw.startsWith('/')) {
+    const drive = /^([A-Za-z]:)\//.exec(base);
+    return drive ? normalizeAbs(`${drive[1]}${raw}`) : null;
+  }
+
+  // ./ ../ 与裸相对：拆段求解并处理 .. 上跳
+  const segs = base.split('/').filter(s => s !== '');
+  for (const part of raw.split(/[\\/]+/)) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      segs.pop();
+      continue;
+    }
+    segs.push(part);
+  }
+  return segs.join('/');
+}
+
+/**
+ * 文件引用链接组件：点击拦截为「侧边栏/弹层预览」（不跳转、不新开标签页）。
+ * 相对路径解析依赖当前工作目录；无法解析时退化为不可点文本。
+ */
+function MarkdownFileLink({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
+  const cwd = useStore(s => s.workingDirectory);
+  const sessionId = useStore(s => s.activeTaskId) ?? '';
+  const openPreview = useOpenFilePreview();
+  const abs = resolveFileHref(href, cwd);
+  if (!abs) return <span>{children}</span>;
+  return (
+    <a
+      href={href}
+      title={title}
+      className="md-link"
+      onClick={e => {
+        e.preventDefault();
+        e.stopPropagation();
+        openPreview(sessionId, abs);
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 function attrsToRecord(token: { attrs: ReadonlyArray<readonly [string, string | number]> | null }): Record<string, string> {
@@ -71,14 +169,26 @@ function renderInlineTokens(tokens: readonly InlineToken[], closed: boolean, key
       case 'link_close': {
         const frame = stack.pop();
         if (frame?.type === 'a') {
-          const href = safeUrl(frame.attrs['href']);
-          const node = href ? (
-            <a key={key} href={href} target="_blank" rel="noopener noreferrer" title={frame.attrs['title']}>
-              {frame.children}
-            </a>
-          ) : (
-            <span key={key}>{frame.children}</span>
-          );
+          const rawHref = frame.attrs['href'] ?? '';
+          const title = frame.attrs['title'];
+          let node: ReactNode;
+          if (isFileLikeHref(rawHref)) {
+            // 文件引用：拦截点击 → 侧边栏/弹层预览（不新开标签页、不触发路由跳转）
+            node = (
+              <MarkdownFileLink key={key} href={rawHref} title={title}>
+                {frame.children}
+              </MarkdownFileLink>
+            );
+          } else {
+            const href = safeUrl(rawHref);
+            node = href ? (
+              <a key={key} href={href} target="_blank" rel="noopener noreferrer" title={title}>
+                {frame.children}
+              </a>
+            ) : (
+              <span key={key}>{frame.children}</span>
+            );
+          }
           pushNode(node);
         }
         break;

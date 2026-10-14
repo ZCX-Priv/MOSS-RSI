@@ -16,7 +16,7 @@ import { GraphEngine } from './graph-engine/engine';
 import { queryImpact, renderImpactText } from './graph-engine/impact';
 import { SagEngine } from './sag-engine/engine';
 import { IgnoreGlobs } from './shared/ignore';
-import { ensureProjectDirs } from './shared/store';
+import { SYSTEM_SCOPE, ensureProjectDirs } from './shared/store';
 import type {
   FileEntry,
   FileIndexConfig,
@@ -90,6 +90,7 @@ export class FileIndexService {
 
   /** 确保 cwd 的项目索引运行时存在并按配置启动（后台，不阻塞） */
   async ensureProject(cwd: string): Promise<ProjectRuntime | null> {
+    if (!cwd || cwd === SYSTEM_SCOPE) return null; // 系统作用域无单一项目根 → 不建索引
     const cfg = this.getConfig();
     if (!cfg.indexing.enabled) return null; // 索引引擎关闭 → 整个模块不激活
     const existing = this.projects.get(cwd);
@@ -102,7 +103,7 @@ export class FileIndexService {
   }
 
   private async createRuntime(cwd: string, cfg: FileIndexConfig): Promise<ProjectRuntime> {
-    const dirs = ensureProjectDirs(this.env, cwd);
+    const dirs = ensureProjectDirs(cwd);
     const customIgnore = IgnoreGlobs.compile(cfg.ignore);
     const runtime: ProjectRuntime = {
       cwd,
@@ -146,7 +147,7 @@ export class FileIndexService {
 
     // 图谱引擎
     if (cfg.graph.enabled && !runtime.graphEngine) {
-      const dirs = ensureProjectDirs(this.env, runtime.cwd);
+      const dirs = ensureProjectDirs(runtime.cwd);
       runtime.graphEngine = new GraphEngine(runtime.cwd, dirs.graph, runtime.indexEngine, {
         env: this.env,
         logger: this.logger,
@@ -165,7 +166,7 @@ export class FileIndexService {
 
     // SAG 引擎
     if (cfg.sag.enabled && !runtime.sagEngine) {
-      const dirs = ensureProjectDirs(this.env, runtime.cwd);
+      const dirs = ensureProjectDirs(runtime.cwd);
       runtime.sagEngine = new SagEngine(
         runtime.cwd,
         dirs.sag,

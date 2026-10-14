@@ -37,8 +37,29 @@ export function projectMemoryRoot(cwd: string): string {
   return join(cwd, '.moss', 'memory');
 }
 
-/** 项目 wing 名（目录名；用于项目记忆归档与 Tunnel 关联） */
+/** 系统作用域标记（本机全盘模式；无单一项目根） */
+export const SYSTEM_SCOPE = '__system__';
+
+/** 是否为系统作用域（无单一项目根：记忆入全局、不建项目根，避免相对路径写入进程目录） */
+export function isSystemScope(cwd: string): boolean {
+  return !cwd || cwd === SYSTEM_SCOPE;
+}
+
+/**
+ * 记忆双作用域根解析：
+ * - global 恒为全局宫殿；
+ * - project 仅非系统作用域存在（系统作用域无项目根，项目翼记忆归档到全局）。
+ */
+export function memoryRoots(env: Environment, cwd: string): { global: string; project: string | null } {
+  return {
+    global: globalMemoryRoot(env),
+    project: isSystemScope(cwd) ? null : projectMemoryRoot(cwd),
+  };
+}
+
+/** 项目 wing 名（目录名；用于项目记忆归档与 Tunnel 关联）。系统作用域固定 'system'。 */
 export function projectWing(cwd: string): string {
+  if (isSystemScope(cwd)) return 'system';
   return basename(cwd) || 'default';
 }
 
@@ -109,6 +130,13 @@ export function listAllMemories(root: string, scope: MemoryScope): ScopedMemoryR
   return out;
 }
 
+/** 落盘前剔除运行期 scope 字段（记忆文件只应含 MemoryRecord 字段） */
+function toDiskRecord(record: MemoryRecord | ScopedMemoryRecord): MemoryRecord {
+  const copy = { ...record } as MemoryRecord & { scope?: MemoryScope };
+  delete copy.scope;
+  return copy;
+}
+
 /** 写入记忆（wing/room 目录自动创建；内容寻址去重） */
 export function writeMemory(
   root: string,
@@ -117,7 +145,7 @@ export function writeMemory(
   const wingDir = join(root, safeDirName(record.wing));
   const roomDir = join(wingDir, safeDirName(record.room));
   ensureDir(roomDir);
-  writeFileSync(join(roomDir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8');
+  writeFileSync(join(roomDir, `${record.id}.json`), JSON.stringify(toDiskRecord(record), null, 2), 'utf8');
   return record;
 }
 
@@ -152,9 +180,10 @@ export function findMemoryAnywhere(
   cwd: string,
   id: string,
 ): { record: ScopedMemoryRecord; file: string; root: string } | null {
+  const { global: globalRoot, project } = memoryRoots(env, cwd);
   const roots: Array<{ root: string; scope: MemoryScope }> = [
-    { root: projectMemoryRoot(cwd), scope: 'project' },
-    { root: globalMemoryRoot(env), scope: 'global' },
+    ...(project ? [{ root: project, scope: 'project' as const }] : []),
+    { root: globalRoot, scope: 'global' as const },
   ];
   for (const { root, scope } of roots) {
     if (!existsSync(root)) continue;
@@ -176,7 +205,7 @@ export function findMemoryAnywhere(
 
 /** 更新记忆（原地重写；保留 id 与 createdAt） */
 export function rewriteMemory(file: string, record: MemoryRecord, scope: MemoryScope): ScopedMemoryRecord {
-  writeFileSync(file, JSON.stringify(record, null, 2), 'utf8');
+  writeFileSync(file, JSON.stringify(toDiskRecord(record), null, 2), 'utf8');
   return { ...record, scope };
 }
 
@@ -205,9 +234,10 @@ export function buildPalaceTree(
     total: number;
   }>;
 } {
+  const { global: globalRoot, project } = memoryRoots(env, cwd);
   const all = [
-    ...listAllMemories(globalMemoryRoot(env), 'global'),
-    ...listAllMemories(projectMemoryRoot(cwd), 'project'),
+    ...listAllMemories(globalRoot, 'global'),
+    ...(project ? listAllMemories(project, 'project') : []),
   ];
   const wingMap = new Map<string, { wing: string; scope: MemoryScope; rooms: Map<string, Map<MemoryHall, number>>; total: number }>();
   for (const m of all) {

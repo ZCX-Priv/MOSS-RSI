@@ -86,8 +86,8 @@ export interface DistillDeps {
   distillModelId: string;
   /** 触发蒸馏的最小新增消息数 */
   minMessages: number;
-  /** 全局个人记忆 wing 固定 'user'；项目记忆写入项目根 */
-  projectRoot: string;
+  /** 全局个人记忆 wing 固定 'user'；项目记忆写入项目根（系统作用域无项目根 → null） */
+  projectRoot: string | null;
   globalRoot: string;
 }
 
@@ -175,7 +175,7 @@ export async function distillSession(
   const wing = projectWing(cwd);
   const existing = [
     ...listAllMemories(deps.globalRoot, 'global'),
-    ...listAllMemories(deps.projectRoot, 'project'),
+    ...(deps.projectRoot ? listAllMemories(deps.projectRoot, 'project') : []),
   ];
   const now = new Date().toISOString();
   let created = 0;
@@ -214,14 +214,16 @@ export async function distillSession(
         updatedAt: now,
         tags: [...new Set([...similar.tags, ...(m.tags ?? [])])].slice(0, 12),
       };
-      writeMemory(similar.scope === 'project' ? deps.projectRoot : deps.globalRoot, updated);
+      writeMemory(
+        similar.scope === 'project' && deps.projectRoot ? deps.projectRoot : deps.globalRoot,
+        updated,
+      );
       merged++;
     } else {
-      writeMemory(
-        targetWing === 'user' ? deps.globalRoot : deps.projectRoot,
-        record,
-      );
-      existing.push({ ...record, scope: targetWing === 'user' ? 'global' : 'project' });
+      // 系统作用域无项目根：项目翼记忆也归档到全局（翼名 'system'）
+      const toGlobal = targetWing === 'user' || deps.projectRoot === null;
+      writeMemory(toGlobal ? deps.globalRoot : (deps.projectRoot ?? deps.globalRoot), record);
+      existing.push({ ...record, scope: toGlobal ? 'global' : 'project' });
       created++;
     }
   }

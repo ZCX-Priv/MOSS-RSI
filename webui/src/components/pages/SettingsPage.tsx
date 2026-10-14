@@ -1089,18 +1089,28 @@ export function FileIndexSettings() {
   const [rebuildOpen, setRebuildOpen] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
 
-  const patchFileIndex = (patch: Partial<FileIndexConfig>) => {
-    void updateAppConfig({ context: { ...(appConfig?.context ?? CONTEXT_FALLBACK), fileIndex: { ...fileIndex, ...patch } } }).catch(() => {
-      // toast 已在 useConfig 内处理
+  const patchFileIndex = (patch: Partial<FileIndexConfig>): Promise<void> =>
+    updateAppConfig({
+      context: { ...(appConfig?.context ?? CONTEXT_FALLBACK), fileIndex: { ...fileIndex, ...patch } },
+    }).then(
+      () => undefined,
+      () => undefined, // toast 已在 useConfig 内处理
+    );
+
+  // 开启任一引擎后立即触发一次构建：否则仅改配置、后端无任何触发点 → 引擎不启动、不落库。
+  const startAfterEnable = (): void => {
+    if (!cwd || cwd === '__system__') return; // 系统作用域无单一项目根，索引跳过
+    void rebuild(['indexing']).catch(err => {
+      toast.error(err instanceof Error ? err.message : String(err));
     });
   };
 
   // 开关联动：graph/sag 开启 → indexing 强制开启；indexing 关闭 → graph/sag 一并关闭
   const setIndexing = (v: boolean) => {
     if (v) {
-      patchFileIndex({ indexing: { enabled: true } });
+      void patchFileIndex({ indexing: { enabled: true } }).then(startAfterEnable);
     } else {
-      patchFileIndex({
+      void patchFileIndex({
         indexing: { enabled: false },
         graph: { enabled: false },
         sag: { ...fileIndex.sag, enabled: false },
@@ -1109,18 +1119,18 @@ export function FileIndexSettings() {
   };
   const setGraph = (v: boolean) => {
     if (v) {
-      patchFileIndex({ indexing: { enabled: true }, graph: { enabled: true } });
       toast.info(t('settings.fileIndex.linkedOn'));
+      void patchFileIndex({ indexing: { enabled: true }, graph: { enabled: true } }).then(startAfterEnable);
     } else {
-      patchFileIndex({ graph: { enabled: false } });
+      void patchFileIndex({ graph: { enabled: false } });
     }
   };
   const setSag = (v: boolean) => {
     if (v) {
-      patchFileIndex({ indexing: { enabled: true }, sag: { ...fileIndex.sag, enabled: true } });
       toast.info(t('settings.fileIndex.linkedOn'));
+      void patchFileIndex({ indexing: { enabled: true }, sag: { ...fileIndex.sag, enabled: true } }).then(startAfterEnable);
     } else {
-      patchFileIndex({ sag: { ...fileIndex.sag, enabled: false } });
+      void patchFileIndex({ sag: { ...fileIndex.sag, enabled: false } });
     }
   };
 

@@ -5,7 +5,7 @@
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Environment } from '../../core/types';
-import { globalMemoryRoot, listAllMemories, projectMemoryRoot, projectWing } from './storage';
+import { listAllMemories, memoryRoots, projectWing } from './storage';
 import { tokenize } from './tokenizer';
 import type { MemoryHall, ScopedMemoryRecord } from './types';
 
@@ -73,9 +73,9 @@ export class MemoryRetriever {
 
   /** 重建索引（全量读盘 + 分词；惰性调用） */
   private ensureIndex(cwd: string): MemoryIndex {
-    const globalRoot = globalMemoryRoot(this.env);
-    const projectRoot = projectMemoryRoot(cwd);
-    const fingerprint = storageFingerprint(globalRoot) + storageFingerprint(projectRoot);
+    const { global: globalRoot, project: projectRoot } = memoryRoots(this.env, cwd);
+    const fingerprint =
+      storageFingerprint(globalRoot) + (projectRoot ? storageFingerprint(projectRoot) : 0);
 
     if (this.index && this.index.fingerprint === fingerprint && this.indexedCwd === cwd) {
       return this.index;
@@ -83,7 +83,7 @@ export class MemoryRetriever {
 
     const records = [
       ...listAllMemories(globalRoot, 'global'),
-      ...listAllMemories(projectRoot, 'project'),
+      ...(projectRoot ? listAllMemories(projectRoot, 'project') : []),
     ];
     const entries: IndexEntry[] = records.map(record => ({
       record,

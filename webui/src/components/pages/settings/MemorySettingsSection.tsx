@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dialog';
 import { useConfig } from '@/hooks/useConfig';
 import { api } from '@/api/http';
+import { useStore } from '@/store';
 import type { MemoryHall, MemoryItem, MemoryPalaceTree, MemoryUpsertBody } from '@/types/api';
 
 const MEMORY_HALLS: MemoryHall[] = ['decision', 'event', 'discovery', 'preference', 'suggestion'];
@@ -71,6 +72,8 @@ export function MemorySettingsSection() {
       l1MaxEntries: 20,
     };
   const models = apiConfig?.providers.flatMap(p => p.models) ?? [];
+  // 当前工作目录：记忆按任务 cwd 分项目落盘，列表/宫殿树需带 cwd 才能读到项目翼记忆
+  const cwd = useStore((s) => s.workingDirectory);
 
   const [loading, setLoading] = useState(true);
   const [tree, setTree] = useState<MemoryPalaceTree | null>(null);
@@ -90,8 +93,9 @@ export function MemorySettingsSection() {
     setLoading(true);
     try {
       const [treeResult, listResult] = await Promise.all([
-        api.getMemoryTree(),
+        api.getMemoryTree(cwd),
         api.listMemory({
+          cwd,
           ...(wingFilter !== 'all' ? { wing: wingFilter } : {}),
           ...(roomFilter !== 'all' ? { room: roomFilter } : {}),
           ...(query.trim() ? { q: query.trim() } : {}),
@@ -105,7 +109,7 @@ export function MemorySettingsSection() {
     } finally {
       setLoading(false);
     }
-  }, [wingFilter, roomFilter, query, t]);
+  }, [wingFilter, roomFilter, query, t, cwd]);
 
   useEffect(() => {
     void load();

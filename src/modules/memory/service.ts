@@ -16,7 +16,9 @@ import {
   buildPalaceTree,
   findMemoryAnywhere,
   globalMemoryRoot,
+  isSystemScope,
   listAllMemories,
+  memoryRoots,
   projectMemoryRoot,
   projectWing,
   removeMemoryFile,
@@ -28,6 +30,7 @@ import type {
   MemoryHall,
   MemoryPalaceTree,
   MemoryRecallSection,
+  MemoryScope,
   MemoryUpsertInput,
   ScopedMemoryRecord,
 } from './types';
@@ -194,7 +197,7 @@ export class MemoryEngineServiceImpl {
           llm,
           distillModelId: requestModel,
           minMessages: cfg.distillMinMessages,
-          projectRoot: projectMemoryRoot(cwd),
+          projectRoot: isSystemScope(cwd) ? null : projectMemoryRoot(cwd),
           globalRoot: globalMemoryRoot(this.env),
         });
         if (result.skipped) {
@@ -233,7 +236,7 @@ export class MemoryEngineServiceImpl {
         llm,
         distillModelId: requestModel,
         minMessages: 1,
-        projectRoot: projectMemoryRoot(cwd),
+        projectRoot: isSystemScope(cwd) ? null : projectMemoryRoot(cwd),
         globalRoot: globalMemoryRoot(this.env),
       });
       this.retriever.invalidate();
@@ -252,7 +255,7 @@ export class MemoryEngineServiceImpl {
   // 检索与 CRUD 直通（memory 工具与 REST 路由消费）
   // ========================================================================
 
-  /** 检索（memory 工具 action=search / REST 列表） */
+  /** 检索（memory 工具 action=search） */
   search(
     cwd: string,
     query: string,
@@ -262,12 +265,39 @@ export class MemoryEngineServiceImpl {
     return this.retriever.recall(cwd, query, { filter, topK: topK ?? 10 });
   }
 
+  /**
+   * 列表枚举（REST 无查询 q 时的全量数据源，替代不可用的 BM25 空查询）：
+   * 全局 ∪ 项目（系统作用域仅全局），元数据过滤后按 updatedAt 降序截断。
+   */
+  listMemories(
+    cwd: string,
+    filter?: { wing?: string; room?: string; hall?: MemoryHall; pinned?: boolean },
+    limit = 200,
+  ): ScopedMemoryRecord[] {
+    const { global: globalRoot, project } = memoryRoots(this.env, cwd);
+    const all = [
+      ...listAllMemories(globalRoot, 'global'),
+      ...(project ? listAllMemories(project, 'project') : []),
+    ];
+    return all
+      .filter(
+        m =>
+          (!filter?.wing || m.wing === filter.wing) &&
+          (!filter?.room || m.room === filter.room) &&
+          (!filter?.hall || m.hall === filter.hall) &&
+          (filter?.pinned === undefined || m.pinned === filter.pinned),
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, Math.max(1, limit));
+  }
+
   /** 关键词包含搜索（REST q= 参数：BM25 无结果时回退） */
   searchContains(cwd: string, q: string): ScopedMemoryRecord[] {
     const needle = q.toLowerCase();
+    const { global: globalRoot, project } = memoryRoots(this.env, cwd);
     return [
-      ...listAllMemories(globalMemoryRoot(this.env), 'global'),
-      ...listAllMemories(projectMemoryRoot(cwd), 'project'),
+      ...listAllMemories(globalRoot, 'global'),
+      ...(project ? listAllMemories(project, 'project') : []),
     ].filter(
       m =>
         m.insight.toLowerCase().includes(needle) ||
@@ -284,11 +314,14 @@ export class MemoryEngineServiceImpl {
   /** 创建记忆（memory 工具 action=save / REST） */
   save(cwd: string, input: MemoryUpsertInput): ScopedMemoryRecord {
     const record = buildMemoryRecord(input);
-    // preference/suggestion → 全局 user wing；其余 → 当前项目 wing
-    const root = record.wing === 'user' ? globalMemoryRoot(this.env) : projectMemoryRoot(cwd);
+    // preference/suggestion → 全局 user wing；其余 → 当前项目 wing。
+    // 系统作用域（__system__）无项目根 → 项目翼记忆也归档到全局（避免相对路径写入进程目录）。
+    const toGlobal = record.wing === 'user' || isSystemScope(cwd);
+    const root = toGlobal ? globalMemoryRoot(this.env) : projectMemoryRoot(cwd);
+    const scope: MemoryScope = toGlobal ? 'global' : 'project';
     writeMemory(root, record);
     this.retriever.invalidate();
-    return { ...record, scope: record.wing === 'user' ? 'global' : 'project' };
+    return { ...record, scope };
   }
 
   /** 按 id 读取 */

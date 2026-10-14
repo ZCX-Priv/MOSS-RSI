@@ -54,8 +54,10 @@ export interface GovernorDeps {
   onCompaction(sessionId: string, record: CompactionRecord): void;
   /** 降级遥测回调 */
   onDegraded(sessionId: string, reason: string): void;
-  /** 项目概要文本（文件索引模块；图谱/SAG 开启时注入锚定消息，关闭返回 null） */
+  /** 项目概要文本（文件索引模块；索引开启时注入锚定消息，关闭返回 null） */
   getProjectOverview?(cwd: string): Promise<string | null>;
+  /** 主动确保文件索引项目运行时（索引开启时每次请求幂等触发；fire-and-forget） */
+  ensureFileIndex?(cwd: string): void;
 }
 
 export interface PrepareRequestInput {
@@ -123,6 +125,18 @@ export async function prepareRequest(
   const { session, cwd, model, modelDisplayName, windowTokens } = input;
   const config = deps.getConfig();
 
+  // ===== 0. 文件索引主动激活（仅开 indexing 时也需建运行时并扫描；幂等、不阻塞）=====
+  if (config.fileIndex.indexing.enabled) {
+    try {
+      deps.ensureFileIndex?.(cwd);
+    } catch (err) {
+      deps.logger.warn('context: ensureFileIndex failed', {
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // ===== 1. 环境上下文保障（跨天追加 / 旧会话补建；模型信息随消息锚定）=====
   try {
     if (ensureEnvContext(session, deps.env, cwd, model, modelDisplayName)) {
@@ -135,8 +149,8 @@ export async function prepareRequest(
     });
   }
 
-  // ===== 1.5 项目概要锚定（文件索引：图谱/SAG 开启时注入大局观）=====
-  if (deps.getProjectOverview && (config.fileIndex.graph.enabled || config.fileIndex.sag.enabled)) {
+  // ===== 1.5 项目概要锚定（文件索引：索引开启时注入大局观）=====
+  if (deps.getProjectOverview && config.fileIndex.indexing.enabled) {
     try {
       if (await ensureProjectContext(session, () => deps.getProjectOverview!(cwd))) {
         deps.persistSession(session);

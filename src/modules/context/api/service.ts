@@ -128,6 +128,12 @@ export class ContextEngineServiceImpl {
   /** 配置热重载：文件索引引擎启停（config:changed 时由 server 路由调用） */
   async onFileIndexConfigChanged(): Promise<void> {
     await this.fileIndex.applyConfigChange();
+    // 开关刚打开时通常无既有运行时 → 为最近工作目录主动建索引并扫描
+    if (this.getConfig().fileIndex.indexing.enabled && this.lastCwd) {
+      void this.fileIndex.ensureProject(this.lastCwd).catch(() => {
+        // 失败静默（后续任务请求会重试）
+      });
+    }
   }
 
   /** agent 模块注入会话存取桥（依赖方向 agent → context） */
@@ -456,6 +462,11 @@ export class ContextEngineServiceImpl {
       getApiModels: () =>
         flattenModels(this.config.getApiConfig()).map(m => ({ id: m.id, model: m.model })),
       getProjectOverview: (cwd: string) => this.fileIndex.projectOverview(cwd),
+      ensureFileIndex: (cwd: string) => {
+        void this.fileIndex.ensureProject(cwd).catch(() => {
+          // 单次失败静默（下次请求会重试）
+        });
+      },
       persistSession: session => this.sessionStore?.persist(session),
       emitWs: (sessionId, message) => this.emitWs(sessionId, message),
       onCompaction: sessionId => {

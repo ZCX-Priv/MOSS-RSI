@@ -479,7 +479,7 @@ export const en = {
       building: 'Building {{percent}}%',
       storeSize: 'Storage {{size}}',
       indexingTitle: 'Index Engine',
-      indexingDesc: 'One full scan then auto incremental updates to accelerate file search; data stored in ~/.moss/file-index',
+      indexingDesc: 'One full scan then auto incremental updates to accelerate file search; data stored in the project .moss/file-index',
       indexingEnabled: 'Enable index engine',
       indexingEnabledDesc: 'Builds the file index in the background; glob/grep searches are transparently accelerated',
       graphTitle: 'Graph Engine',

@@ -480,7 +480,7 @@ export const zh = {
       building: '构建中 {{percent}}%',
       storeSize: '存储 {{size}}',
       indexingTitle: '索引引擎',
-      indexingDesc: '一次全量扫描后自动增量更新，加速文件搜索；索引数据存于 ~/.moss/file-index',
+      indexingDesc: '一次全量扫描后自动增量更新，加速文件搜索；索引数据存于项目下 .moss/file-index',
       indexingEnabled: '启用索引引擎',
       indexingEnabledDesc: '打开后后台自动建立文件索引；glob/grep 搜索透明加速',
       graphTitle: '图谱引擎',

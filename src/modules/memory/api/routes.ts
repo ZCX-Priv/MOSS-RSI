@@ -75,14 +75,16 @@ export function createListMemoryHandler(services: ServicesLike): RouteHandler {
       }, limit);
       items = searched.length > 0 ? searched : engine.searchContains(cwd, q).slice(0, limit);
     } else {
-      // 无查询：全量过滤
-      const all = [
-        ...engine.search(cwd, '', { ...(hall ? { hall } : {}) }, 100000),
-      ];
-      items = all
-        .filter(m => (!wing || m.wing === wing) && (!room || m.room === room))
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        .slice(0, limit);
+      // 无查询：枚举全量记忆（全局 ∪ 项目），按元数据过滤后 updatedAt 降序
+      items = engine.listMemories(
+        cwd,
+        {
+          ...(wing ? { wing } : {}),
+          ...(room ? { room } : {}),
+          ...(hall ? { hall } : {}),
+        },
+        limit,
+      );
     }
     return { status: 200, body: { items, count: items.length } };
   };
