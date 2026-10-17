@@ -677,6 +677,18 @@ export const api = {
       '/api/filesystem/save-attachment',
       payload,
     ),
+  /**
+   * 文件浏览器「上传」：base64 → 指定授权目录（走 filesys roots 权限；重名 409；上限 12MB）。
+   * sessionId 用于让后端把 file-created 事件投递到该会话，前端文件列表自动刷新。
+   */
+  uploadFile: (dir: string, name: string, dataBase64: string, cwd?: string, sessionId?: string) =>
+    request<{ file: PickedFile }>('POST', '/api/filesystem/upload', {
+      dir,
+      name,
+      dataBase64,
+      ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    }),
   suggestPaths: () => request<{ paths: SuggestPath[] }>('GET', '/api/filesystem/suggest-paths'),
   /** 本机实测可用的终端解释器类型（「新建终端」菜单数据源；只返回真实存在的类型） */
   listInterpreters: () => request<{ interpreters: InterpreterOption[] }>('GET', '/api/terminal/interpreters'),

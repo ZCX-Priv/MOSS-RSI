@@ -20,6 +20,7 @@ import { SYSTEM_SCOPE } from '../../filesys/roots';
 import { decodeTerminalOutput } from '../../../utils/encoding';
 import { parseRangeHeader, clampChunk } from './range';
 import { RAW_MIME_MAP, MEDIA_EXTS, isTextualExt, extOfFile } from './preview-mime';
+import { hashBuffer } from '../../filesys/hash';
 import type { FilesysService } from '../../filesys/types';
 
 /** 跳过这些巨型/系统目录，避免遍历爆炸 */
@@ -739,6 +740,107 @@ export function createSaveAttachmentHandler(
 }
 
 // ============================================================================
+// POST /api/filesystem/upload
+// 文件浏览器「上传」：前端把本机文件读成 base64（dataURL 去前缀）提交，后端写入当前浏览目录。
+// 通道与 save-attachment 一致（走 base64 JSON：HTTP 层用 req.text() 读体，无法直接收二进制）。
+// 权限：目标目录经 filesys.resolve（cwd 缺省 __system__）→ roots 越权 / .moss 硬屏蔽 → 403。
+// 写盘后经 filesys.recordExternalWrite 广播 file-created 事件，前端文件浏览器自动刷新。
+// 体积上限 UPLOAD_MAX_BYTES（与 HTTP 层 16MB 请求体上限协同，base64 约放大 4/3）。
+// ============================================================================
+
+/** 上传单文件体积上限（解码后字节数）：12MB */
+const UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
+
+interface UploadFileBody {
+  /** 目标目录绝对路径（必填） */
+  dir?: string;
+  /** 原始文件名（用于命名与推断扩展名） */
+  name?: string;
+  /** 文件内容 base64（不含 dataURL 前缀） */
+  dataBase64?: string;
+  /** 解析 dir 的作用域工作目录（缺省 __system__，与 list 一致） */
+  cwd?: string;
+  /** 发起上传的会话 id（用于把 file-created 事件投递给该会话的前端，实现列表自动刷新） */
+  sessionId?: string;
+}
+
+export function createUploadFileHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const body = (req.body ?? {}) as UploadFileBody;
+    const rawDir = (body.dir ?? '').trim();
+    if (!rawDir) {
+      return { status: 400, body: { error: 'dir is required' } };
+    }
+    const dataBase64 = (body.dataBase64 ?? '').trim();
+    if (!dataBase64) {
+      return { status: 400, body: { error: ErrorCode.FS_ATTACHMENT_DATA_REQUIRED } };
+    }
+
+    const filesys = services.tryResolve<FilesysService>(ServiceNames.FILESYS);
+    if (!filesys) {
+      return { status: 503, body: { error: 'filesys service unavailable' } };
+    }
+
+    const cwd = (body.cwd ?? '').trim() || SYSTEM_SCOPE;
+    const dirAbs = filesys.resolve(rawDir, cwd);
+    if (!dirAbs) {
+      return {
+        status: 403,
+        body: { error: 'Access denied: target directory outside allowed roots or blocked' },
+      };
+    }
+    if (!isDirectorySafe(dirAbs)) {
+      return { status: 404, body: { error: `Not a directory: ${dirAbs}` } };
+    }
+
+    // 体积上限兜底：base64 长度 ≈ 原始字节 * 4/3，超限直接拒绝
+    if (dataBase64.length > Math.ceil((UPLOAD_MAX_BYTES * 4) / 3) + 4) {
+      return { status: 413, body: { error: ErrorCode.FS_ATTACHMENT_TOO_LARGE } };
+    }
+
+    // 文件名：清洗原名（去路径分隔符/非法字符），保留归一扩展名
+    const safeName = sanitizeAttachmentName(body.name ?? '', `file-${Date.now()}.bin`);
+    const ext = safeAttachmentExt(safeName);
+    const stem = sanitizeAttachmentName(safeName.replace(/\.[^.]*$/, ''), 'file').slice(0, 60);
+    const fileName = `${stem}.${ext}`;
+    const absPath = join(dirAbs, fileName);
+
+    // 重名不覆盖：交由前端提示用户改名或另选目录
+    if (existsSync(absPath)) {
+      return { status: 409, body: { error: 'File already exists', path: absPath } };
+    }
+
+    let buf: Buffer;
+    let size = 0;
+    try {
+      buf = Buffer.from(dataBase64, 'base64');
+      if (buf.length > UPLOAD_MAX_BYTES) {
+        return { status: 413, body: { error: ErrorCode.FS_ATTACHMENT_TOO_LARGE } };
+      }
+      writeFileSync(absPath, buf);
+      size = buf.length;
+    } catch {
+      return { status: 500, body: { error: 'Failed to write uploaded file' } };
+    }
+
+    // 广播 file-created（与 filesys 工具写入同一事件语义），前端文件浏览器自动刷新。
+    // 必须带 sessionId：engine.onFilesysChange 对无 sessionId 的事件直接丢弃（不推送到任何会话）。
+    const sessionId = (body.sessionId ?? '').trim();
+    try {
+      filesys.recordExternalWrite(
+        absPath,
+        { sha256: hashBuffer(buf), bytes: size },
+        { source: 'upload', existed: false, ...(sessionId ? { sessionId } : {}) },
+      );
+    } catch {
+      // 事件广播失败不阻断落盘结果
+    }
+
+    return { status: 200, body: { file: { path: absPath, name: fileName, size } } };
+  };
+}
+
+// ============================================================================
 // filesys roots 管理（虚拟文件系统的授权目录边界）
 // GET  /api/filesys/roots — 读取配置的额外授权目录 + 当前实际生效列表
 // PUT  /api/filesys/roots — 设置额外授权目录（写回 config.filesys.roots，热生效）
@@ -1091,6 +1193,8 @@ export function createTextExtractHandler(services: ServiceRegistry): RouteHandle
       const officeExts = new Set([
         'docx', 'docm', 'dotx', 'doc', 'dot', 'xlsx', 'xlsm', 'xltx', 'xltm', 'xls', 'xlt', 'xlsb',
         'pptx', 'pptm', 'potx', 'ppsx', 'ppt', 'pot', 'odt', 'ods', 'odp', 'ott', 'ots', 'otp', 'rtf',
+        // WPS 三族（文字/表格/演示）：与 read 工具 detector 的 office 扩展名集合对齐
+        'wps', 'wpt', 'et', 'ett', 'dps', 'dpt',
       ]);
       const ebookExts = new Set(['epub', 'opf', 'mobi', 'azw3', 'azw', 'fb2']);
       if (officeExts.has(ext)) {

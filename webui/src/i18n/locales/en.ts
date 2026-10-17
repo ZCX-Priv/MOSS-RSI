@@ -982,6 +982,13 @@ export const en = {
     driveLabel: 'Local Disk ({{letter}}:)',
     driveFree: '{{free}} free of {{total}}',
     drivesFailed: 'Failed to read drives',
+    upload: 'Upload file',
+    download: 'Download',
+    uploadSuccess: 'Uploaded {{count}} file(s)',
+    uploadExists: '{{name}} already exists, not overwritten',
+    uploadTooLarge: '{{name}} exceeds the upload size limit (12MB)',
+    uploadFailed: 'Failed to upload {{name}}',
+    downloadFailed: 'Failed to download {{name}}',
   },
   fileChanges: {
     refresh: 'Refresh',

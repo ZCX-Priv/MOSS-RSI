@@ -10,13 +10,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, ArrowUp, Folder, HardDrive, Loader2, RotateCw, TriangleAlert } from 'lucide-react';
+import { ArrowRight, ArrowUp, Download, Folder, HardDrive, Loader2, RotateCw, TriangleAlert, Upload } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileTypeIcon } from './FileTypeIcon';
 import { useStore, SYSTEM_WORKING_DIRECTORY } from '../../store';
 import { api } from '../../api/http';
 import { wsClient } from '../../api/ws';
+import { fetchFileBuffer, mimeOfPath } from '../../render/file/fetcher';
 import type { DirectoryListing, DriveInfo, WSMessage } from '../../types/api';
 
 export interface FileBrowserPanelProps {
@@ -52,6 +54,29 @@ function formatSize(bytes: number): string {
     i++;
   }
   return `${v.toFixed(1)} ${units[i]}`;
+}
+
+/** ArrayBuffer → base64（分块转换，避免超长字符串触发调用栈溢出） */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/** 触发浏览器下载（blob → 临时 <a download>） */
+function triggerDownload(buffer: ArrayBuffer, fileName: string, mime: string): void {
+  const url = URL.createObjectURL(new Blob([buffer], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 /** 根 → 目标目录的相对路径（统一 / 显示；目标即根时返回空串） */
@@ -121,6 +146,10 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
   const [drives, setDrives] = useState<DriveInfo[] | null>(null);
   const [drivesLoading, setDrivesLoading] = useState(false);
   const [drivesError, setDrivesError] = useState<string | null>(null);
+  /** 上传中（禁用按钮 + 转圈） */
+  const [uploading, setUploading] = useState(false);
+  /** 隐藏的文件选择 input（点击「上传」按钮触发） */
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   /** 最新目录列表（WS 事件回调读取，避免闭包过期） */
   const listingRef = useRef<DirectoryListing | null>(null);
@@ -300,6 +329,55 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
     [openFileTab, setRightPanelOpen, sessionId],
   );
 
+  /**
+   * 上传：逐个把本机文件读成 base64 → 后端写入当前浏览目录。
+   * 成功后后端广播 file-created（列表自动刷新）；WS 未连接时兜底手动刷新。
+   */
+  const handleUploadFiles = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0 || !listing) return;
+      const targetDir = listing.path;
+      setUploading(true);
+      let ok = 0;
+      try {
+        for (const file of Array.from(files)) {
+          try {
+            const base64 = arrayBufferToBase64(await file.arrayBuffer());
+            await api.uploadFile(targetDir, file.name, base64, workingDirectory || undefined, sessionId);
+            ok++;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.startsWith('409')) toast.error(t('fileBrowser.uploadExists', { name: file.name }));
+            else if (msg.startsWith('413')) toast.error(t('fileBrowser.uploadTooLarge', { name: file.name }));
+            else toast.error(t('fileBrowser.uploadFailed', { name: file.name }));
+          }
+        }
+        if (ok > 0) {
+          toast.success(t('fileBrowser.uploadSuccess', { count: ok }));
+          // 上传成功即本地刷新当前目录（确定性，不依赖 WS 是否送达；WS 事件仍作为多端补充通道）
+          void silentRefresh();
+        }
+      } finally {
+        setUploading(false);
+        if (uploadInputRef.current) uploadInputRef.current.value = '';
+      }
+    },
+    [listing, workingDirectory, sessionId, silentRefresh, t],
+  );
+
+  /** 下载：取回文件二进制 → 触发浏览器下载（带 Authorization 头，沿用 /raw 通道） */
+  const handleDownload = useCallback(
+    async (path: string, name: string) => {
+      try {
+        const buf = await fetchFileBuffer(path);
+        triggerDownload(buf, name, mimeOfPath(path));
+      } catch {
+        toast.error(t('fileBrowser.downloadFailed', { name }));
+      }
+    },
+    [t],
+  );
+
   /** 点击驱动器：进入其根目录（本机模式，跨盘自由浏览） */
   const openDrive = useCallback(
     (drive: DriveInfo) => {
@@ -402,6 +480,24 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
             }}
           />
         </div>
+        {/* 上传：把本机文件写入当前浏览目录（仅目录视图可用） */}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title={t('fileBrowser.upload')}
+          aria-label={t('fileBrowser.upload')}
+          disabled={view === 'drives' || !listing || uploading}
+          onClick={() => uploadInputRef.current?.click()}
+        >
+          {uploading ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+        </Button>
+        <input
+          ref={uploadInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => void handleUploadFiles(e.target.files)}
+        />
         <Button
           variant="ghost"
           size="icon-sm"
@@ -507,28 +603,45 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
         ) : listing ? (
           <div className="flex flex-col gap-0.5 p-1.5">
             {listing.entries.map((entry) => (
-              <button
+              <div
                 key={entry.path}
-                type="button"
-                title={entry.path}
-                onClick={() => {
-                  if (entry.kind === 'directory') void load(entry.path, systemMode ? null : listing.root);
-                  else handleOpenFile(entry.path);
-                }}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
+                className="group flex w-full items-center rounded-md transition-colors hover:bg-muted"
               >
-                {entry.kind === 'directory' ? (
-                  <Folder className="size-4 shrink-0 text-primary-strong" />
-                ) : (
-                  <FileTypeIcon fileName={entry.name} size={16} className="shrink-0" />
-                )}
-                <span className="min-w-0 flex-1 truncate text-xs text-foreground">{entry.name}</span>
+                <button
+                  type="button"
+                  title={entry.path}
+                  onClick={() => {
+                    if (entry.kind === 'directory') void load(entry.path, systemMode ? null : listing.root);
+                    else handleOpenFile(entry.path);
+                  }}
+                  className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-2 py-1.5 text-left"
+                >
+                  {entry.kind === 'directory' ? (
+                    <Folder className="size-4 shrink-0 text-primary-strong" />
+                  ) : (
+                    <FileTypeIcon fileName={entry.name} size={16} className="shrink-0" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-xs text-foreground">{entry.name}</span>
+                  {entry.kind === 'file' && (
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      {formatSize(entry.size)}
+                    </span>
+                  )}
+                </button>
+                {/* 下载：取回文件二进制并以浏览器下载（hover/聚焦显示） */}
                 {entry.kind === 'file' && (
-                  <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                    {formatSize(entry.size)}
-                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    className="mr-1 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                    title={t('fileBrowser.download')}
+                    aria-label={t('fileBrowser.download')}
+                    onClick={() => void handleDownload(entry.path, entry.name)}
+                  >
+                    <Download className="size-3.5" />
+                  </Button>
                 )}
-              </button>
+              </div>
             ))}
           </div>
         ) : null}

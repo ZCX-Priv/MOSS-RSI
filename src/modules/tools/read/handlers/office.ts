@@ -14,6 +14,18 @@ import { readFileSync, openSync, readSync, closeSync } from 'node:fs';
 import { extname, basename } from 'node:path';
 import type { ToolResult } from '../../types';
 import { extractOleText } from './ole';
+import type { ArtifactDir } from '../shared/analysis-dir';
+import {
+  countArtifactAssets,
+  readArtifactMarkdown,
+  writeArtifactMarkdown,
+  writeArtifactMeta,
+} from '../shared/analysis-dir';
+import {
+  convertModernOffice,
+  type OfficeContainerKind,
+  type OfficeParserFileType,
+} from './office-markdown';
 
 /** mammoth.extractRawText 返回结构 */
 interface MammothResult {
@@ -62,6 +74,13 @@ const WPS_WORD_EXTS = new Set(['.wps', '.wpt']);
 const WPS_EXCEL_EXTS = new Set(['.et', '.ett']);
 const WPS_PPT_EXTS = new Set(['.dps', '.dpt']);
 
+/** Markdown 产物化（modern）判定用的扩展名集合：仅 officeparser 支持的 OOXML/ODF/RTF 可走此路 */
+const EXCEL_OOXML_EXTS = new Set(['.xlsx', '.xlsm', '.xltx', '.xltm']);
+const PPT_OOXML_EXTS = new Set(['.pptx', '.pptm', '.potx', '.ppsx']);
+const ODT_EXTS = new Set(['.odt', '.ott']);
+const ODS_EXTS = new Set(['.ods', '.ots']);
+const ODP_EXTS = new Set(['.odp', '.otp']);
+
 /** 依据文件头 magic 判断容器类型：zip(OOXML) / ole(复合文档) / other */
 function sniffContainer(path: string): 'zip' | 'ole' | 'other' {
   let fd: number | null = null;
@@ -100,10 +119,139 @@ function oleTextResult(path: string, label: string, kind: 'word' | 'ppt'): ToolR
 }
 
 /**
- * 读取 Office/文档文件，提取文本。
+ * 读取 Office/文档文件。
+ * 提供 artifact 时优先走「Markdown 产物化」路径（Office→Markdown + 内嵌媒体抽取，
+ * 产物落 <artifact>/content.md 与 assets/）；该路径不可用（无 artifact / 转换失败）时
+ * 回退到纯文本提取（readOfficePlain），保证任何情况下都不报错、不返回空。
+ */
+export async function readOffice(path: string, artifact?: ArtifactDir): Promise<ToolResult> {
+  if (artifact) {
+    const artifactResult = await readOfficeArtifact(path, artifact);
+    if (artifactResult) return artifactResult;
+  }
+  return readOfficePlain(path);
+}
+
+/** modern（可产物化）转换规格 */
+interface ModernSpec {
+  fileTypeHint: OfficeParserFileType;
+  containerKind: OfficeContainerKind | null;
+}
+
+/**
+ * Markdown 产物化路径。
+ * 返回 null 表示不可用（调用方回退纯文本）：转换抛错等。
+ */
+async function readOfficeArtifact(path: string, artifact: ArtifactDir): Promise<ToolResult | null> {
+  const ext = extname(path).toLowerCase();
+
+  // 1. 命中已有产物（同哈希复用）：直接读回 content.md
+  if (artifact.exists) {
+    const cached = readArtifactMarkdown(artifact);
+    if (cached !== null) {
+      const counts = countArtifactAssets(artifact.assetsDir);
+      return markdownResult(path, ext, artifact, cached, counts.images, counts.videos);
+    }
+  }
+
+  // 2. 新转换
+  const spec = resolveModernSpec(path, ext);
+  try {
+    let markdown: string;
+    let images = 0;
+    let videos = 0;
+    if (spec) {
+      const buf = readFileSync(path);
+      const out = await convertModernOffice({
+        buffer: buf,
+        fileTypeHint: spec.fileTypeHint,
+        containerKind: spec.containerKind,
+        artifact,
+      });
+      markdown = out.markdown;
+      images = out.images;
+      videos = out.videos;
+    } else {
+      // 旧版 OLE / 非 officeparser 支持格式：文本提取后作为 Markdown 落盘（不抽媒体）
+      const plain = await readOfficePlain(path);
+      if (plain.isError) return plain;
+      const body = stripFileHeader(plain, path);
+      if (!body.trim()) return plain;
+      markdown = body;
+    }
+    writeArtifactMarkdown(artifact, markdown);
+    writeArtifactMeta(artifact, {
+      sourcePath: path,
+      sha256: basename(artifact.root),
+      type: ext.replace('.', ''),
+      extra: spec ? { images, videos } : { noMedia: true },
+    });
+    return markdownResult(path, ext, artifact, markdown, images, videos);
+  } catch {
+    // 转换失败 → 回退纯文本（绝不向上抛错）
+    return null;
+  }
+}
+
+/** 构造 Markdown 产物结果（首行保持 `${path} (EXT)` 格式，供文本提取路由剥离） */
+function markdownResult(
+  path: string,
+  ext: string,
+  artifact: ArtifactDir,
+  markdown: string,
+  images: number,
+  videos: number,
+): ToolResult {
+  const label = ext.replace('.', '').toUpperCase();
+  return {
+    content: [{ type: 'text', text: `${path} (${label})\n${markdown}` }],
+    metadata: {
+      type: label.toLowerCase(),
+      artifact: { dir: artifact.root, markdown: artifact.markdownPath, images, videos },
+    },
+  };
+}
+
+/** 剥离文本结果首行的 `${path} (EXT)` 文件头，返回正文（无文件头则原样返回） */
+function stripFileHeader(result: ToolResult, absPath: string): string {
+  const text = (result.content ?? [])
+    .filter((c) => c.type === 'text')
+    .map((c) => c.text ?? '')
+    .join('\n');
+  const firstLine = text.split('\n')[0] ?? '';
+  if (firstLine.startsWith(absPath)) {
+    return text.slice(firstLine.length).replace(/^\n/, '');
+  }
+  return text;
+}
+
+/** 判定是否可走 officeparser 的 Markdown 产物化；不可（旧版 OLE 等）返回 null */
+function resolveModernSpec(path: string, ext: string): ModernSpec | null {
+  const isZip = (): boolean => sniffContainer(path) === 'zip';
+  // Word OOXML（含宏/模板同族）
+  if (WORD_OOXML_EXTS.has(ext)) return { fileTypeHint: 'docx', containerKind: 'word' };
+  if (WPS_WORD_EXTS.has(ext)) return isZip() ? { fileTypeHint: 'docx', containerKind: 'word' } : null;
+  // Excel OOXML
+  if (EXCEL_OOXML_EXTS.has(ext)) return { fileTypeHint: 'xlsx', containerKind: 'excel' };
+  if (WPS_EXCEL_EXTS.has(ext)) return isZip() ? { fileTypeHint: 'xlsx', containerKind: 'excel' } : null;
+  // PowerPoint OOXML（.ppt/.pot 被改名为 OOXML 时同族处理）
+  if (PPT_OOXML_EXTS.has(ext)) return { fileTypeHint: 'pptx', containerKind: 'ppt' };
+  if (WPS_PPT_EXTS.has(ext)) return isZip() ? { fileTypeHint: 'pptx', containerKind: 'ppt' } : null;
+  if (ext === '.ppt' || ext === '.pot') return isZip() ? { fileTypeHint: 'pptx', containerKind: 'ppt' } : null;
+  // OpenDocument
+  if (ODT_EXTS.has(ext)) return { fileTypeHint: 'odt', containerKind: 'odf' };
+  if (ODS_EXTS.has(ext)) return { fileTypeHint: 'ods', containerKind: 'odf' };
+  if (ODP_EXTS.has(ext)) return { fileTypeHint: 'odp', containerKind: 'odf' };
+  // RTF（非 ZIP 容器，无媒体抽取）
+  if (ext === '.rtf') return { fileTypeHint: 'rtf', containerKind: null };
+  return null;
+}
+
+/**
+ * 读取 Office/文档文件，提取纯文本（原实现；artifact 不可用时回退路径）。
  * 根据扩展名分派到对应处理器。
  */
-export async function readOffice(path: string): Promise<ToolResult> {
+async function readOfficePlain(path: string): Promise<ToolResult> {
   const ext = extname(path).toLowerCase();
   try {
     if (WORD_OOXML_EXTS.has(ext)) {

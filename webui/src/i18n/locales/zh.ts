@@ -983,6 +983,13 @@ export const zh = {
     driveLabel: '本地磁盘 ({{letter}}:)',
     driveFree: '{{free}} 可用，共 {{total}}',
     drivesFailed: '无法读取磁盘信息',
+    upload: '上传文件',
+    download: '下载',
+    uploadSuccess: '已上传 {{count}} 个文件',
+    uploadExists: '{{name}} 已存在，未覆盖',
+    uploadTooLarge: '{{name}} 超过上传大小上限（12MB）',
+    uploadFailed: '{{name}} 上传失败',
+    downloadFailed: '{{name}} 下载失败',
   },
   fileChanges: {
     refresh: '刷新',

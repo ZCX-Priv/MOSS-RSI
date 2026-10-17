@@ -5,7 +5,7 @@
 import { extname } from 'node:path';
 
 /** 文件类型分类，决定分派到哪个 handler */
-export type FileType = 'text' | 'image' | 'pdf' | 'office' | 'notebook' | 'ebook';
+export type FileType = 'text' | 'image' | 'video' | 'pdf' | 'office' | 'notebook' | 'ebook';
 
 /** 图片扩展名集合 */
 const IMAGE_EXTS = new Set<string>([
@@ -45,6 +45,15 @@ const OFFICE_EXTS = new Set<string>([
 const EBOOK_EXTS = new Set<string>(['.epub', '.opf', '.mobi', '.azw3', '.azw', '.fb2']);
 
 /**
+ * 视频扩展名集合（供 read 工具返回基础信息 + 容器元数据）。
+ * 注意：不含 'ts'（属 TypeScript 文本）与 'm3u8'（播放列表文本）。
+ */
+const VIDEO_EXTS = new Set<string>([
+  '.mp4', '.m4v', '.mov', '.qt', '.avi', '.wmv', '.asf', '.mkv', '.webm', '.flv',
+  '.3gp', '.3g2', '.mpeg', '.mpg', '.ogv', '.rmvb',
+]);
+
+/**
  * 根据扩展名检测文件类型。
  * 默认回退为 'text'，由 text handler 做二进制检测兜底
  * （避免将 GBK 编码的 .txt 误判为二进制而拒绝）。
@@ -54,6 +63,7 @@ export function detectFileType(path: string): FileType {
   if (ext === '.pdf') return 'pdf';
   if (ext === '.ipynb') return 'notebook';
   if (IMAGE_EXTS.has(ext)) return 'image';
+  if (VIDEO_EXTS.has(ext)) return 'video';
   if (OFFICE_EXTS.has(ext)) return 'office';
   if (EBOOK_EXTS.has(ext)) return 'ebook';
   return 'text';

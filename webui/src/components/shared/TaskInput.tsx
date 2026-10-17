@@ -812,25 +812,27 @@ export function TaskInput({
               <div className="px-2 py-1 text-[11px] text-muted-foreground">
                 {t('directoryPicker.recent')}
               </div>
-              {renderDirItem(
-                t('directoryPicker.system'),
-                t('directoryPicker.systemDesc'),
-                () => setWorkingDirectory(SYSTEM_WORKING_DIRECTORY),
-                <Monitor key="system" className="size-3.5 shrink-0 text-muted-foreground" />,
-              )}
-              {recentDirectories.length > 0 && (
-                <div className="max-h-[10.5rem] overflow-y-auto pr-1">
-                  {recentDirectories.map((dir) => (
-                      <div key={dir}>
-                        {renderDirItem(
-                          recentDirectoryAliases[dir]?.trim() || dirName(dir),
-                          dir,
-                          () => setWorkingDirectory(dir),
-                        )}
-                      </div>
-                    ))}
+              {/* 「本机（全盘访问）」与最近目录同列同一滚动容器：
+                  不再单独固定在列表之上，与其他文件夹条目对齐（同宽、同缩进、一起滚动） */}
+              <div className="max-h-[10.5rem] overflow-y-auto pr-1">
+                <div key="__system__">
+                  {renderDirItem(
+                    t('directoryPicker.system'),
+                    t('directoryPicker.systemDesc'),
+                    () => setWorkingDirectory(SYSTEM_WORKING_DIRECTORY),
+                    <Monitor key="system" className="size-3.5 shrink-0 text-muted-foreground" />,
+                  )}
                 </div>
-              )}
+                {recentDirectories.map((dir) => (
+                  <div key={dir}>
+                    {renderDirItem(
+                      recentDirectoryAliases[dir]?.trim() || dirName(dir),
+                      dir,
+                      () => setWorkingDirectory(dir),
+                    )}
+                  </div>
+                ))}
+              </div>
               <DropdownMenuSeparator className="mx-2" />
               <DropdownMenuItem onSelect={() => pickDirectory()} className="gap-1.5">
                 <FolderInput className="size-3.5" />

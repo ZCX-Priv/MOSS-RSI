@@ -25,8 +25,12 @@ export function systemRoot(): string {
   return '/';
 }
 
-/** ~/.moss 下允许 AI 访问的子目录（其余一律屏蔽，含 config/todo 等） */
-const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills'];
+/**
+ * ~/.moss 下允许 AI 访问的子目录（其余一律屏蔽，含 config/todo 等）。
+ * analysis：read 工具对 office 文件的解析产物（图片/视频本体 + markdown），
+ * 需对 agent（read 工具）与前端预览（/api/filesystem/raw）放行。
+ */
+const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills', 'analysis'];
 
 /** 路径归一化比较键：统一分隔符 + 小写（Windows 大小写不敏感） */
 function pathKey(p: string): string {

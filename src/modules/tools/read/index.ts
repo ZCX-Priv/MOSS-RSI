@@ -3,6 +3,11 @@
 // 元数据（name/description/icon/annotations/inputSchema/config）见同目录 tool.json。
 // handlers/ 子目录按文件类型分派，shared/ 子目录提供检测/minified/流式读取等公共能力。
 //
+// 特殊分派：
+//   - office：Markdown 产物化（Office→Markdown + 内嵌图片/视频抽取），产物落
+//     <cwd>/.moss/analysis/<sha256>/（本机模式为 ~/.moss/analysis），见 handlers/office.ts。
+//   - video：返回基础信息 + 容器元数据（有界 IO），见 handlers/video.ts；在大小上限之前分派。
+//
 // filesys 统一化改造：
 //   - 路径解析走 FilesysService.resolve（roots 机制，默认等价旧版 resolveWithinCwd）
 //   - sha256/编码分类/内容读取合并走 filesys.readFile（缓存命中零读盘；未命中一次读盘全派生，
@@ -26,6 +31,8 @@ import { readPdf } from './handlers/pdf';
 import { readOffice } from './handlers/office';
 import { readNotebook } from './handlers/notebook';
 import { readEbook } from './handlers/ebook';
+import { readVideo } from './handlers/video';
+import { ensureArtifactDir, resolveAnalysisBase, type ArtifactDir } from './shared/analysis-dir';
 import type { FileHistoryService, FilesysService } from '../../contracts';
 import type { ToolContext, ToolResult, ToolResultContent } from '../types';
 
@@ -118,6 +125,24 @@ async function processSingleFile(
     return errorResult(t('tools.readPathIsDirectory', { path }));
   }
 
+  // 类型检测（提前：视频需在大文件上限之前处理——视频仅按需读头部，不整读进内存）
+  const fileType = detectFileType(path);
+
+  // 视频：返回基础信息 + 容器元数据（有界 IO；不做 dedup/sha/read ledger）
+  if (fileType === 'video') {
+    const result = readVideo(path);
+    return {
+      ...result,
+      metadata: {
+        path,
+        type: fileType,
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ...result.metadata,
+      },
+    };
+  }
+
   // 大文件策略：>50MB 返回错误 + 提示
   if (stat.size > MAX_FILE_SIZE) {
     return largeFileResult(path, stat.size);
@@ -146,12 +171,18 @@ async function processSingleFile(
     }
   }
 
+  // Office 文件：按内容哈希解析产物目录（项目内 <cwd>/.moss/analysis 或全局 ~/.moss/analysis）
+  const artifact = fileType === 'office' ? safeArtifactDir(ctx.cwd, entity.sha256) : undefined;
+
   // 类型分派（text 场景复用已读 buffer，不再二次读盘）
-  const fileType = detectFileType(path);
-  const result = await dispatchByType(path, fileType, params, stat, {
-    rawBuffer: entity.rawBuffer,
-    kind: entity.kind,
-  });
+  const result = await dispatchByType(
+    path,
+    fileType,
+    params,
+    stat,
+    { rawBuffer: entity.rawBuffer, kind: entity.kind },
+    artifact,
+  );
 
   // 标记"刚被 read"（dedup 语义，filesys 缓存条目 lastReadAt）
   filesys.touchRead(path);
@@ -170,6 +201,15 @@ async function processSingleFile(
   };
 }
 
+/** 安全创建产物目录（失败返回 undefined → office handler 回退纯文本，绝不报错） */
+function safeArtifactDir(cwd: string, sha256: string): ArtifactDir | undefined {
+  try {
+    return ensureArtifactDir(resolveAnalysisBase(cwd), sha256);
+  } catch {
+    return undefined;
+  }
+}
+
 /** 根据文件类型分派到对应 handler */
 async function dispatchByType(
   absPath: string,
@@ -177,14 +217,18 @@ async function dispatchByType(
   params: ReadParams,
   stat: Stats,
   cached: CachedFileEntity,
+  artifact?: ArtifactDir,
 ): Promise<ToolResult> {
   switch (fileType) {
     case 'image':
       return readImage(absPath);
+    case 'video':
+      // 正常流程已在 processSingleFile 提前返回；这里作兜底保证分派自洽
+      return readVideo(absPath);
     case 'pdf':
       return readPdf(absPath, params.pages);
     case 'office':
-      return readOffice(absPath);
+      return readOffice(absPath, artifact);
     case 'notebook':
       return readNotebook(absPath);
     case 'ebook':
