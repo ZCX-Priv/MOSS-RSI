@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/select';
 import { useSkills } from '../../hooks/useSkills';
 import { useMcp } from '../../hooks/useMcp';
+import { parseMcpJsonInput, type ParsedMcpDef } from '../../lib/mcp-json';
 import { useStore } from '../../store';
 import { api } from '../../api/http';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
@@ -544,92 +545,6 @@ const EMPTY_MCP_FORM: McpServerForm = {
   url: '',
   headers: '',
 };
-
-/** JSON 添加模式的归一化 server 定义（与 createMcpServer 的 def 对齐） */
-interface ParsedMcpDef {
-  name: string;
-  transport: 'stdio' | 'http' | 'sse';
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-}
-
-/** 归一化单个 server 定义：原生格式（含 name/transport）或 map 值（name 取 key） */
-function normalizeMcpDef(value: unknown, nameFromKey?: string): ParsedMcpDef | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const v = value as Record<string, unknown>;
-  const name =
-    typeof v.name === 'string' && v.name.trim() ? v.name.trim() : (nameFromKey ?? '').trim();
-  if (!name) return null;
-  const hasCommand = typeof v.command === 'string' && v.command.trim().length > 0;
-  const hasUrl = typeof v.url === 'string' && v.url.trim().length > 0;
-  const transport: 'stdio' | 'http' | 'sse' | null =
-    v.transport === 'stdio' || v.transport === 'http' || v.transport === 'sse'
-      ? v.transport
-      : hasCommand
-        ? 'stdio'
-        : hasUrl
-          ? 'http'
-          : null;
-  if (!transport) return null;
-  if (transport === 'stdio' && !hasCommand) return null;
-  if (transport !== 'stdio' && !hasUrl) return null;
-
-  const def: ParsedMcpDef = { name, transport };
-  if (hasCommand) def.command = (v.command as string).trim();
-  if (Array.isArray(v.args)) {
-    const args = v.args.filter((a): a is string => typeof a === 'string');
-    if (args.length > 0) def.args = args;
-  }
-  if (v.env && typeof v.env === 'object' && !Array.isArray(v.env)) {
-    const env: Record<string, string> = {};
-    for (const [k, val] of Object.entries(v.env as Record<string, unknown>)) {
-      if (typeof val === 'string') env[k] = val;
-    }
-    if (Object.keys(env).length > 0) def.env = env;
-  }
-  if (hasUrl) def.url = (v.url as string).trim();
-  if (v.headers && typeof v.headers === 'object' && !Array.isArray(v.headers)) {
-    const headers: Record<string, string> = {};
-    for (const [k, val] of Object.entries(v.headers as Record<string, unknown>)) {
-      if (typeof val === 'string') headers[k] = val;
-    }
-    if (Object.keys(headers).length > 0) def.headers = headers;
-  }
-  return def;
-}
-
-/**
- * 解析 JSON 粘贴内容，支持三种主流格式：
- * 1. 单个原生定义：{ "name": "x", "transport": "stdio", "command": "npx", "args": [...] }
- * 2. Claude Desktop / Cursor 风格 map：{ "x": { "command": "npx", "args": [...] } }
- * 3. 以上两者的数组（批量添加）
- */
-function parseMcpJsonInput(raw: string): ParsedMcpDef[] {
-  const parsed: unknown = JSON.parse(raw);
-  const defs: ParsedMcpDef[] = [];
-  const push = (d: ParsedMcpDef | null): void => {
-    if (d) defs.push(d);
-  };
-  if (Array.isArray(parsed)) {
-    for (const item of parsed) push(normalizeMcpDef(item));
-  } else if (parsed && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>;
-    if (
-      typeof obj.name === 'string' ||
-      typeof obj.transport === 'string' ||
-      typeof obj.command === 'string' ||
-      typeof obj.url === 'string'
-    ) {
-      push(normalizeMcpDef(obj));
-    } else {
-      for (const [key, val] of Object.entries(obj)) push(normalizeMcpDef(val, key));
-    }
-  }
-  return defs;
-}
 
 /**
  * MOSS 自身 MCP 服务器置顶卡片：

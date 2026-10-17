@@ -124,6 +124,10 @@ interface McpSdkClient {
   }>;
   callTool(
     req: { name: string; arguments?: Record<string, unknown> },
+    // SDK 1.30 签名：callTool(params, resultSchema?, options?)
+    // 第 2 参是「结果校验 schema」，请求选项必须放第 3 位；
+    // 错放第 2 位会让 SDK 对选项对象执行 safeParse → 运行时 TypeError。
+    resultSchema?: unknown,
     options?: { timeout?: number; signal?: AbortSignal; resetTimeoutOnProgress?: boolean },
   ): Promise<{
     content?: Array<{ type: string; text?: string; data?: string; mimeType?: string; uri?: string; blob?: string }>;
@@ -318,6 +322,8 @@ export class McpClient {
         name: toolName,
         arguments: args as Record<string, unknown>,
       },
+      // resultSchema：传 undefined，交由 SDK 使用默认 CallToolResultSchema
+      undefined,
       {
         timeout: opts?.timeoutMs,
         signal: opts?.signal,

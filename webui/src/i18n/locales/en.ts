@@ -1171,7 +1171,7 @@ export const en = {
     mcpAddModeForm: 'Form',
     mcpAddModeJson: 'JSON',
     mcpJsonLabel: 'JSON config',
-    mcpJsonHint: 'Supports {"name":...} single defs, {"name":{"command"/"url":...}} maps and arrays for batch adding',
+    mcpJsonHint: 'Supports {"name":...} single defs, {"name":{"command"/"url":...}} maps, standard {"mcpServers":{"name":{...}}} snippets (with "type", Claude Desktop/Cursor/VS Code) and arrays for batch adding',
     mcpJsonInvalid: 'Cannot parse: definitions must include command or url',
     mcpCreatedMulti: 'Created {{count}} MCP server(s)',
     mcpCreateFailedMulti: 'Some creations failed: {{failures}}',

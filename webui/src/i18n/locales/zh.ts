@@ -1172,7 +1172,7 @@ export const zh = {
     mcpAddModeForm: '表单',
     mcpAddModeJson: 'JSON',
     mcpJsonLabel: 'JSON 配置',
-    mcpJsonHint: '支持 {"name":...} 单个定义、{"名称":{"command"/"url":...}} 映射格式及其数组，可批量添加',
+    mcpJsonHint: '支持 {"name":...} 单个定义、{"名称":{"command"/"url":...}} 映射、标准片段 {"mcpServers":{"名称":{...}}}（含 type 字段，Claude Desktop/Cursor/VS Code）及其数组，可批量添加',
     mcpJsonInvalid: '无法解析：定义需包含 command 或 url 字段',
     mcpCreatedMulti: '已创建 {{count}} 个 MCP 服务器',
     mcpCreateFailedMulti: '部分创建失败：{{failures}}',
