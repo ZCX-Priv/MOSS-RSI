@@ -53,6 +53,11 @@ const DEPRECATED_SEED_PATHS: ReadonlyArray<string> = [
   'prompts/main/rule',
   'prompts/main/spec',
   'prompts/main/rules.md',
+  // 提示词精简（去英文/去 fallback/合并 distill）：清理用户目录残留
+  'prompts/agenteam/usage-en.md',
+  'prompts/fallback',
+  'prompts/memory/distill-system.md',
+  'prompts/context',
 ];
 
 interface SeedManifest {

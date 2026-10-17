@@ -128,7 +128,7 @@ import { createListAutomationsHandler,
 } from './routes/automations';
 import {
   createSuggestPathsHandler,
-  createPickFileHandler,
+  createResolvePathsHandler,
   createSaveAttachmentHandler,
   createSearchFilesHandler,
   createListDirectoryHandler,
@@ -437,9 +437,9 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'POST', pattern: '/api/automations/:id/resume', handler: createResumeAutomationHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/automations/:id/history', handler: createAutomationHistoryHandler(services), auth: true });
 
-    // filesystem（目录选择=前端选择器：drives/list/suggest-paths；附件=原生文件对话框）
-    this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/pick-file', handler: createPickFileHandler(env, config), auth: true });
-    // 粘贴图片落盘：base64 → ~/.moss/agent/attachments/<file>，返回绝对路径（附件路径引用）
+    // filesystem（目录选择=前端选择器：drives/list/suggest-paths；附件=前端选择器选路径 + 粘贴落盘）
+    this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/resolve-paths', handler: createResolvePathsHandler(env, config), auth: true });
+    // 粘贴附件落盘：base64 → ~/.moss/agent/attachments/<file>，返回绝对路径（附件路径引用）
     this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/save-attachment', handler: createSaveAttachmentHandler(env, config), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/suggest-paths', handler: createSuggestPathsHandler(env), auth: true });
     // 终端：本机实测可用的解释器类型（前端「新建终端」菜单数据源）

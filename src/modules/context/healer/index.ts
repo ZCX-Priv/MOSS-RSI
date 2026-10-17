@@ -6,7 +6,7 @@
 
 import type { Environment } from '../../../core/types';
 import type { HealLogEntry, HealResult, HealerConfig } from '../types';
-import { loadPromptFile, renderTemplate } from '../prompt-loader';
+import { loadPromptFileOrNull, renderTemplate } from '../prompt-loader';
 import { repairToolCallArguments } from './args-repair';
 import { fuzzyMatchToolName } from './tool-match';
 import { validateAndFixSchema } from './schema-fix';
@@ -32,19 +32,36 @@ export interface HealToolCallInput {
   env: Environment;
 }
 
-/** tool-error.md 内置兜底（用户文件与包内种子均缺失时） */
-export const FALLBACK_TOOL_ERROR_TEMPLATE = `[工具调用失败]
-
-工具: {{TOOL_NAME}}
-
-问题:
-{{ISSUES}}
-
-正确用法:
-{{USAGE}}
-
-{{CANDIDATES}}
-请根据上述信息修正后重新调用工具。不要原样重复错误的调用参数。`;
+/**
+ * 生成工具错误回传文本。
+ * 优先使用 agent/prompts/heal/tool-error.md 模板；文件缺失时程序化拼接最小结构（降级），
+ * 保证自愈回路仍能向模型回传结构化错误。
+ * @returns text 回传文本；degraded 是否走了降级路径
+ */
+function buildToolErrorText(
+  env: Environment,
+  vars: { TOOL_NAME: string; ISSUES: string; USAGE: string; CANDIDATES: string },
+): { text: string; degraded: boolean } {
+  const template = loadPromptFileOrNull(env, 'heal/tool-error.md');
+  if (template) {
+    return { text: renderTemplate(template, vars), degraded: false };
+  }
+  const lines = [
+    '[工具调用失败]',
+    '',
+    `工具: ${vars.TOOL_NAME}`,
+    '',
+    '问题:',
+    vars.ISSUES,
+    '',
+    '正确用法:',
+    vars.USAGE,
+  ];
+  if (vars.CANDIDATES) {
+    lines.push('', vars.CANDIDATES);
+  }
+  return { text: lines.join('\n'), degraded: true };
+}
 
 /**
  * 工具调用自愈主入口。
@@ -70,8 +87,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
     healLog.push({ kind: 'tool-name', detail: `corrected tool name "${toolName}" → "${resolvedName}"` });
   } else if (match.matched === null) {
     // 无法纠正：回传错误（含候选列表）
-    const template = loadPromptFile(env, 'heal/tool-error.md', FALLBACK_TOOL_ERROR_TEMPLATE);
-    const errorText = renderTemplate(template, {
+    const { text: errorText, degraded } = buildToolErrorText(env, {
       TOOL_NAME: toolName,
       ISSUES: [
         `工具 "${toolName}" 不存在或未注册`,
@@ -83,6 +99,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
           ? `相近的可用工具:\n${match.candidates.map(c => `- ${c}`).join('\n')}`
           : '',
     });
+    if (degraded) healLog.push({ kind: 'template-fallback', detail: 'heal/tool-error.md missing, using minimal fallback' });
     return {
       toolName,
       args,
@@ -103,8 +120,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
     }
     if (!schemaResult.valid) {
       // 校验失败：回传结构化错误（含正确用法），让模型自纠
-      const template = loadPromptFile(env, 'heal/tool-error.md', FALLBACK_TOOL_ERROR_TEMPLATE);
-      const errorText = renderTemplate(template, {
+      const { text: errorText, degraded } = buildToolErrorText(env, {
         TOOL_NAME: resolvedName,
         ISSUES: [
           ...(repaired.note ? [`参数修复说明: ${repaired.note}`] : []),
@@ -114,6 +130,7 @@ export function healToolCall(input: HealToolCallInput): HealResult {
         USAGE: buildUsageHint(resolvedName, tool.inputSchema),
         CANDIDATES: '',
       });
+      if (degraded) healLog.push({ kind: 'template-fallback', detail: 'heal/tool-error.md missing, using minimal fallback' });
       return {
         toolName: resolvedName,
         args,

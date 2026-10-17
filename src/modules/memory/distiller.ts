@@ -4,30 +4,14 @@
 // 防重入：session 内存 Set；合并策略：同 room 同 insight token 重合度>0.8 → 更新而非新建。
 
 import type { ContextSessionLike, ContextMessage } from '../context/types';
-import type { Logger } from '../../core/types';
+import type { Environment, Logger } from '../../core/types';
 import type { LLMRouter } from '../contracts';
 import type { UnifiedMessage } from '../llm/types';
+import { loadPromptFileOrNull } from '../context/prompt-loader';
 import { buildMemoryRecord, globalMemoryRoot, listAllMemories, projectMemoryRoot, projectWing, writeMemory } from './storage';
 import { tokenOverlap, tokenize } from './tokenizer';
 import type { DistilledMemory } from './types';
 import { MEMORY_HALLS } from './types';
-
-/** 蒸馏指令（要求输出结构化 JSON） */
-const DISTILL_PROMPT = `分析以下对话，提取值得长期记忆的信息。
-
-只提取满足以下条件的内容（宁缺毋滥）：
-1. 用户表达的稳定偏好或工作习惯（hall: preference）
-2. 做出的关键决策及理由（hall: decision）
-3. 项目的重要发现/约束/架构事实（hall: discovery）
-4. 值得记录的重要事件（hall: event）
-5. 对未来工作有用的建议（hall: suggestion）
-
-丢弃：调试输出、临时性讨论、寒暄、已被后续消息否定的内容、纯代码细节。
-
-输出严格 JSON（不要 markdown 代码块，不要多余文本）：
-{"memories": [{"room": "主题名(英文小写连字符)", "hall": "decision|event|discovery|preference|suggestion", "verbatim": "对话中的原文片段(保留用户原话)", "insight": "一句话洞察(中文)", "tags": ["标签"], "importance": 0.0到1.0}]}
-无值得记忆的内容时输出 {"memories": []}
-room 命名规范：按主题（如 context-engine、api-design、user-preference），跨次保持一致。importance：关键决策/强偏好 ≥0.8，一般发现 0.5-0.7。`;
 
 /** 可蒸馏消息筛选：user/assistant 且非锚定/非工具消息 */
 function distillableMessages(messages: readonly ContextMessage[], fromIndex: number): ContextMessage[] {
@@ -81,6 +65,8 @@ function parseDistillOutput(text: string): DistilledMemory[] {
 
 export interface DistillDeps {
   logger: Logger;
+  /** 环境信息（定位 agent/prompts/ 提示词文件） */
+  env: Environment;
   llm: LLMRouter;
   /** 蒸馏模型（已解析的请求 model 名） */
   distillModelId: string;
@@ -119,14 +105,19 @@ export async function distillSession(
   // 构建 LLM 请求（消息裁剪：单条上限 + 总条数上限，防 prompt 膨胀）
   const MAX_MSGS = 60;
   const MAX_CHARS = 1500;
+  // 提示词从 agent/prompts/memory/ 加载（distill.md 已含角色设定行，作为单条 user 消息）；缺失则放弃本轮蒸馏（降级）
+  const distillPrompt = loadPromptFileOrNull(deps.env, 'memory/distill.md');
+  if (!distillPrompt) {
+    return { created: 0, merged: 0, skipped: true, reason: 'distill prompt missing' };
+  }
+  const retryPrompt = loadPromptFileOrNull(deps.env, 'memory/distill-retry.md') ?? '';
   const regionLimited = region.slice(-MAX_MSGS).map(m => ({
     role: m.role,
     content: m.content.length > MAX_CHARS ? `${m.content.slice(0, MAX_CHARS)}…` : m.content,
   }));
   const messages: UnifiedMessage[] = [
-    { role: 'system', content: '你是记忆蒸馏引擎，只输出 JSON。' },
     ...regionLimited,
-    { role: 'user', content: DISTILL_PROMPT },
+    { role: 'user', content: distillPrompt },
   ];
 
   let text = '';
@@ -156,7 +147,7 @@ export async function distillSession(
         messages: [
           ...messages,
           { role: 'assistant', content: text.slice(0, 2000) },
-          { role: 'user', content: '输出不是合法 JSON。重新输出，只输出 JSON，不要任何其他文本。' },
+          { role: 'user', content: retryPrompt },
         ],
         stream: false,
         max_tokens: 4096,

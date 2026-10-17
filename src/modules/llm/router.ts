@@ -4,9 +4,11 @@
 import { t } from '../../core/i18n';
 import { flattenModels } from '../../core/provider-utils';
 import { getProvider } from './providers';
-import { httpRequest } from './client';
+import { httpRequest, type HttpResponse } from './client';
 import { parseSSEStream } from './stream';
 import { LLMError } from './types';
+import { serializedBodyBytes, shrinkUnifiedRequest, type ShrinkOptions } from './request-budget';
+import { DEFAULT_MAX_REQUEST_BYTES, MIN_MAX_REQUEST_BYTES } from '../context/types';
 import type {
   LLMProvider,
   ModelConfig,
@@ -16,6 +18,13 @@ import type {
 } from './types';
 import type { ConfigService, Logger, EventBus } from '../../core/types';
 import type { LLMRouter } from '../contracts';
+
+/** 发送前字节护栏：单次请求最多执行多少步降级（丢图/截断） */
+const MAX_SHRINK_STEPS = 8;
+/** 收到 HTTP 413 后最多收紧上限并重试的次数 */
+const MAX_413_RETRIES = 2;
+/** 末位护栏的截断口径（与 context.toolPruning 无关，仅保证任何请求体可收敛） */
+const SHRINK_OPTIONS: ShrinkOptions = { keepHeadChars: 8192, keepTailChars: 2048 };
 
 export class LLMRouterImpl implements LLMRouter {
   private readonly config: ConfigService;
@@ -32,35 +41,13 @@ export class LLMRouterImpl implements LLMRouter {
     const cfg = this.resolveModel(req.model);
     const provider = getProvider(cfg.format);
 
-    const endpoint = provider.resolveEndpoint(cfg);
-    const headers = provider.resolveHeaders(cfg);
-    const body = provider.transformRequest({ ...req, model: cfg.model, stream: false }, cfg);
-
-    // 发出前 hook
-    const processed = await this.eventBus.emit('llm:request:before', {
-      endpoint,
-      body,
-      provider: cfg.format,
-      model: cfg.model,
-    });
-    const finalEndpoint = processed.endpoint;
-    const finalBody = processed.body;
-
-    this.logger.debug(t('llm.request', { model: cfg.model }), {
-      provider: cfg.format,
-      endpoint: finalEndpoint,
-    });
-
-    const resp = await httpRequest(
-      {
-        url: finalEndpoint,
-        method: 'POST',
-        headers,
-        body: finalBody,
-        stream: false,
-        signal,
-      },
-      this.logger,
+    const resp = await this.sendWithByteGuard(
+      provider,
+      cfg,
+      req,
+      false,
+      provider.resolveEndpoint(cfg),
+      signal,
     );
 
     if (!resp.text) {
@@ -95,32 +82,13 @@ export class LLMRouterImpl implements LLMRouter {
     const cfg = this.resolveModel(req.model);
     const provider = getProvider(cfg.format);
 
-    const endpoint = this.resolveStreamEndpoint(provider, cfg);
-    const headers = provider.resolveHeaders(cfg);
-    const body = provider.transformRequest({ ...req, model: cfg.model, stream: true }, cfg);
-
-    const processed = await this.eventBus.emit('llm:request:before', {
-      endpoint,
-      body,
-      provider: cfg.format,
-      model: cfg.model,
-    });
-
-    this.logger.debug(t('llm.streamRequest', { model: cfg.model }), {
-      provider: cfg.format,
-      endpoint: processed.endpoint,
-    });
-
-    const resp = await httpRequest(
-      {
-        url: processed.endpoint,
-        method: 'POST',
-        headers,
-        body: processed.body,
-        stream: true,
-        signal,
-      },
-      this.logger,
+    const resp = await this.sendWithByteGuard(
+      provider,
+      cfg,
+      req,
+      true,
+      this.resolveStreamEndpoint(provider, cfg),
+      signal,
     );
 
     if (!resp.stream) {
@@ -128,11 +96,7 @@ export class LLMRouterImpl implements LLMRouter {
     }
     // 双保险：client.ts 已检查流式状态码，这里再校验一次
     if (resp.status >= 400) {
-      throw new LLMError(
-        `LLM stream HTTP ${resp.status}`,
-        resp.status,
-        false,
-      );
+      throw new LLMError(`LLM stream HTTP ${resp.status}`, resp.status, false);
     }
 
     // 空闲超时可配置（config.agent.llmStreamIdleTimeoutMs）：长程任务/推理型模型长思考
@@ -154,6 +118,104 @@ export class LLMRouterImpl implements LLMRouter {
       model: cfg.model,
       stream: true,
     });
+  }
+
+  // ========================================================================
+
+  /**
+   * 发送请求（含请求体字节护栏；complete / stream 共用）：
+   *  1. transform → 精确测量序列化字节；超上限则逐级降级（丢图片 → 截断超长内容）后重新测量；
+   *  2. 发出前 hook（可改 endpoint/body）；
+   *  3. 发送；若服务端返回 413（真实上限小于配置值）→ 收紧上限一半并重试（有界）。
+   * 所有 provider / 格式共用这一条路径 → 任何请求体都不会无界增长。
+   */
+  private async sendWithByteGuard(
+    provider: LLMProvider,
+    cfg: ModelConfig,
+    req: UnifiedRequest,
+    stream: boolean,
+    defaultEndpoint: string,
+    signal: AbortSignal | undefined,
+  ): Promise<HttpResponse> {
+    let cap = this.resolveMaxRequestBytes();
+    for (let retry = 0; ; retry++) {
+      // 1. 构建 body 并按字节上限逐级降级
+      let current: UnifiedRequest = { ...req, model: cfg.model, stream };
+      let body = provider.transformRequest(current, cfg);
+      let bytes = serializedBodyBytes(body);
+      let droppedImages = 0;
+      let truncatedContents = 0;
+      for (let step = 0; step < MAX_SHRINK_STEPS && bytes > cap; step++) {
+        const shrunk = shrinkUnifiedRequest(current.messages, SHRINK_OPTIONS);
+        if (!shrunk.changed) break;
+        current = { ...current, messages: shrunk.messages };
+        droppedImages += shrunk.droppedImages;
+        truncatedContents += shrunk.truncatedContents;
+        body = provider.transformRequest(current, cfg);
+        bytes = serializedBodyBytes(body);
+      }
+
+      // 诊断日志：bytes/cap 是校准「服务端真实上限」的关键数据
+      this.logger.debug(
+        stream
+          ? t('llm.streamRequest', { model: cfg.model })
+          : t('llm.request', { model: cfg.model }),
+        { provider: cfg.format, endpoint: defaultEndpoint, bytes, cap, droppedImages, truncatedContents },
+      );
+      if (droppedImages > 0 || truncatedContents > 0 || bytes > cap) {
+        this.logger.warn(
+          t('llm.requestBodyGuard', { bytes, cap, droppedImages, truncatedContents }),
+          {
+            model: cfg.model,
+            provider: cfg.format,
+            bytes,
+            cap,
+            droppedImages,
+            truncatedContents,
+            overCap: bytes > cap,
+          },
+        );
+      }
+
+      // 2. 发出前 hook
+      const processed = await this.eventBus.emit('llm:request:before', {
+        endpoint: defaultEndpoint,
+        body,
+        provider: cfg.format,
+        model: cfg.model,
+      });
+
+      // 3. 发送 + 413 收紧上限重试
+      try {
+        return await httpRequest(
+          {
+            url: processed.endpoint,
+            method: 'POST',
+            headers: provider.resolveHeaders(cfg),
+            body: processed.body,
+            stream,
+            signal,
+          },
+          this.logger,
+        );
+      } catch (err) {
+        const is413 = err instanceof LLMError && err.status === 413;
+        if (!is413 || retry >= MAX_413_RETRIES) throw err;
+        const nextCap = Math.max(MIN_MAX_REQUEST_BYTES, Math.floor(cap / 2));
+        if (nextCap >= cap) throw err; // 已到下限，无法再收紧
+        this.logger.warn(
+          t('llm.http413Retry', { nextCap, attempt: retry + 1, maxRetries: MAX_413_RETRIES }),
+          {
+            model: cfg.model,
+            provider: cfg.format,
+            cap,
+            nextCap,
+            bytes: serializedBodyBytes(processed.body),
+          },
+        );
+        cap = nextCap;
+      }
+    }
   }
 
   // ========================================================================
@@ -219,5 +281,19 @@ export class LLMRouterImpl implements LLMRouter {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * 读取请求体字节上限（config.context.maxRequestBytes）。
+   * 配置缺失/非法时回退内置默认值（8 MiB）。
+   */
+  private resolveMaxRequestBytes(): number {
+    try {
+      const v = this.config.getAppConfig().context?.maxRequestBytes;
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+    } catch {
+      // 配置不可用
+    }
+    return DEFAULT_MAX_REQUEST_BYTES;
   }
 }

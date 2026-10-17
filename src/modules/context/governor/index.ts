@@ -230,21 +230,28 @@ export async function prepareRequest(
   const resolveSkill = (name: string): string | null =>
     resolveSkillPromptFromRegistry(deps.services, name);
 
-  const buildView = (budgetTokens?: number) =>
+  const buildView = (budgetTokens?: number, budgetBytes?: number) =>
     buildRequestView(session, staticSystemPrompt, {
       toolPruning: config.toolPruning,
       resolveSkillPrompt: resolveSkill,
       budgetTokens,
+      budgetBytes,
       ...(ephemeralMessages ? { ephemeralMessages } : {}),
     });
 
-  // ===== 3. 预览估算 → 压缩决策 =====
+  // ===== 3. 预览估算 → 压缩决策（token 与请求体字节双维度） =====
   let compactionTriggered = false;
   let degradedReason: string | undefined;
 
   const preview = buildView();
+  const byteBudget = config.maxRequestBytes;
+  // 图片 base64 对 token 估算不可见 → 字节维度必须独立判定，否则会漏掉 413 型溢出
+  const byteOverBudget = preview.bytes > byteBudget;
   if (compactionActive(config.compaction, windowTokens)) {
-    if (shouldCompact(preview.breakdown.total, windowTokens, config.compaction.compactRatio)) {
+    if (
+      shouldCompact(preview.breakdown.total, windowTokens, config.compaction.compactRatio) ||
+      byteOverBudget
+    ) {
       const llm = deps.getLlm();
       if (llm) {
         const { requestModel } = resolveSummaryModel(
@@ -296,24 +303,36 @@ export async function prepareRequest(
     }
   }
 
-  // ===== 4. 最终视图（溢出兜底：压缩后仍超窗 → 尾部裁剪）=====
+  // ===== 4. 最终视图（溢出兜底：压缩后仍超窗 → 尾部裁剪；字节超限 → 同步启用字节预算）=====
   const final = buildView(
     needsHardCeiling(preview.breakdown.total, windowTokens) || compactionTriggered
       ? windowTokens
       : undefined,
+    byteOverBudget ? byteBudget : undefined,
   );
 
   if (final.tailDropped > 0) {
     degradedReason = degradedReason ?? `hard ceiling: dropped ${final.tailDropped} head messages`;
     deps.onDegraded(session.id, `tail window dropped ${final.tailDropped} messages`);
   }
+  // 字节兜底后仍超上限（锚定消息/单条巨消息本身过大）：显式降级（llm router 还有末位护栏兜底）
+  if (final.bytes > byteBudget) {
+    degradedReason = degradedReason ?? `request body ${final.bytes}B exceeds cap ${byteBudget}B`;
+    deps.onDegraded(session.id, `request body over byte cap: ${final.bytes}/${byteBudget}`);
+  }
 
+  // ===== 4.5 图片「只发一次」：把本轮内联发送的图片消息引用交给调用方 =====
+  // 调用方须在请求**成功送达后**调用 confirmImagesSent 落 imagesSentAt（下轮起降级为占位符）；
+  // 请求失败则 discardImagesSent 丢弃 → 下次仍会重新发送该图片（不会让模型"从未见过"）。
   return {
     messages: final.messages,
     estimatedTokens: final.breakdown.total,
     windowTokens,
     compactionTriggered,
     breakdown: final.breakdown,
+    ...(final.imageMessagesToMark.length > 0
+      ? { imageMessagesToMark: final.imageMessagesToMark }
+      : {}),
     ...(degradedReason ? { degradedReason } : {}),
   };
 }

@@ -6,7 +6,6 @@ export {
   loadSystemPromptSegments,
   getSystemSections,
   invalidateSystemPromptCache,
-  FALLBACK_SYSTEM_PROMPT,
 } from './system-prompt';
 export {
   buildEnvContextMessage,

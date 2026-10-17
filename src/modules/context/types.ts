@@ -92,6 +92,13 @@ export interface ContextEngineConfig {
   hooks: HooksConfig;
   /** 记忆引擎（默认开） */
   memory: MemoryConfig;
+  /**
+   * 单次 LLM 请求体字节上限（序列化后的 JSON body）。
+   * 用途：token 预算看不到图片 base64 字节，服务端却按字节判 413；
+   * 该值既是压缩/兜底裁剪的字节预算，也是 llm router 发送前的硬护栏。
+   * 默认 8 MiB（1M token 的纯文本约 3–4 MB，小于该值 → 不牺牲纯文本上下文）。
+   */
+  maxRequestBytes: number;
 }
 
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
@@ -141,6 +148,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   l1MaxEntries: 20,
 };
 
+/** 请求体字节上限默认值（8 MiB）与下限（256 KiB；router 兜底降级时不会低于此值） */
+export const DEFAULT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+export const MIN_MAX_REQUEST_BYTES = 256 * 1024;
+
 export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   compaction: { ...DEFAULT_COMPACTION_CONFIG },
   toolPruning: { ...DEFAULT_TOOL_PRUNING_CONFIG },
@@ -150,6 +161,7 @@ export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   rules: { ...DEFAULT_RULES_CONFIG },
   hooks: { ...DEFAULT_HOOKS_CONFIG },
   memory: { ...DEFAULT_MEMORY_CONFIG },
+  maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES,
 };
 
 // ============================================================================
@@ -167,6 +179,12 @@ export interface ContextMessage {
   attachments?: string[];
   /** 工具结果附带的图片绝对路径（role=tool；view-builder 据此读盘编码图片） */
   images?: string[];
+  /**
+   * 图片「已发送过」的时间（ISO 8601）。非空表示该消息的图片已在先前的请求中以
+   * base64 发送过 → 本次构建视图时只留占位符（附原始路径），不再读盘内联。
+   * 用途：避免历史图片 base64 每轮重发撑爆请求体（413）。由 governor 在构建最终视图后写入。
+   */
+  imagesSentAt?: string;
   toolCalls?: Array<{
     id: string;
     name: string;
@@ -303,6 +321,12 @@ export interface PreparedRequest {
   breakdown: ContextBreakdown;
   /** 降级说明（fallback 触发原因；正常为 null） */
   degradedReason?: string;
+  /**
+   * 本轮「实际内联发送了图片」的原始 session 消息引用（有图时才有值）。
+   * 调用方须在请求**成功送达后**调用 confirmImagesSent 落 imagesSentAt；
+   * 请求失败则调用 discardImagesSent 丢弃——保证「图片只发一次」不会在失败时误标记。
+   */
+  imageMessagesToMark?: ContextMessage[];
 }
 
 // ============================================================================
@@ -310,7 +334,7 @@ export interface PreparedRequest {
 // ============================================================================
 
 export interface HealLogEntry {
-  kind: 'args-repair' | 'tool-name' | 'schema-fix';
+  kind: 'args-repair' | 'tool-name' | 'schema-fix' | 'template-fallback';
   detail: string;
 }
 

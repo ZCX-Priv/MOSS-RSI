@@ -44,6 +44,33 @@ export function estimateMessageTokens(m: ContextMessage): number {
   return total;
 }
 
+/** 文本 UTF-8 字节数（序列化请求体体积的准确口径） */
+export function estimateTextBytes(text: string): number {
+  if (text.length === 0) return 0;
+  return Buffer.byteLength(text, 'utf8');
+}
+
+/**
+ * 单条消息的「文本部分」字节数估算（content/name/toolCallId/toolCalls 的 UTF-8 字节）。
+ * 不含图片字节——图片体积由调用方按文件真实大小核算（view-builder 的 imagePathBytes），
+ * 因为图片以 base64 内联，与文本字节不是一个量级、且需要读盘/stat。
+ */
+export function estimateMessageBytes(m: ContextMessage): number {
+  let total = estimateTextBytes(m.content);
+  if (m.toolCallId) total += estimateTextBytes(m.toolCallId);
+  if (m.name) total += estimateTextBytes(m.name);
+  if (m.toolCalls) {
+    for (const tc of m.toolCalls) {
+      total += estimateTextBytes(tc.id);
+      total += estimateTextBytes(tc.name);
+      total += estimateTextBytes(tc.arguments);
+    }
+  }
+  // chat 结构字段（role/分隔符等）的保守开销
+  total += 32;
+  return total;
+}
+
 /** 消息列表 token 估算总和 */
 export function estimateMessagesTokens(msgs: readonly ContextMessage[]): number {
   let total = 0;

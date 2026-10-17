@@ -14,6 +14,7 @@
 import type { ConfigService, Environment, Logger, LogService, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { AgentEngine, AgentMessage, LLMRouter } from '../contracts';
+import { loadPromptFileOrNull } from '../context/prompt-loader';
 import { sampleResourceSnapshot, type ResourceSnapshot } from './routes/system-monitor';
 
 export type InsightKind = 'cause' | 'harness' | 'resource';
@@ -114,34 +115,12 @@ function snapshotDigest(s: ResourceSnapshot): string {
   ].join('\n');
 }
 
-const CAUSE_SYSTEM = [
-  '你是 MOSS-OS（微内核 + 模组化架构的本地 AI Agent 应用）的诊断专家。',
-  '用户会给你一次「模型请求失败」的原始错误、任务流链路、相关日志。',
-  '请用 Markdown 输出一份「链路式」诊断报告：先一句话总结，再分节：',
-  '## 现象',
-  '## 证据链（逐条列出你读到的关键证据，并给出基于该证据的推断）',
-  '## 根因',
-  '## 解决方案（分步骤，可执行）',
-  '要求：结论必须基于给定证据，不得臆造；简洁、分点。',
-].join('\n');
-
-const HARNESS_SYSTEM = [
-  '你是 MOSS-OS（微内核 + 模组化架构的本地 AI Agent 应用）的架构优化专家。',
-  '用户会给你一段任务流链路与相关日志（可能附带一次模型请求失败的错误原文）。',
-  '请用 Markdown 输出 MOSS harness（Agent 运行时 / 工具编排 / 上下文管线 / 会话持久化）的可优化点：',
-  '## 总体评价',
-  '## 优化点（每条用 ### 标题，并标注严重度 High/Medium/Low、原因、改进建议）',
-  '要求：3~6 条，按严重度排序；基于给定证据，不得臆造。',
-].join('\n');
-
-const RESOURCE_SYSTEM = [
-  '你是 MOSS-OS 的系统资源分析专家。用户会给你一份本机资源快照（系统总量 + MOSS 自身进程树占用）。',
-  '请用 Markdown 输出一份报告：',
-  '## 资源利用概况',
-  '## MOSS 自身占用分析',
-  '## 可优化点',
-  '要求：结论必须基于给定数字，不得臆造；简洁分点。',
-].join('\n');
+/** 诊断提示词文件路径（agent/prompts/insight/<kind>.md） */
+const INSIGHT_PROMPT_PATHS: Record<InsightKind, string> = {
+  cause: 'insight/cause.md',
+  harness: 'insight/harness.md',
+  resource: 'insight/resource.md',
+};
 
 /**
  * 执行一次诊断：先做取证步骤（emit step），再流式产出模型结论。
@@ -255,8 +234,13 @@ export async function runInsightDiagnose(
     if (signal.aborted) return;
 
     // ===== 模型分析（流式） =====
+    // 诊断提示词从 agent/prompts/insight/<kind>.md 加载；缺失则直接报错结束（降级）
+    const system = loadPromptFileOrNull(deps.env, INSIGHT_PROMPT_PATHS[kind]);
+    if (!system) {
+      emit({ requestId, kind, phase: 'error', message: 'insight prompt missing' });
+      return;
+    }
     emitStep(emit, requestId, kind, 'model-analysis', 'modelAnalysis', 'running', '');
-    const system = kind === 'cause' ? CAUSE_SYSTEM : kind === 'harness' ? HARNESS_SYSTEM : RESOURCE_SYSTEM;
     const user =
       kind === 'resource'
         ? evidence

@@ -735,6 +735,9 @@ export function SafetySettings() {
 
 /* ===== 上下文引擎设置（压缩 / 摘要模型 / 工具结果修剪 / 自愈） ===== */
 
+/** 请求体字节上限默认值（MiB）——与后端 context.maxRequestBytes 默认一致 */
+const DEFAULT_MAX_REQUEST_BYTES_MB = 8;
+
 const CONTEXT_FALLBACK: ContextEngineConfig = {
   compaction: {
     enabled: true,
@@ -747,6 +750,7 @@ const CONTEXT_FALLBACK: ContextEngineConfig = {
   toolPruning: { enabled: true, thresholdChars: 8192, keepHeadChars: 4096, keepTailChars: 1024 },
   healer: { enabled: true, toolNameFuzzy: true, schemaFix: true },
   telemetry: { enabled: true },
+  maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES_MB * 1024 * 1024,
 };
 
 /** 上下文引擎设置行（标题 + 描述 + 控件；复用 safety/render 的行样式） */
@@ -942,6 +946,34 @@ export function ContextEngineSettings() {
                 ))}
               </SelectContent>
             </Select>
+          </ContextSettingRow>
+          <ContextSettingRow
+            title={t('settings.context.maxRequestBytes')}
+            desc={t('settings.context.maxRequestBytesDesc')}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={0.25}
+                max={64}
+                step={0.5}
+                value={
+                  Math.round(
+                    ((context.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES_MB * 1024 * 1024) /
+                      (1024 * 1024)) *
+                      100,
+                  ) / 100
+                }
+                onChange={(e) => {
+                  const mb = Number(e.target.value);
+                  if (Number.isFinite(mb) && mb >= 0.25 && mb <= 64) {
+                    patchContext({ maxRequestBytes: Math.round(mb * 1024 * 1024) });
+                  }
+                }}
+                className="w-24"
+              />
+              <span className="text-xs text-muted-foreground">MiB</span>
+            </div>
           </ContextSettingRow>
         </div>
       </div>

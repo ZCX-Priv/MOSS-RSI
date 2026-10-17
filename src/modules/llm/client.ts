@@ -97,7 +97,7 @@ export async function httpRequest(
             continue;
           }
           throw new LLMError(
-            `HTTP ${resp.status}: ${truncate(errText, 500)}`,
+            describeHttpError(resp.status, errText, logger),
             resp.status,
             false,
             errText,
@@ -140,7 +140,7 @@ export async function httpRequest(
       }
       if (resp.status >= 400) {
         throw new LLMError(
-          `HTTP ${resp.status}: ${truncate(text, 500)}`,
+          describeHttpError(resp.status, text, logger),
           resp.status,
           false,
           text,
@@ -201,4 +201,37 @@ function sleep(ms: number): Promise<void> {
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '...' : s;
+}
+
+/**
+ * 上游内容审核拦截标记（DeepSeek 返回 `Content Exists Risk`；其他 OpenAI 兼容服务商有同类文案）。
+ * 命中时给出可操作的中文提示，而不是把原始 JSON 直接抛给用户。
+ */
+const MODERATION_MARKERS = [
+  'content exists risk',
+  'content_exist_risk',
+  'data_inspection_failed',
+  'data inspection failed',
+  'sensitive content',
+  'unsafe content',
+  'content policy',
+  '风险',
+  '敏感',
+];
+
+/** 是否为「上游内容审核」类 400（原始错误体含审核标记） */
+function isModerationError(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  const lower = body.toLowerCase();
+  return MODERATION_MARKERS.some(marker => lower.includes(marker.toLowerCase()));
+}
+
+/** 4xx 错误体 → 抛出的 LLMError 文案（审核类替换为可操作提示；其余保留原始片段） */
+function describeHttpError(status: number, body: string, logger: Logger): string {
+  if (isModerationError(status, body)) {
+    // 原始错误体保留在日志与 LLMError.raw 中，便于定位是哪家服务商的审核
+    logger.warn(t('llm.moderationBlocked'), { status, raw: truncate(body, 300) });
+    return `HTTP ${status}: ${t('llm.moderationBlocked')}`;
+  }
+  return `HTTP ${status}: ${truncate(body, 500)}`;
 }

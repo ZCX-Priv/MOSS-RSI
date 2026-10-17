@@ -7,18 +7,11 @@ import type { LLMRouter } from '../../../contracts';
 import type { UnifiedMessage } from '../../../llm/types';
 import type { FileIndexRuntimeDeps, SagEngineConfig } from '../types';
 import type { SagStore } from './store';
+import { loadPromptFileOrNull } from '../../prompt-loader';
 
 const BATCH_SIZE = 8;
 const BATCH_INTERVAL_MS = 2000;
 const MAX_CHUNK_CHARS = 6000;
-
-const SYSTEM_PROMPT = `你是代码库知识抽取引擎。对给定的代码块/文档块，输出严格的 JSON 数组（无其他文本）：
-[{"index": 0, "summary": "一句话事件摘要：该块发生了什么/定义了什么", "entities": ["实体1", "实体2"]}]
-要求：
-- summary 用一句中文概括（≤60 字），聚焦"发生了什么"（定义了函数 X、配置了 Y、描述了 Z 流程）
-- entities：该块涉及的关键实体（函数名、类名、模块名、概念、工具名），3-8 个，保留原始拼写
-- index 为输入块的序号（从 0 开始）
-- 不确定的内容宁可不写，不要发明`;
 
 interface LlmBatchItem {
   chunkId: number;
@@ -132,11 +125,14 @@ export class SagLlmExtractor {
 
   private async callLlm(items: LlmBatchItem[]): Promise<LlmBatchResult[]> {
     if (!this.llm) throw new Error('llm router unavailable');
+    // 抽取提示词从 agent/prompts/file-index/sag-extract.md 加载；缺失则跳过本批（保留规则结果，降级）
+    const systemPrompt = loadPromptFileOrNull(this.deps.env, 'file-index/sag-extract.md');
+    if (!systemPrompt) return [];
     const payload = items
       .map((item, i) => `【块 ${i}】\n${item.content}`)
       .join('\n\n========\n\n');
     const messages: UnifiedMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: payload },
     ];
     const response = await this.llm.complete({

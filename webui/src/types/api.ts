@@ -385,6 +385,8 @@ export interface ContextEngineConfig {
   hooks?: HooksEngineConfig;
   /** 记忆引擎（可选，旧 config 无此段时用默认值） */
   memory?: MemoryEngineConfig;
+  /** 单次 LLM 请求体字节上限（可选；旧 config 无此字段时后端按默认 8 MiB） */
+  maxRequestBytes?: number;
 }
 
 /** config.context.rules 段（规则引擎） */
@@ -1557,7 +1559,7 @@ export interface SearchedFile {
   ext: string;
 }
 
-/** 原生文件选择结果（POST /api/filesystem/pick-file） */
+/** 附件条目（POST /api/filesystem/resolve-paths 与 save-attachment 的返回元素） */
 export interface PickedFile {
   /** 文件绝对路径（附件以路径引用，文件留在原位） */
   path: string;

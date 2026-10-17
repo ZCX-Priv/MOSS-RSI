@@ -13,12 +13,12 @@ function stripBom(text: string): string {
 }
 
 /**
- * 加载提示词文件。
+ * 加载提示词文件（缺失或为空时返回 null）。
+ * 查找顺序：用户目录 → 包内种子源；均缺失/为空时返回 null，由调用方决定降级行为。
  * @param env 环境信息
  * @param relativePath 相对 ~/.moss/agent/prompts/ 的路径（如 'compact/compaction.md'）
- * @param fallback 内置兜底文本（用户文件与包内种子均缺失时使用）
  */
-export function loadPromptFile(env: Environment, relativePath: string, fallback: string): string {
+export function loadPromptFileOrNull(env: Environment, relativePath: string): string | null {
   // 1. 用户目录（~/.moss/agent/prompts/...）
   const userFile = join(env.dataDir, 'agent', 'prompts', relativePath);
   try {
@@ -41,7 +41,17 @@ export function loadPromptFile(env: Environment, relativePath: string, fallback:
     // 落回兜底
   }
 
-  return fallback;
+  return null;
+}
+
+/**
+ * 加载提示词文件（缺失时返回兜底文本，默认空串）。
+ * @param env 环境信息
+ * @param relativePath 相对 ~/.moss/agent/prompts/ 的路径（如 'compact/compaction.md'）
+ * @param fallback 兜底文本（用户文件与包内种子均缺失时使用；默认空串）
+ */
+export function loadPromptFile(env: Environment, relativePath: string, fallback = ''): string {
+  return loadPromptFileOrNull(env, relativePath) ?? fallback;
 }
 
 /**

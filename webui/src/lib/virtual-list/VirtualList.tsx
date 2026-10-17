@@ -308,6 +308,15 @@ export function VirtualList<T>({
     [],
   );
 
+  // 卸载即列表消失：滚动位置不再有意义，显式告知宿主「在底部」，
+  // 避免宿主 atBottom 残留 false → 空白页（列表未挂载）「返回底部」按钮幽灵出现。
+  useEffect(() => {
+    return () => {
+      atBottomRef.current = true;
+      bottomCbRef.current?.(true);
+    };
+  }, []);
+
   // ===== ResizeObserver：条目实测 + 容器尺寸 =====
   const cellObserverRef = useRef<ResizeObserver | null>(null);
   const scrollerObserverRef = useRef<ResizeObserver | null>(null);
@@ -447,11 +456,11 @@ export function VirtualList<T>({
     // 清掉跨会话的滚动基准，避免新会话首帧被误判为「用户上滑」
     lastScrollTopRef.current = 0;
     selfScrollTopRef.current = null;
-    // 新会话必然贴底：显式通知宿主（组件不重挂，宿主 atBottom 会残留上一会话的 false）
-    if (!atBottomRef.current) {
-      atBottomRef.current = true;
-      bottomCbRef.current?.(true);
-    }
+    // 新会话 / 首次挂载一律从底部开始：无条件告知宿主「在底部」。
+    // 不能只在内部 atBottomRef 为 false 时才通知——首次挂载时内部 ref 本就为 true，
+    // 而宿主可能残留上一处列表 / 上一会话的 false → 按钮在已贴底的新列表中幽灵出现。
+    atBottomRef.current = true;
+    bottomCbRef.current?.(true);
     // 高度缓存按消息 key 索引，跨会话残留无引用且无限膨胀 → 清空重测
     heightsRef.current.clear();
     dirtyRef.current = true;

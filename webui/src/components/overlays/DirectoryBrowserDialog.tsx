@@ -58,7 +58,14 @@ import type { DirectoryEntry, DirectoryListing, DriveInfo, SuggestPath, SuggestP
 
 interface DirectoryBrowserDialogProps {
   open: boolean;
-  onSelect: (path: string) => void;
+  /** 文件夹模式：确认选中文件夹 */
+  onSelect?: (path: string) => void;
+  /** 文件模式：确认选中文件（支持多选） */
+  onSelectFiles?: (paths: string[]) => void;
+  /** 文件模式：打开时默认定位的目录（缺省/为空则回落默认磁盘页） */
+  initialPath?: string;
+  /** 选择模式：'directory'（默认，选文件夹）/ 'file'（选文件，可多选） */
+  mode?: 'directory' | 'file';
   onClose: () => void;
 }
 
@@ -142,8 +149,17 @@ function suggestIcon(kind: SuggestPathKind) {
   }
 }
 
-export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBrowserDialogProps) {
+export function DirectoryBrowserDialog({
+  open,
+  onSelect,
+  onSelectFiles,
+  initialPath,
+  mode = 'directory',
+  onClose,
+}: DirectoryBrowserDialogProps) {
   const { t } = useTranslation();
+  /** 文件模式（选文件、可多选）；否则为文件夹模式 */
+  const isFileMode = mode === 'file';
   const recentDirectories = useStore((s) => s.recentDirectories);
   const recentDirectoryAliases = useStore((s) => s.recentDirectoryAliases);
   const renameRecentDirectory = useStore((s) => s.renameRecentDirectory);
@@ -163,7 +179,7 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [nameInput, setNameInput] = useState('');
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('name');
@@ -194,7 +210,7 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
       const resp = await api.listDrives();
       setDrives(resp.drives);
       setListing(null);
-      setSelectedPath(null);
+      setSelectedPaths([]);
       setNameInput('');
       setSearch('');
     } catch (e) {
@@ -204,40 +220,56 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
     }
   }, []);
 
-  /** 加载目录（不再维护前进/后退历史栈） */
-  const loadDirectory = useCallback(async (path: string) => {
+  /** 加载目录（不再维护前进/后退历史栈）；返回是否加载成功 */
+  const loadDirectory = useCallback(async (path: string): Promise<boolean> => {
     setLoading(true);
     setError(null);
     try {
       const resp = await api.listDirectory(path);
       setListing(resp);
       setView('dir');
-      setSelectedPath(null);
+      setSelectedPaths([]);
       setNameInput(baseName(resp.path));
       setSearch('');
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 打开时重置到「此电脑」并载入磁盘 + 常用位置
+  // 打开时的默认页面：
+  //  - 文件夹模式 → 「此电脑」磁盘页（默认页面）
+  //  - 文件模式且指定 initialPath → 定位到该目录；定位失败（不存在/越界）→ 静默回落磁盘页
+  //  - 文件模式未指定 initialPath → 磁盘页
   useEffect(() => {
     if (!open) return;
     // 每次打开按断点重置侧栏默认态（移动端收起 / 桌面端展开）
     setSidebarOpen(!isMobile);
-    void loadDrives();
-    setView('drives');
+    const startAtPath =
+      mode === 'file' && initialPath && initialPath.trim() ? initialPath.trim() : null;
+    if (startAtPath) {
+      void loadDirectory(startAtPath).then((ok) => {
+        if (!ok) {
+          void loadDrives();
+          setView('drives');
+        }
+      });
+    } else {
+      void loadDrives();
+      setView('drives');
+    }
     api.suggestPaths()
       .then((r) => setSuggestions(r.paths))
       .catch(() => setSuggestions([]));
-  }, [open, isMobile, loadDrives]);
+  }, [open, isMobile, mode, initialPath, loadDrives, loadDirectory]);
 
   const goDrives = useCallback(() => {
     setView('drives');
     setListing(null);
-    setSelectedPath(null);
+    setSelectedPaths([]);
     setNameInput('');
     setSearch('');
     setError(null);
@@ -273,8 +305,8 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
   }, [listing, sortKey, sortAsc, search]);
 
   const selectedEntry = useMemo(
-    () => rows.find((e) => e.path === selectedPath) ?? null,
-    [rows, selectedPath],
+    () => rows.find((e) => e.path === selectedPaths[0]) ?? null,
+    [rows, selectedPaths],
   );
 
   const toggleSort = (key: SortKey) => {
@@ -285,20 +317,41 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
     }
   };
 
+  /** 行点击：文件夹模式=选中（目录用于确认，文件回填名称）；文件模式=文件切换多选 / 目录进入 */
   const selectRow = (entry: DirectoryEntry) => {
-    setSelectedPath(entry.path);
+    if (isFileMode) {
+      if (entry.kind === 'directory') {
+        void loadDirectory(entry.path);
+        return;
+      }
+      setSelectedPaths((prev) =>
+        prev.includes(entry.path) ? prev.filter((p) => p !== entry.path) : [...prev, entry.path],
+      );
+      return;
+    }
+    setSelectedPaths([entry.path]);
     setNameInput(entry.kind === 'directory' ? entry.name : baseName(listing?.path ?? ''));
   };
 
+  /** 行双击：目录=进入；文件模式下文件=直接确认 */
   const enterRow = (entry: DirectoryEntry) => {
-    if (entry.kind === 'directory') void loadDirectory(entry.path);
+    if (entry.kind === 'directory') {
+      void loadDirectory(entry.path);
+      return;
+    }
+    if (isFileMode) onSelectFiles?.([entry.path]);
   };
 
-  /** 底栏确认：优先选中目录；否则按输入名尝试进入，最后落到当前目录 */
+  /** 底栏确认 */
   const confirm = () => {
     if (view !== 'dir' || !listing) return;
+    if (isFileMode) {
+      if (selectedPaths.length > 0) onSelectFiles?.(selectedPaths);
+      return;
+    }
+    // 文件夹模式：优先选中目录；否则按输入名尝试进入，最后落到当前目录
     if (selectedEntry?.kind === 'directory') {
-      onSelect(selectedEntry.path);
+      onSelect?.(selectedEntry.path);
       return;
     }
     const typed = nameInput.trim();
@@ -307,10 +360,11 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
       void loadDirectory(joinPath(listing.path, typed, sep));
       return;
     }
-    onSelect(listing.path);
+    onSelect?.(listing.path);
   };
 
-  const canSelect = view === 'dir' && !!listing && !loading;
+  const canSelect =
+    view === 'dir' && !!listing && !loading && (!isFileMode || selectedPaths.length > 0);
 
   const sortIndicator = (key: SortKey) =>
     sortKey === key ? (sortAsc ? ' ▲' : ' ▼') : '';
@@ -323,7 +377,7 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
         className="h-[100dvh] max-h-[100dvh] w-full max-w-none rounded-none sm:h-[72dvh] sm:max-h-[72dvh] sm:max-w-5xl sm:rounded-xl"
       >
         <DialogHeader>
-          <DialogTitle>{t('directoryPicker.browseTitle')}</DialogTitle>
+          <DialogTitle>{isFileMode ? t('directoryPicker.browseTitleFile') : t('directoryPicker.browseTitle')}</DialogTitle>
         </DialogHeader>
         <DialogBody className="relative flex-row gap-0 overflow-hidden p-0">
           {/* 移动端遮罩：点击后收起目录抽屉 */}
@@ -574,7 +628,7 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
                         onClick={() => selectRow(entry)}
                         onDoubleClick={() => enterRow(entry)}
                         className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                          entry.path === selectedPath ? 'bg-primary/10' : 'hover:bg-muted'
+                          selectedPaths.includes(entry.path) ? 'bg-primary/10' : 'hover:bg-muted'
                         } ${entry.kind === 'file' ? 'opacity-70' : ''}`}
                       >
                         {entry.kind === 'directory' ? (
@@ -602,21 +656,31 @@ export function DirectoryBrowserDialog({ open, onSelect, onClose }: DirectoryBro
         </DialogBody>
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="shrink-0 text-xs text-muted-foreground">{t('directoryPicker.filename')}</span>
-            <input
-              className="h-8 min-w-0 flex-1 rounded-lg border border-input bg-muted/40 px-2 font-mono text-xs text-foreground outline-none"
-              value={nameInput}
-              disabled={view === 'drives'}
-              onChange={(e) => setNameInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') confirm();
-              }}
-            />
-          </div>
+          {isFileMode ? (
+            <div className="flex min-w-0 flex-1 items-center">
+              <span className="text-xs text-muted-foreground">
+                {t('directoryPicker.selectedFiles', { count: selectedPaths.length })}
+              </span>
+            </div>
+          ) : (
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="shrink-0 text-xs text-muted-foreground">{t('directoryPicker.filename')}</span>
+              <input
+                className="h-8 min-w-0 flex-1 rounded-lg border border-input bg-muted/40 px-2 font-mono text-xs text-foreground outline-none"
+                value={nameInput}
+                disabled={view === 'drives'}
+                onChange={(e) => setNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') confirm();
+                }}
+              />
+            </div>
+          )}
           <div className="flex shrink-0 items-center justify-end gap-2">
             <Button variant="outline" onClick={onClose}>{t('directoryPicker.cancel')}</Button>
-            <Button disabled={!canSelect} onClick={confirm}>{t('directoryPicker.selectFolderBtn')}</Button>
+            <Button disabled={!canSelect} onClick={confirm}>
+              {isFileMode ? t('directoryPicker.selectFileBtn') : t('directoryPicker.selectFolderBtn')}
+            </Button>
           </div>
         </DialogFooter>
       </DialogContent>

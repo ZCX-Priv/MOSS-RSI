@@ -86,6 +86,10 @@ export const zh = {
     networkErrorRetry: '网络错误，{{delay}}ms 后重试（第 {{attempt}}/{{maxRetries}} 次）: {{error}}',
     openaiMissingChoices: 'OpenAI Chat 响应缺少 choices',
     unknownProviderFormat: '未知的 provider format: {{format}}',
+    requestBodyGuard: '请求体字节超上限，已自动降级：{{bytes}}B / 上限 {{cap}}B（丢图片 {{droppedImages}} 张、截断 {{truncatedContents}} 条）',
+    http413Retry: 'HTTP 413（请求体超上限），收紧上限至 {{nextCap}}B 后重试（第 {{attempt}}/{{maxRetries}} 次）',
+    moderationBlocked:
+      '上游内容审核拦截（HTTP 400）：本会话上下文中存在被服务商判定为风险的文本，通常来自网页抓取、文件内容或命令输出。可撤回触发该内容的用户消息后重发，或先执行「手动压缩」清理上下文后重试。',
   },
   mcp: {
     managerInitializing: 'MCP 管理器初始化中',

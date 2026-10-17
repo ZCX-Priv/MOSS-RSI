@@ -160,6 +160,13 @@ export interface ContextEngine {
   getCompactions(sessionId: string): CompactionRecord[];
   /** 文件索引服务访问器（三引擎；默认关闭时方法安全降级） */
   getFileIndex(): FileIndexServiceLike;
+  /**
+   * 确认「本轮请求已成功送达」→ 把本轮内联发送过图片的消息标记为已发送（落盘）。
+   * 之后这些图片在发送视图中降级为占位符（避免历史 base64 每轮重发撑爆请求体）。
+   */
+  confirmImagesSent(sessionId: string): void;
+  /** 请求失败/中断 → 放弃本轮图片「已发送」标记（下次仍会重新发送该图片）。 */
+  discardImagesSent(sessionId: string): void;
 }
 
 // ============================================================================
@@ -390,6 +397,13 @@ export interface AgentMessage {
    * 发送请求时由 view-builder 实时读盘编码为多模态内容。
    */
   images?: string[];
+  /**
+   * 该消息附带的图片「已发送过」的时间（ISO 8601；role=user 的 attachments 与 role=tool 的 images 共用）。
+   * 图片只在首次进入请求视图的那一轮以 base64 发送；此后构建视图时不再读盘内联，
+   * 改为占位符（附原始路径，模型可随时用 read 工具重新查看）。
+   * 目的：避免历史图片 base64 每轮重发导致请求体字节数无界增长（HTTP 413）。
+   */
+  imagesSentAt?: string;
   /**
    * 前端为该用户消息生成的稳定 id（role=user；前端随消息下发，后端持久化并原样返回）。
    * 前端据此把「乐观写入的本地消息」与「历史回放的同一条消息」视为同一实体，避免重复渲染。

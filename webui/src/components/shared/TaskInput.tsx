@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   Plus,
@@ -16,6 +17,8 @@ import {
   Paperclip,
   Zap,
   Bot,
+  Search,
+  Settings2,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -62,6 +65,7 @@ import {
   tokenWireText,
   touchRecentCommand,
   type ComposerToken,
+  type MentionGroup,
   type MentionItem,
   type MentionLookups,
   type MentionSegment,
@@ -78,10 +82,13 @@ interface AttachmentItem {
   kind: AttachmentKind;
 }
 
-/** 剪贴板图片扩展名推断（clipboard File 常无有效 name，用 mime 兜底） */
+/** 粘贴附件单文件体积上限（与后端 PASTE_MAX_BYTES 一致）：25MB */
+const PASTE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
+/** 剪贴板文件扩展名推断（clipboard File 常无有效 name，用 mime 兜底；未知类型回退 bin） */
 function extFromMime(mime: string): string {
-  const sub = mime.split('/')[1] ?? '';
-  return /^[A-Za-z0-9]{1,5}$/.test(sub) ? sub.toLowerCase() : 'png';
+  const sub = mime.split('/')[1]?.split(';')[0] ?? '';
+  return /^[A-Za-z0-9]{1,5}$/.test(sub) ? sub.toLowerCase() : 'bin';
 }
 
 /** File → base64（去掉 dataURL 前缀；后端按 base64 解码落盘） */
@@ -149,6 +156,7 @@ export function TaskInput({
   onOpenAttachment,
 }: TaskInputProps) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const workingDirectory = useStore((s) => s.workingDirectory);
   const setWorkingDirectory = useStore((s) => s.setWorkingDirectory);
   const recentDirectories = useStore((s) => s.recentDirectories);
@@ -169,18 +177,27 @@ export function TaskInput({
   } = useDirectoryPicker();
 
   // ==========================================================================
-  // 附件（纯本地路径引用：原生对话框选择，无上传）
+  // 附件（纯本地路径引用：内建选择器「文件模式」选路径 / 粘贴落盘；均不向模型传内容）
   // ==========================================================================
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  /** 内建文件选择器弹窗开关（新增附件用；与工作目录弹窗相互独立） */
+  const [attachBrowseOpen, setAttachBrowseOpen] = useState(false);
 
-  const handlePickFiles = async () => {
+  /** 「添加附件」：打开内建文件选择器（文件模式，默认定位工作区目录） */
+  const openAttachPicker = () => setAttachBrowseOpen(true);
+
+  /** 内建选择器确认选中文件：解析为附件条目（后端 stat + 自动授权父目录） */
+  const handleAttachSelected = async (paths: string[]) => {
+    setAttachBrowseOpen(false);
+    if (paths.length === 0) return;
     try {
-      const resp = await api.pickFiles();
-      if (resp.files.length === 0) return; // 用户取消
+      const resp = await api.resolvePaths(paths);
+      if (resp.files.length === 0) return;
+      const now = Date.now();
       setAttachments((prev) => [
         ...prev,
         ...resp.files.map((f, i) => ({
-          id: `${Date.now()}-${i}-${f.path}`,
+          id: `${now}-${i}-${f.path}`,
           path: f.path,
           name: f.name,
           size: f.size,
@@ -196,13 +213,18 @@ export function TaskInput({
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
-  /** 粘贴图片 → 落盘为附件（不占用输入框）：base64 提交后端写入 ~/.moss/agent/attachments */
-  const handlePasteImages = async (files: File[]) => {
+  /** 粘贴文件（图片/任意文件）→ 落盘为附件（不占用输入框）：base64 提交后端写入 ~/.moss/agent/attachments */
+  const handlePasteFiles = async (files: File[]) => {
     const saved: AttachmentItem[] = [];
     for (const file of files) {
+      // 体积上限：超限跳过并提示（后端同值兜底）
+      if (file.size > PASTE_ATTACHMENT_MAX_BYTES) {
+        toast.error(t('taskInput.pasteFileTooLarge', { name: file.name || '—' }));
+        continue;
+      }
       try {
         const dataBase64 = await fileToBase64(file);
-        const name = file.name || `image-${Date.now()}.${extFromMime(file.type)}`;
+        const name = file.name || `file-${Date.now()}.${extFromMime(file.type)}`;
         const { file: picked } = await api.saveAttachment({ name, dataBase64 });
         saved.push({
           id: `${Date.now()}-${picked.path}`,
@@ -212,7 +234,7 @@ export function TaskInput({
           kind: getAttachmentKind(picked.name, ''),
         });
       } catch {
-        toast.error(t('taskInput.pasteImageFailed'));
+        toast.error(t('taskInput.pasteFileFailed'));
       }
     }
     if (saved.length > 0) {
@@ -285,7 +307,7 @@ export function TaskInput({
     clearComposerInjection();
   }, [composerInjection, clearComposerInjection]);
 
-  // ---- / 菜单数据源：commands + skills + 最近使用（localStorage） ----
+  // ---- / 菜单与「+ → 命令」子菜单共用数据源：commands + skills + 最近使用（localStorage） ----
   const recentRef = useRef(readRecentCommands());
   const [recentVersion, setRecentVersion] = useState(0);
 
@@ -430,6 +452,17 @@ export function TaskInput({
     editorRef.current?.commitMention(item);
   };
 
+  /** 「+ → 命令」子菜单项选中：插入命令/技能 token（复用 / 菜单的插入口径） */
+  const selectPlusItem = (item: MentionItem) => {
+    if (!item.data) return;
+    editorRef.current?.insertToken({
+      kind: 'command',
+      source: item.data.source,
+      name: item.data.name,
+    });
+    handleItemSelected(item);
+  };
+
   /** 按名单现查命令/技能模板（查不到 → 该 token 原样保留为普通文本） */
   const findCommandPrompt = (token: ComposerToken & { kind: 'command' }): string | null => {
     if (token.source === 'skill') {
@@ -534,8 +567,34 @@ export function TaskInput({
     </Tooltip>
   );
 
-  // Plus 菜单可选项：commands + skills（不含 recent 重复项）
-  const plusMenuItems = commandItems.filter((it) => it.group !== 'recent');
+  /** 「命令」子菜单：搜索词 */
+  const [plusQuery, setPlusQuery] = useState('');
+  /** 「命令」子菜单开关（受控：打开时聚焦搜索框、关闭时清空搜索词） */
+  const [plusOpen, setPlusOpen] = useState(false);
+  /** 搜索框引用（打开子菜单时自动聚焦） */
+  const plusSearchRef = useRef<HTMLInputElement>(null);
+
+  /** 命令 + 技能 + 最近使用（与 / 主菜单同源；分组标题与排他逻辑一致） */
+  const filteredPlus = useMemo(
+    () => filterMentionItems(commandItems, plusQuery),
+    [commandItems, plusQuery],
+  );
+
+  /** 按 group 顺序聚合为 [{ group, items }]（最近使用 → 命令 → 技能） */
+  const plusGroups = useMemo(() => {
+    const groups: Array<{ group: MentionGroup; items: MentionItem[] }> = [];
+    for (const it of filteredPlus) {
+      const last = groups[groups.length - 1];
+      if (last && last.group === it.group) last.items.push(it);
+      else groups.push({ group: it.group, items: [it] });
+    }
+    return groups;
+  }, [filteredPlus]);
+
+  // 打开「命令」子菜单时聚焦搜索框（radix 默认会聚焦菜单项，这里主动抢回焦点）
+  useEffect(() => {
+    if (plusOpen) plusSearchRef.current?.focus();
+  }, [plusOpen]);
 
   return (
     <>
@@ -610,7 +669,7 @@ export function TaskInput({
           onDuplicateFile={(path) =>
             toast.info(t('taskInput.fileAlreadyReferenced', { name: fileNameOf(path) }))
           }
-          onPasteImages={handlePasteImages}
+          onPasteFiles={handlePasteFiles}
           lookups={lookups}
           sendShortcut={sendShortcut}
           onSend={handleSend}
@@ -632,13 +691,19 @@ export function TaskInput({
               className="w-auto min-w-[220px] rounded-xl p-1"
             >
               <DropdownMenuItem
-                onSelect={() => void handlePickFiles()}
+                onSelect={openAttachPicker}
                 className="gap-2 rounded-lg px-2.5 py-1.5 text-[13px]"
               >
                 <Paperclip className="size-4 text-muted-foreground" />
                 <span>{t('taskInput.addAttachment')}</span>
               </DropdownMenuItem>
-              <DropdownMenuSub>
+              <DropdownMenuSub
+                open={plusOpen}
+                onOpenChange={(o) => {
+                  setPlusOpen(o);
+                  if (!o) setPlusQuery('');
+                }}
+              >
                 <DropdownMenuSubTrigger className="gap-2 rounded-lg px-2.5 py-1.5 text-[13px]">
                   <Zap className="size-4 text-muted-foreground" />
                   <span>{t('taskInput.commands')}</span>
@@ -646,43 +711,77 @@ export function TaskInput({
                 <DropdownMenuSubContent
                   sideOffset={8}
                   collisionPadding={8}
-                  className="w-auto min-w-[260px] max-h-72 overflow-y-auto rounded-xl"
+                  className="w-72 rounded-xl p-0"
                 >
-                  {plusMenuItems.length === 0 ? (
-                    <div className="flex flex-col items-center gap-2 px-6 py-8">
-                      <Zap className="size-5 text-muted-foreground/50" />
-                      <span className="text-xs text-muted-foreground">
-                        {t('taskInput.noCommands')}
-                      </span>
-                    </div>
-                  ) : (
-                    plusMenuItems.map((item) => {
-                      const Icon = item.icon;
-                      return (
-                        <DropdownMenuItem
-                          key={item.id}
-                          onSelect={() => {
-                            if (!item.data) return;
-                            editorRef.current?.insertToken({
-                              kind: 'command',
-                              source: item.data.source,
-                              name: item.data.name,
-                            });
-                            handleItemSelected(item);
-                          }}
-                          className="gap-2 rounded-lg px-2.5 py-1.5"
-                        >
-                          <Icon className="size-4 shrink-0 text-muted-foreground" />
-                          <div className="flex min-w-0 flex-col">
-                            <span className="truncate text-[13px] font-medium">{item.name}</span>
-                            <span className="truncate text-xs text-muted-foreground">
-                              {item.desc}
-                            </span>
+                  {/* 搜索框 */}
+                  <div className="relative p-1.5">
+                    <Search className="pointer-events-none absolute left-3.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      ref={plusSearchRef}
+                      value={plusQuery}
+                      onChange={(e) => setPlusQuery(e.target.value)}
+                      placeholder={t('taskInput.searchCommandsSkills')}
+                      spellCheck={false}
+                      className="h-8 w-full rounded-lg border border-input bg-muted/40 pl-8 pr-2 text-xs text-foreground outline-none"
+                      onKeyDown={(e) => {
+                        // Escape 放行给 radix（关闭菜单）；其余按键阻断冒泡，
+                        // 避免 radix 菜单的方向键导航 / 字母 typeahead 抢焦点
+                        if (e.key === 'Escape') return;
+                        e.stopPropagation();
+                        // Enter：选中首个匹配项
+                        if (e.key === 'Enter') {
+                          const first = filteredPlus[0];
+                          if (first) {
+                            e.preventDefault();
+                            selectPlusItem(first);
+                          }
+                        }
+                      }}
+                    />
+                  </div>
+                  {/* 可滚动的分组列表 */}
+                  <div className="max-h-80 overflow-y-auto px-1 pb-1">
+                    {plusGroups.length === 0 ? (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        {t('taskInput.noResults')}
+                      </div>
+                    ) : (
+                      plusGroups.map((section) => (
+                        <div key={section.group}>
+                          <div className="px-2 pb-0.5 pt-1.5 text-[11px] text-muted-foreground">
+                            {t(`taskInput.mentionGroups.${section.group}`)}
                           </div>
-                        </DropdownMenuItem>
-                      );
-                    })
-                  )}
+                          {section.items.map((item) => {
+                            const Icon = item.icon;
+                            return (
+                              <DropdownMenuItem
+                                key={item.id}
+                                onSelect={() => selectPlusItem(item)}
+                                className="items-start gap-2 rounded-lg px-2 py-1.5"
+                              >
+                                <Icon className={`mt-0.5 size-4 shrink-0 ${item.iconClass}`} />
+                                <div className="flex min-w-0 flex-1 flex-col">
+                                  <span className="truncate text-[13px] font-medium">{item.name}</span>
+                                  <span className="truncate text-xs text-muted-foreground">
+                                    {item.desc}
+                                  </span>
+                                </div>
+                              </DropdownMenuItem>
+                            );
+                          })}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <DropdownMenuSeparator className="mx-0" />
+                  {/* 底部：管理技能（跳转 插件库 → 技能页；radix 随 onSelect 自动关闭菜单） */}
+                  <DropdownMenuItem
+                    onSelect={() => navigate('/plugins/skills')}
+                    className="items-start gap-2 rounded-lg px-2.5 py-1.5 text-[13px]"
+                  >
+                    <Settings2 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                    <span>{t('taskInput.manageSkills')}</span>
+                  </DropdownMenuItem>
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             </DropdownMenuContent>
@@ -788,6 +887,13 @@ export function TaskInput({
       open={browseOpen}
       onSelect={onBrowserPicked}
       onClose={closeBrowser}
+    />
+    <DirectoryBrowserDialog
+      open={attachBrowseOpen}
+      mode="file"
+      initialPath={isSystemScope ? undefined : workingDirectory}
+      onSelectFiles={(paths) => void handleAttachSelected(paths)}
+      onClose={() => setAttachBrowseOpen(false)}
     />
     </>
   );

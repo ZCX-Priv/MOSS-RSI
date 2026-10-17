@@ -618,6 +618,18 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     setAtBottom(v);
   }, []);
 
+  /**
+   * 列表未挂载时（空白页 / 历史未加载）滚动状态失去意义：
+   * 复位为「在底部」，避免上一会话用户上滑后残留的 atBottom=false
+   * 让「返回底部」按钮在空白页幽灵出现（列表不在，无人能回调重置）。
+   */
+  useEffect(() => {
+    if (messages.length > 0) return;
+    if (atBottomRef.current) return;
+    atBottomRef.current = true;
+    setAtBottom(true);
+  }, [messages.length]);
+
   /** 滚动容器 DOM（用于判定「是否真的在顶部」，见 handleStartReached） */
   const scrollerElRef = useRef<HTMLDivElement | null>(null);
 
@@ -1407,7 +1419,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           ) : null}
           {/* 返回底部按钮：不在底部时显示；流式生成中显示顺时针跑马灯 */}
           <ScrollToBottomButton
-            visible={!atBottom}
+            // 仅在列表存在（有消息）时才可能显示；空白页 / 未加载时按钮无语义，直接隐藏
+            visible={messages.length > 0 && !atBottom}
             streaming={isGenerating}
             onClick={() => scrollToBottom('smooth')}
           />

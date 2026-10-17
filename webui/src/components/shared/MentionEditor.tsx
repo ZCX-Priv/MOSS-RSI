@@ -381,8 +381,8 @@ interface MentionEditorProps {
   onItemSelected: (item: MentionItem) => void;
   /** 同一文件被重复引用（父层 toast 提示） */
   onDuplicateFile: (path: string) => void;
-  /** 剪贴板图片（父层落盘为附件，不进入输入框） */
-  onPasteImages?: (files: File[]) => void;
+  /** 剪贴板文件（图片/任意文件；父层落盘为附件，不进入输入框） */
+  onPasteFiles?: (files: File[]) => void;
   /** 线格式反解析名单（粘贴还原用） */
   lookups: MentionLookups;
   sendShortcut: string;
@@ -402,7 +402,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     onMenuClose,
     onItemSelected,
     onDuplicateFile,
-    onPasteImages,
+    onPasteFiles,
     lookups,
     sendShortcut,
     onSend,
@@ -422,7 +422,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   const onTriggerChangeRef = useRef(onTriggerChange);
   const onMenuCloseRef = useRef(onMenuClose);
   const onDuplicateRef = useRef(onDuplicateFile);
-  const onPasteImagesRef = useRef(onPasteImages);
+  const onPasteFilesRef = useRef(onPasteFiles);
   const lookupsRef = useRef(lookups);
   const menuOpenRef = useRef(false);
   const itemsRef = useRef(items);
@@ -435,7 +435,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   onTriggerChangeRef.current = onTriggerChange;
   onMenuCloseRef.current = onMenuClose;
   onDuplicateRef.current = onDuplicateFile;
-  onPasteImagesRef.current = onPasteImages;
+  onPasteFilesRef.current = onPasteFiles;
   lookupsRef.current = lookups;
   menuOpenRef.current = Boolean(trigger);
   itemsRef.current = items;
@@ -949,20 +949,20 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   };
 
   const handlePaste = (e: ClipboardEvent<HTMLDivElement>) => {
-    // 剪贴板图片 → 交给父层落盘为附件。必须在此 preventDefault，
-    // 否则浏览器默认行为会把图片作为 <img>/blob 直接插入 contenteditable（占用输入框）。
+    // 剪贴板文件（图片/任意文件）→ 交给父层落盘为附件。必须在此 preventDefault，
+    // 否则浏览器默认行为会把文件作为 <img>/blob 直接插入 contenteditable（占用输入框）。
     const dt = e.clipboardData;
-    const fromFiles = Array.from(dt.files).filter((f) => f.type.startsWith('image/'));
-    const imageFiles =
+    const fromFiles = Array.from(dt.files);
+    const files =
       fromFiles.length > 0
         ? fromFiles
         : Array.from(dt.items)
-            .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+            .filter((it) => it.kind === 'file')
             .map((it) => it.getAsFile())
             .filter((f): f is File => f !== null);
-    if (imageFiles.length > 0) {
+    if (files.length > 0) {
       e.preventDefault();
-      onPasteImagesRef.current?.(imageFiles);
+      onPasteFilesRef.current?.(files);
       return;
     }
 

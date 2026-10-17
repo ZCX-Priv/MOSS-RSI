@@ -86,6 +86,12 @@ export const en = {
     networkErrorRetry: 'Network error, retrying in {{delay}}ms (attempt {{attempt}}/{{maxRetries}}): {{error}}',
     openaiMissingChoices: 'OpenAI Chat response missing choices',
     unknownProviderFormat: 'Unknown provider format: {{format}}',
+    requestBodyGuard:
+      'Request body exceeded the byte cap; degraded automatically: {{bytes}}B / cap {{cap}}B (dropped {{droppedImages}} image(s), truncated {{truncatedContents}} message(s))',
+    http413Retry:
+      'HTTP 413 (request body too large); lowering the cap to {{nextCap}}B and retrying (attempt {{attempt}}/{{maxRetries}})',
+    moderationBlocked:
+      'Upstream moderation blocked the request (HTTP 400): the conversation contains text the provider flagged as risky, usually from web fetches, file contents, or command output. Retract the user message that pulled in that content and resend, or run a manual compaction first, then retry.',
   },
   mcp: {
     managerInitializing: 'MCP manager initializing',

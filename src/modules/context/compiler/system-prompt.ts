@@ -16,23 +16,6 @@ import type { SystemSection } from '../types';
 import { seedBuiltinAgentPrompts } from '../../tools/shared/agent-seed';
 import { estimateTextTokens } from '../budgeter/estimator';
 
-/** 兜底系统提示词（agent/prompts/main/ 下无任何基本设定文件时） */
-export const FALLBACK_SYSTEM_PROMPT = `你是 MOSS，一个运行在真实环境中的交互式 AI 智能体。
-
-你可以使用工具读写文件、执行命令、调用 skill、调用 MCP 服务器。环境信息（平台、工作目录、终端解释器、开发工具链、时间等）以会话首条 [环境上下文] 消息为准。
-
-# 核心原则
-1. **第一性原理**：从根本推理，不浮于表面。
-2. **诚实**：不编造，有依据，不懂坦白。
-3. **最小改动**：只做被要求的事，不擅自重构、加文档或加功能。
-4. **安全优先**：破坏性操作需明确确认。
-5. **工具纪律**：声称环境事实前先用工具核实。
-
-# 响应格式
-- 简洁直接，先给答案或行动，不铺垫推理。
-- 使用工具时简述在做什么及为什么。
-- 工具执行后总结结果并继续。`;
-
 /** always 用户规则段（rules 引擎注入；规则集变更 = 新缓存周期，与 skill 切换同级） */
 export interface RulesSectionInput {
   /** 规则集内容指纹（缓存键组成部分） */
@@ -51,10 +34,10 @@ const CANDIDATE_NAMES: ReadonlySet<string> = new Set<string>(BASE_PROMPT_CANDIDA
 
 /** 段落标题（WebUI 系统标签页折叠栏展示用） */
 const SEGMENT_TITLES: Record<string, string> = {
+  system: '系统设定',
   soul: '工作哲学（soul）',
-  identity: '身份认知（identity）',
+  identity: '身份认知',
   'user-rules': '用户规则（user rules）',
-  fallback: '基础设定（内置兜底）',
 };
 
 /** 段落缓存条目：mtime + 规则指纹未变时免读盘 */
@@ -161,17 +144,7 @@ export function loadSystemPromptSegments(env: Environment, rulesSection?: RulesS
     }
   }
 
-  // 3. 全部缺失 → 内置兜底
-  if (segments.length === 0) {
-    segments.push({
-      id: 'fallback',
-      title: SEGMENT_TITLES.fallback,
-      tokens: 0,
-      content: FALLBACK_SYSTEM_PROMPT,
-    });
-  }
-
-  // 4. always 用户规则段（rules 引擎注入；恒在末尾）
+  // 3. always 用户规则段（rules 引擎注入；恒在末尾）
   if (rulesSection?.text) {
     segments.push({
       id: 'user-rules',
@@ -215,7 +188,7 @@ export function buildStaticSystemPrompt(
   ) {
     loadSystemPromptSegments(env, rulesSection);
   }
-  const joined = promptCache?.joined ?? FALLBACK_SYSTEM_PROMPT;
+  const joined = promptCache?.joined ?? '';
   if (skillPrompt) {
     return `${joined}\n\n---\n\n${skillPrompt}`;
   }

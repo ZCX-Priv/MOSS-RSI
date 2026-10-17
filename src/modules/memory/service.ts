@@ -194,6 +194,7 @@ export class MemoryEngineServiceImpl {
         );
         const result = await distillSession(session, cwd, {
           logger: this.logger,
+          env: this.env,
           llm,
           distillModelId: requestModel,
           minMessages: cfg.distillMinMessages,
@@ -233,6 +234,7 @@ export class MemoryEngineServiceImpl {
     try {
       const result = await distillSession(session, cwd, {
         logger: this.logger,
+        env: this.env,
         llm,
         distillModelId: requestModel,
         minMessages: 1,

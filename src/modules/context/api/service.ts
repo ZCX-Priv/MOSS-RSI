@@ -17,6 +17,7 @@ import type {
   CompactionRecord,
   ContextBreakdown,
   ContextEngineConfig,
+  ContextMessage,
   ContextSessionLike,
   ContextStats,
   HealResult,
@@ -89,6 +90,11 @@ export class ContextEngineServiceImpl {
   private readonly calibrator = new TokenCalibrator();
   private readonly telemetry = new Map<string, SessionTelemetry>();
   private readonly busySessions = new Set<string>();
+  /**
+   * 待确认的「图片已发送」标记（sessionId → 本轮内联发送过图片的原始消息引用）。
+   * prepareRequest 写入；调用方在请求成功送达后 confirm、失败/中断时 discard。
+   */
+  private readonly pendingImageMarks = new Map<string, ContextMessage[]>();
   private sessionStore: SessionStoreBridge | null = null;
   /** 文件索引模块（三引擎；默认关闭，配置打开后激活） */
   private readonly fileIndex: FileIndexService;
@@ -155,6 +161,10 @@ export class ContextEngineServiceImpl {
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules, ...ctx.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks, ...ctx.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory, ...ctx.memory },
+      maxRequestBytes:
+        typeof ctx.maxRequestBytes === 'number' && Number.isFinite(ctx.maxRequestBytes)
+          ? ctx.maxRequestBytes
+          : DEFAULT_CONTEXT_CONFIG.maxRequestBytes,
     };
   }
 
@@ -183,6 +193,13 @@ export class ContextEngineServiceImpl {
       modelDisplayName: opts.modelDisplayName,
       windowTokens,
     });
+
+    // 图片「只发一次」：缓存本轮内联发送的图片消息引用（等待调用方确认/丢弃）
+    if (prepared.imageMessagesToMark && prepared.imageMessagesToMark.length > 0) {
+      this.pendingImageMarks.set(session.id, prepared.imageMessagesToMark);
+    } else {
+      this.pendingImageMarks.delete(session.id);
+    }
 
     // 遥测：breakdown + systemSections + 发送字符数（校准口径）
     const skillName = session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
@@ -284,6 +301,33 @@ export class ContextEngineServiceImpl {
 
   markIdle(sessionId: string): void {
     this.busySessions.delete(sessionId);
+  }
+
+  /**
+   * 请求**成功送达** → 把本轮内联发送过图片的消息落 imagesSentAt 并持久化。
+   * 之后这些图片在发送视图中降级为占位符（附原始路径，可 read 重看），
+   * 从根上阻止历史图片 base64 每轮重发导致的请求体无界增长（HTTP 413）。
+   */
+  confirmImagesSent(sessionId: string): void {
+    const pending = this.pendingImageMarks.get(sessionId);
+    this.pendingImageMarks.delete(sessionId);
+    if (!pending || pending.length === 0) return;
+    const at = new Date().toISOString();
+    let changed = false;
+    for (const m of pending) {
+      if (!m.imagesSentAt) {
+        m.imagesSentAt = at;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    const session = this.sessionStore?.get(sessionId);
+    if (session) this.sessionStore?.persist(session);
+  }
+
+  /** 请求失败/中断 → 丢弃本轮标记：下次请求仍会重新发送该图片（模型不会"从未见过"）。 */
+  discardImagesSent(sessionId: string): void {
+    this.pendingImageMarks.delete(sessionId);
   }
 
   /** 手动压缩（空闲时可用） */
@@ -601,7 +645,7 @@ export class ContextEngineServiceImpl {
         const content = `共 ${schemas.length} 个（内置 ${schemas.length - mcpCount} · MCP ${mcpCount}），经请求 tools 参数动态注入，不在系统提示词中。\n\n${lines.join('\n')}`;
         out.push({
           id: 'tools',
-          title: '工具定义（LLM tools 参数注入）',
+          title: '工具定义',
           tokens: estimateTextTokens(content),
           content,
           defaultOpen: false,
@@ -615,7 +659,7 @@ export class ContextEngineServiceImpl {
     if (envMsg) {
       out.push({
         id: 'env',
-        title: '环境上下文消息',
+        title: '环境信息',
         tokens: estimateTextTokens(envMsg.content),
         content: envMsg.content,
         defaultOpen: false,

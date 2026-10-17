@@ -29,6 +29,7 @@ import { flattenModels } from '../../core/provider-utils';
 import { resolveSummaryModel } from '../context/compressor';
 import { getSessionTodoPath, readSessionTodoStore, type TodoItem } from '../tools/todo/shared/store';
 import { isMossAccessAllowed, SYSTEM_SCOPE } from '../filesys/roots';
+import { loadPromptFileOrNull } from '../context/prompt-loader';
 import { t } from '../../core/i18n';
 import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, resolve } from 'node:path';
@@ -308,13 +309,6 @@ function summarizeResult(result: unknown): string {
   }
   return truncate(parts.join('\n'), MAX_FIELD_CHARS);
 }
-
-const SUMMARY_SYSTEM_PROMPT = [
-  'You summarize the live trajectory of an AI agent task so another agent can decide what to do next.',
-  'Output 2-4 short sentences in the same language as the task description.',
-  'Cover: what the task is doing right now, what has already been done, and what is likely next.',
-  'Use only facts present in the input. Never invent progress, files, or results.',
-].join(' ');
 
 /**
  * MCP 派发任务注册表（进程级单例，由 mcp 模块注册为 ServiceNames.MCP_TASK_REGISTRY）。
@@ -848,13 +842,17 @@ export class McpTaskRegistry {
     }
     if (!model) return { text: null, error: 'summary model unresolved (empty model name)' };
 
+    // 摘要系统提示词从 agent/prompts/mcp/task-summary.md 加载；缺失则放弃摘要（降级）
+    const systemPrompt = loadPromptFileOrNull(this.env, 'mcp/task-summary.md');
+    if (!systemPrompt) return { text: null, error: 'task summary prompt missing' };
+
     const payload = this.buildSummaryInput(record, view);
     try {
       const response = await llm.complete(
         {
           model,
           messages: [
-            { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: payload },
           ],
           stream: false,

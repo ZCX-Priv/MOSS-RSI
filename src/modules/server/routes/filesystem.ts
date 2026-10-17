@@ -3,8 +3,8 @@
 // GET  /api/filesystem/drives             —— 驱动器/卷枚举（前端文件夹选择器「此电脑」视图）
 // GET  /api/filesystem/list               —— 列出目录直接子项（前端文件夹选择器 + 文件浏览器）
 // GET  /api/filesystem/search-files       —— 递归模糊搜索文件名（# 文件提及菜单）
-// POST /api/filesystem/pick-file          —— 系统原生多文件选择（附件纯路径引用）
-// POST /api/filesystem/save-attachment    —— 粘贴图片落盘（附件）
+// POST /api/filesystem/resolve-paths      —— 解析前端已选绝对路径为附件条目并授权父目录
+// POST /api/filesystem/save-attachment    —— 粘贴附件落盘（图片/文件）
 // GET  /api/filesystem/raw|media|text     —— 只读预览（渲染模块）/ 媒体直链 / 文本提取
 // GET/PUT /api/filesys/roots              —— 授权 roots 管理
 //
@@ -539,27 +539,14 @@ export function createListDrivesHandler(env: Environment): RouteHandler {
 }
 
 // ============================================================================
-// 原生文件对话框接入（nativefiledialog-for-bun）
-// 目录选择已弃用原生对话框（改用前端选择器），此处仅供 pick-file 使用。
+// 附件「纯路径引用」路径解析
+// 原 pick-file 的系统原生对话框已弃用：改由前端内建选择器选取路径后调用下方接口。
+// 文件留在原位，消息仅引用路径，agent 用 filesys 工具读取。
 // ============================================================================
 
-type NfdModule = typeof import('nativefiledialog-for-bun');
-
-/** nfd 模块惰性单例：加载失败（缺平台二进制/Android）返回 null，绝不阻断路由模块加载 */
-let nfdModule: NfdModule | null = null;
-async function loadNfd(): Promise<NfdModule | null> {
-  if (nfdModule) return nfdModule;
-  try {
-    nfdModule = await import('nativefiledialog-for-bun');
-    return nfdModule;
-  } catch {
-    return null;
-  }
-}
-
 // ============================================================================
-// POST /api/filesystem/pick-file
-// 系统原生多文件选择对话框（nfd.openFiles），返回真实绝对路径 + stat 元数据。
+// POST /api/filesystem/resolve-paths
+// 解析前端内建选择器选中的绝对路径（stat 元数据），并把父目录自动授权进 filesys roots。
 // 附件"纯路径引用"方案的数据源：文件留在原位，消息仅引用路径，agent 用 filesys 工具读取。
 // 自动授权：把每个选中文件的父目录合并进 config.filesys.roots（去重），保证 agent 可读。
 // ============================================================================
@@ -570,66 +557,74 @@ interface PickedFile {
   size: number;
 }
 
-export function createPickFileHandler(
+/**
+ * 把一组绝对路径解析为附件条目（stat 元数据），并把每个文件的父目录自动授权进
+ * config.filesys.roots（去重；已存在的跳过），保证 agent 可读。
+ * 非文件 / 不可访问的路径跳过；授权失败不阻断解析结果。
+ */
+async function resolvePickedPaths(
+  env: Environment,
+  config: ConfigService,
+  paths: string[],
+): Promise<{ files: PickedFile[]; grantedRoots: string[] }> {
+  if (paths.length === 0) return { files: [], grantedRoots: [] };
+
+  // stat 元数据 + 父目录收集
+  const files: PickedFile[] = [];
+  const parents = new Set<string>();
+  for (const p of paths) {
+    try {
+      const st = statSync(p);
+      if (!st.isFile()) continue;
+      files.push({ path: p, name: basenameOf(p), size: st.size });
+      parents.add(dirnameOf(p));
+    } catch {
+      // 文件消失/不可访问：跳过
+    }
+  }
+
+  // 自动授权：父目录合并进 filesys roots（去重；已存在的跳过）
+  const grantedRoots: string[] = [];
+  if (parents.size > 0) {
+    try {
+      const cfg = config.getAppConfig();
+      const existing: string[] = Array.isArray(cfg.filesys?.roots) ? cfg.filesys.roots : [];
+      const known = new Set(existing.map((r) => (env.isWindows ? r.toLowerCase() : r)));
+      const merged = [...existing];
+      for (const parent of parents) {
+        if (!isDirectorySafe(parent)) continue;
+        const key = env.isWindows ? parent.toLowerCase() : parent;
+        if (known.has(key)) continue;
+        known.add(key);
+        merged.push(normalize(parent));
+        grantedRoots.push(parent);
+      }
+      if (grantedRoots.length > 0) {
+        await config.updateAppConfig({ filesys: { roots: merged } } as never);
+      }
+    } catch {
+      // 授权失败不阻断解析结果（agent 读取时由权限体系兜底提示）
+    }
+  }
+
+  return { files, grantedRoots };
+}
+
+export function createResolvePathsHandler(
   env: Environment,
   config: ConfigService,
 ): RouteHandler {
-  return async (): Promise<HttpResponse> => {
-    // Android：无原生文件对话框 → 标记 unsupported（前端按需提示）
-    if (env.isAndroid) {
-      return { status: 200, body: { files: [], unsupported: true } };
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const body = (req.body ?? {}) as { paths?: unknown };
+    const raw = body.paths;
+    if (!Array.isArray(raw) || raw.some((p) => typeof p !== 'string')) {
+      return { status: 400, body: { error: ErrorCode.INVALID_BODY } };
     }
-    let picked: string[] | null;
-    try {
-      const nfd = await loadNfd();
-      if (!nfd) return { status: 200, body: { files: [], unsupported: true } };
-      // openFiles：用户取消返回 null，成功返回绝对路径数组，错误抛 NativeDialogError
-      picked = await nfd.openFiles();
-    } catch {
-      return { status: 200, body: { files: [], error: ErrorCode.FS_PICK_FILE_FAILED } };
-    }
-    if (!picked || picked.length === 0) {
-      return { status: 200, body: { files: [] } };
-    }
-
-    // stat 元数据 + 父目录收集
-    const files: PickedFile[] = [];
-    const parents = new Set<string>();
-    for (const p of picked) {
-      try {
-        const st = statSync(p);
-        if (!st.isFile()) continue;
-        files.push({ path: p, name: basenameOf(p), size: st.size });
-        parents.add(dirnameOf(p));
-      } catch {
-        // 文件消失/不可访问：跳过
-      }
-    }
-
-    // 自动授权：父目录合并进 filesys roots（去重；已存在的跳过）
-    const grantedRoots: string[] = [];
-    if (parents.size > 0) {
-      try {
-        const cfg = config.getAppConfig();
-        const existing: string[] = Array.isArray(cfg.filesys?.roots) ? cfg.filesys.roots : [];
-        const known = new Set(existing.map((r) => (env.isWindows ? r.toLowerCase() : r)));
-        const merged = [...existing];
-        for (const parent of parents) {
-          if (!isDirectorySafe(parent)) continue;
-          const key = env.isWindows ? parent.toLowerCase() : parent;
-          if (known.has(key)) continue;
-          known.add(key);
-          merged.push(normalize(parent));
-          grantedRoots.push(parent);
-        }
-        if (grantedRoots.length > 0) {
-          await config.updateAppConfig({ filesys: { roots: merged } } as never);
-        }
-      } catch {
-        // 授权失败不阻断选择结果（agent 读取时由权限体系兜底提示）
-      }
-    }
-
+    const paths = raw
+      .filter((p): p is string => typeof p === 'string')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    const { files, grantedRoots } = await resolvePickedPaths(env, config, paths);
     return { status: 200, body: { files, grantedRoots } };
   };
 }
@@ -648,14 +643,18 @@ function dirnameOf(p: string): string {
 
 // ============================================================================
 // POST /api/filesystem/save-attachment
-// 粘贴图片落盘：前端把剪贴板图片读成 base64（dataURL 去前缀）提交，后端写入
+// 粘贴附件落盘（图片/文件）：前端把剪贴板文件读成 base64（dataURL 去前缀）提交，后端写入
 // ~/.moss/agent/attachments/ 并返回真实绝对路径。
-// 与 nativefiledialog pick-file 并列，是附件「纯路径引用」体系的另一个数据源：
-// 图片本体落盘，消息只引用路径，agent 经 filesys 工具读取。
+// 与 resolve-paths 并列，是附件「纯路径引用」体系的另一个数据源：
+// 文件本体落盘，消息只引用路径，agent 经 filesys 工具读取。
 // 目录选择 ~/.moss/agent/attachments 的原因：.moss 白名单仅放行 agent/mcps/skills，
 // 该目录天然可被 agent 读取，无需放宽安全规则。
 // 自动授权：把 attachments 目录合并进 config.filesys.roots（去重），保证目录外也可读。
+// 单文件体积上限 PASTE_MAX_BYTES（前端同值预校验，此处兜底防绕过）。
 // ============================================================================
+
+/** 粘贴附件单文件体积上限（解码后字节数）：25MB */
+const PASTE_MAX_BYTES = 25 * 1024 * 1024;
 
 interface SaveAttachmentBody {
   name?: string;
@@ -673,10 +672,10 @@ function sanitizeAttachmentName(raw: string, fallback: string): string {
   return cleaned || fallback;
 }
 
-/** 扩展名归一：仅保留 1-5 位字母数字，非法（缺失/过长）回退 png */
+/** 扩展名归一：仅保留 1-5 位字母数字，非法（缺失/过长）回退 bin（图片与任意文件通用） */
 function safeAttachmentExt(name: string): string {
   const ext = extname(name).replace(/^\./, '');
-  return /^[A-Za-z0-9]{1,5}$/.test(ext) ? ext.toLowerCase() : 'png';
+  return /^[A-Za-z0-9]{1,5}$/.test(ext) ? ext.toLowerCase() : 'bin';
 }
 
 export function createSaveAttachmentHandler(
@@ -689,6 +688,10 @@ export function createSaveAttachmentHandler(
     if (!dataBase64) {
       return { status: 400, body: { error: ErrorCode.FS_ATTACHMENT_DATA_REQUIRED } };
     }
+    // 体积上限兜底：base64 长度 ≈ 原始字节 * 4/3，超限直接拒绝（防绕过 + 防内存膨胀）
+    if (dataBase64.length > Math.ceil((PASTE_MAX_BYTES * 4) / 3) + 4) {
+      return { status: 400, body: { error: ErrorCode.FS_ATTACHMENT_TOO_LARGE } };
+    }
 
     const dir = join(env.dataDir, 'agent', 'attachments');
     try {
@@ -698,22 +701,25 @@ export function createSaveAttachmentHandler(
     }
 
     // 文件名：<清洗后的原名>-<时间戳>-<随机>.<归一扩展名>，既保留可读性又避免覆盖
-    const safeName = sanitizeAttachmentName(body.name ?? '', `image-${Date.now()}.png`);
+    const safeName = sanitizeAttachmentName(body.name ?? '', `file-${Date.now()}.bin`);
     const ext = safeAttachmentExt(safeName);
-    const stem = sanitizeAttachmentName(safeName.replace(/\.[^.]*$/, ''), 'image').slice(0, 40);
+    const stem = sanitizeAttachmentName(safeName.replace(/\.[^.]*$/, ''), 'file').slice(0, 40);
     const fileName = `${stem}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
     const absPath = join(dir, fileName);
 
     let size = 0;
     try {
       const buf = Buffer.from(dataBase64, 'base64');
+      if (buf.length > PASTE_MAX_BYTES) {
+        return { status: 400, body: { error: ErrorCode.FS_ATTACHMENT_TOO_LARGE } };
+      }
       writeFileSync(absPath, buf);
       size = buf.length;
     } catch {
       return { status: 500, body: { error: ErrorCode.FS_ATTACHMENT_SAVE_FAILED } };
     }
 
-    // 自动授权：attachments 目录并入 filesys roots（去重；已存在的跳过），与 pick-file 一致
+    // 自动授权：attachments 目录并入 filesys roots（去重；已存在的跳过），与 resolve-paths 一致
     const grantedRoots: string[] = [];
     try {
       const cfg = config.getAppConfig();

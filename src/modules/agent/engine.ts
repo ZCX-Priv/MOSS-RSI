@@ -681,6 +681,9 @@ export class AgentEngineImpl implements AgentEngine {
           }
         }
       } catch (err) {
+        // 请求失败/中断 → 放弃本轮图片「已发送」标记：下次请求仍会重新发送该图，
+        // 避免"模型从未见过这张图、后续却只看到占位符"的功能性丢失。
+        contextEngine?.discardImagesSent(sessionId);
         if (signal?.aborted) {
           // 用户主动中断：不发 error 事件，静默退出
           finishReason = 'aborted';
@@ -774,6 +777,10 @@ export class AgentEngineImpl implements AgentEngine {
           this.logger.debug('agent.turnStreamAccounting', acct);
         }
       }
+
+      // 本轮请求成功送达 → 确认图片「已发送」：图像只在首次进入请求的那一轮内联 base64，
+      // 之后轮次降级为占位符（附原始路径，可 read 重看）→ 阻止历史图片 base64 重发撑爆请求体（413）。
+      contextEngine?.confirmImagesSent(sessionId);
 
       if (signal?.aborted) {
         finishReason = 'aborted';
@@ -904,6 +911,7 @@ export class AgentEngineImpl implements AgentEngine {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+        contextEngine?.confirmImagesSent(sessionId);
         contextEngine?.markIdle(sessionId);
         this.cleanupPendingAsks();
         // 本轮流式草稿作废：最终消息已由 addAssistantMessage 落盘

@@ -85,10 +85,10 @@ class AgentRegistryImpl implements AgentRegistry {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    this.data = this.load();
+    this.data = this.load(env);
   }
 
-  private load(): AgentsStoreData {
+  private load(env: Environment): AgentsStoreData {
     const defaultData: AgentsStoreData = {
       version: 1,
       defaultAgentId: 'agent',
@@ -113,7 +113,7 @@ class AgentRegistryImpl implements AgentRegistry {
         parsed.agents.unshift(defaultData.agents[0]);
       }
       // 合并内置模板 agent（幂等：已存在则不覆盖用户修改，缺失则补齐）
-      for (const template of buildTemplateAgents()) {
+      for (const template of buildTemplateAgents(env)) {
         if (!parsed.agents.find(a => a.id === template.id)) {
           parsed.agents.push(template);
         }
@@ -126,7 +126,7 @@ class AgentRegistryImpl implements AgentRegistry {
       return parsed;
     } catch {
       // 文件不存在/损坏：默认数据 + 内置模板
-      defaultData.agents.push(...buildTemplateAgents());
+      defaultData.agents.push(...buildTemplateAgents(env));
       return defaultData;
     }
   }
@@ -272,7 +272,7 @@ class AgenteamModule implements Module {
         scope: 'agenteam',
       });
       // 单一 agent 工具注册（mode=subagent|agenteam）
-      registerAgentTools(ctx.services, this.orchestrator, ctx.logger);
+      registerAgentTools(ctx.services, this.orchestrator, ctx.logger, ctx.env);
     } else {
       ctx.logger.warn('agenteam: agent engine unavailable, orchestrator disabled');
     }

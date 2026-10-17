@@ -7,7 +7,7 @@
 // ephemeral 消息（L2 记忆召回）：仅本次请求视图、不持久化；插在消息流末尾——
 // 保住 system+env+history 的前缀缓存命中，且近因注意力聚焦召回内容（规避 lost-in-the-middle）。
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
 import type { UnifiedImage, UnifiedMessage } from '../../llm/types';
 import type {
@@ -16,7 +16,12 @@ import type {
   ContextSessionLike,
   ToolPruningConfig,
 } from '../types';
-import { estimateTextTokens, estimateMessageTokens } from '../budgeter/estimator';
+import {
+  estimateTextTokens,
+  estimateMessageTokens,
+  estimateTextBytes,
+  estimateMessageBytes,
+} from '../budgeter/estimator';
 import { sanitizeMessages, alignWindowBoundaries } from '../healer/pair-sanitize';
 import { pruneToolResultView } from '../compressor/tool-pruner';
 import { ENV_CONTEXT_MSG_NAME } from './env-context';
@@ -80,12 +85,63 @@ function readImages(paths: readonly string[]): { images: UnifiedImage[]; skipped
   return { images, skipped };
 }
 
+/**
+ * 该消息携带的**图片**路径（role=user 取附件路径，role=tool 取工具结果图片路径；其余恒空）。
+ * 只保留扩展名受支持的图片路径——非图片附件（mp4/pdf 等）从不内联为 base64，
+ * 因此不参与字节核算，也不出现在「已发送」占位符里。
+ */
+function messageImagePaths(m: ContextMessage): string[] {
+  if (m.role === 'user') return (m.attachments ?? []).filter(isImagePath);
+  if (m.role === 'tool') return (m.images ?? []).filter(isImagePath);
+  return [];
+}
+
+/**
+ * 图片「已发送过」的占位提示（替代 base64 内联）。
+ * 附原始路径 + 明确的重新查看方式：MOSS 只持久化路径、从不存 base64，
+ * 原图始终在磁盘上，模型需要时可再用 read 工具读取该路径 → 首个方案天然无损。
+ */
+function imageSentPlaceholder(paths: readonly string[]): string {
+  const list = paths.map(p => `- ${p}`).join('\n');
+  return `\n\n[图片已于此前发送过，为控制请求体体积此处以占位符替代（不再内联 base64）。原始文件仍在：\n${list}\n如需重新查看，请用 read 工具读取对应路径]`;
+}
+
+/** 图片路径 → base64 内联后的预估字节（内存缓存；读不到/超限被跳过记 0，以免阻断或高估） */
+const imageBytesCache = new Map<string, number>();
+function imagePathBytes(p: string): number {
+  const cached = imageBytesCache.get(p);
+  if (cached !== undefined) return cached;
+  let bytes = 0;
+  try {
+    const size = statSync(p).size;
+    // 与 readImages 口径对齐：超过单图上限的图片不会被内联发送 → 不计入字节预算
+    bytes = size > MAX_IMAGE_BYTES ? 0 : Math.ceil(size / 3) * 4; // base64 膨胀率约 4/3
+  } catch {
+    bytes = 0;
+  }
+  imageBytesCache.set(p, bytes);
+  return bytes;
+}
+
+/**
+ * 单条消息的完整字节估算：文本部分（estimateMessageBytes，不含图片）
+ * + 该消息图片按文件真实大小折算的 base64 字节。
+ * 用于请求体字节预算（token 估算对图片不可见，必须单独按字节核算）。
+ */
+function messageBytes(m: ContextMessage): number {
+  let total = estimateMessageBytes(m);
+  for (const p of messageImagePaths(m)) total += imagePathBytes(p);
+  return total;
+}
+
 export interface BuildViewOptions {
   toolPruning: ToolPruningConfig;
   /** skill 内容解析回调（message 模式占位替换 / system 模式由调用方拼进 staticSystemPrompt） */
   resolveSkillPrompt?: (name: string) => string | null;
   /** 溢出兜底预算（窗口 token；undefined = 不做兜底裁剪） */
   budgetTokens?: number;
+  /** 请求体字节预算（序列化后字节；undefined = 不做字节兜底裁剪） */
+  budgetBytes?: number;
   /** ephemeral 尾部消息（L2 记忆召回等；不持久化，追加在消息流末尾） */
   ephemeralMessages?: ContextMessage[];
 }
@@ -95,6 +151,13 @@ export interface BuiltView {
   breakdown: ContextBreakdown;
   /** 兜底裁剪丢弃的头部消息数（0 = 无兜底） */
   tailDropped: number;
+  /** 本次发送视图的估算字节数（文本 UTF-8 + 图片 base64；含 system 前缀） */
+  bytes: number;
+  /**
+   * 本轮「实际以 base64 发送了图片」的**原始 session 消息**引用。
+   * 调用方（governor）据此写入 imagesSentAt 并持久化 → 下轮起这些图片降级为占位符。
+   */
+  imageMessagesToMark: ContextMessage[];
 }
 
 /** 是否为恒保留的锚定消息（env-context / 压缩摘要 / skill 注入占位 / 规则 / L1 记忆） */
@@ -127,52 +190,91 @@ export function buildRequestView(
       m.name !== SYSTEM_ERROR_MSG_NAME,
   );
 
-  // ===== 2. 视图消息准备（微压缩 + skill 占位替换；全部新建对象不动原消息） =====
-  const prepared: ContextMessage[] = visible.map(m => {
-    if (m.role === 'tool' && opts.toolPruning.enabled) {
-      const pruned = pruneToolResultView(m.content, opts.toolPruning);
-      if (pruned !== m.content) {
-        return { ...m, content: pruned };
-      }
-      return m;
+  // ===== 2. 视图消息准备（图片占位降级 + 微压缩 + skill 占位替换；全部新建对象不动原消息） =====
+  // originalOf：视图对象 → 原始 session 消息。视图可能被复制（占位/修剪），
+  // 而标记 imagesSentAt 必须落在原始 session 对象上才能持久化生效。
+  const originalOf = new WeakMap<ContextMessage, ContextMessage>();
+  const prepared: ContextMessage[] = visible.map(raw => {
+    let next: ContextMessage = raw;
+
+    // 2a. 图片已发送过 → 降级为占位符（剥离图片路径，避免下游读盘内联 base64）
+    const imgPaths = messageImagePaths(raw);
+    if (raw.imagesSentAt && imgPaths.length > 0) {
+      next = {
+        role: raw.role,
+        content: `${raw.content}${imageSentPlaceholder(imgPaths)}`,
+        ...(raw.toolCalls ? { toolCalls: raw.toolCalls } : {}),
+        ...(raw.toolCallId ? { toolCallId: raw.toolCallId } : {}),
+        ...(raw.name ? { name: raw.name } : {}),
+        ...(raw.isError !== undefined ? { isError: raw.isError } : {}),
+        ...(raw.metadata ? { metadata: raw.metadata } : {}),
+        ...(raw.timestamp ? { timestamp: raw.timestamp } : {}),
+        imagesSentAt: raw.imagesSentAt,
+      };
     }
-    if (m.role === 'system' && m.name === SKILL_INJECT_MSG_NAME && opts.resolveSkillPrompt) {
+
+    // 2b. 工具结果微压缩（仅发送视图，session 原文不动）
+    if (next.role === 'tool' && opts.toolPruning.enabled) {
+      const pruned = pruneToolResultView(next.content, opts.toolPruning);
+      if (pruned !== next.content) next = { ...next, content: pruned };
+    }
+
+    // 2c. skill message 模式占位消息 → 注册表全文
+    if (next.role === 'system' && next.name === SKILL_INJECT_MSG_NAME && opts.resolveSkillPrompt) {
       const skillName =
-        (m.metadata as { skillName?: string } | undefined)?.skillName ??
-        /^# Active Skill: (.+)$/.exec(m.content)?.[1] ??
+        (next.metadata as { skillName?: string } | undefined)?.skillName ??
+        /^# Active Skill: (.+)$/.exec(next.content)?.[1] ??
         session.activeSkill?.name;
       if (skillName) {
         const prompt = opts.resolveSkillPrompt(skillName);
-        if (prompt) {
-          return { ...m, content: `# Active Skill: ${skillName}\n\n${prompt}` };
-        }
+        if (prompt) next = { ...next, content: `# Active Skill: ${skillName}\n\n${prompt}` };
       }
     }
-    return m;
+
+    originalOf.set(next, raw);
+    return next;
   });
 
   // ===== 2.5 ephemeral 尾部消息（L2 记忆召回等；不参与持久化/压缩/兜底裁剪） =====
   const ephemeral = opts.ephemeralMessages ?? [];
 
   // ===== 3. 溢出兜底裁剪（压缩失败/关闭时的最后防线；ephemeral 不参与裁剪） =====
+  // 同时受 token 预算与请求体字节预算约束：图片 base64 对 token 估算不可见，
+  // 只靠 token 预算会漏掉「字节已超限但 token 看起来正常」的图片型溢出（413 根因）。
   let tailDropped = 0;
   let windowed = prepared;
-  if (opts.budgetTokens !== undefined) {
+  if (opts.budgetTokens !== undefined || opts.budgetBytes !== undefined) {
     const systemTokens = estimateTextTokens(staticSystemPrompt);
     const ephemeralTokens = ephemeral.reduce((s, m) => s + estimateMessageTokens(m), 0);
-    const budget = opts.budgetTokens - systemTokens - ephemeralTokens - 500; // 500 token 余量
+    const tokenBudget =
+      opts.budgetTokens !== undefined
+        ? opts.budgetTokens - systemTokens - ephemeralTokens - 500 // 500 token 余量
+        : Number.POSITIVE_INFINITY;
+
+    const systemBytes = estimateTextBytes(staticSystemPrompt);
+    const ephemeralBytes = ephemeral.reduce((s, m) => s + messageBytes(m), 0);
+    const byteBudget =
+      opts.budgetBytes !== undefined
+        ? opts.budgetBytes - systemBytes - ephemeralBytes - 2048 // 2 KiB 余量（JSON 结构开销）
+        : Number.POSITIVE_INFINITY;
+
     const anchors = prepared.filter(isAnchorMessage);
     const anchorTokens = anchors.reduce((s, m) => s + estimateMessageTokens(m), 0);
+    const anchorBytes = anchors.reduce((s, m) => s + messageBytes(m), 0);
     const rest = prepared.filter(m => !isAnchorMessage(m));
 
     // 保持相对顺序：锚定消息 + 从后往前保留的普通消息
     const keptRest: ContextMessage[] = [];
-    let used = budget - anchorTokens;
+    let usedTokens = tokenBudget - anchorTokens;
+    let usedBytes = byteBudget - anchorBytes;
     for (let i = rest.length - 1; i >= 0; i--) {
       const t = estimateMessageTokens(rest[i]);
-      if (used - t < 0 && keptRest.length >= 1) break;
+      const b = messageBytes(rest[i]);
+      // 至少保留 1 条普通消息（避免空尾部）；否则任一预算超限即停止
+      if ((usedTokens - t < 0 || usedBytes - b < 0) && keptRest.length >= 1) break;
       keptRest.unshift(rest[i]);
-      used -= t;
+      usedTokens -= t;
+      usedBytes -= b;
     }
     tailDropped = rest.length - keptRest.length;
 
@@ -192,9 +294,15 @@ export function buildRequestView(
   // ===== 5. 转 UnifiedMessage =====
   // 多模态图片在此实时读盘编码（base64 不落库，仅存在于本次请求视图）；
   // user 消息取附件路径，tool 消息取工具结果携带的图片路径。
+  // 仅「尚未发送过」的消息会真正内联图片；已发送过的消息在步骤 2a 已降级为占位符（无路径）。
+  const imageMessagesToMark: ContextMessage[] = [];
   const conversation: UnifiedMessage[] = full.map(m => {
-    const paths = m.role === 'user' ? m.attachments ?? [] : m.role === 'tool' ? m.images ?? [] : [];
+    const paths = messageImagePaths(m);
     const { images, skipped } = readImages(paths);
+    if (images.length > 0) {
+      // 回填原始 session 消息（视图对象可能被复制，标记必须落在原始对象上）
+      imageMessagesToMark.push(originalOf.get(m) ?? m);
+    }
     const content =
       skipped.length > 0 ? `${m.content}\n\n[图片过大已跳过: ${skipped.join(', ')}]` : m.content;
     return {
@@ -227,6 +335,10 @@ export function buildRequestView(
     else historyTokens += t;
   }
 
+  // ===== 7. 请求体字节估算（文本 UTF-8 + 图片 base64；system 前缀计入） =====
+  const bodyBytes =
+    estimateTextBytes(staticSystemPrompt) + full.reduce((s, m) => s + messageBytes(m), 0);
+
   return {
     messages: [{ role: 'system', content: staticSystemPrompt }, ...conversation],
     breakdown: {
@@ -239,5 +351,7 @@ export function buildRequestView(
       total: systemTokens + envTokens + summaryTokens + historyTokens + rulesTokens + memoryTokens,
     },
     tailDropped,
+    bytes: bodyBytes,
+    imageMessagesToMark,
   };
 }

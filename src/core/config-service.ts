@@ -277,6 +277,14 @@ const contextSchema = z.object({
       l1MaxEntries: z.number().int().min(1).max(100).default(20),
     })
     .default({}),
+  // 单次请求体字节上限（256 KiB–64 MiB；默认 8 MiB）。
+  // 旧 config.json 缺该字段时由 .default() 自动补全；热更新经 config:changed 生效。
+  maxRequestBytes: z
+    .number()
+    .int()
+    .min(262144)
+    .max(67108864)
+    .default(8 * 1024 * 1024),
 });
 
 const appConfigSchema = z.object({
@@ -415,6 +423,7 @@ export function defaultAppConfig(): AppConfig {
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory },
+      maxRequestBytes: DEFAULT_CONTEXT_CONFIG.maxRequestBytes,
     },
     safety: {
       defaultMode: 'ask',

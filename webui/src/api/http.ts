@@ -665,12 +665,12 @@ export const api = {
     ),
 
   // ==========================================================================
-  // 文件系统（前端文件夹选择器：drives/list/suggest-paths；附件：原生文件对话框）
+  // 文件系统（前端文件夹/文件选择器：drives/list/suggest-paths；附件：解析已选路径 + 粘贴落盘）
   // ==========================================================================
-  /** 原生多文件选择对话框（附件"纯路径引用"数据源；后端自动授权父目录进 filesys roots） */
-  pickFiles: () =>
-    request<{ files: PickedFile[]; grantedRoots?: string[] }>('POST', '/api/filesystem/pick-file'),
-  /** 粘贴图片落盘：base64 → 本地附件文件，返回绝对路径（后端自动授权 ~/.moss/agent/attachments） */
+  /** 解析前端内建选择器已选路径为附件条目（后端 stat + 自动授权父目录进 filesys roots） */
+  resolvePaths: (paths: string[]) =>
+    request<{ files: PickedFile[]; grantedRoots?: string[] }>('POST', '/api/filesystem/resolve-paths', { paths }),
+  /** 粘贴附件落盘（图片/文件）：base64 → 本地附件文件，返回绝对路径（后端自动授权 ~/.moss/agent/attachments） */
   saveAttachment: (payload: { name: string; dataBase64: string }) =>
     request<{ file: PickedFile; grantedRoots?: string[] }>(
       'POST',
