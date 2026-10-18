@@ -79,6 +79,25 @@ function getAuthToken(): string {
   return localStorage.getItem('moss-token') ?? '';
 }
 
+/** 远程登录页逃生路径（与后端 guard.ts 的 LOGIN_GATE_PATH 一致）：
+ *  `/api/` 前缀在 PWA Service Worker 的导航放行名单内，故即使当前页面来自
+ *  SW 缓存的 SPA 外壳，跳到这里也能稳定拿到服务端登录页。 */
+const REMOTE_GATE_PATH = '/api/remote-gate';
+
+/** 远程会话失效（401）时交回服务端登录页。仅顶层窗口 + 非回环主机，避免影响本机桌面。 */
+function redirectToRemoteGate(): void {
+  try {
+    if (typeof window === 'undefined') return;
+    if (window.top !== window.self) return;
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return;
+    if (window.location.pathname === REMOTE_GATE_PATH) return;
+    window.location.replace(REMOTE_GATE_PATH);
+  } catch {
+    // 跳转不可用（跨源 iframe 等）时忽略，不影响原错误抛出
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -93,6 +112,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
 
   if (!resp.ok) {
+    if (resp.status === 401) redirectToRemoteGate();
     const text = await resp.text();
     let msg = text;
     try {

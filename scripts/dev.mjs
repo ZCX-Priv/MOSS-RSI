@@ -3,10 +3,11 @@
 // 使用：node scripts/dev.mjs
 //
 // - 后端：bun run --watch src/main.ts start --foreground --log-level debug
-//   （文件改动自动重启；注入 MOSS_DEV=1 → 后端强制仅本机（回环）绑定）
+//   （文件改动自动重启；注入 MOSS_DEV=1 → 默认仅本机（回环）绑定；开启远程访问后允许 0.0.0.0）
 // - 前端：vite（3000 端口，代理 /api 与 /ws 到后端 7766；仅绑 127.0.0.1，不对局域网开放）
 //
-// dev 仅本机可达：127.0.0.1 / localhost；局域网不可达（含 remote.enabled=true 的情况）。
+// dev 默认仅本机可达：127.0.0.1 / localhost。开启「远程访问」后，后端会绑定 0.0.0.0，
+// 局域网手机可访问后端端口（页面为 dist/webui 构建产物；前端 Vite 仍仅本机）。
 //
 // Ctrl+C 优雅退出，关闭所有子进程。
 
@@ -364,7 +365,7 @@ async function main() {
   console.log(' UI: http://127.0.0.1:3000');
   console.log('  Tip: 用 "node scripts/dev.mjs" 启动可 0 弹窗（npm run dev 顶层无法消除）');
   console.log('  Tip: 若日志无 "using bun" 行，说明还在跑旧版，请重启 dev');
-  console.log('  Note: dev 仅本机可达（127.0.0.1 / localhost），不对局域网开放');
+  console.log('  Note: dev 默认仅本机；开启远程访问后后端绑 0.0.0.0（手机可访问，页面为 dist 构建产物）');
   console.log('=========================================');
   startBackend();
   log('dev', 'Waiting for backend to be ready...');

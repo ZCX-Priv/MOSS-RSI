@@ -27,6 +27,40 @@ const TUNNEL_HOST_RE = /trycloudflare\.com$/i;
 /** 登录表单端点 */
 const LOGIN_PATH = '/remote/login';
 
+/**
+ * 登录页公开资源白名单：无敏感信息，允许未认证的远程客户端获取，
+ * 供登录页渲染品牌图标（否则会被门卫按非 HTML 请求拦截为 401/403）。
+ * 仅精确路径 + GET/HEAD 放行，静态层自身已做 root 内越界校验。
+ */
+const PUBLIC_LOGIN_ASSETS = new Set<string>(['/MOSS.png']);
+
+/** 是否为放行的登录页公开资源请求。 */
+function isPublicLoginAsset(ctx: GuardRequestContext): boolean {
+  const m = ctx.method.toUpperCase();
+  if (m !== 'GET' && m !== 'HEAD') return false;
+  const path = new URL(ctx.url, 'http://x').pathname;
+  return PUBLIC_LOGIN_ASSETS.has(path);
+}
+
+/**
+ * 登录页「逃生路径」：`/api/` 前缀在 PWA Service Worker 的导航放行名单
+ * （workbox navigateFallbackDenylist）内，故该路径对已安装的 SW 也直接走网络，
+ * 可在 HTTPS/PWA 源被 SW 顶掉（返回缓存 SPA 外壳）时稳定拿到服务端登录页。
+ */
+const LOGIN_GATE_PATH = '/api/remote-gate';
+
+/** 是否为登录页逃生路径请求（仅 GET/HEAD + 精确路径）。 */
+function isLoginGatePath(ctx: GuardRequestContext): boolean {
+  const m = ctx.method.toUpperCase();
+  if (m !== 'GET' && m !== 'HEAD') return false;
+  return new URL(ctx.url, 'http://x').pathname === LOGIN_GATE_PATH;
+}
+
+/** 已认证访问逃生路径 → 302 回首页。 */
+function redirectHomeResponse(): GuardResponse {
+  return { status: 302, headers: { location: '/', 'cache-control': 'no-store' }, body: '' };
+}
+
 /** 判定地址是否 loopback（兼容 IPv6-mapped 格式 ::ffff:127.0.0.1） */
 export function isLoopbackAddress(addr: string): boolean {
   let ip = String(addr ?? '').trim().toLowerCase();
@@ -109,9 +143,30 @@ export class RemoteGuard implements RequestGuard {
     const remote = this.config.getAppConfig().remote;
     if (!remote.enabled) return { action: 'pass' };
 
+    // 登录页公开资源（品牌图标）：隧道/局域网未认证时也要能加载
+    if (isPublicLoginAsset(ctx)) return { action: 'pass' };
+
     const host = ctx.headers['host'] ?? '';
     const tunnelHost = isTunnelHost(host);
     const loopbackClient = isLoopbackAddress(ctx.clientIp);
+
+    // ---- 登录页逃生路径（远程客户端专用；本机回环直连交给路由处理）----
+    // 已认证 → 302 回首页；未认证且为 HTML 导航 → 直接返回登录页；
+    // 其余（局域网关闭等）不干预，落到下方原有分支。
+    if (isLoginGatePath(ctx) && !(loopbackClient && !tunnelHost)) {
+      const scope: RemoteScope = tunnelHost ? 'public' : 'lan';
+      const authed =
+        scope === 'lan'
+          ? remote.lanEnabled && (!remote.lanPasswordEnabled || this.auth.checkCookie(ctx.headers['cookie'] ?? '', 'lan'))
+          : this.auth.checkCookie(ctx.headers['cookie'] ?? '', 'public');
+      if (authed) return { action: 'respond', response: redirectHomeResponse() };
+      if (isHtmlRequest(ctx) && (scope === 'public' || remote.lanEnabled)) {
+        return {
+          action: 'respond',
+          response: htmlResponse(loginPageHtml({ error: false, isPublic: scope === 'public' })),
+        };
+      }
+    }
 
     // ---- 公网（隧道域名；cloudflared 回连是 loopback 客户端 + 隧道 Host，伪造直连是非 loopback）----
     if (tunnelHost) {

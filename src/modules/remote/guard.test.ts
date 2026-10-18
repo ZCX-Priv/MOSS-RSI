@@ -237,6 +237,92 @@ describe('RemoteGuard 判定矩阵', () => {
     expect(verdict.action).toBe('pass');
   });
 
+  test('登录页公开资源 /MOSS.png：未认证也放行（GET）；POST 或其他路径不放行', () => {
+    // 局域网 + 密码开，未认证 → 图标放行
+    const lan = guard.precheck(ctx({
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/MOSS.png',
+      headers: { host: '192.168.1.100:7766' },
+    }));
+    expect(lan.action).toBe('pass');
+    // 公网（隧道 Host）未认证 → 图标放行
+    const pub = guard.precheck(ctx({
+      clientIp: '::ffff:127.0.0.1',
+      host: 'abc.trycloudflare.com',
+      url: '/MOSS.png',
+      headers: { host: 'abc.trycloudflare.com' },
+    }));
+    expect(pub.action).toBe('pass');
+    // 非 GET/HEAD → 不因白名单放行
+    const post = guard.precheck(ctx({
+      method: 'POST',
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/MOSS.png',
+      headers: { host: '192.168.1.100:7766' },
+    }));
+    expect(post.action).not.toBe('pass');
+    // 其他路径 → 不因白名单放行
+    const other = guard.precheck(ctx({
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/other.png',
+      headers: { host: '192.168.1.100:7766' },
+    }));
+    expect(other.action).not.toBe('pass');
+  });
+
+  test('登录页逃生路径 /api/remote-gate：未认证返回登录页；已认证 302 回首页', () => {
+    // 局域网未认证 → 直接返回登录页
+    const lanHtml = guard.precheck(ctx({
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/api/remote-gate',
+      headers: { host: '192.168.1.100:7766', accept: 'text/html' },
+    }));
+    expect(lanHtml.action).toBe('respond');
+    if (lanHtml.action === 'respond') {
+      expect(lanHtml.response.status).toBe(200);
+      expect(lanHtml.response.body).toContain('remote/login');
+    }
+    // 公网（隧道 Host）未认证 → 直接返回登录页
+    const pubHtml = guard.precheck(ctx({
+      clientIp: '::ffff:127.0.0.1',
+      host: 'abc.trycloudflare.com',
+      url: '/api/remote-gate',
+      headers: { host: 'abc.trycloudflare.com', accept: 'text/html' },
+    }));
+    expect(pubHtml.action).toBe('respond');
+    if (pubHtml.action === 'respond') {
+      expect(pubHtml.response.status).toBe(200);
+      expect(pubHtml.response.body).toContain('remote/login');
+    }
+    // 已认证（lan cookie）→ 302 回首页
+    const cookie = `${REMOTE_COOKIE}=${auth.cookieValue('lan')}`;
+    const authed = guard.precheck(ctx({
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/api/remote-gate',
+      headers: { host: '192.168.1.100:7766', accept: 'text/html', cookie },
+    }));
+    expect(authed.action).toBe('respond');
+    if (authed.action === 'respond') {
+      expect(authed.response.status).toBe(302);
+      expect(authed.response.headers['location']).toBe('/');
+    }
+    // POST 不特殊处理：返回 401 JSON 而非登录页
+    const post = guard.precheck(ctx({
+      method: 'POST',
+      clientIp: '192.168.1.5',
+      host: '192.168.1.100:7766',
+      url: '/api/remote-gate',
+      headers: { host: '192.168.1.100:7766' },
+    }));
+    expect(post.action).toBe('respond');
+    if (post.action === 'respond') expect(post.response.body).not.toContain('remote/login');
+  });
+
   test('局域网 + 密码开 + 有效 lan cookie → pass-authenticated', () => {
     const cookie = `${REMOTE_COOKIE}=${auth.cookieValue('lan')}`;
     const verdict = guard.precheck(ctx({

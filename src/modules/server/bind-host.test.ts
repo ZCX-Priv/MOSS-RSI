@@ -1,7 +1,7 @@
 // src/modules/server/bind-host.test.ts
-// 后端绑定地址解析测试：dev 模式强制回环，防止把开发环境暴露到局域网。
+// 后端绑定地址解析测试：dev 默认回环（仅本机），开启远程访问后允许 0.0.0.0。
 //
-// 判定优先级：dev（MOSS_DEV=1）→ remote.enabled（0.0.0.0）→ bindLocalhostOnly → server.host。
+// 判定优先级：dev && !remote → 127.0.0.1 → remote.enabled → 0.0.0.0 → bindLocalhostOnly → server.host。
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { computeBindHost } from './index';
@@ -28,16 +28,21 @@ describe('computeBindHost', () => {
     else process.env.MOSS_DEV = saved;
   });
 
-  test('dev 模式覆盖 remote.enabled：即使远程开启也强制回环', () => {
+  test('dev + 远程开启 → 0.0.0.0（局域网可达）', () => {
     process.env.MOSS_DEV = '1';
-    expect(computeBindHost(cfg({ remoteEnabled: true, bindLocalhostOnly: true }))).toBe('127.0.0.1');
+    expect(computeBindHost(cfg({ remoteEnabled: true, bindLocalhostOnly: true }))).toBe('0.0.0.0');
   });
 
-  test('dev 模式覆盖自定义 host（0.0.0.0 也强制回环）', () => {
+  test('dev + 未开远程 + 自定义 host 0.0.0.0 → 仍强制回环', () => {
     process.env.MOSS_DEV = '1';
     expect(
       computeBindHost(cfg({ remoteEnabled: false, bindLocalhostOnly: false, host: '0.0.0.0' })),
     ).toBe('127.0.0.1');
+  });
+
+  test('dev + 未开远程 + bindLocalhostOnly → 回环（localhost / 127.0.0.1 均可用）', () => {
+    process.env.MOSS_DEV = '1';
+    expect(computeBindHost(cfg({ remoteEnabled: false, bindLocalhostOnly: true }))).toBe('127.0.0.1');
   });
 
   test('非 dev + remote.enabled：绑定 0.0.0.0', () => {

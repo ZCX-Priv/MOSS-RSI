@@ -119,7 +119,7 @@ function migrateLegacyDataDir(oldDir: string, newDir: string): void {
 
 /**
  * 是否开发模式：scripts/dev.mjs 以 MOSS_DEV=1 启动后端时为 true。
- * 开发模式强制仅本机（回环）绑定，避免把 dev 环境暴露到局域网。
+ * 开发模式默认仅本机（回环）绑定；仅在开启远程访问（remote.enabled）时允许绑定 0.0.0.0。
  */
 export function isDevMode(): boolean {
   return process.env.MOSS_DEV === '1';

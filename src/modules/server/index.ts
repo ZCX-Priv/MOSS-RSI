@@ -524,7 +524,7 @@ class ServerModule implements Module {
     const host = computeBindHost(cfg);
 
     if (isDevMode() && cfg.remote?.enabled) {
-      this.ctx.logger.info('dev mode: forcing loopback bind (remote access is local-only in dev)', { host });
+      this.ctx.logger.info('dev mode: remote access enabled — bound to 0.0.0.0 (LAN reachable)', { host });
     }
 
     if (cfg.server.autoPort) {
@@ -565,8 +565,6 @@ class ServerModule implements Module {
    * 端口锁定（禁止 autoPort 漂移——手机端正拿着 URL 访问）；失败时按原 hostname 回滚。
    */
   async rebind(hostname: string): Promise<void> {
-    // dev 模式：任何热重绑都停在回环，禁止切到 0.0.0.0
-    if (isDevMode()) hostname = '127.0.0.1';
     // 并发 rebind 串行化（开关快速连点）
     if (this.rebinding) await this.rebinding;
     this.rebinding = (async (): Promise<void> => {
@@ -739,10 +737,10 @@ class ServerModule implements Module {
   }
 }
 
-/** 计算绑定地址：dev 模式强制回环（仅本机）→ remote.enabled（0.0.0.0）→ bindLocalhostOnly → server.host。 */
+/** 计算绑定地址：dev 未开远程回环（仅本机）→ remote.enabled（0.0.0.0）→ bindLocalhostOnly → server.host。 */
 export function computeBindHost(cfg: { remote?: { enabled?: boolean }; security: { bindLocalhostOnly: boolean }; server: { host: string } }): string {
-  // 开发模式：强制仅本机，杜绝把 dev 暴露到网络（优先于 remote.enabled）
-  if (isDevMode()) return '127.0.0.1';
+  // 开发模式：默认强制仅本机（localhost / 127.0.0.1）；但开启远程访问后允许 0.0.0.0，供局域网手机访问
+  if (isDevMode() && !cfg.remote?.enabled) return '127.0.0.1';
   if (cfg.remote?.enabled) return '0.0.0.0';
   return cfg.security.bindLocalhostOnly ? '127.0.0.1' : cfg.server.host;
 }

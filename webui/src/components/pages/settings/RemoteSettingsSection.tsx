@@ -110,7 +110,12 @@ function PinManager({ scope, pin, passwordEnabled, supportsDisable = false, cust
       return;
     }
     void run(async () => {
-      await api.setRemoteLanPassword('custom', value);
+      // 严格分域：公网密码走隧道接口，局域网密码走局域网接口
+      if (scope === 'public') {
+        await api.setRemoteTunnelPassword('custom', value);
+      } else {
+        await api.setRemoteLanPassword('custom', value);
+      }
       toast.success(t('settings.remote.pin.customized'));
       setEditing(false);
       setValue('');

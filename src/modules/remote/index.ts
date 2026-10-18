@@ -8,9 +8,9 @@
 // - 远程总开关切换 → 配置更新 + 延迟热重绑（server.rebind；响应先发出，前端弹窗轮询 health）
 
 import { t } from '../../core/i18n';
-import { isDevMode } from '../../core/env';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
+import { computeBindHost } from '../server/index';
 import type { ServerInstance } from '../server/types';
 import type { HttpRequest, HttpResponse, Route } from '../server/types';
 import { RemoteAuth, isValidPin } from './auth';
@@ -118,14 +118,8 @@ class RemoteModule implements Module {
       if (!enabled) {
         this.service.stopTunnel();
       }
-      // dev 模式：remote 开关不改变绑定（始终回环），报告与实际一致
-      const dev = isDevMode();
-      const hostname = dev
-        ? '127.0.0.1'
-        : (enabled ? '0.0.0.0' : (cfg.security.bindLocalhostOnly ? '127.0.0.1' : cfg.server.host));
-      if (dev && enabled) {
-        this.ctx.logger.warn('dev mode: remote access stays loopback-only');
-      }
+      // 绑定规则与启动时同源（computeBindHost）：dev 未开远程→回环；开启→0.0.0.0
+      const hostname = computeBindHost({ remote: { enabled }, security: cfg.security, server: cfg.server });
       this.scheduleRebind(hostname);
       this.ctx.logger.info(t(enabled ? 'remote.enabled' : 'remote.disabled'), { hostname });
       return { status: 200, body: { rebound: true, enabled, hostname } };
