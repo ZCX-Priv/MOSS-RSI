@@ -17,6 +17,17 @@ export const md = new MarkdownIt({
   breaks: true,
 });
 
+// markdown-it 默认 validateLink 禁用 file: 等本地 scheme → [名](file:///…) 会退化为纯文本。
+// 放行 file:（本地文件引用）；仍拦截 javascript:/vbscript:，并保留 data:image 白名单。
+const BAD_PROTO_RE = /^(vbscript|javascript|data):/i;
+const GOOD_DATA_RE = /^data:image\/(gif|png|jpeg|webp|svg\+xml);/i;
+md.validateLink = (url: string): boolean => {
+  const str = url.trim().toLowerCase();
+  if (!BAD_PROTO_RE.test(str)) return true; // http(s)/mailto/相对/锚点等一律放行
+  if (GOOD_DATA_RE.test(str)) return true; // 内联图片 data URI 保持默认放行
+  return str.startsWith('file:'); // 仅额外放行本地文件引用
+};
+
 export type Token = ReturnType<typeof md.parse>[number];
 export type InlineToken = NonNullable<Token['children']>[number];
 
@@ -268,7 +279,99 @@ md.core.ruler.push('inline_specials', (state) => {
   walk(state.tokens);
 });
 
+// ============================================================================
+// 链接目标空白转义：markdown-it 的目标解析不允许裸空白 →
+// [名](file:///a b.ts) 会退化为源文本。此处保守地把「文件类」目标内的空白转义为百分号编码。
+// ============================================================================
+
+/** 文件类链接目标前缀：file://、盘符（C:\ C:/）、/ 根相对、./ ../ 相对 */
+const FILE_LIKE_PREFIX_RE = /^(?:file:\/\/|[A-Za-z]:[\\/]|\.{1,2}\/|\/)/;
+
+/**
+ * 把「文件类」链接目标内的裸空白转义为百分号编码。
+ * 保守策略：仅处理 ](…) 目标且以文件类前缀开头；跳过代码围栏、行内代码；目标未闭合则原样返回。
+ */
+function encodeSpacesInLinkDestinations(text: string): string {
+  const lines = text.split('\n');
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    lines[i] = encodeLineDestinations(line);
+  }
+  return lines.join('\n');
+}
+
+/** 单行内：逐字符扫描，跳过行内代码（反引号串配对），对 ]( 后的文件类目标转义空白 */
+function encodeLineDestinations(line: string): string {
+  const n = line.length;
+  let out = '';
+  let i = 0;
+  let codeDelim = ''; // 行内代码定界（反引号串；成对出现即进出）
+  while (i < n) {
+    const ch = line[i];
+    if (ch === '`') {
+      let j = i;
+      while (j < n && line[j] === '`') j++;
+      const run = line.slice(i, j);
+      if (codeDelim === '') codeDelim = run;
+      else if (codeDelim === run) codeDelim = '';
+      out += run;
+      i = j;
+      continue;
+    }
+    if (codeDelim === '' && ch === ']' && line[i + 1] === '(') {
+      const dest = tryEncodeFileDest(line, i + 2);
+      if (dest) {
+        out += `](${dest.value}`;
+        i = dest.end; // dest.end 指向闭合 ')'
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * 从 start（'](' 之后）解析文件类目标：
+ * 返回 { value: 转义后目标, end: 闭合 ')' 的下标 }；非文件类/未闭合/`<...>` 包裹返回 null。
+ */
+function tryEncodeFileDest(line: string, start: number): { value: string; end: number } | null {
+  const n = line.length;
+  let s = start;
+  while (s < n && /\s/.test(line[s])) s++; // 目标前导空白（markdown 允许）
+  if (line[s] === '<') return null; // <...> 包裹的合法目标允许空白 → 不处理
+  if (!FILE_LIKE_PREFIX_RE.test(line.slice(s))) return null;
+
+  let depth = 1;
+  let out = '';
+  let i = s;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === '\\' && i + 1 < n) {
+      out += ch + line[i + 1]; // 保留转义，不编码
+      i += 2;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) break;
+    }
+    out += /\s/.test(ch) ? encodeURIComponent(ch) : ch;
+    i++;
+  }
+  if (depth !== 0) return null; // 未闭合 → 放弃（交回原样）
+  return { value: out, end: i };
+}
+
 /** 解析块文本（MarkdownBlock 调用；env 未使用传空对象） */
 export function parseBlock(raw: string): Token[] {
-  return md.parse(raw, {});
+  return md.parse(encodeSpacesInLinkDestinations(raw), {});
 }
