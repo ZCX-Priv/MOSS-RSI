@@ -552,7 +552,7 @@ export class McpTaskRegistry {
           this.pushEvent(record, {
             at: Date.now(),
             kind: 'notice',
-            text: `ask cancelled: externally dispatched tasks have no user channel${resolved ? '' : ' (no pending ask matched)'}${event.question ? ` — ${truncate(event.question, 160)}` : ''}`,
+            text: `ask cancelled: externally dispatched tasks have no user channel${resolved ? '' : ' (no pending ask matched)'}${event.questions.length ? ` — ${truncate(event.questions.map((q) => q.question).join(' / '), 160)}` : ''}`,
           });
           break;
         }

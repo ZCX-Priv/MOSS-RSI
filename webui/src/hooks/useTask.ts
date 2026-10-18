@@ -264,7 +264,7 @@ export function useTask() {
       wsClient.send({
         type: 'tool.ask.reply',
         sessionId: ask.sessionId,
-        payload: { toolCallId, action: outcome.action, answer: outcome.answer },
+        payload: { toolCallId, action: outcome.action, answers: outcome.answers },
       });
       removePendingAsk(toolCallId);
     },

@@ -734,7 +734,7 @@ export class WsHandler {
         getPendingAsks?: (sessionId: string) => Array<{
           toolCallId: string;
           sessionId: string;
-          payload: { question: string; answerType?: string; options?: Array<{ value: string; label: string }>; defaultAnswer?: string };
+          payload: { questions: Array<{ id: string; question: string; answerType?: string; options?: Array<{ value: string; label: string; description?: string }>; defaultAnswer?: string; formSchema?: Record<string, unknown>; attachments?: string[] }> };
         }>;
         getPendingConfirms?: (sessionId: string) => Array<{
           toolCallId: string;
@@ -752,10 +752,7 @@ export class WsHandler {
             type: 'ask',
             sessionId: ask.sessionId,
             toolCallId: ask.toolCallId,
-            question: ask.payload.question,
-            answerType: ask.payload.answerType,
-            options: ask.payload.options,
-            defaultAnswer: ask.payload.defaultAnswer,
+            questions: ask.payload.questions,
           },
         });
       }
@@ -788,25 +785,40 @@ export class WsHandler {
     const payload = (msg.payload ?? {}) as {
       toolCallId?: string;
       action?: 'accept' | 'cancel';
+      /** 逐题回答（answers[i] 与 toolCall 的 questions[i] 按下标对齐） */
+      answers?: Array<{
+        selectedValues?: string[];
+        selectedLabels?: string[];
+        editedLabels?: Record<string, string>;
+        otherText?: string;
+        text?: string;
+        form?: Record<string, string | number | boolean>;
+        attachments?: string[];
+      }>;
+      /** @deprecated 单题兼容：旧前端只回传 answer */
       answer?: {
         selectedValues?: string[];
         selectedLabels?: string[];
         editedLabels?: Record<string, string>;
         otherText?: string;
         text?: string;
+        form?: Record<string, string | number | boolean>;
+        attachments?: string[];
       };
     };
     if (!payload.toolCallId || (payload.action !== 'accept' && payload.action !== 'cancel')) {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TOOLCALLID_ANSWER_REQUIRED } });
       return;
     }
-    if (payload.action === 'accept' && !payload.answer) {
+    // 兼容旧前端：仅回传 answer → 归一化为 answers[0]
+    const answers = payload.answers ?? (payload.answer ? [payload.answer] : undefined);
+    if (payload.action === 'accept' && (!answers || answers.length === 0)) {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TOOLCALLID_ANSWER_REQUIRED } });
       return;
     }
     const ok = agent.resolveAsk(payload.toolCallId, {
       action: payload.action,
-      ...(payload.action === 'accept' && payload.answer ? { answer: payload.answer } : {}),
+      ...(payload.action === 'accept' && answers ? { answers } : {}),
     });
     if (!ok) {
       state.conn.send({

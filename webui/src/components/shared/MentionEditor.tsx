@@ -35,6 +35,7 @@ import {
   tokenWireText,
   type ComposerToken,
   type MentionItem,
+  type MentionKind,
   type MentionLookups,
   type TriggerMatch,
 } from './mention-data';
@@ -387,6 +388,8 @@ interface MentionEditorProps {
   lookups: MentionLookups;
   sendShortcut: string;
   onSend: () => void;
+  /** 允许触发的类型（缺省全部：command/agent/file）；用于在受限场景禁用某类触发（如 ask 卡片禁用 agent） */
+  allowedTriggers?: MentionKind[];
   className?: string;
 }
 
@@ -406,6 +409,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     lookups,
     sendShortcut,
     onSend,
+    allowedTriggers,
     className,
   },
   ref,
@@ -430,6 +434,8 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   const onSelectRef = useRef(onItemSelected);
   const onSendRef = useRef(onSend);
   const sendShortcutRef = useRef(sendShortcut);
+  /** 允许触发的类型白名单（缺省全部）；用 ref 防止 recomputeTrigger 闭包陈旧 */
+  const allowedTriggersRef = useRef<MentionKind[] | undefined>(allowedTriggers);
 
   onChangeRef.current = onChange;
   onTriggerChangeRef.current = onTriggerChange;
@@ -443,6 +449,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   onSelectRef.current = onItemSelected;
   onSendRef.current = onSend;
   sendShortcutRef.current = sendShortcut;
+  allowedTriggersRef.current = allowedTriggers;
 
   /** chip 图标 portal 目标（宿主元素 + 对应 token） */
   const [iconHosts, setIconHosts] = useState<IconHost[]>([]);
@@ -531,7 +538,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       return;
     }
     const match = detectTrigger(serializeRoot(root, 'placeholder'), caret);
-    if (!match) {
+    if (!match || (allowedTriggersRef.current && !allowedTriggersRef.current.includes(match.kind))) {
       suppressedTokenRef.current = null;
       onTriggerChangeRef.current(null);
       return;

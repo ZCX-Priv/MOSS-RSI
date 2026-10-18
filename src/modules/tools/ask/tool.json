@@ -1,7 +1,7 @@
 {
   "name": "ask",
-  "description": "向用户提问并阻塞等待回复。当需要澄清、决策或仅用户能提供的信息时使用。支持四种回答类型：answerType=\"text\" 自由文本（缺省）；\"single\" 单选（需提供 2-6 个 options）；\"multi\" 多选（需提供 options）；\"boolean\" 是/否。前端始终会附加「其他」自由输入项，用户也可能取消提问。返回格式固定为「问题 + 用户回答」，便于完整理解上下文。等待无默认超时。",
-  "description_en": "Ask the user a question and block until the reply arrives. Use when you need clarification, a decision, or information only the user can provide. Four answer types: answerType=\"text\" free text (default); \"single\" single choice (requires 2-6 options); \"multi\" multiple choice (requires options); \"boolean\" yes/no. The frontend always appends an \"Other\" free-input option, and the user may cancel the question. Returns a fixed \"question + user answer\" format for full context. No default timeout while waiting.",
+  "description": "向用户提问并阻塞等待回复。当需要澄清、决策或仅用户能提供的信息时使用。可在一次调用里提出多个问题（questions 数组，最多 6 题），前端会以向导卡片逐题呈现；也可用 question 单题兼容。每题支持回答类型：answerType=\"text\" 自由文本（缺省）；\"single\" 单选（需提供 2-6 个 options）；\"multi\" 多选（需提供 options）；\"boolean\" 是/否；\"form\" 动态表单（需提供 formSchema）。可用 attachments 给出题面附件的绝对路径（前端渲染为附件卡片）。前端始终会附加「其他」自由输入项，用户可粘贴/选择文件作为回答附件，也可能取消提问。返回格式为「问题 + 用户回答（+ 附件路径）」，便于完整理解上下文。等待无默认超时。",
+  "description_en": "Ask the user a question and block until the reply arrives. Use when you need clarification, a decision, or information only the user can provide. You may ask multiple questions in one call (questions array, up to 6); the frontend presents them as a wizard card. question is kept for single-question compatibility. Per-question answer types: answerType=\"text\" free text (default); \"single\" single choice (requires 2-6 options); \"multi\" multiple choice (requires options); \"boolean\" yes/no; \"form\" dynamic form (requires formSchema). Use attachments to pass absolute paths of question-side files (rendered as attachment cards). The frontend always appends an \"Other\" free-input option; the user may attach pasted/selected files to the answer and may cancel. Returns a fixed \"question + user answer (+ attachment paths)\" format for full context. No default timeout while waiting.",
   "icon": "help-circle",
   "annotations": {
     "readOnlyHint": true,
@@ -10,10 +10,98 @@
   "inputSchema": {
     "type": "object",
     "properties": {
+      "questions": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 6,
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "问题标识（可选，缺省按顺序生成 q0/q1…）",
+              "description_en": "Question identifier (optional; defaults to q0/q1… in order)"
+            },
+            "question": {
+              "type": "string",
+              "description": "要向用户提问的问题。请具体且简洁。",
+              "description_en": "The question to ask the user. Be specific and concise."
+            },
+            "answerType": {
+              "type": "string",
+              "enum": [
+                "text",
+                "single",
+                "multi",
+                "boolean",
+                "form"
+              ],
+              "description": "回答类型。text=自由文本（缺省）；single=单选；multi=多选；boolean=是/否；form=动态表单",
+              "description_en": "Answer type. text=free text (default); single=single choice; multi=multiple choice; boolean=yes/no; form=dynamic form"
+            },
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string",
+                    "description": "选项标识（如 \"a\"、\"postgres\"）",
+                    "description_en": "Option identifier (e.g. \"a\", \"postgres\")"
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "选项显示文本",
+                    "description_en": "Option display text"
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "选项补充说明（可选，显示在选项下方的小字）",
+                    "description_en": "Optional option description (shown as small text under the option)"
+                  }
+                },
+                "required": [
+                  "value",
+                  "label"
+                ],
+                "additionalProperties": false
+              },
+              "description": "候选项列表。answerType 为 single/multi 时必填（2-6 项）；前端会自动附加「其他」自由输入项",
+              "description_en": "List of candidate options. Required when answerType is single/multi (2-6 items); the frontend automatically appends an \"Other\" free-input option"
+            },
+            "defaultAnswer": {
+              "type": "string",
+              "description": "预填的默认回答文本（可选，仅 text 类型）",
+              "description_en": "Pre-filled default answer text (optional, text type only)"
+            },
+            "formSchema": {
+              "type": "object",
+              "description": "answerType=form 时的 JSON Schema（顶层 properties：string/number/boolean）",
+              "description_en": "JSON Schema when answerType=form (top-level properties: string/number/boolean)"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "题面附件的文件绝对路径（可选，前端渲染为附件卡片并可预览）",
+              "description_en": "Absolute file paths of question-side attachments (optional; rendered as attachment cards with preview)"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "additionalProperties": false
+        },
+        "description": "一次提问的多个问题（最多 6 题）。与 question 二选一，优先使用本数组。",
+        "description_en": "Multiple questions in one call (max 6). Mutually exclusive with question; this array takes precedence."
+      },
       "question": {
         "type": "string",
-        "description": "要向用户提问的问题。请具体且简洁。",
-        "description_en": "The question to ask the user. Be specific and concise."
+        "description": "【单题兼容用法】要向用户提问的问题。多题请改用 questions 数组。",
+        "description_en": "[Single-question compatibility] The question to ask. Use the questions array for multiple questions."
       },
       "answerType": {
         "type": "string",
@@ -23,8 +111,8 @@
           "multi",
           "boolean"
         ],
-        "description": "回答类型。text=自由文本（缺省）；single=单选；multi=多选；boolean=是/否",
-        "description_en": "Answer type. text=free text (default); single=single choice; multi=multiple choice; boolean=yes/no"
+        "description": "【单题兼容用法】回答类型。text=自由文本（缺省）；single=单选；multi=多选；boolean=是/否",
+        "description_en": "[Single-question compatibility] Answer type. text=free text (default); single=single choice; multi=multiple choice; boolean=yes/no"
       },
       "options": {
         "type": "array",
@@ -50,18 +138,23 @@
           ],
           "additionalProperties": false
         },
-        "description": "候选项列表。answerType 为 single/multi 时必填（2-6 项）；前端会自动附加「其他」自由输入项",
-        "description_en": "List of candidate options. Required when answerType is single/multi (2-6 items); the frontend automatically appends an \"Other\" free-input option"
+        "description": "【单题兼容用法】候选项列表（answerType 为 single/multi 时必填，2-6 项）",
+        "description_en": "[Single-question compatibility] Candidate options (required for single/multi, 2-6 items)"
       },
       "defaultAnswer": {
         "type": "string",
-        "description": "预填的默认回答文本（可选，仅 text 类型）",
-        "description_en": "Pre-filled default answer text (optional, text type only)"
+        "description": "【单题兼容用法】预填的默认回答文本（可选，仅 text 类型）",
+        "description_en": "[Single-question compatibility] Pre-filled default answer text (optional, text type only)"
+      },
+      "attachments": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "【单题兼容用法】题面附件的文件绝对路径（可选）",
+        "description_en": "[Single-question compatibility] Absolute file paths of question-side attachments (optional)"
       }
     },
-    "required": [
-      "question"
-    ],
     "additionalProperties": false
   },
   "config": {

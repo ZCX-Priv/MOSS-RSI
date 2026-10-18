@@ -190,11 +190,7 @@ export function useSessionHistory(
       st.addPendingAsk({
         toolCallId: ask.toolCallId,
         sessionId,
-        question: ask.question,
-        ...(ask.answerType ? { answerType: ask.answerType } : {}),
-        ...(ask.options ? { options: ask.options } : {}),
-        ...(ask.defaultAnswer ? { defaultAnswer: ask.defaultAnswer } : {}),
-        ...(ask.formSchema ? { formSchema: ask.formSchema } : {}),
+        questions: ask.questions,
         createdAt: Date.now(),
       });
     }

@@ -100,6 +100,7 @@ import { useSessionHistory } from '../../hooks/useSessionHistory';
 import { useTabBarScroll } from '../../hooks/useTabBarScroll';
 import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
 import { AskPromptCard } from '../shared/AskPromptCard';
+import { AskAttachmentStrip } from '../shared/AskAttachmentStrip';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
 import { TerminalPanel } from '../shared/TerminalPanel';
 import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
@@ -125,7 +126,7 @@ import {
 import { useTask } from '../../hooks/useTask';
 import { useFileIndex } from '../../hooks/useFileIndex';
 import { api } from '../../api/http';
-import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats } from '../../types/api';
+import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, AskQuestion } from '../../types/api';
 
 // 稳定引用的空数组，避免 useStore 选择器每次返回新 [] 触发 useSyncExternalStore 无限循环
 const EMPTY_MESSAGES: TaskMessage[] = [];
@@ -1724,26 +1725,22 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                     },
                   ]
                 : []),
-              // ask 模块：动态独立分类，仅当存在待回答提问时出现
+              // ask 模块：动态独立分类，仅当存在待回答提问时出现（同一 session 合并为一张多问题向导卡片）
               ...(pendingAsks.filter((a) => a.sessionId === taskId).length > 0
                 ? [
                     {
                       id: 'ask',
                       icon: HelpCircle,
                       title: t('hub.askModule'),
-                      badge: pendingAsks.filter((a) => a.sessionId === taskId).length,
+                      badge: pendingAsks
+                        .filter((a) => a.sessionId === taskId)
+                        .reduce((n, a) => n + a.questions.length, 0),
                       render: () => (
-                        <div className="flex flex-col gap-2.5">
-                          {pendingAsks
-                            .filter((a) => a.sessionId === taskId)
-                            .map((ask) => (
-                              <AskPromptCard
-                                key={ask.toolCallId}
-                                ask={ask}
-                                className="border-0 bg-transparent p-0 shadow-none"
-                              />
-                            ))}
-                        </div>
+                        <AskPromptCard
+                          asks={pendingAsks.filter((a) => a.sessionId === taskId)}
+                          onOpenAttachment={openAttachment}
+                          className="border-0 bg-transparent p-0 shadow-none"
+                        />
                       ),
                     },
                   ]
@@ -2558,7 +2555,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       {message.toolCalls?.some((tc) => tc.name === 'todo') && (message.todoSnapshot ?? todos).length > 0 && (
         <TodoProgressCard todos={message.todoSnapshot ?? todos} variant="inline" />
       )}
-      {/* ask 工具调用 → 渲染为问答卡片（仅已完成、有结果时渲染；进行中的由底部 AskPromptCard 处理） */}
+      {/* ask 工具调用 → 渲染为可折叠问答卡片（默认折叠；仅已完成、有结果时渲染；进行中的由底部 AskPromptCard 处理） */}
       {message.toolCalls?.filter((tc) => tc.name === 'ask').map((tc) => {
         const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         if (!matchedResult) return null; // 只渲染已完成的 ask
@@ -2566,38 +2563,119 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           .filter((c) => c.type === 'text')
           .map((c) => (c.type === 'text' ? c.text : ''))
           .join('\n');
-        // 工具返回固定格式「问题：X\n用户回答：Y」；问题优先取 arguments，回答取"用户回答："之后的部分
-        let replyText = fullText;
-        const answerMarker = fullText.indexOf('用户回答：');
-        if (answerMarker !== -1) {
-          replyText = fullText.slice(answerMarker + '用户回答：'.length);
-        }
-        let questionText = '';
+
+        // 入参：questions 数组（新）或 question 单题（旧，attachments 在顶层）
+        let args: { questions?: AskQuestion[]; question?: string; attachments?: string[] } = {};
         try {
-          questionText = (JSON.parse(tc.arguments || '{}') as { question?: string }).question ?? '';
+          args = JSON.parse(tc.arguments || '{}') as {
+            questions?: AskQuestion[];
+            question?: string;
+            attachments?: string[];
+          };
         } catch {
-          questionText = '';
+          args = {};
         }
+
+        // 结构化展示块（后端 metadata.display；locale 由后端统一，前端直接渲染）
+        const meta = matchedResult.result.metadata as
+          | {
+              action?: 'accept' | 'cancel';
+              questions?: AskQuestion[];
+              display?: Array<{ question: string; answer: string; attachments?: string[] }>;
+            }
+          | undefined;
+
+        // agent 题面附件优先取归一化后的 meta.questions（含 attachments，覆盖新旧入参形态）；
+        // 无 metadata（老会话）才回退 tc.arguments，并把旧扁平顶层 attachments 折进单题
+        const metaQuestions = meta?.questions && meta.questions.length > 0 ? meta.questions : undefined;
+        const argQuestions: AskQuestion[] =
+          Array.isArray(args.questions) && args.questions.length > 0
+            ? args.questions
+            : args.question
+              ? [
+                  {
+                    id: 'q0',
+                    question: args.question,
+                    ...(Array.isArray(args.attachments) && args.attachments.length > 0
+                      ? { attachments: args.attachments }
+                      : {}),
+                  },
+                ]
+              : [];
+        const inputQuestions = metaQuestions ?? argQuestions;
+
+        // display 为空（老会话）时回退：单题从文本解析「问题/用户回答」
+        let display = meta?.display ?? [];
+        if (display.length === 0) {
+          if (meta?.action === 'cancel') {
+            display = inputQuestions.map((q) => ({ question: q.question, answer: '', attachments: [] }));
+          } else {
+            let answerText = fullText;
+            const marker = fullText.indexOf('用户回答：');
+            if (marker !== -1) answerText = fullText.slice(marker + '用户回答：'.length);
+            display = [{ question: inputQuestions[0]?.question ?? '', answer: answerText, attachments: [] }];
+          }
+        }
+        const cancelled = meta?.action === 'cancel';
+        const onOpen = onOpenAttachment ?? (() => {});
+
         return (
-          <div
-            key={tc.id}
-            className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-3 shadow-sm"
-          >
-            <div className="flex items-center gap-1.5">
-              <HelpCircle className="size-3.5 text-primary-strong" />
-              <span className="text-xs font-medium text-foreground">{t('task.askTitle')}</span>
+          <details key={tc.id} className="group rounded-lg border border-border bg-card shadow-sm">
+            <summary className="flex cursor-pointer items-center gap-1.5 rounded-lg p-3">
+              <HelpCircle className="size-3.5 shrink-0 text-primary-strong" />
+              <span className="shrink-0 text-xs font-medium text-foreground">{t('task.askTitle')}</span>
+              {display[0]?.question && (
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {display[0].question}
+                </span>
+              )}
+              {display.length > 1 && (
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {t('task.askQuestionCount', { count: display.length })}
+                </span>
+              )}
+              {cancelled && (
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {t('task.askCancelledInline')}
+                </span>
+              )}
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+            </summary>
+            <div className="flex flex-col gap-2.5 px-3 pb-3">
+              {display.map((blk, i) => {
+                // agent 题面附件（按题序对齐）
+                const agentAttachments = inputQuestions[i]?.attachments ?? [];
+                return (
+                  <div key={i} className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-1">
+                      <div className="text-xs text-muted-foreground/70">{t('task.askQuestion')}</div>
+                      <p className="whitespace-pre-wrap text-sm text-foreground">{blk.question}</p>
+                    </div>
+                    {agentAttachments.length > 0 && (
+                      <AskAttachmentStrip
+                        items={agentAttachments.map((p) => ({ path: p, name: fileNameOf(p) }))}
+                        onOpen={onOpen}
+                      />
+                    )}
+                    {!cancelled && (
+                      <div className="flex flex-col gap-1">
+                        <div className="text-xs text-muted-foreground/70">{t('task.askReply')}</div>
+                        <p className="whitespace-pre-wrap text-sm text-foreground">
+                          <MentionTokenText text={stripAttachmentBlock(blk.answer)} onOpenFile={onOpen} />
+                        </p>
+                      </div>
+                    )}
+                    {!cancelled && blk.attachments && blk.attachments.length > 0 && (
+                      <AskAttachmentStrip
+                        items={blk.attachments.map((p) => ({ path: p, name: fileNameOf(p) }))}
+                        onOpen={onOpen}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
-            <div>
-              <div className="text-xs text-muted-foreground/70">{t('task.askQuestion')}</div>
-              <p className="whitespace-pre-wrap text-sm text-foreground">{questionText}</p>
-            </div>
-            {replyText && (
-              <div>
-                <div className="text-xs text-muted-foreground/70">{t('task.askReply')}</div>
-                <p className="whitespace-pre-wrap text-sm text-foreground">{replyText}</p>
-              </div>
-            )}
-          </div>
+          </details>
         );
       })}
       {/* 非 todo/ask/agent 工具调用（可折叠：展开显示参数与结果）。

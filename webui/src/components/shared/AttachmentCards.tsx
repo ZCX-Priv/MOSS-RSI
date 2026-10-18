@@ -19,7 +19,7 @@ interface CardProps {
   onOpen: (path: string) => void;
 }
 
-function MessageAttachmentCard({ path, onOpen }: CardProps) {
+export function MessageAttachmentCard({ path, onOpen }: CardProps) {
   const name = fileNameOf(path);
   const isImage = getAttachmentKind(name, '') === 'image';
   const thumb = useFileThumbnail(path, isImage);

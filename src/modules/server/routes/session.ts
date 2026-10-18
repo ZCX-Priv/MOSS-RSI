@@ -6,6 +6,7 @@ import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
 import type { ServiceRegistry } from '../../../core/types';
 import { ServiceNames } from '../../../core/types';
 import type { AgentEngine } from '../../contracts';
+import type { AskQuestion } from '../../tools/types';
 import { ErrorCode } from '../../../core/error-codes';
 
 /** 引擎扩展面（可选能力；未实现时安全降级） */
@@ -28,13 +29,7 @@ type AgentEngineExt = AgentEngine & {
   getPendingAsks?: (id: string) => Array<{
     toolCallId: string;
     sessionId: string;
-    payload: {
-      question: string;
-      answerType?: string;
-      options?: Array<{ value: string; label: string }>;
-      defaultAnswer?: string;
-      formSchema?: Record<string, unknown>;
-    };
+    payload: { questions: AskQuestion[] };
   }>;
   getPendingConfirms?: (id: string) => Array<{
     toolCallId: string;
@@ -195,11 +190,7 @@ export function createSessionStateHandler(services: ServiceRegistry): RouteHandl
     const pendingAsks = (agent?.getPendingAsks?.(sessionId) ?? []).map((a) => ({
       toolCallId: a.toolCallId,
       sessionId: a.sessionId,
-      question: a.payload.question,
-      answerType: a.payload.answerType,
-      options: a.payload.options,
-      defaultAnswer: a.payload.defaultAnswer,
-      formSchema: a.payload.formSchema,
+      questions: a.payload.questions,
     }));
     const pendingConfirms = (agent?.getPendingConfirms?.(sessionId) ?? []).map((c) => ({
       toolCallId: c.toolCallId,

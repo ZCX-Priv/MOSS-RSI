@@ -29,7 +29,7 @@ import type { PermissionMode } from '../safety/types';
 import type { FileChangeEvent } from '../filesys/types';
 import type { ConfigService, EventBus, Logger, ServiceRegistry, Environment, ApiConfig } from '../../core/types';
 import { ServiceNames } from '../../core/types';
-import type { AskOutcome, AskPayload, ToolResult } from '../tools/types';
+import type { AskOutcome, AskPayload, AskQuestion, ToolResult } from '../tools/types';
 import type { SkillRegistry } from '../tools/shared/skill-registry';
 import { readSessionTodoStore, getSessionTodoPath } from '../tools/todo/shared/store';
 import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } from '../context/compiler';
@@ -819,8 +819,11 @@ export class AgentEngineImpl implements AgentEngine {
         break;
       }
 
-      // 执行工具调用
-      for (const tc of toolCalls) {
+      // 执行单个工具调用（含 abort 兜底、失败隔离、配对、统计）。
+      // abortedInTools：本轮工具执行期间是否发生中断（闭包内赋值，供循环底部判定；
+      // 直接用 finishReason=== 判定会被 TS 流分析窄化，故用显式标志）
+      let abortedInTools = false;
+      const runOne = async (tc: (typeof toolCalls)[number]): Promise<void> => {
         if (signal?.aborted) {
           // abort 时补一个错误 tool 结果，保持 tool_calls 配对完整
           // 否则 assistant 消息已带 tool_calls 但缺少对应 tool 结果，session 复用时会触发 HTTP 400
@@ -832,7 +835,8 @@ export class AgentEngineImpl implements AgentEngine {
             { isError: true },
           );
           finishReason = 'aborted';
-          continue;
+          abortedInTools = true;
+          return;
         }
         // 单工具失败隔离：executeToolCall 抛错时兜底补错误 tool_result，
         // 避免中断后续 tc 导致多个 tool_use 失去 tool_result（触发 HTTP 400）。
@@ -849,10 +853,10 @@ export class AgentEngineImpl implements AgentEngine {
           });
           // 工具执行完毕后检查 abort：这里**不能** break，
           // 否则尚未执行的 tc 会缺失 tool 结果，assistant.tool_calls 悬挂 → HTTP 400。
-          // 改为 continue，让下一轮循环顶部为每个剩余 tc 统一补错误 tool 结果。
+          // 改为标记 aborted，让其余 tc 在 runOne 顶部统一补错误 tool 结果。
           if (signal?.aborted) {
             finishReason = 'aborted';
-            continue;
+            abortedInTools = true;
           }
         } catch (err) {
           this.logger.error(t('agent.executeToolCallThrew'), {
@@ -871,6 +875,28 @@ export class AgentEngineImpl implements AgentEngine {
           stats.steps++;
           stats.toolMs += performance.now() - toolStart;
           pushStats();
+        }
+      };
+
+      // `ask` 为交互阻塞型工具：同一轮内出现 ≥2 个 ask 调用时**并发执行**，
+      // 使多个提问同时挂起（前端据此合并为一张多问题卡片）；
+      // 其余工具保持原有串行语义（依赖顺序 / abort 配对）。
+      const askCalls = toolCalls.filter((tc) => tc.name === 'ask');
+      if (askCalls.length >= 2) {
+        let asksLaunched = false;
+        for (const tc of toolCalls) {
+          if (tc.name === 'ask') {
+            if (!asksLaunched) {
+              asksLaunched = true;
+              await Promise.all(askCalls.map((a) => runOne(a)));
+            }
+            continue;
+          }
+          await runOne(tc);
+        }
+      } else {
+        for (const tc of toolCalls) {
+          await runOne(tc);
         }
       }
 
@@ -927,7 +953,7 @@ export class AgentEngineImpl implements AgentEngine {
         };
       }
 
-      if (finishReason === 'aborted') break;
+      if (abortedInTools) break;
 
       // 继续下一轮（让 LLM 看到工具结果后继续）
       finalText = assistantText;
@@ -1842,10 +1868,7 @@ export class AgentEngineImpl implements AgentEngine {
             type: 'ask',
             sessionId: ctx.sessionId,
             toolCallId: ctx.toolCallId,
-            question: payload.question,
-            answerType: payload.answerType,
-            options: payload.options,
-            defaultAnswer: payload.defaultAnswer,
+            questions: payload.questions,
           });
         });
       },
@@ -2181,10 +2204,12 @@ export class AgentEngineImpl implements AgentEngine {
               ctx.onEvent({ type: 'ask-timeout', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
             }
           }, Math.min(askTimeoutMs, ASK_TIMEOUT_CEILING_MS)) : null;
+          const elicitationQuestion: AskQuestion = { id: 'q0', question, answerType: 'form', formSchema };
           this.pendingAsks.set(ctx.toolCallId, {
             resolve: outcome => {
-              if (outcome.action === 'accept' && outcome.answer?.form) {
-                resolve({ action: 'accept', content: outcome.answer.form });
+              const form = outcome.action === 'accept' ? outcome.answers?.[0]?.form : undefined;
+              if (form) {
+                resolve({ action: 'accept', content: form });
               } else {
                 resolve({ action: 'decline' });
               }
@@ -2192,7 +2217,7 @@ export class AgentEngineImpl implements AgentEngine {
             reject,
             timer,
             sessionId: ctx.sessionId,
-            payload: { question, answerType: 'form', formSchema },
+            payload: { questions: [elicitationQuestion] },
           });
           if (ctx.signal) {
             ctx.signal.addEventListener(
@@ -2211,9 +2236,7 @@ export class AgentEngineImpl implements AgentEngine {
             type: 'ask',
             sessionId: ctx.sessionId,
             toolCallId: ctx.toolCallId,
-            question,
-            answerType: 'form',
-            formSchema,
+            questions: [elicitationQuestion],
           });
         },
       );

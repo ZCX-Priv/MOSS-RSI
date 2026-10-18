@@ -234,11 +234,7 @@ export interface SessionState {
   pendingAsks: Array<{
     toolCallId: string;
     sessionId: string;
-    question: string;
-    answerType?: PendingAsk['answerType'];
-    options?: AskOption[];
-    defaultAnswer?: string;
-    formSchema?: Record<string, unknown>;
+    questions: AskQuestion[];
   }>;
   pendingConfirms: Array<{
     toolCallId: string;
@@ -1424,17 +1420,34 @@ export type AgentEvent =
   | { type: 'tool-call-delta'; sessionId: string; toolCallId: string; argumentsDelta: string; runId?: string }
   | { type: 'tool-call-executing'; sessionId: string; toolName: string; toolCallId: string; runId?: string }
   | { type: 'tool-call-end'; sessionId: string; toolName: string; toolCallId: string; result: ToolResult; runId?: string }
-  | { type: 'ask'; sessionId: string; toolCallId: string; question: string; answerType?: PendingAsk['answerType']; options?: AskOption[]; defaultAnswer?: string; formSchema?: Record<string, unknown>; runId?: string }
+  | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string }
   | { type: 'done'; sessionId: string; finishReason: string; runId?: string };
 
+/** ask 回答类型 */
+export type AskAnswerType = 'text' | 'single' | 'multi' | 'boolean' | 'form';
+
 /** ask 工具候选项 */
 export interface AskOption {
   value: string;
   label: string;
+  /** 选项补充说明（可选，前端渲染为次行小字） */
+  description?: string;
+}
+
+/** ask 工具单个问题（归一化后的最小单元） */
+export interface AskQuestion {
+  id: string;
+  question: string;
+  answerType?: AskAnswerType;
+  options?: AskOption[];
+  defaultAnswer?: string;
+  formSchema?: Record<string, unknown>;
+  /** agent 侧题面附件绝对路径 */
+  attachments?: string[];
 }
 
 /** ask 工具用户回答（结构化） */
@@ -1446,27 +1459,23 @@ export interface AskAnswer {
   text?: string;
   /** form 模式（elicitation）：字段名 → 值 */
   form?: Record<string, string | number | boolean>;
+  /** 用户侧附件绝对路径（粘贴/选择的文件） */
+  attachments?: string[];
 }
 
 /** ask 工具结局 */
 export interface AskOutcome {
   action: 'accept' | 'cancel';
-  answer?: AskAnswer;
+  /** 逐题回答（answers[i] 与 questions[i] 按下标对齐） */
+  answers?: AskAnswer[];
 }
 
 /** 工具发起的、待用户回复的提问 */
 export interface PendingAsk {
   toolCallId: string;
   sessionId: string;
-  question: string;
-  /** 回答类型：text（缺省）/single/multi/boolean/form（elicitation） */
-  answerType?: 'text' | 'single' | 'multi' | 'boolean' | 'form';
-  /** single/multi 类型的候选项 */
-  options?: AskOption[];
-  /** text 类型预填文本 */
-  defaultAnswer?: string;
-  /** form 类型：JSON Schema（elicitation requestedSchema） */
-  formSchema?: Record<string, unknown>;
+  /** 该次 ask 调用携带的问题列表（≥1 题） */
+  questions: AskQuestion[];
   /** 收到时间，用于排序 */
   createdAt: number;
 }

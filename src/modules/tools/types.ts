@@ -60,22 +60,48 @@ export interface AskOption {
   value: string;
   /** 选项显示文本 */
   label: string;
+  /** 选项补充说明（可选，前端渲染为次行小字） */
+  description?: string;
 }
 
-/** ask 工具提问载荷 */
-export interface AskPayload {
+/** ask 回答类型：text=自由文本（缺省）、single=单选、multi=多选、boolean=是/否、form=动态表单 */
+export type AskAnswerType = 'text' | 'single' | 'multi' | 'boolean' | 'form';
+
+/** ask 工具单个问题（归一化后的最小单元） */
+export interface AskQuestion {
+  /** 稳定标识（q0/q1…，归一化时生成；供前端按题对齐回答） */
+  id: string;
+  /** 问题文本 */
   question: string;
-  /** 回答类型：text=自由文本（缺省）、single=单选、multi=多选、boolean=是/否、form=动态表单 */
-  answerType?: 'text' | 'single' | 'multi' | 'boolean' | 'form';
+  /** 回答类型（缺省 text） */
+  answerType?: AskAnswerType;
   /** answerType 为 single/multi 时的候选项（2-6 个） */
   options?: AskOption[];
   /** 预填文本（可选） */
   defaultAnswer?: string;
   /** answerType=form 时的 JSON Schema（MCP elicitation Form 模式：string/number/boolean/enum） */
   formSchema?: Record<string, unknown>;
+  /** agent 侧题面附件（文件绝对路径，前端渲染为附件卡片并可预览） */
+  attachments?: string[];
 }
 
-/** ask 工具用户回答结果 */
+/** ask 工具提问载荷（归一化后一律用 questions；旧扁平字段仅作单题兼容） */
+export interface AskPayload {
+  /** 归一化后的提问列表（至少 1 题） */
+  questions: AskQuestion[];
+  /** @deprecated 单题兼容：旧调用点传入的单题，工具内归一化为 questions[0] */
+  question?: string;
+  /** @deprecated 单题兼容 */
+  answerType?: AskAnswerType;
+  /** @deprecated 单题兼容 */
+  options?: AskOption[];
+  /** @deprecated 单题兼容 */
+  defaultAnswer?: string;
+  /** @deprecated 单题兼容 */
+  formSchema?: Record<string, unknown>;
+}
+
+/** ask 工具用户回答结果（对应单个问题） */
 export interface AskAnswer {
   /** 选中的选项 value 列表（single 为 0/1 个，multi 为 0-N 个） */
   selectedValues?: string[];
@@ -85,16 +111,19 @@ export interface AskAnswer {
   editedLabels?: Record<string, string>;
   /** 「其他」自由输入文本 */
   otherText?: string;
-  /** text 类型的自由回答文本 */
+  /** text 类型的自由回答文本（线格式：可能内联 `#<绝对路径>` 文件引用） */
   text?: string;
   /** form 类型的表单回答（字段名 → 值；MCP elicitation） */
   form?: Record<string, string | number | boolean>;
+  /** 用户侧附件绝对路径（粘贴/选择的文件） */
+  attachments?: string[];
 }
 
 /** ask 工具结局：accept=用户已回答，cancel=用户取消提问 */
 export interface AskOutcome {
   action: 'accept' | 'cancel';
-  answer?: AskAnswer;
+  /** 逐题回答（answers[i] 与当前 toolCall 的 questions[i] 按下标对齐；merge 场景每个 toolCall 仅 1 题） */
+  answers?: AskAnswer[];
 }
 
 export interface ToolContext {

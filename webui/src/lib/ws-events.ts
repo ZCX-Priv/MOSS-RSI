@@ -45,6 +45,7 @@ import type {
   LiveDraftPayload,
   SessionSubscribedPayload,
   InsightEvent,
+  AskQuestion,
 } from '../types/api';
 
 function genId(): string {
@@ -422,23 +423,35 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'ask': {
       if (!sessionId) return;
-      const event = (msg.payload ?? {}) as {
-        toolCallId?: string;
+      const event = (msg.payload ?? {}) as Partial<Extract<AgentEvent, { type: 'ask' }>> & {
+        // 旧后端兜底：扁平单题字段
         question?: string;
-        answerType?: 'text' | 'single' | 'multi' | 'boolean' | 'form';
-        options?: Array<{ value: string; label: string }>;
+        answerType?: AskQuestion['answerType'];
+        options?: AskQuestion['options'];
         defaultAnswer?: string;
         formSchema?: Record<string, unknown>;
       };
-      if (!event.toolCallId || !event.question) break;
+      if (!event.toolCallId) break;
+      const questions: AskQuestion[] =
+        Array.isArray(event.questions) && event.questions.length > 0
+          ? event.questions
+          : event.question
+            ? [
+                {
+                  id: 'q0',
+                  question: event.question,
+                  answerType: event.answerType,
+                  options: event.options,
+                  defaultAnswer: event.defaultAnswer,
+                  formSchema: event.formSchema,
+                },
+              ]
+            : [];
+      if (questions.length === 0) break;
       s.addPendingAsk({
         toolCallId: event.toolCallId,
         sessionId,
-        question: event.question,
-        answerType: event.answerType,
-        options: event.options,
-        defaultAnswer: event.defaultAnswer,
-        formSchema: event.formSchema,
+        questions,
         createdAt: Date.now(),
       });
       break;
