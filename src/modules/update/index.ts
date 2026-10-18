@@ -5,9 +5,17 @@ import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { NPM_REGISTRIES, cachedRankMirrors } from '../../utils/mirror';
 
-const NPM_REGISTRY_URL = 'https://registry.npmjs.org';
 const PACKAGE_NAME = 'moss';
+
+/** 候选 registry 的「<registry>/<pkg>/latest」元数据地址（国内源优先；实测四者均可达） */
+function registryCandidates(): { id: string; url: string }[] {
+  return NPM_REGISTRIES.map(registry => ({
+    id: new URL(registry).host,
+    url: `${registry.replace(/\/+$/, '')}/${PACKAGE_NAME}/latest`,
+  }));
+}
 
 class UpdateModule implements Module {
 
@@ -66,15 +74,34 @@ class UpdateModule implements Module {
 
   private async checkForUpdate(): Promise<void> {
     try {
-      const resp = await fetch(`${NPM_REGISTRY_URL}/${PACKAGE_NAME}/latest`, {
-        signal: AbortSignal.timeout(10000),
+      // 多 registry + 测速：国内源（npmmirror 等）通常远快于 registry.npmjs.org；
+      // 元数据体积极小，故按延迟排序而非吞吐。全部失败时保持静默 debug，不打扰用户。
+      const ranked = await cachedRankMirrors(`npm:${PACKAGE_NAME}`, registryCandidates, {
+        metric: 'latency',
+        probeBytes: 64 * 1024,
+        maxMs: 8000,
       });
-      if (!resp.ok) {
-        this.ctx.logger.debug(t('update.registryNonOk'), { status: resp.status });
-        return;
+
+      let latest: string | undefined;
+      for (const mirror of ranked) {
+        try {
+          const resp = await fetch(mirror.url, { signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) {
+            this.ctx.logger.debug(t('update.registryNonOk'), { registry: mirror.id, status: resp.status });
+            continue;
+          }
+          const data = (await resp.json()) as { version?: string };
+          if (data.version) {
+            latest = data.version;
+            break;
+          }
+        } catch (err) {
+          this.ctx.logger.debug(t('update.checkFailed'), {
+            registry: mirror.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
-      const data = (await resp.json()) as { version?: string };
-      const latest = data.version;
       if (!latest) return;
 
       if (isNewerVersion(latest, this.currentVersion)) {

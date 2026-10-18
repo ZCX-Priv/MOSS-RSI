@@ -72,9 +72,13 @@ export class RemoteService {
     this.tunnelAbort = controller;
     this.tunnelState.startedAt = Date.now();
 
-    const onPhase = (phase: 'downloading' | 'starting' | 'registering' | 'ready'): void => {
+    // detail 缺省时按阶段取默认文案；tunnel.ts 在 Termux pkg 安装 / 测速选源时会传自定义文案
+    const onPhase = (
+      phase: 'downloading' | 'starting' | 'registering' | 'ready',
+      detail?: string,
+    ): void => {
       this.tunnelState.phase = phase;
-      this.tunnelState.detail = PHASE_DETAILS[phase]?.zh ?? '';
+      this.tunnelState.detail = detail ?? PHASE_DETAILS[phase]?.zh ?? '';
     };
 
     this.tunnelPromise = (async (): Promise<string> => {

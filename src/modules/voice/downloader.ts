@@ -25,15 +25,10 @@ import { join } from 'node:path';
 import unbzip2 from 'unbzip2-stream';
 import * as tar from 'tar';
 import type { VoiceModelDef } from './types';
+import { githubAssetCandidates, cachedRankMirrors } from '../../utils/mirror';
 
 /** 下载空闲超时（毫秒）：超过该时长无新数据即中止，交由下一镜像重试，避免永久挂起 */
 const IDLE_TIMEOUT_MS = 30_000;
-
-/**
- * GitHub Releases 加速镜像前缀：直连大文件在大陆网络常被重置，依次回退到公共代理。
- * 顺序 =「直连 → gh-proxy → ghproxy」，任一成功即使用。
- */
-const MIRROR_PREFIXES = ['', 'https://gh-proxy.com/', 'https://ghproxy.net/'];
 
 /** 校验文件头是否为 bzip2 归档（魔数 "BZh"，避免镜像/网络返回错误页后误当归档解压） */
 function assertBzip2Archive(file: string): void {
@@ -125,18 +120,27 @@ async function downloadArchive(
   }
 }
 
-/** 依次尝试直连与各镜像下载（任一成功即返回） */
+/**
+ * 按测速结果依次尝试各源（快 → 慢 → 失败），任一成功即返回。
+ * 源池 / 并发测速 / 排序统一在 utils/mirror：GitHub 直连在大陆常被重置、公共加速源又时好时坏，
+ * 故由「写死前缀盲试」改为「运行时测速 + 从最快源下载 + 按序回退」。
+ */
 async function downloadWithFallback(
   url: string,
   destFile: string,
   expectedBytes: number,
   onProgress?: (p: number) => void,
 ): Promise<void> {
+  const ranked = await cachedRankMirrors(
+    `voice:${url}`,
+    () => githubAssetCandidates(url),
+    { probeBytes: 256 * 1024, maxMs: 6000 },
+  );
   let lastError: unknown = null;
-  for (const prefix of MIRROR_PREFIXES) {
+  for (const m of ranked) {
     try {
       onProgress?.(0); // 切换源：进度归零，避免停在高位后突然跳变
-      await downloadArchive(`${prefix}${url}`, destFile, expectedBytes, onProgress);
+      await downloadArchive(m.url, destFile, expectedBytes, onProgress);
       return;
     } catch (err) {
       lastError = err;
@@ -144,7 +148,7 @@ async function downloadWithFallback(
   }
   throw lastError instanceof Error
     ? lastError
-    : new Error('下载失败（直连与镜像均不可用）');
+    : new Error('下载失败（所有镜像源均不可用）');
 }
 
 /**

@@ -2,8 +2,12 @@
 // cloudflared 快速隧道：把本机 MOSS server 暴露成公网 https URL（随机 trycloudflare 子域）。
 // 按 MOSS 规范 TS 化。
 //
-// - 二进制解析三级回退：PATH 已装 → ~/.moss/remote/bin/ 持久缓存 → 多镜像自动下载
-//   （GitHub 官方 + 国内加速源；大文件 8 段并发分块，探针测速自适应）
+// - 二进制解析四级回退：PATH 已装 → Termux($PREFIX/bin / pkg 安装) → ~/.moss/remote/bin/ 持久缓存
+//   → 多镜像测速选源下载（GitHub 官方直连 + 国内加速源，取最快；大文件 8 段并发分块自适应）
+// - 资产名按 OS 分别拼：Windows 为 *.exe；macOS 为 *.tgz（需解压）；Linux 为**裸二进制**（无扩展名）。
+//   实测 cloudflared-linux-*.tgz 一律 404——用「os+arch+.tgz」通吃会让 Linux 永远下载失败
+// - Termux/Android 必须走 `pkg install cloudflared`：官方 Linux 构建是 glibc，Android 用户态是
+//   bionic libc，二进制根本跑不起来（No such file or directory / 崩溃）
 // - 强制 --protocol http2（TCP 443）：国内网络常屏蔽 UDP 7844（QUIC）导致 error 1033
 // - URL 正则排除 api. 保留子域（cloudflared 输出会先出现 API 注册地址）
 // - 进程退出监听：隧道崩溃/被杀时把状态打回，别让 UI 永远显示"可用"
@@ -14,17 +18,19 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { githubAssetCandidates, cachedRankMirrors, mirrorLabel } from '../../utils/mirror';
 
 /** 快速隧道 URL：https://<随机子域>.trycloudflare.com（负向前瞻排除保留子域 api.） */
 export const QUICK_TUNNEL_URL_RE = /https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/i;
 
-/** cloudflared 下载镜像源（官方 + 国内加速，依次回退） */
-const CLOUDFLARED_MIRRORS: Array<(asset: string) => string> = [
-  asset => `https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-  asset => `https://ghproxy.net/https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-  asset => `https://gh.ddlc.top/https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-  asset => `https://gh-proxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`,
-];
+/** cloudflared 官方发布资产根地址（各镜像源在此基础上加前缀，见 utils/mirror） */
+const CLOUDFLARED_RELEASE_BASE =
+  'https://github.com/cloudflare/cloudflared/releases/latest/download';
+
+/** 隧道进度阶段（types.ts 的 TunnelPhase 子集；idle/error 不由进度回调发出） */
+export type TunnelProgressPhase = 'downloading' | 'starting' | 'registering' | 'ready';
+/** 进度回调：detail 省略时由 service 按阶段取默认文案 */
+export type PhaseCallback = (phase: TunnelProgressPhase, detail?: string) => void;
 
 /** 多线程分块下载的并发段数（Windows 官方源单线程 ~200KB/s，8 并发 ≈ 1.6MB/s） */
 const PARALLEL_SEGMENTS = 8;
@@ -35,17 +41,64 @@ const PROBE_SIZE = 2 * 1024 * 1024;
 /** 探针测速阈值（bytes/ms）：低于它认为慢网络，切多线程（300KB/s = 0.3） */
 const SLOW_SPEED_THRESHOLD = 0.3;
 
-interface PlatformBinary {
-  os: 'darwin' | 'windows' | 'linux';
-  arch: 'amd64' | 'arm64';
+/** cloudflared 发布资产的目标平台（Android/Termux 不走此路径，走 Termux 仓库的 pkg 包） */
+export type CloudflaredTarget = 'windows' | 'darwin' | 'linux';
+export type CloudflaredArch = 'amd64' | 'arm64' | 'arm' | '386';
+
+export interface CloudflaredAsset {
+  target: CloudflaredTarget;
+  /** 发布资产文件名 */
+  asset: string;
+  /** 落位后的扩展名（Windows 为 .exe，其余为 ''） */
   ext: string;
+  /** 是否需解压（仅 macOS 的 .tgz） */
+  needsExtract: boolean;
 }
 
-function platformBinary(): PlatformBinary {
-  const archMap: Record<string, string> = { x64: 'amd64', arm64: 'arm64' };
-  const a = archMap[process.arch] ?? process.arch;
-  const os = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux';
-  return { os, arch: a as PlatformBinary['arch'], ext: os === 'windows' ? '.exe' : '' };
+/** node 的 arch 名 → 发布资产用的 arch 名（ia32 = 386） */
+const ARCH_ALIAS: Record<string, CloudflaredArch | undefined> = {
+  x64: 'amd64',
+  arm64: 'arm64',
+  arm: 'arm',
+  ia32: '386',
+};
+
+/**
+ * 由 platform/arch 推导 cloudflared 发布资产（**实测清单，勿凭直觉改成「os+arch+.tgz」通吃**）：
+ *   win32  : cloudflared-windows-{amd64|386}.exe   （官方无 windows-arm64 资产）
+ *   darwin : cloudflared-darwin-{amd64|arm64}.tgz  （唯一需要解压的平台）
+ *   linux  : cloudflared-linux-{amd64|arm64|arm|386}（裸二进制；cloudflared-linux-*.tgz 实测 404）
+ * 不支持的组合（如 win32+arm64）返回 null，由调用方给出可操作的错误提示。
+ */
+export function cloudflaredAssetOf(platform: string, arch: string): CloudflaredAsset | null {
+  const a = ARCH_ALIAS[arch];
+  if (!a) return null;
+  if (platform === 'win32') {
+    if (a !== 'amd64' && a !== '386') return null;
+    return { target: 'windows', asset: `cloudflared-windows-${a}.exe`, ext: '.exe', needsExtract: false };
+  }
+  if (platform === 'darwin') {
+    if (a !== 'amd64' && a !== 'arm64') return null;
+    return { target: 'darwin', asset: `cloudflared-darwin-${a}.tgz`, ext: '', needsExtract: true };
+  }
+  if (platform === 'linux') {
+    return { target: 'linux', asset: `cloudflared-linux-${a}`, ext: '', needsExtract: false };
+  }
+  return null;
+}
+
+/**
+ * 是否 Termux（Android 上的 Termux 终端）。
+ * 只用 Termux 专有信号：proot-distro 内会继承 Termux 的 ANDROID_ROOT / ANDROID_DATA，
+ * 用它们判定会把 glibc 发行版误判成 Termux——而发行版恰恰应当下载 glibc 二进制。
+ */
+export function isTermux(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.TERMUX_VERSION) || (env.PREFIX ?? '').includes('com.termux');
+}
+
+/** Termux 中 cloudflared 的安装位置（pkg 装在 $PREFIX/bin） */
+function termuxBinPath(env: NodeJS.ProcessEnv): string {
+  return join(env.PREFIX ?? '/data/data/com.termux/files/usr', 'bin', 'cloudflared');
 }
 
 function sleep(ms: number): Promise<void> {
@@ -151,43 +204,73 @@ export async function downloadFile(
   return len;
 }
 
-async function downloadCloudflared(binPath: string, signal?: AbortSignal): Promise<string> {
-  const { os, arch, ext } = platformBinary();
+/** 手动安装指引（自动下载全部失败时给出，按平台区分）。 */
+function manualInstallHint(): string {
+  if (process.platform === 'win32') return 'winget install cloudflared';
+  if (process.platform === 'darwin') return 'brew install cloudflared';
+  return '从 https://github.com/cloudflare/cloudflared/releases 下载对应 linux 资产';
+}
+
+async function downloadCloudflared(
+  binPath: string,
+  signal?: AbortSignal,
+  onPhase?: PhaseCallback,
+): Promise<string> {
+  const target = cloudflaredAssetOf(process.platform, process.arch);
+  if (!target) {
+    throw new Error(
+      `当前平台不受支持（${process.platform}/${process.arch}），无法自动获取 cloudflared。\n`
+      + `请手动安装后重试：${manualInstallHint()}`,
+    );
+  }
+  const { asset, ext, needsExtract } = target;
   const dir = dirname(binPath);
   const tmpFile = join(dir, 'cloudflared.download');
-  const isWindows = os === 'windows';
-  // 发布资产：Windows 是 .exe（下载即二进制），macOS/Linux 是 .tgz（需解压）
-  const asset = isWindows ? `cloudflared-windows-${arch}.exe` : `cloudflared-${os}-${arch}.tgz`;
+  const isWindows = target.target === 'windows';
+  const assetUrl = `${CLOUDFLARED_RELEASE_BASE}/${asset}`;
   const fetchSignal = signal
     ? AbortSignal.any([signal, AbortSignal.timeout(120_000)])
     : AbortSignal.timeout(120_000);
 
+  // 测速选源：候选 = 官方直连 + 各国内加速源；返回已按「快 → 慢 → 失败」排序的全量列表
+  const ranked = await cachedRankMirrors(
+    `cloudflared:${asset}`,
+    () => githubAssetCandidates(assetUrl),
+    { signal },
+  );
+  const fastest = ranked.find(m => m.ok);
+  if (fastest) {
+    const kbps = Math.round((fastest.speed * 1000) / 1024);
+    onPhase?.('downloading', `已测速选源：${mirrorLabel(fastest.url)}（${kbps} KB/s），开始下载 cloudflared…`);
+  }
+
+  let ok = false;
   let lastErr: unknown = null;
-  for (let i = 0; i < CLOUDFLARED_MIRRORS.length; i++) {
-    const url = CLOUDFLARED_MIRRORS[i](asset);
+  for (const m of ranked) {
     try {
-      await downloadFile(url, tmpFile, { signal: fetchSignal });
+      await rm(tmpFile, { force: true }).catch(() => {});
+      await downloadFile(m.url, tmpFile, { signal: fetchSignal });
       const st = await stat(tmpFile);
       if (st.size < 1024 * 1024) throw new Error(`文件异常小（${st.size} 字节），疑似镜像错误页`);
-      lastErr = null;
+      ok = true;
       break;
     } catch (err) {
       lastErr = err;
       await rm(tmpFile, { force: true }).catch(() => {});
     }
   }
-  if (lastErr) {
+  if (!ok) {
     const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
     throw new Error(
-      `cloudflared 下载失败：所有镜像源都不通（最后错误：${msg}）。`
-      + (isWindows
-        ? 'Windows 可手动安装后重试：winget install cloudflared；或下载发布资产放到缓存目录'
-        : '可手动安装后重试：npm i -g cloudflared；或开启代理/换网络后重试'),
+      `cloudflared 下载失败：所有镜像源都不通（最后错误：${msg}）。\n`
+      + `可手动安装后重试：${manualInstallHint()}\n`
+      + `或把对应发布资产（${asset}）放到缓存目录 ${dir} 后重试。`,
     );
   }
 
   const extracted = join(dir, `cloudflared${ext}`);
-  if (isWindows) {
+  if (!needsExtract) {
+    // Windows .exe / Linux 裸二进制：下载即二进制，直接落位
     await rename(tmpFile, extracted).catch(async () => {
       await cp(tmpFile, extracted).catch(() => {});
     });
@@ -256,20 +339,97 @@ function cloudflaredOnPath(): boolean {
 /** in-flight 下载（单飞）：并发调用复用同一次，防止交错写入损坏文件。 */
 let downloading: Promise<string> | null = null;
 
+/** Termux：通过 pkg 安装 cloudflared（官方 glibc 构建在 Android 上跑不起来）。 */
+async function installCloudflaredViaPkg(onPhase?: PhaseCallback, signal?: AbortSignal): Promise<void> {
+  onPhase?.('downloading', 'Termux：正在通过 pkg 安装 cloudflared（不使用 glibc 二进制）…');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('pkg', ['install', '-y', 'cloudflared'], { stdio: 'ignore' });
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
+    const onAbort = (): void => {
+      try {
+        child.kill();
+      } catch {
+        // 忽略
+      }
+      finish(() => reject(new Error('已取消 | cancelled')));
+    };
+    child.once('error', err => {
+      const code = (err as NodeJS.ErrnoException).code;
+      finish(() => reject(new Error(
+        code === 'ENOENT' ? '找不到 pkg 命令（请确认运行在 Termux 内）' : `启动 pkg 失败：${err.message}`,
+      )));
+    });
+    child.once('exit', code => {
+      if (code === 0) finish(() => resolve());
+      else finish(() => reject(new Error(`pkg install cloudflared 退出码 ${code}`)));
+    });
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Termux 安装失败的统一可操作提示（不回退去下 glibc 二进制——下了也跑不起来）。 */
+function termuxInstallError(reason: string): Error {
+  return new Error(
+    `Termux 安装 cloudflared 失败：${reason}\n`
+    + '请手动执行：pkg update && pkg install -y cloudflared\n'
+    + '若下载慢或失败：先执行 termux-change-repo（切清华/中科大等国内镜像）后重试。',
+  );
+}
+
 /**
- * 拿一个可用的 cloudflared 路径。
- * 优先：PATH 已有 → 直接用；否则用持久缓存（cacheDir），缺失才下载。
+ * 拿一个可用的 cloudflared 路径。回退顺序：
+ *   1) PATH 已装 → 'cloudflared'
+ *   2) Termux → $PREFIX/bin/cloudflared；缺失则 pkg install（失败即抛可操作错误）
+ *   3) 持久缓存（cacheDir）
+ *   4) 多镜像测速选源下载
  */
 export async function resolveCloudflared(
-  opts: { cacheDir: string; onPhase?: (phase: 'downloading' | 'starting' | 'registering' | 'ready') => void; signal?: AbortSignal } ,
+  opts: { cacheDir: string; onPhase?: PhaseCallback; signal?: AbortSignal },
 ): Promise<string> {
   if (cloudflaredOnPath()) return 'cloudflared';
-  const { os, arch, ext } = platformBinary();
-  // 缓存命中，兼容两种文件名（本模块下载的 bin 名 / 手动放置的发布资产名）
-  const candidates = [
-    join(opts.cacheDir, `cloudflared${ext}`),
-    join(opts.cacheDir, `cloudflared-${os}-${arch}${ext}`),
-  ];
+
+  // Termux/Android：必须用 Termux 仓库的包；官方 Linux 资产是 glibc，Android 用户态是 bionic
+  if (isTermux(process.env)) {
+    const bin = termuxBinPath(process.env);
+    try {
+      await access(bin);
+      return bin;
+    } catch {
+      // 未安装 → 走 pkg
+    }
+    try {
+      await installCloudflaredViaPkg(opts.onPhase, opts.signal);
+    } catch (err) {
+      if (opts.signal?.aborted) throw err; // 主动取消：原样抛出
+      throw termuxInstallError(err instanceof Error ? err.message : String(err));
+    }
+    if (cloudflaredOnPath()) return 'cloudflared';
+    try {
+      await access(bin);
+      return bin;
+    } catch {
+      throw termuxInstallError('pkg 已执行但未找到 cloudflared 可执行文件');
+    }
+  }
+
+  const target = cloudflaredAssetOf(process.platform, process.arch);
+  if (!target) {
+    throw new Error(
+      `当前平台不受支持（${process.platform}/${process.arch}），无法自动获取 cloudflared。\n`
+      + `请手动安装后重试：${manualInstallHint()}`,
+    );
+  }
+  // 缓存命中：兼容本模块落位名与手动放置的官方资产原名
+  const candidates = [...new Set([
+    join(opts.cacheDir, `cloudflared${target.ext}`),
+    join(opts.cacheDir, target.asset),
+  ])];
   for (const bin of candidates) {
     try {
       await access(bin);
@@ -281,7 +441,7 @@ export async function resolveCloudflared(
   opts.onPhase?.('downloading');
   await mkdir(opts.cacheDir, { recursive: true });
   if (!downloading) {
-    downloading = downloadCloudflared(join(opts.cacheDir, `cloudflared${ext}`), opts.signal)
+    downloading = downloadCloudflared(join(opts.cacheDir, `cloudflared${target.ext}`), opts.signal, opts.onPhase)
       .finally(() => {
         downloading = null;
       });
@@ -308,7 +468,7 @@ export async function startQuickTunnel(opts: {
   port: number;
   cacheDir: string;
   signal?: AbortSignal;
-  onPhase?: (phase: 'downloading' | 'starting' | 'registering' | 'ready') => void;
+  onPhase?: PhaseCallback;
 }): Promise<QuickTunnel> {
   const bin = await resolveCloudflared({ cacheDir: opts.cacheDir, onPhase: opts.onPhase, signal: opts.signal });
   opts.onPhase?.('starting');
@@ -401,11 +561,28 @@ export async function startQuickTunnel(opts: {
 
 /** 校验已知 cloudflared 缓存文件是否存在（状态快照用，不触发下载）。 */
 export async function cloudflaredCached(cacheDir: string): Promise<boolean> {
-  const { ext } = platformBinary();
-  try {
-    await access(join(cacheDir, `cloudflared${ext}`));
-    return true;
-  } catch {
-    return false;
+  // Termux：pkg 装在 $PREFIX/bin（不计入缓存目录，但状态上等同"已就绪"）
+  if (isTermux(process.env)) {
+    try {
+      await access(termuxBinPath(process.env));
+      return true;
+    } catch {
+      // 继续查缓存目录
+    }
   }
+  const target = cloudflaredAssetOf(process.platform, process.arch);
+  const names = new Set<string>(['cloudflared', 'cloudflared.exe']);
+  if (target) {
+    names.add(`cloudflared${target.ext}`);
+    names.add(target.asset); // 手动放置的官方资产原名
+  }
+  for (const name of names) {
+    try {
+      await access(join(cacheDir, name));
+      return true;
+    } catch {
+      // 下一个
+    }
+  }
+  return false;
 }
