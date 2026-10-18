@@ -11,8 +11,8 @@
 // Ctrl+C 优雅退出，关闭所有子进程。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { homedir, uptime } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -180,9 +180,12 @@ function startBackend() {
 }
 
 /**
- * 预检残留 PID 文件：若 ~/.moss/moss.pid 记录的进程仍存活，
- * 后端 foreground 模式会因单例检测直接退出。提前打印警告，避免用户面对 ECONNREFUSED 不知所措。
- * 不自动杀进程（避免误杀用户故意保留的 daemon）。
+ * 预检残留 PID 文件：只有当该 PID 确实是活着的 MOSS 时才提示冲突；
+ * 其余情况（进程已没了 / PID 号被 svchost.exe 等系统进程复用 / 跨重启残留）
+ * 一律自动清理后继续启动。绝不因残留文件阻断 dev。
+ *
+ * ⚠️ 本文件是纯 ESM，无法 import TS，下列判定与 src/utils/pid.ts 的
+ * inspectPid / classifyPid / parseTasklistCsv 是等价实现，两处必须同步修改。
  */
 function checkStalePid() {
   const pidFile = resolve(homedir(), '.moss', 'moss.pid');
@@ -194,36 +197,83 @@ function checkStalePid() {
     return;
   }
   if (!info || typeof info.pid !== 'number') return;
-  if (isPidAlive(info.pid)) {
+
+  const inspection = inspectPid(info);
+  if (inspection.isMoss) {
     log('backend', `WARNING: live MOSS process detected (PID ${info.pid}) from ${pidFile}.`);
     log('backend', `  The foreground backend will exit due to single-instance check.`);
     log('backend', `  Run "moss stop" or kill PID ${info.pid} first, then restart dev.`);
+    return;
+  }
+
+  if (inspection.reason === 'image-mismatch') {
+    log('backend', `NOTE: PID ${info.pid} in ${pidFile} is held by ${inspection.imageName} (not MOSS).`);
+    log('backend', `  Windows reuses PID numbers after reboot; removing the stale PID file.`);
+  } else if (inspection.reason === 'stale-across-boot') {
+    log('backend', `NOTE: PID file entry (PID ${info.pid}) predates this boot; removing it.`);
   } else {
-    log('backend', `NOTE: stale PID file at ${pidFile} (PID ${info.pid} not alive); will be auto-cleaned on start.`);
+    log('backend', `NOTE: stale PID file at ${pidFile} (PID ${info.pid} not alive); removing it.`);
+  }
+
+  try {
+    unlinkSync(pidFile);
+    log('backend', `Stale PID file removed: ${pidFile}`);
+  } catch (err) {
+    log('backend', `WARNING: failed to remove stale PID file: ${err.message}`);
   }
 }
 
-function isPidAlive(pid) {
+// ★ 以下为 src/utils/pid.ts 的等价实现（纯 ESM 无法 import TS），修改时两边同步。
+const MOSS_IMAGE_NAMES = new Set(['bun.exe', 'node.exe', 'bun', 'node', 'moss.exe', 'moss']);
+const BOOT_TIME_TOLERANCE_MS = 2000;
+
+/** 严格按 CSV 前两列解析（映像名, PID），避开内存列 "34,816 K" 里的数字 */
+function parseTasklistCsv(csv) {
+  const map = new Map();
+  for (const line of csv.split(/\r?\n/)) {
+    const m = /^\s*"([^"]*)"\s*,\s*"(\d+)"\s*,/.exec(line);
+    if (!m) continue;
+    const pid = Number(m[2]);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    map.set(pid, m[1]);
+  }
+  return map;
+}
+
+/** 查询单个 PID 的映像名；查不到返回 null */
+function queryImageName(pid) {
   try {
     if (isWin) {
-      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
-      const out = r.stdout ?? '';
-      return !/no tasks/i.test(out) && !/没有运行/i.test(out) && String(pid) in toPidSet(out);
+      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], {
+        encoding: 'utf8',
+      });
+      return parseTasklistCsv(r.stdout ?? '').get(pid) ?? null;
     }
     process.kill(pid, 0);
-    return true;
+    return 'bun';
   } catch {
-    return false;
+    return null;
   }
 }
 
-function toPidSet(csv) {
-  const set = {};
-  for (const line of csv.split('\n')) {
-    const m = line.match(/"?(\d+)"?,/);
-    if (m) set[m[1]] = true;
+/** 判定 PID 文件记录的是否真为活着的 MOSS（PID 存在 ∧ 映像是运行时 ∧ 未跨重启） */
+function inspectPid(info) {
+  const pid = info.pid;
+  const imageName = queryImageName(pid);
+  if (!imageName) return { pid, alive: false, isMoss: false, imageName: null, reason: 'not-running' };
+  if (!MOSS_IMAGE_NAMES.has(imageName.toLowerCase())) {
+    return { pid, alive: true, isMoss: false, imageName, reason: 'image-mismatch' };
   }
-  return set;
+  const bootTimeMs = Date.now() - uptime() * 1000;
+  const startedAtMs = Date.parse(info.startedAt);
+  if (
+    Number.isFinite(startedAtMs) &&
+    bootTimeMs > 0 &&
+    startedAtMs < bootTimeMs - BOOT_TIME_TOLERANCE_MS
+  ) {
+    return { pid, alive: true, isMoss: false, imageName, reason: 'stale-across-boot' };
+  }
+  return { pid, alive: true, isMoss: true, imageName, reason: 'ok' };
 }
 
 function startFrontend() {

@@ -6,9 +6,11 @@ import { detectEnvironment } from '../core/env';
 import {
   readPidFile,
   removePidFile,
-  isProcessAlive,
+  inspectPid,
   killProcess,
   writePidFile,
+  currentProcessIdentity,
+  type PidInspection,
 } from '../utils/pid';
 import { ServiceNames, type LogLevel, type Logger } from '../core/types';
 import type { ServerInstance } from '../modules/server/types';
@@ -104,15 +106,19 @@ export async function runCommand(parsed: ParsedArgs): Promise<number> {
 async function cmdStart(parsed: ParsedArgs): Promise<number> {
   const env = detectEnvironment();
 
-  // 单例检测：若已有进程运行，提示
+  // 单例检测：必须是「活着的 MOSS」才算真的在运行。
+  // 只判 PID 存在会把 Windows 重启后复用该号的 svchost.exe 当成 MOSS，导致
+  // 明明没跑也弹「已在运行」并直接退出。
   const existing = readPidFile(env.pidFile);
-  if (existing && isProcessAlive(existing.pid)) {
-    console.error(t('cli.alreadyRunning', { pid: existing.pid }));
-    console.error(t('cli.useStatusOrRestart'));
-    return 1;
-  }
   if (existing) {
-    // 残留 PID 文件，清理
+    const inspection = inspectPid(existing);
+    if (inspection.isMoss) {
+      console.error(t('cli.alreadyRunning', { pid: existing.pid }));
+      console.error(t('cli.useStatusOrRestart'));
+      return 1;
+    }
+    // 过期 / 被他人占用：自动清理并继续启动（绝不因残留文件阻断 dev）。
+    logStalePid(inspection);
     removePidFile(env.pidFile);
   }
 
@@ -148,6 +154,7 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
       pid: process.pid,
       startedAt: new Date().toISOString(),
       port,
+      ...currentProcessIdentity(),
     });
 
     console.log(t('cli.started', { pid: process.pid }));
@@ -194,11 +201,12 @@ async function startDaemon(): Promise<number> {
     // 静默
   }
 
-  // 等待子进程写 PID 文件（最多 5 秒）
+  // 等待子进程写 PID 文件（最多 5 秒）；同样要求身份校验通过，避免把复用该号的
+  // 系统进程误认为刚拉起的守护进程。
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const info = readPidFile(env.pidFile);
-    if (info && isProcessAlive(info.pid)) {
+    if (info && inspectPid(info).isMoss) {
       console.log(t('cli.daemonStarted', { pid: info.pid }));
       return 0;
     }
@@ -208,6 +216,32 @@ async function startDaemon(): Promise<number> {
   return 1;
 }
 
+/**
+ * 打印 PID 文件失效的具体原因。
+ * 开机后常见情形是 reason=image-mismatch（PID 号被 svchost.exe 等系统进程复用），
+ * 此时必须让用户看清楚「不是 MOSS 占了号」，而不是笼统报「已在运行」。
+ */
+function logStalePid(inspection: PidInspection): void {
+  switch (inspection.reason) {
+    case 'image-mismatch':
+      console.error(
+        t('cli.pidReusedByOther', {
+          pid: inspection.pid,
+          imageName: inspection.imageName ?? 'unknown',
+        }),
+      );
+      break;
+    case 'stale-across-boot':
+      console.error(t('cli.pidStaleAcrossBoot', { pid: inspection.pid }));
+      break;
+    case 'not-running':
+      console.error(t('cli.processNotAlive', { pid: inspection.pid }));
+      break;
+    default:
+      break;
+  }
+}
+
 async function cmdStop(): Promise<number> {
   const env = detectEnvironment();
   const info = readPidFile(env.pidFile);
@@ -215,13 +249,19 @@ async function cmdStop(): Promise<number> {
     console.log(t('cli.notRunningNoPid'));
     return 0;
   }
-  if (!isProcessAlive(info.pid)) {
-    console.log(t('cli.processNotAlive', { pid: info.pid }));
+
+  const inspection = inspectPid(info);
+  if (!inspection.isMoss) {
+    // ⚠️ 身份不符时绝不调用 killProcess：该号可能已被 svchost.exe 等系统进程复用，
+    // taskkill /T /F 会直接打穿系统服务。只清理过期 PID 文件。
+    logStalePid(inspection);
     removePidFile(env.pidFile);
+    console.log(t('cli.stalePidCleaned', { pid: info.pid }));
     return 0;
   }
+
   console.log(t('cli.stopping', { pid: info.pid }));
-  const ok = await killProcess(info.pid, 5000);
+  const ok = await killProcess(info.pid, 5000, info);
   if (ok) {
     removePidFile(env.pidFile);
     console.log(t('cli.stopped'));
@@ -238,9 +278,21 @@ async function cmdStatus(): Promise<number> {
     console.log(t('cli.statusNotRunningNoPid'));
     return 0;
   }
-  const alive = isProcessAlive(info.pid);
-  if (!alive) {
-    console.log(t('cli.statusNotRunningStalePid', { pid: info.pid }));
+  const alive = inspectPid(info);
+  if (!alive.isMoss) {
+    // 区分「进程已没了」与「该号被其他程序占用」，避免用户对着 svchost 的 PID 发愁。
+    if (alive.reason === 'image-mismatch') {
+      console.log(
+        t('cli.statusPidReused', {
+          pid: info.pid,
+          imageName: alive.imageName ?? 'unknown',
+        }),
+      );
+    } else if (alive.reason === 'stale-across-boot') {
+      console.log(t('cli.statusPidStaleAcrossBoot', { pid: info.pid }));
+    } else {
+      console.log(t('cli.statusNotRunningStalePid', { pid: info.pid }));
+    }
     return 0;
   }
   console.log(t('cli.statusRunning'));

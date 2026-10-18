@@ -4,7 +4,7 @@
 
 import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
-import { writePidFile, removePidFile } from '../../utils/pid';
+import { writePidFile, removePidFile, currentProcessIdentity } from '../../utils/pid';
 import type { ServerInstanceLike } from '../contracts';
 
 class DaemonModule implements Module {
@@ -29,6 +29,7 @@ class DaemonModule implements Module {
       pid: process.pid,
       startedAt: new Date().toISOString(),
       port,
+      ...currentProcessIdentity(),
     });
 
     ctx.logger.info(t('daemon.initialized'), {
