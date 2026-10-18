@@ -93,6 +93,8 @@ const PERSISTED_KEYS = [
   'moss-right-panel-ratio',
   // 右侧面板宽度是否为手动拖拽产生（true → 设置项显示「自定义」）
   'moss-right-panel-custom',
+  // 任务分组（左侧边栏文件夹）展开/收起状态：刷新后保持
+  'moss-task-group-expanded',
 ] as const;
 
 /**
@@ -203,6 +205,10 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
     messageQueues:
       data['moss-message-queues'] && typeof data['moss-message-queues'] === 'object'
         ? (data['moss-message-queues'] as PersistedState['messageQueues'])
+        : undefined,
+    taskGroupExpanded:
+      data['moss-task-group-expanded'] && typeof data['moss-task-group-expanded'] === 'object'
+        ? (data['moss-task-group-expanded'] as PersistedState['taskGroupExpanded'])
         : undefined,
   };
 }

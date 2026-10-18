@@ -1305,6 +1305,14 @@ export class AgentEngineImpl implements AgentEngine {
     return this.tasks.listTasks();
   }
 
+  /** 列出某分组内任务（组内排序，可分页）；供侧边栏按分组按需加载 */
+  listTasksInGroup(
+    groupId: string,
+    opts?: { limit?: number; offset?: number },
+  ): { tasks: TaskItem[]; total: number } {
+    return this.tasks.listGroupTasks(groupId, opts);
+  }
+
   getTask(id: string): TaskItem | null {
     return this.tasks.getTask(id);
   }

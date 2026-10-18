@@ -861,8 +861,9 @@ export function applyWsMessage(msg: WSMessage): void {
     case 'tasks.changed': {
       const payload = (msg.payload ?? {}) as { tasks?: TaskItem[]; groups?: TaskGroup[] };
       const st = useStore.getState();
-      if (Array.isArray(payload.tasks)) st.setTasks(payload.tasks);
+      // 顺序：先更新分组，再物化全量任务快照（applyFullTaskSnapshot 按最新分组标记各分组加载态）
       if (Array.isArray(payload.groups)) st.setTaskGroups(payload.groups);
+      if (Array.isArray(payload.tasks)) st.applyFullTaskSnapshot(payload.tasks);
       break;
     }
     case 'task-groups.changed': {

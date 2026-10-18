@@ -340,6 +340,16 @@ export const api = {
       page?: { total: number; limit: number; offset: number; hasMore: boolean };
     }>('GET', `/api/tasks${q ? `?${q}` : ''}`);
   },
+  /** 按分组拉取任务（组内排序，可分页）；侧边栏按分组按需加载用 */
+  listTasksInGroup: (groupId: string, opts?: { limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams({ groupId });
+    if (opts?.limit !== undefined) qs.set('limit', String(opts.limit));
+    if (opts?.offset !== undefined) qs.set('offset', String(opts.offset));
+    return request<{
+      tasks: TaskItem[];
+      page?: { total: number; limit?: number; offset?: number; hasMore: boolean };
+    }>('GET', `/api/tasks?${qs.toString()}`);
+  },
   /**
    * 创建任务。deriveGroupName：工作目录名 → 服务端按目录归类建组（前端免一次
    * 「查组/建组」串行往返，发送新任务从 2-3 次请求降到 1 次）。

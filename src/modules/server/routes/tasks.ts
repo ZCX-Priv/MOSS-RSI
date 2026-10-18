@@ -60,6 +60,22 @@ type AgentEngineWithTasks = AgentEngine & {
     active?: boolean;
     sessionId?: string;
   }>;
+  /** 按分组列出任务（组内排序，可分页）；侧边栏按分组按需加载 */
+  listTasksInGroup?: (
+    groupId: string,
+    opts?: { limit?: number; offset?: number },
+  ) => {
+    tasks: Array<{
+      id: string;
+      title: string;
+      groupId: string;
+      createdAt: string;
+      updatedAt: string;
+      active?: boolean;
+      sessionId?: string;
+    }>;
+    total: number;
+  };
   getTask?: (id: string) => {
     id: string;
     title: string;
@@ -156,26 +172,37 @@ export function createListTasksHandler(services: ServiceRegistry): RouteHandler 
     const server = services.tryResolve<{ isSessionRunning?: (sid: string) => boolean }>(
       ServiceNames.SERVER_INSTANCE,
     );
+    // 按分组查询：?groupId=<id>&limit=N&offset=M —— 侧边栏按分组按需加载（组内排序，可分页）。
+    // 只返回该组任务（order asc → createdAt desc），total 为该组任务总数；
+    // 不再有「跨分组全局排序的扁平分页」，故不会把某些分组（尤其各组 order=0 的任务）挤出分页外。
+    const groupId =
+      typeof req.query?.groupId === 'string' && req.query.groupId ? req.query.groupId : undefined;
+    if (groupId) {
+      const rawLimit = Number(req.query?.limit);
+      const rawOffset = Number(req.query?.offset);
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
+      const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+      const { tasks, total } = engine.listTasksInGroup?.(groupId, { limit, offset }) ?? {
+        tasks: [],
+        total: 0,
+      };
+      const withRunning = tasks.map((tk) => ({
+        ...tk,
+        running: server?.isSessionRunning?.(tk.sessionId ?? tk.id) ?? false,
+      }));
+      return {
+        status: 200,
+        body: {
+          tasks: withRunning,
+          page: { total, limit, offset, hasMore: offset + withRunning.length < total },
+        },
+      };
+    }
+    // 全量（无 groupId）：分组 + 全部可见任务。供 SearchModal / WS 重连恢复 / 既有文档契约使用。
     const all = visibleTasks(engine).map((tk) => ({
       ...tk,
       running: server?.isSessionRunning?.(tk.sessionId ?? tk.id) ?? false,
     }));
-    // 分页（可选）：?limit=N&offset=M。排序口径与引擎一致（order asc → createdAt 倒序），
-    // 切片稳定 → 前端滚动加载可安全 concat。不传 limit 时保持全量（兼容既有调用方）。
-    const limit = Number(req.query?.limit);
-    const offset = Number(req.query?.offset);
-    if (Number.isInteger(limit) && limit > 0) {
-      const start = Number.isInteger(offset) && offset > 0 ? offset : 0;
-      const tasks = all.slice(start, start + limit);
-      return {
-        status: 200,
-        body: {
-          groups: visibleGroups(engine),
-          tasks,
-          page: { total: all.length, limit, offset: start, hasMore: start + tasks.length < all.length },
-        },
-      };
-    }
     return { status: 200, body: { groups: visibleGroups(engine), tasks: all } };
   };
 }

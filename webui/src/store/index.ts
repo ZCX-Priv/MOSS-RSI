@@ -130,6 +130,18 @@ function stampThinkingTiming(
   return {};
 }
 
+/** 分组任务加载态（按需加载 + 组内分页）：groupId → { loaded, loading, hasMore, total } */
+export interface GroupTasksMeta {
+  /** 该分组第 1 页是否已加载（空组也会标记为已加载，避免重复请求） */
+  loaded: boolean;
+  /** 是否正在请求该分组任务 */
+  loading: boolean;
+  /** 组内是否还有未加载的任务页 */
+  hasMore: boolean;
+  /** 该分组任务总数（服务端权威，用于 hasMore 判定） */
+  total: number;
+}
+
 interface UIState {
   // --- 会话 / 消息 ---
   activeSessionId: string | null;
@@ -178,6 +190,11 @@ interface UIState {
   tasks: TaskItem[];
   taskGroups: TaskGroup[];
   activeTaskId: string | null;
+  /** 任务分组（文件夹）展开/收起状态：groupId → expanded（缺省视为展开）。
+   *  仅持久化「被用户改动过」的分组项，未出现的分组运行时回退 true。 */
+  taskGroupExpanded: Record<string, boolean>;
+  /** 分组任务加载态（按需加载 + 组内分页）：groupId → { loaded, loading, hasMore, total } */
+  groupTasksMeta: Record<string, GroupTasksMeta | undefined>;
 
   // --- Todo / Context（按 sessionId 索引） ---
   todosBySession: Record<string, TodoItem[]>;
@@ -322,6 +339,8 @@ export interface PersistedState {
   messageQueues?: Record<string, QueuedMessage[]>;
   /** 最近使用目录的自定义显示名（path → alias） */
   recentDirectoryAliases?: Record<string, string>;
+  /** 任务分组展开/收起（groupId → expanded；仅存被改动过的项） */
+  taskGroupExpanded?: Record<string, boolean>;
 }
 
 // ============================================================================
@@ -415,6 +434,27 @@ interface UIActions {
   addTaskGroup: (group: TaskGroup) => void;
   updateTaskGroup: (id: string, patch: Partial<TaskGroup>) => void;
   removeTaskGroup: (id: string) => void;
+  /** 设置某分组的展开/收起并持久化到 IndexedDB（groupId → expanded 全量落盘） */
+  setTaskGroupExpanded: (groupId: string, expanded: boolean) => void;
+  /** 局部更新某分组任务加载态（发起请求前置 loading 等） */
+  patchGroupTasksMeta: (groupId: string, patch: Partial<GroupTasksMeta>) => void;
+  /**
+   * 写入某分组的一页任务：mode='replace' 覆盖该组切片（首屏）；mode='append' 续载（按 id 去重）。
+   * 只影响该分组，其它分组任务原样保留。
+   */
+  setGroupTasks: (
+    groupId: string,
+    tasks: TaskItem[],
+    meta: Partial<GroupTasksMeta>,
+    mode: 'replace' | 'append',
+  ) => void;
+  /** 清空全部任务与分组加载态（首载 / 兜底重载前调用） */
+  resetGroupTasks: () => void;
+  /**
+   * 全量任务快照（WS tasks.changed / tasks.reordered、PUT reorder 响应、无参 GET /api/tasks）：
+   * 物化全部任务，并把当前所有分组标记为「已加载、无更多」（折叠分组由 Radix 卸载内容，不占 DOM）。
+   */
+  applyFullTaskSnapshot: (tasks: TaskItem[]) => void;
 
   // Todo / Context
   setTodos: (sessionId: string, todos: TodoItem[]) => void;
@@ -741,6 +781,8 @@ export const useStore = create<Store>((set, get) => ({
   tasks: [],
   taskGroups: [],
   activeTaskId: null,
+  taskGroupExpanded: {},
+  groupTasksMeta: {},
 
   // --- Todo / Context ---
   todosBySession: {},
@@ -1252,7 +1294,87 @@ export const useStore = create<Store>((set, get) => ({
       taskGroups: state.taskGroups.map((g) => (g.id === id ? { ...g, ...patch } : g)),
     })),
   removeTaskGroup: (id) =>
-    set((state) => ({ taskGroups: state.taskGroups.filter((g) => g.id !== id) })),
+    set((state) => {
+      const { [id]: _omitMeta, ...restMeta } = state.groupTasksMeta;
+      return {
+        taskGroups: state.taskGroups.filter((g) => g.id !== id),
+        // 顺带清理该分组的加载态与已物化任务；迁往默认分组的任务由 WS tasks.changed / 兜底 reload 重新物化
+        tasks: state.tasks.filter((t) => t.groupId !== id),
+        groupTasksMeta: restMeta,
+      };
+    }),
+  // 展开/收起持久化：缺省视为展开（undefined → true），同值不重复写盘
+  setTaskGroupExpanded: (groupId, expanded) =>
+    set((state) => {
+      if ((state.taskGroupExpanded[groupId] ?? true) === expanded) return {};
+      const taskGroupExpanded = { ...state.taskGroupExpanded, [groupId]: expanded };
+      void idbSet('moss-task-group-expanded', taskGroupExpanded);
+      return { taskGroupExpanded };
+    }),
+  // --- 分组任务按需加载 / 组内分页 ---
+  patchGroupTasksMeta: (groupId, patch) =>
+    set((state) => ({
+      groupTasksMeta: {
+        ...state.groupTasksMeta,
+        [groupId]: {
+          ...(state.groupTasksMeta[groupId] ?? { loaded: false, loading: false, hasMore: false, total: 0 }),
+          ...patch,
+        },
+      },
+    })),
+  setGroupTasks: (groupId, tasks, meta, mode) =>
+    set((state) => {
+      const others = state.tasks.filter((t) => t.groupId !== groupId);
+      const existing = state.tasks.filter((t) => t.groupId === groupId);
+      let slice: TaskItem[];
+      if (mode === 'append') {
+        // 续载：按 id 去重后追加（与 WS 广播交错时安全）
+        const seen = new Set(existing.map((t) => t.id));
+        slice = [...existing, ...tasks.filter((t) => !seen.has(t.id))];
+      } else {
+        // 首屏：以服务端本组页为准覆盖该组切片（乐观任务的短暂缺失由 task.created 广播 / updateTask 校正）
+        slice = tasks;
+      }
+      return {
+        tasks: [...others, ...slice],
+        groupTasksMeta: {
+          ...state.groupTasksMeta,
+          [groupId]: {
+            ...(state.groupTasksMeta[groupId] ?? { loaded: false, loading: false, hasMore: false, total: 0 }),
+            ...meta,
+          },
+        },
+      };
+    }),
+  resetGroupTasks: () => set({ tasks: [], groupTasksMeta: {} }),
+  applyFullTaskSnapshot: (tasks) =>
+    set((state) => {
+      // 与 setTasks 同源的「运行态置位」：只置位不清除（清除由状态快照 / 完成事件负责）
+      let generating = state.generatingBySession;
+      let changed = false;
+      for (const tk of tasks) {
+        if (tk.running !== true) continue;
+        const sid = tk.sessionId ?? tk.id;
+        if (!generating[sid]) {
+          if (!changed) {
+            generating = { ...generating };
+            changed = true;
+          }
+          generating[sid] = true;
+        }
+      }
+      // 全量快照：所有分组均为「已完整加载」（折叠分组由 Radix 卸载内容，不占 DOM）
+      const groupTasksMeta: Record<string, GroupTasksMeta | undefined> = { ...state.groupTasksMeta };
+      for (const g of state.taskGroups) {
+        groupTasksMeta[g.id] = {
+          loaded: true,
+          loading: false,
+          hasMore: false,
+          total: tasks.filter((t) => t.groupId === g.id).length,
+        };
+      }
+      return { tasks, groupTasksMeta, ...(changed ? { generatingBySession: generating } : {}) };
+    }),
 
   // --- Actions: Todo / Context ---
   setTodos: (sessionId, todos) =>
@@ -1951,6 +2073,14 @@ export const useStore = create<Store>((set, get) => ({
           if (items.length > 0) queues[sid] = [items[0]];
         }
         next.messageQueueBySession = queues;
+      }
+      // 任务分组展开/收起（groupId → expanded）：仅收布尔值，非法项丢弃
+      if (patch.taskGroupExpanded && typeof patch.taskGroupExpanded === 'object') {
+        const clean: Record<string, boolean> = {};
+        for (const [k, v] of Object.entries(patch.taskGroupExpanded)) {
+          if (k && typeof v === 'boolean') clean[k] = v;
+        }
+        next.taskGroupExpanded = clean;
       }
       return next;
     }),

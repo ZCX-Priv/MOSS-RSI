@@ -125,6 +125,30 @@ export class TaskStore {
       });
   }
 
+  /**
+   * 某分组内任务（组内排序：order asc → createdAt desc），可分页。
+   * 与 listTasks() 排序口径一致，但**仅本组**——供侧边栏按分组按需加载，避免跨组全局分页
+   * 把某些分组（尤其各组最旧的 order=0 任务）挤到首屏之外。
+   */
+  listGroupTasks(
+    groupId: string,
+    opts?: { limit?: number; offset?: number },
+  ): { tasks: TaskItem[]; total: number } {
+    const all = (this.tasksByGroup.get(groupId) ?? [])
+      .map(tk => ({ ...tk }))
+      .sort((a, b) => {
+        const oa = a.order ?? Number.MAX_SAFE_INTEGER;
+        const ob = b.order ?? Number.MAX_SAFE_INTEGER;
+        if (oa !== ob) return oa - ob;
+        return b.createdAt.localeCompare(a.createdAt);
+      });
+    const start =
+      Number.isInteger(opts?.offset) && (opts?.offset ?? 0) > 0 ? (opts!.offset as number) : 0;
+    const limit =
+      Number.isInteger(opts?.limit) && (opts?.limit ?? 0) > 0 ? (opts!.limit as number) : undefined;
+    return limit ? { tasks: all.slice(start, start + limit), total: all.length } : { tasks: all, total: all.length };
+  }
+
   getTask(id: string): TaskItem | null {
     const task = this.findTask(id);
     return task ? { ...task } : null;

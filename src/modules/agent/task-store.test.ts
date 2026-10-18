@@ -65,3 +65,41 @@ describe('TaskStore.createTask（前端预分配 id）', () => {
     expect(task.sessionId).toBe(task.id);
   });
 });
+
+describe('TaskStore.listGroupTasks（分组内查询 / 分页）', () => {
+  it('仅返回指定分组的任务，并按组内 order asc 排序（不混入他组）', () => {
+    const store = makeStore();
+    const a = store.createGroup('A', 'manual');
+    const b = store.createGroup('B', 'manual');
+    const a1 = store.createTask('A1', a.id, 'a1'); // order 0
+    const a2 = store.createTask('A2', a.id, 'a2'); // order -1
+    const a3 = store.createTask('A3', a.id, 'a3'); // order -2
+    store.createTask('B1', b.id, 'b1');
+
+    const { tasks, total } = store.listGroupTasks(a.id);
+    expect(total).toBe(3);
+    expect(tasks.map((t) => t.id)).toEqual([a3.id, a2.id, a1.id]);
+    expect(tasks.every((t) => t.groupId === a.id)).toBe(true);
+  });
+
+  it('limit/offset 切片且 total 为分组任务总数', () => {
+    const store = makeStore();
+    const g = store.createGroup('G', 'manual');
+    const ids = ['g1', 'g2', 'g3'].map((id, i) => store.createTask(`T${i}`, g.id, id).id);
+    // orders：g1=0、g2=-1、g3=-2 → 组内排序后为 [g3, g2, g1]
+    const first = store.listGroupTasks(g.id, { limit: 2 });
+    expect(first.tasks.map((t) => t.id)).toEqual([ids[2], ids[1]]);
+    expect(first.total).toBe(3);
+
+    const second = store.listGroupTasks(g.id, { limit: 2, offset: 2 });
+    expect(second.tasks.map((t) => t.id)).toEqual([ids[0]]);
+    expect(second.total).toBe(3);
+  });
+
+  it('未知分组返回空列表', () => {
+    const store = makeStore();
+    const { tasks, total } = store.listGroupTasks('no-such-group');
+    expect(tasks).toEqual([]);
+    expect(total).toBe(0);
+  });
+});

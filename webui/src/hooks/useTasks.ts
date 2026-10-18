@@ -1,33 +1,116 @@
 // UI/src/hooks/useTasks.ts
-// 任务 hook：分页首载 + 滚动追加；WS 广播实时同步（后端 task.created/updated/deleted）。
-// 重连后的兜底刷新由 useWebSocket 负责（restored 时全量重拉）。
+// 任务 hook：分组全量 + 分组任务按需加载（组内分页）；WS 广播实时同步（后端 task.created/updated/deleted/changed/reordered）。
+// 加载模型：
+//   首载 → GET /api/task-groups 拿全量分组（标题 / taskCount），再按需拉「展开中」的分组任务；
+//   展开某分组 → ensureGroupLoaded（组内第 1 页）；组内底部哨兵 → loadMoreGroup（组内续载）；
+//   全量快照（WS tasks.changed / tasks.reordered、PUT reorder 响应、无参 GET /api/tasks）→ applyFullTaskSnapshot。
+// 重连后的兜底刷新由 useWebSocket 负责（restored 时全量快照）。
 
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { withRetry } from '../lib/retry';
 import type { TaskItem } from '../types/api';
 
-/** 列表每页条数：首载与滚动追加共用（百级内首屏秒开，超出滚动加载） */
+/** 分组内每页条数（组内分页；典型分组远小于此值，一页即加载完） */
 const TASKS_PAGE_SIZE = 100;
 
 export function useTasks() {
-  const setTasks = useStore((s) => s.setTasks);
   const setTaskGroups = useStore((s) => s.setTaskGroups);
-  /** 分页状态（hasMore：服务端还有更早的任务页） */
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  /** loadMore 防重入（读取最新值用 ref，避免闭包过期） */
-  const loadingMoreRef = useRef(false);
+  const resetGroupTasks = useStore((s) => s.resetGroupTasks);
+  const patchGroupTasksMeta = useStore((s) => s.patchGroupTasksMeta);
+  const setGroupTasks = useStore((s) => s.setGroupTasks);
+  const applyFullTaskSnapshot = useStore((s) => s.applyFullTaskSnapshot);
+
+  /** 加载某分组第 1 页（已加载或加载中则跳过） */
+  const ensureGroupLoaded = useCallback(
+    async (groupId: string): Promise<void> => {
+      const meta = useStore.getState().groupTasksMeta[groupId];
+      if (meta?.loaded || meta?.loading) return;
+      patchGroupTasksMeta(groupId, { loading: true });
+      try {
+        const { tasks, page } = await api.listTasksInGroup(groupId, { limit: TASKS_PAGE_SIZE });
+        setGroupTasks(
+          groupId,
+          tasks,
+          {
+            loaded: true,
+            loading: false,
+            hasMore: page?.hasMore ?? false,
+            total: page?.total ?? tasks.length,
+          },
+          'replace',
+        );
+      } catch (err) {
+        console.warn('ensureGroupLoaded failed:', err);
+        // 保留未加载态，下次展开/重载可重试
+        patchGroupTasksMeta(groupId, { loading: false });
+      }
+    },
+    [patchGroupTasksMeta, setGroupTasks],
+  );
+
+  /** 续载某分组下一页（组内分页；offset = 该组已物化任务数） */
+  const loadMoreGroup = useCallback(
+    async (groupId: string): Promise<void> => {
+      const st = useStore.getState();
+      const meta = st.groupTasksMeta[groupId];
+      if (!meta || meta.loading || !meta.hasMore) return;
+      patchGroupTasksMeta(groupId, { loading: true });
+      const offset = st.tasks.filter((t) => t.groupId === groupId).length;
+      try {
+        const { tasks, page } = await api.listTasksInGroup(groupId, {
+          limit: TASKS_PAGE_SIZE,
+          offset,
+        });
+        setGroupTasks(
+          groupId,
+          tasks,
+          {
+            loaded: true,
+            loading: false,
+            hasMore: page?.hasMore ?? false,
+            total: page?.total ?? offset + tasks.length,
+          },
+          'append',
+        );
+      } catch (err) {
+        console.warn('loadMoreGroup failed:', err);
+        patchGroupTasksMeta(groupId, { loading: false });
+      }
+    },
+    [patchGroupTasksMeta, setGroupTasks],
+  );
+
+  /**
+   * 把每个分组补全到「无更多」（进入管理模式 / 拖拽前调用）。
+   * 拖拽排序依赖「分组内完整有序 id 序列」，只加载部分会写坏 order。
+   */
+  const ensureAllGroupsLoaded = useCallback(async (): Promise<void> => {
+    const groups = useStore.getState().taskGroups;
+    await Promise.all(
+      groups.map(async (g) => {
+        await ensureGroupLoaded(g.id);
+        while (useStore.getState().groupTasksMeta[g.id]?.hasMore) {
+          await loadMoreGroup(g.id);
+        }
+      }),
+    );
+  }, [ensureGroupLoaded, loadMoreGroup]);
 
   const load = useCallback(async () => {
-    // 优先分页首载（首页 TASKS_PAGE_SIZE 条；WS 广播与全量调用方不受影响）。
+    // 首载：分组全量 + 展开中的分组任务按需预载。
     // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503，退避重试后无需刷新即可自愈。
     try {
-      const { groups, tasks, page } = await withRetry(() => api.listTasks({ limit: TASKS_PAGE_SIZE }));
+      const { groups } = await withRetry(() => api.listTaskGroups());
       setTaskGroups(groups);
-      setTasks(tasks);
-      setHasMore(page?.hasMore ?? false);
+      resetGroupTasks();
+      const expanded = useStore.getState().taskGroupExpanded;
+      void Promise.all(
+        groups
+          .filter((g) => (expanded[g.id] ?? true) && (g.taskCount ?? 0) > 0)
+          .map((g) => ensureGroupLoaded(g.id)),
+      );
       return;
     } catch {
       // 后端 tasks 路由未就绪，降级到 session 适配
@@ -44,40 +127,18 @@ export function useTasks() {
         updatedAt: s.updatedAt,
         sessionId: s.id,
       }));
-      setTasks(tasks);
-      setHasMore(false);
       // 默认分组
       setTaskGroups([{ id: 'default', name: '默认', expanded: true }]);
+      applyFullTaskSnapshot(tasks);
     } catch (err) {
       // 后端未启动，静默
       console.warn('useTasks load failed:', err);
     }
-  }, [setTasks, setTaskGroups]);
+  }, [setTaskGroups, resetGroupTasks, ensureGroupLoaded, applyFullTaskSnapshot]);
 
   useEffect(() => {
     void load();
   }, [load]);
-
-  /** 滚动到底部附近时追加下一页（按 id 去重合并：与 WS 全量广播交错时安全） */
-  const loadMore = useCallback(async () => {
-    if (loadingMoreRef.current || !hasMore) return;
-    loadingMoreRef.current = true;
-    setLoadingMore(true);
-    try {
-      const offset = useStore.getState().tasks.length;
-      const { tasks, page } = await api.listTasks({ limit: TASKS_PAGE_SIZE, offset });
-      const st = useStore.getState();
-      const existing = new Set(st.tasks.map((t) => t.id));
-      const merged = [...st.tasks, ...tasks.filter((t) => !existing.has(t.id))];
-      st.setTasks(merged);
-      setHasMore(page?.hasMore ?? false);
-    } catch {
-      // 追加失败保持现状，用户再滚动会重试
-    } finally {
-      loadingMoreRef.current = false;
-      setLoadingMore(false);
-    }
-  }, [hasMore]);
 
   const createTask = useCallback(
     async (title: string, groupId?: string) => {
@@ -124,8 +185,9 @@ export function useTasks() {
 
   const reorderTasks = useCallback(async (taskIds: string[]) => {
     try {
+      // 响应为「全量可见任务」→ 走全量快照（物化全部 + 全部组标记已加载）
       const { tasks } = await api.reorderTasks(taskIds);
-      useStore.getState().setTasks(tasks);
+      useStore.getState().applyFullTaskSnapshot(tasks);
       return tasks;
     } catch (err) {
       console.warn('reorderTasks failed:', err);
@@ -172,13 +234,15 @@ export function useTasks() {
     tasks: useStore((s) => s.tasks),
     taskGroups: useStore((s) => s.taskGroups),
     activeTaskId: useStore((s) => s.activeTaskId),
+    /** 各分组任务加载态（按需加载 + 组内分页） */
+    groupTasksMeta: useStore((s) => s.groupTasksMeta),
     reload: load,
-    /** 滚动追加下一页（Sidebar 距底 <300px 时调用） */
-    loadMore,
-    /** 服务端还有未加载的任务页 */
-    hasMore,
-    /** 正在追加下一页 */
-    loadingMore,
+    /** 加载某分组第 1 页（展开时按需调用，幂等） */
+    ensureGroupLoaded,
+    /** 续载某分组下一页（组内哨兵触发） */
+    loadMoreGroup,
+    /** 补全所有分组到「无更多」（进入管理模式 / 拖拽前调用） */
+    ensureAllGroupsLoaded,
     createTask,
     updateTask,
     deleteTask,

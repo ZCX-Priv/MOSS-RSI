@@ -120,7 +120,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, loadMore, hasMore, loadingMore } = useTasks();
+  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, groupTasksMeta, ensureGroupLoaded, loadMoreGroup, ensureAllGroupsLoaded } = useTasks();
   const isSettingsRoute = pathname.startsWith('/settings');
   const [settingsSearch, setSettingsSearch] = useState('');
   const { isMobile, setOpenMobile } = useSidebar();
@@ -151,12 +151,9 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteTaskId, setDeleteTaskId] = useState<string | null>(null);
 
-  // 分组管理状态：受控折叠 + 新建/重命名/删除
-  const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>(() => {
-    const initial: Record<string, boolean> = {};
-    for (const g of taskGroups) initial[g.id] = g.expanded ?? true;
-    return initial;
-  });
+  // 分组展开/收起状态：来自全局 store（IndexedDB 持久化，刷新后保持）
+  const groupExpanded = useStore((s) => s.taskGroupExpanded);
+  const setTaskGroupExpanded = useStore((s) => s.setTaskGroupExpanded);
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [renameGroup, setRenameGroup] = useState<TaskGroup | null>(null);
@@ -166,8 +163,15 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const [deleteGroupAlsoTasks, setDeleteGroupAlsoTasks] = useState(false);
 
   const toggleGroup = (groupId: string) => {
-    setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
+    setTaskGroupExpanded(groupId, !(groupExpanded[groupId] ?? true));
   };
+
+  // 按需加载：展开中的分组（含初始默认展开）自动加载其任务（幂等，已加载/加载中会跳过）
+  useEffect(() => {
+    for (const g of taskGroups) {
+      if ((groupExpanded[g.id] ?? true) && (g.taskCount ?? 0) > 0) void ensureGroupLoaded(g.id);
+    }
+  }, [taskGroups, groupExpanded, ensureGroupLoaded]);
 
   const handleCreateGroup = async () => {
     if (newGroupName.trim()) {
@@ -215,6 +219,10 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  // 拖拽就绪：所有分组均已完整加载（组内无未加载页）才允许拖拽——拖拽排序依赖分组内完整有序序列，
+  // 用不完整序列 reorderTasks 会写坏 order（分组内分页下必须守卫）
+  const dragReady = taskGroups.every((g) => !(groupTasksMeta[g.id]?.hasMore));
+  const draggable = manageMode && dragReady;
 
   // 拖拽草稿态：onDragStart 快照任务列表，拖动期间以其为渲染数据源（跨组实时预览）；
   // 提交时按草稿落定位置持久化，取消（Esc）直接丢弃草稿即完整回滚
@@ -352,7 +360,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
       const groupId = overId.slice('group-header:'.length);
       if (!(groupExpanded[groupId] ?? true) && expandTimerRef.current === null) {
         expandTimerRef.current = setTimeout(() => {
-          setGroupExpanded((prev) => ({ ...prev, [groupId]: true }));
+          setTaskGroupExpanded(groupId, true);
           expandTimerRef.current = null;
         }, 350);
       }
@@ -630,7 +638,13 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 variant="ghost"
                 size="icon-xs"
                 title={t('sidebar.manage')}
-                onClick={() => { setManageMode((v) => !v); setSelectedIds(new Set()); }}
+                onClick={() => {
+                  const next = !manageMode;
+                  setManageMode(next);
+                  setSelectedIds(new Set());
+                  // 进入管理模式即补全各分组（拖拽排序依赖分组内完整有序序列）
+                  if (next) void ensureAllGroupsLoaded();
+                }}
                 className={cn(manageMode && 'bg-muted text-foreground')}
               >
                 <ListChecks />
@@ -692,13 +706,21 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 onDragCancel={handleDragCancel}
               >
               {taskGroups
-                // 默认分组为空时隐藏整个条目（常驻分组，持有任务才显示）；
-                // 拖动期间以草稿 displayTasks 为渲染源（跨组实时预览）
-                .filter((group) => group.id !== 'default' || displayTasks.some((task) => task.groupId === 'default'))
+                // 默认分组为空时隐藏整个条目（常驻分组，持有任务才显示）。
+                // 判定以与分组同帧返回的权威 taskCount 为准（后端由全量任务计算，不受任务分页影响），
+                // 保证默认分组与其它分组同帧出现；displayTasks 兜底覆盖「新任务已到但 taskCount 尚未刷新」。
+                // 非默认分组恒显示；拖动期间以草稿 displayTasks 为渲染源（跨组实时预览）
+                .filter(
+                  (group) =>
+                    group.id !== 'default' ||
+                    (group.taskCount ?? 0) > 0 ||
+                    displayTasks.some((task) => task.groupId === group.id),
+                )
                 .map((group) => {
                 const groupTasks = displayTasks.filter((task) => task.groupId === group.id);
                 const groupTaskIds = groupTasks.map((t) => t.id);
                 const expanded = groupExpanded[group.id] ?? true;
+                const meta = groupTasksMeta[group.id];
                 const GroupIcon = expanded ? FolderOpen : Folder;
                 // 默认分组为常驻分组：文案固定且随语言本地化
                 const groupLabel = group.id === 'default' ? t('sidebar.defaultGroup') : group.name;
@@ -760,6 +782,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                                   key={task.id}
                                   task={task}
                                   manageMode={manageMode}
+                                  draggable={draggable}
                                   isSelected={selectedIds.has(task.id)}
                                   onToggleSelect={toggleSelect}
                                   onNavigate={handleTaskNavigate}
@@ -770,6 +793,13 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                             </SortableContext>
                           </SidebarMenuSub>
                         </GroupDropZone>
+                        {/* 组内续载哨兵：该组仍有下一页（或正在加载）时置于组内底部，进入视口即续载 */}
+                        {meta && (meta.hasMore || meta.loading) && (
+                          <ListLoadMoreSentinel
+                            onVisible={() => void loadMoreGroup(group.id)}
+                            loading={meta.loading}
+                          />
+                        )}
                       </CollapsibleContent>
                     </SidebarMenuItem>
                   </Collapsible>
@@ -780,11 +810,6 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 {activeDragTask ? <TaskDragCard task={activeDragTask} /> : null}
               </DragOverlay>
               </DndContext>
-              {/* 滚动加载哨兵：任务超过首页 100 条（hasMore）时，滚到底部附近自动追加下一页。
-                  IntersectionObserver 不依赖具体滚动容器（shadcn 内层），rootMargin 提前触发 */}
-              {hasMore && (
-                <ListLoadMoreSentinel onVisible={() => void loadMore()} loading={loadingMore} />
-              )}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -988,6 +1013,8 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
 interface TaskRowProps {
   task: TaskItem;
   manageMode: boolean;
+  /** 是否允许拖拽（= 管理模式 && 各分组均已完整加载；越界序列会写坏 order） */
+  draggable: boolean;
   isSelected: boolean;
   onToggleSelect: (id: string) => void;
   onNavigate: (id: string) => void;
@@ -999,6 +1026,7 @@ interface TaskRowProps {
 const TaskRow = memo(function TaskRow({
   task,
   manageMode,
+  draggable,
   isSelected,
   onToggleSelect,
   onNavigate,
@@ -1007,11 +1035,11 @@ const TaskRow = memo(function TaskRow({
 }: TaskRowProps) {
   const { t } = useTranslation();
   const { pathname } = useLocation();
-  // 仅管理模式可拖拽（disabled 时 listeners 不激活，普通模式彻底不可拖）；
+  // 仅管理模式且各分组均已完整加载（draggable）时可拖拽（disabled 时不激活 listeners）；
   // data.groupId 供碰撞检测在让位缝隙中按组吸附最近任务
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
-    disabled: !manageMode,
+    disabled: !draggable,
     data: { groupId: task.groupId },
   });
   // 状态指示器：运行中（转圈）/ 出错（红警示），空闲不显示；WS 事件流驱动
