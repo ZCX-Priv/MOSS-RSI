@@ -14,7 +14,7 @@ import type {
   ContextSessionLike,
 } from '../types';
 import type { LLMRouter } from '../../contracts';
-import { estimateMessagesTokens } from '../budgeter/estimator';
+import { estimateMessagesTokens, estimateTextTokens } from '../budgeter/estimator';
 import { planCompaction, isProtectedMessage } from './planner';
 import { summarizeRegion, SummarizeError } from './summarizer';
 import { COMPACTION_SUMMARY_MSG_NAME } from '../compiler/view-builder';
@@ -83,7 +83,13 @@ export async function compactSession(
   const active = session.messages.filter(m => !m.deletedAt && !m.compacted);
 
   // 2. 规划
-  const plan = planCompaction(active, windowTokens, config.tailKeepRatio, config.minFoldTokens);
+  const plan = planCompaction(
+    active,
+    windowTokens,
+    config.tailKeepRatio,
+    config.minFoldTokens,
+    config.minCompactMessages,
+  );
   if (!plan.ok) {
     return { record: null, reason: plan.reason };
   }
@@ -113,6 +119,26 @@ export async function compactSession(
     const msg = err instanceof SummarizeError ? err.message : err instanceof Error ? err.message : String(err);
     logger.warn('context: compaction summarization failed', { sessionId: session.id, error: msg });
     return { record: null, reason: `summarization failed: ${msg}` };
+  }
+
+  // 4.5 收缩比检查（DSH shrink check）：摘要必须显著小于被压缩区，否则放弃本轮。
+  // 目的：杜绝“摘要≈原文”的空转——这正是“越压越傻 / 反复压缩”的直接成因。
+  const summaryTokens = estimateTextTokens(summary) + 8; // +8 结构/包装开销
+  if (summaryTokens > plan.regionTokens * config.maxShrinkRatio) {
+    logger.warn('context: compaction aborted (shrink check failed)', {
+      sessionId: session.id,
+      regionTokens: plan.regionTokens,
+      summaryTokens,
+      maxShrinkRatio: config.maxShrinkRatio,
+    });
+    return {
+      record: null,
+      reason: `shrink check failed: summary ${summaryTokens} > region ${plan.regionTokens} × ${config.maxShrinkRatio}`,
+    };
+  }
+  const projectedAfter = beforeTokens - plan.regionTokens + summaryTokens;
+  if (projectedAfter >= beforeTokens) {
+    return { record: null, reason: `compaction would not reduce tokens (${projectedAfter} >= ${beforeTokens})` };
   }
 
   // 5. 物理折叠被压缩区间（体积治理：原文不再保留，session 文件与内存有界）。

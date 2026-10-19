@@ -126,6 +126,7 @@ import {
 import { useTask } from '../../hooks/useTask';
 import { useFileIndex } from '../../hooks/useFileIndex';
 import { api } from '../../api/http';
+import { copyText } from '../../lib/clipboard';
 import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, AskQuestion } from '../../types/api';
 
 // 稳定引用的空数组，避免 useStore 选择器每次返回新 [] 触发 useSyncExternalStore 无限循环
@@ -822,10 +823,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
 
   /** 复制消息文本 */
   const handleCopyMessage = useCallback((content: string) => {
-    void navigator.clipboard.writeText(content).then(
-      () => toast.success(t('task.messageCopied')),
-      () => toast.error(t('task.messageCopyFailed')),
-    );
+    void copyText(content).then((ok) => {
+      if (ok) toast.success(t('task.messageCopied'));
+      else toast.error(t('common.copyManualHint'));
+    });
   }, [t]);
 
   /** 打开 AI 错误诊断弹窗（入参为原始 provider 错误文本） */

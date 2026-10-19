@@ -1,5 +1,5 @@
 // tools/read/index.ts
-// read 工具核心调度层：参数校验 → 路径安全（filesys roots）→ 大文件策略 → Dedup → 类型分派 → 结果聚合。
+// read 工具核心调度层：参数校验 → 路径安全（filesys roots）→ 大文件策略 → 类型分派 → 结果聚合。
 // 元数据（name/description/icon/annotations/inputSchema/config）见同目录 tool.json。
 // handlers/ 子目录按文件类型分派，shared/ 子目录提供检测/minified/流式读取等公共能力。
 //
@@ -12,7 +12,6 @@
 //   - 路径解析走 FilesysService.resolve（roots 机制，默认等价旧版 resolveWithinCwd）
 //   - sha256/编码分类/内容读取合并走 filesys.readFile（缓存命中零读盘；未命中一次读盘全派生，
 //     旧实现同一文件读 3 次盘：classify 全量读 + handler 读 + sha 再读）
-//   - Dedup 并入 filesys 缓存条目的 lastReadAt（旧 shared/dedup.ts 删除）
 //
 // 路径（read/index.ts → src/）：
 //   ../../../../core/types    — ServiceNames
@@ -148,14 +147,6 @@ async function processSingleFile(
     return largeFileResult(path, stat.size);
   }
 
-  // Dedup 去重：自上次 read 后未变（mtime/size 校验）则不重复全量返回
-  if (filesys.isUnchangedSinceRead(path)) {
-    return {
-      content: [{ type: 'text', text: t('tools.readFileUnchanged', { path }) }],
-      metadata: { path, unchanged: true, sizeBytes: stat.size },
-    };
-  }
-
   // 一次读盘全派生：rawBuffer / sha256 / 编码分类（缓存命中则零 I/O）
   const entity = filesys.readFile(path);
   if (!entity) {
@@ -183,9 +174,6 @@ async function processSingleFile(
     { rawBuffer: entity.rawBuffer, kind: entity.kind },
     artifact,
   );
-
-  // 标记"刚被 read"（dedup 语义，filesys 缓存条目 lastReadAt）
-  filesys.touchRead(path);
 
   // 合并元信息（sha256 暴露给 edit 工具 expectHash 乐观锁）
   return {

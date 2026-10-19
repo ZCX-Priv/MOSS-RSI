@@ -24,6 +24,50 @@ export interface CompactionConfig {
   minFoldTokens: number;
   /** 摘要模型：'inherit' = 主模型；否则为 providers 旗下模型 id */
   summaryModel: string;
+  /**
+   * 收缩比上限（DSH shrink check 等价）：摘要 token 必须 ≤ 可压缩区 token × 本值，
+   * 否则放弃本轮压缩（拒绝“摘要≈原文”的空转，防止越压越傻）。
+   */
+  maxShrinkRatio: number;
+  /** 可压缩区最少消息数（低于此值跳过压缩） */
+  minCompactMessages: number;
+  /**
+   * 压缩冷却水位（token）：距离上次自动压缩不足 cooldownMs 且当前估算相较
+   * 上次压缩后增长未超过本值时，跳过本次自动压缩（防止反复徒劳压缩）。
+   */
+  cooldownGrowthTokens: number;
+  /** 压缩冷却时间窗 ms（配合 cooldownGrowthTokens 生效） */
+  cooldownMs: number;
+}
+
+/** 图片发送前优化配置（TinyPNG 式压缩；减少请求体字节同时保留细节） */
+export interface ImageOptimizationConfig {
+  /** 是否启用发送前图片优化（关闭则原样发送原图） */
+  enabled: boolean;
+  /** 长边最大像素（超出则等比缩小；仅缩不放） */
+  maxEdgePx: number;
+  /** 有损编码质量（palette/JPEG/WebP 量化用；1-100） */
+  quality: number;
+  /** 输出格式：auto=按原格式择优选小，或强制 png/jpeg/webp */
+  format: 'auto' | 'png' | 'jpeg' | 'webp';
+  /** 是否使用无损编码（true=仅重新压缩不量化；false=TinyPNG 式量化） */
+  lossless: boolean;
+  /** 单张图片内联字节上限（超出则继续压缩/降级；0=不限制） */
+  maxInlineBytesPerImage: number;
+  /** 小于该字节数的图片跳过优化（优化无收益） */
+  skipBelowBytes: number;
+  /** 所有图片内联字节总量上限（引导 governor 提前淘汰；0=不限制） */
+  maxTotalImageBytes: number;
+}
+
+/** 思考内容回传配置（计入估算对所有 provider 一律生效，回传按 provider 语义） */
+export interface ThinkingReplayConfig {
+  /**
+   * OpenAI 兼容（含 DeepSeek）是否把历史 reasoning_content 回传给模型。
+   * 默认 false —— DeepSeek 官方规范：多轮回写 assistant 消息只需 content，
+   * 不应传入 reasoning_content。仅在自建代理确实接受时才开启。
+   */
+  replayOpenAICompat: boolean;
 }
 
 export interface ToolPruningConfig {
@@ -92,6 +136,10 @@ export interface ContextEngineConfig {
   hooks: HooksConfig;
   /** 记忆引擎（默认开） */
   memory: MemoryConfig;
+  /** 图片发送前优化（默认开；sharp 不可用时自动降级为不压缩） */
+  imageOptimization: ImageOptimizationConfig;
+  /** 思考内容回传（默认严格按 provider 语义；OpenAI 兼容默认不回传） */
+  thinking: ThinkingReplayConfig;
   /**
    * 单次 LLM 请求体字节上限（序列化后的 JSON body）。
    * 用途：token 预算看不到图片 base64 字节，服务端却按字节判 413；
@@ -108,6 +156,25 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
   summaryMaxTokens: 8192,
   minFoldTokens: 400,
   summaryModel: 'inherit',
+  maxShrinkRatio: 0.5,
+  minCompactMessages: 4,
+  cooldownGrowthTokens: 2000,
+  cooldownMs: 60000,
+};
+
+export const DEFAULT_IMAGE_OPTIMIZATION_CONFIG: ImageOptimizationConfig = {
+  enabled: true,
+  maxEdgePx: 1568,
+  quality: 82,
+  format: 'auto',
+  lossless: false,
+  maxInlineBytesPerImage: 1024 * 1024,
+  skipBelowBytes: 64 * 1024,
+  maxTotalImageBytes: 4 * 1024 * 1024,
+};
+
+export const DEFAULT_THINKING_REPLAY_CONFIG: ThinkingReplayConfig = {
+  replayOpenAICompat: false,
 };
 
 export const DEFAULT_TOOL_PRUNING_CONFIG: ToolPruningConfig = {
@@ -161,6 +228,8 @@ export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   rules: { ...DEFAULT_RULES_CONFIG },
   hooks: { ...DEFAULT_HOOKS_CONFIG },
   memory: { ...DEFAULT_MEMORY_CONFIG },
+  imageOptimization: { ...DEFAULT_IMAGE_OPTIMIZATION_CONFIG },
+  thinking: { ...DEFAULT_THINKING_REPLAY_CONFIG },
   maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES,
 };
 
@@ -193,6 +262,8 @@ export interface ContextMessage {
   }>;
   toolCallId?: string;
   thinking?: string;
+  /** 思考签名（Anthropic thinking block 的 signature；回传时必须原样携带） */
+  thinkingSignature?: string;
   name?: string;
   isError?: boolean;
   metadata?: Record<string, unknown>;

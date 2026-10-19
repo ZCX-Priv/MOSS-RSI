@@ -77,6 +77,7 @@ import { Switch } from '@/components/ui/switch';
 import { Progress } from '@/components/ui/progress';
 import { useProviders, type UseProvidersResult } from '../../hooks/useProviders';
 import { useVoiceStatus, useVoiceModels } from '../../hooks/useVoiceInput';
+import { isLocalAsrSupported } from '@/lib/asr-local';
 import { api } from '../../api/http';
 import { useStore } from '../../store';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
@@ -166,6 +167,15 @@ export function ProviderSettings() {
       : 'model';
   const { status: voiceStatus, refresh: refreshVoiceStatus } = useVoiceStatus();
   const { models: voiceModels, refresh: refreshVoiceModels } = useVoiceModels();
+  // 推理位置标签：在线服务商 / 服务端本地引擎 / 浏览器端 WASM / 不可用
+  const voiceLocalModel = voiceModels.find((m) => m.state === 'installed' && m.engine === 'zipformer');
+  const voiceInferLabel =
+    voiceStatus?.providerId ||
+    (voiceStatus?.runtimeAvailable && (voiceStatus.installed?.length ?? 0) > 0)
+      ? t('settings.provider.voiceInferServer')
+      : isLocalAsrSupported() && voiceLocalModel
+        ? t('settings.provider.voiceInferLocal')
+        : t('settings.provider.voiceInferUnavailable');
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderItem | null>(null);
   const [pickProvider, setPickProvider] = useState<ProviderItem | null>(null);
@@ -481,15 +491,37 @@ export function ProviderSettings() {
                 {t('settings.provider.voiceEnableDesc')}
               </span>
               {voiceStatus && !voiceStatus.runtimeAvailable && (
-                <span className="mt-1 text-xs text-destructive">
-                  {t('settings.provider.voiceRuntimeUnavailable')}
-                </span>
+                <div className="mt-1 flex flex-col gap-0.5">
+                  <span className="text-xs text-destructive">
+                    {voiceStatus.platformSupported
+                      ? t('settings.provider.voiceRuntimeUnavailable')
+                      : t('settings.provider.voiceRuntimePlatformUnsupported', { platform: voiceStatus.platform })}
+                  </span>
+                  {voiceStatus.platformSupported && voiceStatus.runtimeError && (
+                    <span className="break-all text-[11px] text-muted-foreground">
+                      {t('settings.provider.voiceRuntimeReasonLabel')}: {voiceStatus.runtimeError}
+                    </span>
+                  )}
+                  {!voiceStatus.platformSupported && (
+                    <span className="text-[11px] text-muted-foreground">
+                      {t('settings.provider.voiceRuntimePlatformHint')}
+                    </span>
+                  )}
+                </div>
               )}
             </div>
             <Switch
               checked={Boolean(voiceStatus?.enabled)}
               onCheckedChange={(v) => void toggleVoiceEnabled(v)}
             />
+          </div>
+
+          {/* 推理位置（服务端本地引擎 / 浏览器端 WASM） */}
+          <div className="flex items-center justify-between rounded-xl border border-border p-4">
+            <span className="text-sm font-medium text-foreground">
+              {t('settings.provider.voiceInferLocation')}
+            </span>
+            <span className="text-xs text-muted-foreground">{voiceInferLabel}</span>
           </div>
 
           {/* 默认语音服务商（本地引擎 / 在线服务商） */}

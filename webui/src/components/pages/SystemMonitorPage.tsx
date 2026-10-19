@@ -23,6 +23,7 @@ import { Badge } from '@/components/ui/badge';
 import { InsightDialog } from '@/components/insight/InsightDialog';
 import { api } from '@/api/http';
 import { cn } from '@/lib/utils';
+import { copyText } from '@/lib/clipboard';
 import { toast } from 'sonner';
 import type { MossProcessInfo, ResourceSnapshot } from '@/types/api';
 
@@ -159,10 +160,10 @@ function ProcessTable({
   const groupLabel = (g: MossProcessInfo['group']): string => t(`resourceMonitor.group.${g}`);
 
   const copy = (text: string) => {
-    void navigator.clipboard.writeText(text).then(
-      () => toast.success(t('resourceMonitor.copied')),
-      () => toast.error(t('resourceMonitor.copyFailed')),
-    );
+    void copyText(text).then((ok) => {
+      if (ok) toast.success(t('resourceMonitor.copied'));
+      else toast.error(t('common.copyManualHint'));
+    });
   };
 
   return (

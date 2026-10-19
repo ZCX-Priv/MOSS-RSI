@@ -23,7 +23,7 @@ export class OpenAIChatProvider implements LLMProvider {
   transformRequest(req: UnifiedRequest, cfg: ModelConfig): unknown {
     const body: Record<string, unknown> = {
       model: req.model,
-      messages: toOpenAIMessages(req.messages),
+      messages: toOpenAIMessages(req.messages, req.replayThinking === true),
       stream: req.stream,
     };
     // 流式时显式请求 usage chunk（OpenAI 兼容 API 默认不在流中返回 usage；
@@ -185,7 +185,7 @@ function normalizeUsage(u: OpenAIChatUsage): UnifiedUsage {
  * 这里改为「延迟发射」：工具块内的图片 user 消息先累积，待工具块结束（遇到非 tool 消息
  * 或遍历结束）后统一追加，保证 tool_calls ↔ tool 消息配对完整。
  */
-function toOpenAIMessages(msgs: UnifiedMessage[]): unknown[] {
+function toOpenAIMessages(msgs: UnifiedMessage[], replayThinking: boolean): unknown[] {
   const out: unknown[] = [];
   let pendingImageMsgs: Array<Record<string, unknown>> = [];
   const flush = (): void => {
@@ -197,7 +197,7 @@ function toOpenAIMessages(msgs: UnifiedMessage[]): unknown[] {
   for (const msg of msgs) {
     // 非 tool 消息：工具块结束，先补发累积的图片承载消息
     if (msg.role !== 'tool') flush();
-    out.push(toOpenAIMessage(msg));
+    out.push(toOpenAIMessage(msg, replayThinking));
     if (msg.role === 'tool' && msg.images && msg.images.length > 0) {
       pendingImageMsgs.push({ role: 'user', content: contentWithImages('[图片]', msg.images) });
     }
@@ -206,7 +206,7 @@ function toOpenAIMessages(msgs: UnifiedMessage[]): unknown[] {
   return out;
 }
 
-function toOpenAIMessage(msg: UnifiedMessage): unknown {
+function toOpenAIMessage(msg: UnifiedMessage, replayThinking: boolean): unknown {
   const hasImages = !!msg.images && msg.images.length > 0;
   // 图片承载为多模态 content 数组；tool 消息除外（其 content 必须为字符串）
   const content =
@@ -214,6 +214,10 @@ function toOpenAIMessage(msg: UnifiedMessage): unknown {
   const out: Record<string, unknown> = { role: msg.role, content };
   if (msg.name) out.name = msg.name;
   if (msg.toolCallId) out.tool_call_id = msg.toolCallId;
+  // 思考内容回传：仅当显式开启（默认关闭，符合 DeepSeek 规范）
+  if (replayThinking && msg.role === 'assistant' && msg.thinking) {
+    out.reasoning_content = msg.thinking;
+  }
   if (msg.toolCalls) {
     out.tool_calls = msg.toolCalls.map(tc => ({
       id: tc.id,

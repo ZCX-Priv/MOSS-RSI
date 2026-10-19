@@ -19,11 +19,13 @@ import type {
   ContextSessionLike,
   PreparedRequest,
 } from '../types';
-import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext } from '../compiler';
+import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSessionImagePaths } from '../compiler';
+import type { OptimizedImage, ImageOptimizer } from '../compiler';
 import type { RulesSectionInput } from '../compiler/system-prompt';
 import { MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from '../compiler/view-builder';
 import { ensureProjectContext } from '../file-index/project-context';
 import { compactSession, resolveSummaryModel } from '../compressor';
+import { planCompaction } from '../compressor/planner';
 import { estimateTextTokens, estimateMessagesTokens } from '../budgeter/estimator';
 import { shouldCompact, needsHardCeiling, compactionActive } from './triggers';
 import { buildRulesSection } from '../../rules/inject';
@@ -54,6 +56,12 @@ export interface GovernorDeps {
   onCompaction(sessionId: string, record: CompactionRecord): void;
   /** 降级遥测回调 */
   onDegraded(sessionId: string, reason: string): void;
+  /** 图片优化器（发送前压缩；模块未就绪返回 null → 发送原图） */
+  getImageOptimizer?(): ImageOptimizer | null;
+  /** 上次自动压缩水位（冷却判定）：{ at: 时间戳ms, tokens: 压缩后估算 }；无则 undefined */
+  getCompactionGuard?(sessionId: string): { at: number; tokens: number } | undefined;
+  /** 记录本次自动压缩水位（供冷却判定） */
+  setCompactionGuard?(sessionId: string, guard: { at: number; tokens: number }): void;
   /** 项目概要文本（文件索引模块；索引开启时注入锚定消息，关闭返回 null） */
   getProjectOverview?(cwd: string): Promise<string | null>;
   /** 主动确保文件索引项目运行时（索引开启时每次请求幂等触发；fire-and-forget） */
@@ -230,28 +238,84 @@ export async function prepareRequest(
   const resolveSkill = (name: string): string | null =>
     resolveSkillPromptFromRegistry(deps.services, name);
 
+  // ===== 2.5 图片预优化（发送前压缩；失败回退原图，绝不阻断请求）=====
+  let optimizedImages: Map<string, OptimizedImage> | undefined;
+  if (config.imageOptimization.enabled) {
+    const optimizer = deps.getImageOptimizer?.();
+    if (optimizer) {
+      const paths = collectSessionImagePaths(session);
+      if (paths.length > 0) {
+        try {
+          const results = await Promise.all(
+            paths.map(p =>
+              optimizer
+                .optimizeImage(p)
+                .then(r => [p, r] as const)
+                .catch(() => [p, null] as const),
+            ),
+          );
+          const map = new Map<string, OptimizedImage>();
+          for (const [p, r] of results) if (r) map.set(p, r);
+          if (map.size > 0) optimizedImages = map;
+        } catch (err) {
+          deps.logger.warn('context: image pre-optimization failed', {
+            sessionId: session.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
   const buildView = (budgetTokens?: number, budgetBytes?: number) =>
     buildRequestView(session, staticSystemPrompt, {
       toolPruning: config.toolPruning,
       resolveSkillPrompt: resolveSkill,
       budgetTokens,
       budgetBytes,
+      imageEviction: { enabled: true, protectUnseen: true },
+      maxTotalImageBytes: config.imageOptimization.maxTotalImageBytes,
       ...(ephemeralMessages ? { ephemeralMessages } : {}),
+      ...(optimizedImages ? { optimizedImages } : {}),
     });
 
-  // ===== 3. 预览估算 → 压缩决策（token 与请求体字节双维度） =====
+  // ===== 3. 预览估算 → token 压缩决策（字节超限不再触发 LLM 压缩） =====
   let compactionTriggered = false;
   let degradedReason: string | undefined;
 
   const preview = buildView();
   const byteBudget = config.maxRequestBytes;
-  // 图片 base64 对 token 估算不可见 → 字节维度必须独立判定，否则会漏掉 413 型溢出
+  // 图片 base64 对 token 估算不可见 → 字节维度独立判定，驱动最终视图的图片淘汰/字节兜底。
   const byteOverBudget = preview.bytes > byteBudget;
-  if (compactionActive(config.compaction, windowTokens)) {
-    if (
-      shouldCompact(preview.breakdown.total, windowTokens, config.compaction.compactRatio) ||
-      byteOverBudget
-    ) {
+
+  // 仅当 token 估算达阈值才触发 LLM 压缩；字节超限由「图片压缩 + 图片淘汰 + 尾部裁剪 + router 护栏」解决。
+  // 同时以「规划预检 + 冷却水位」防抖：徒劳/过频压缩在这里被拦下（不再空发 compaction-started）。
+  if (
+    compactionActive(config.compaction, windowTokens) &&
+    shouldCompact(preview.breakdown.total, windowTokens, config.compaction.compactRatio)
+  ) {
+    const activeForPlan = session.messages.filter(m => !m.deletedAt && !m.compacted);
+    const plan = planCompaction(
+      activeForPlan,
+      windowTokens,
+      config.compaction.tailKeepRatio,
+      config.compaction.minFoldTokens,
+      config.compaction.minCompactMessages,
+    );
+    const guard = deps.getCompactionGuard?.(session.id);
+    const withinCooldown = guard
+      ? Date.now() - guard.at < config.compaction.cooldownMs &&
+        preview.breakdown.total < guard.tokens + config.compaction.cooldownGrowthTokens
+      : false;
+
+    if (!plan.ok) {
+      deps.logger.debug('context: auto compaction skipped (plan invalid)', {
+        sessionId: session.id,
+        reason: plan.reason,
+      });
+    } else if (withinCooldown) {
+      deps.logger.debug('context: auto compaction skipped (cooldown)', { sessionId: session.id });
+    } else {
       const llm = deps.getLlm();
       if (llm) {
         const { requestModel } = resolveSummaryModel(
@@ -280,13 +344,17 @@ export async function prepareRequest(
             compactionTriggered = true;
             deps.persistSession(session);
             deps.onCompaction(session.id, outcome.record);
+            deps.setCompactionGuard?.(session.id, {
+              at: Date.now(),
+              tokens: outcome.record.afterTokens,
+            });
             deps.emitWs(session.id, {
               type: 'compaction-completed',
               sessionId: session.id,
               payload: { sessionId: session.id, compaction: outcome.record },
             });
           } else if (outcome.reason) {
-            // 区太小/摘要失败：不算降级（下轮再试），仅 debug
+            // 区太小/摘要失败/收缩比不达标：不算降级（下轮再试），仅 debug
             deps.logger.debug('context: auto compaction skipped', {
               sessionId: session.id,
               reason: outcome.reason,
@@ -321,9 +389,10 @@ export async function prepareRequest(
     deps.onDegraded(session.id, `request body over byte cap: ${final.bytes}/${byteBudget}`);
   }
 
-  // ===== 4.5 图片「只发一次」：把本轮内联发送的图片消息引用交给调用方 =====
-  // 调用方须在请求**成功送达后**调用 confirmImagesSent 落 imagesSentAt（下轮起降级为占位符）；
-  // 请求失败则 discardImagesSent 丢弃 → 下次仍会重新发送该图片（不会让模型"从未见过"）。
+  // ===== 4.5 图片「已看过」标记：把本轮真正内联发送的图片消息引用交给调用方 =====
+  // 调用方在请求**成功送达后**调用 confirmImagesSent 落 imagesSentAt（此后该图视为「已看过」，
+  // 在字节超预算时优先被淘汰为占位符）；请求失败则 discardImagesSent 丢弃 →
+  // 下次仍会重新发送该图（保证模型至少看过一次）。
   return {
     messages: final.messages,
     estimatedTokens: final.breakdown.total,

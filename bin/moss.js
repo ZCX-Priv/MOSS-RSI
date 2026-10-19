@@ -50,6 +50,21 @@ function resolveRuntime(entry) {
   return ['node', [entry]];
 }
 
+/**
+ * Linux/macOS：sherpa-onnx 原生 addon 的共享库需经 LD_LIBRARY_PATH/DYLD_LIBRARY_PATH 解析
+ * （官方文档要求；Windows 自动加载，无需设置）。glibc/dyld 在进程启动时读取，故须在 spawn 时注入。
+ */
+function nativeLibEnv() {
+  const libDir = path.resolve(ROOT, 'node_modules', 'sherpa-onnx-node', 'lib');
+  if (process.platform === 'linux') {
+    return { LD_LIBRARY_PATH: `${libDir}:${process.env.LD_LIBRARY_PATH ?? ''}` };
+  }
+  if (process.platform === 'darwin') {
+    return { DYLD_LIBRARY_PATH: `${libDir}:${process.env.DYLD_LIBRARY_PATH ?? ''}` };
+  }
+  return {};
+}
+
 function main() {
   const entry = resolveEntry();
   const [runtime, runtimeArgs] = resolveRuntime(entry);
@@ -58,6 +73,7 @@ function main() {
     stdio: 'inherit',
     shell: process.platform === 'win32',
     cwd: ROOT,
+    env: { ...process.env, ...nativeLibEnv() },
   });
   if (result.error) {
     fail(`Failed to spawn ${runtime}: ${result.error.message}`);

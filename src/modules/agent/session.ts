@@ -598,6 +598,7 @@ export class SessionStore {
     thinking?: string,
     messageId?: string,
     thinkingMs?: number,
+    thinkingSignature?: string,
   ): void {
     session.messages.push({
       role: 'assistant',
@@ -606,6 +607,7 @@ export class SessionStore {
       thinking,
       messageId,
       ...(thinkingMs != null ? { thinkingMs } : {}),
+      ...(thinkingSignature ? { thinkingSignature } : {}),
       timestamp: new Date().toISOString(),
     });
     session.updatedAt = new Date().toISOString();

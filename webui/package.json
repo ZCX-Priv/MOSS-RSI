@@ -70,6 +70,7 @@
     "shiki": "^4.4.3",
     "smiles-drawer": "^2.4.1",
     "sonner": "^2.0.7",
+    "speech-asr": "^1.1.6",
     "sql.js": "^1.14.2",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",

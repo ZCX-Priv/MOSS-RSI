@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { extname } from 'node:path';
 import type { ToolResult } from '../../types';
 
-/** 扩展名 → MIME 类型映射 */
+/** 扩展名 → MIME 类型映射（不含 .svg —— SVG 由 text handler 作为代码读取） */
 const MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -15,7 +15,6 @@ const MIME_MAP: Record<string, string> = {
   '.gif': 'image/gif',
   '.webp': 'image/webp',
   '.bmp': 'image/bmp',
-  '.svg': 'image/svg+xml',
 };
 
 /**

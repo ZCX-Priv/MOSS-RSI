@@ -59,6 +59,13 @@ export interface UnifiedMessage {
    * 由各 provider 按原生格式映射进请求。
    */
   images?: UnifiedImage[];
+  /**
+   * 思考内容（assistant 消息）。是否回传给模型由各 provider 按原生语义决定：
+   * Anthropic 需连同 signature 原样回传；DeepSeek/OpenAI 兼容默认不回传。
+   */
+  thinking?: string;
+  /** 思考签名（Anthropic thinking block 的 signature；回传时必须原样携带） */
+  thinkingSignature?: string;
   /** 工具调用 ID（role=tool 时必填） */
   toolCallId?: string;
   /** 助手消息的工具调用列表 */
@@ -80,6 +87,12 @@ export interface UnifiedRequest {
   thinking?: ThinkingConfig;
   /** 强制使用工具 */
   toolChoice?: 'auto' | 'none' | 'required';
+  /**
+   * 是否把历史 assistant 的思考内容回传给模型（仅 OpenAI 兼容 provider 消费）。
+   * 默认 false —— DeepSeek 官方规范：多轮回写 assistant 只需 content，不应传 reasoning_content。
+   * 由 agent engine 依据 config.context.thinking.replayOpenAICompat 设置。
+   */
+  replayThinking?: boolean;
 }
 
 export interface UnifiedUsage {
@@ -108,6 +121,8 @@ export interface UnifiedResponse {
 export type StreamDelta =
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string }
+  /** 思考签名增量（Anthropic signature_delta；回传时须随 thinking 一同携带） */
+  | { type: 'thinking_signature'; signature: string }
   | { type: 'tool_call'; toolCallId: string; name: string; argumentsDelta: string; index: number }
   | { type: 'usage'; usage: UnifiedUsage }
   | { type: 'finish'; finishReason: 'stop' | 'tool_use' | 'length' | 'error' }

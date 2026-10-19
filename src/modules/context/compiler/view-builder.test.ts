@@ -103,31 +103,59 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     expect(userMsg?.images).toBeUndefined();
   });
 
-  test('图片只发一次：imagesSentAt 置位后不再内联，改为占位符（附原始路径）', () => {
+  test('图片留存：默认持续内联（不再“发一次即降级为路径”占位符）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-view-img-sent-'));
     try {
       const p = join(dir, 'a.png');
       writeFileSync(p, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]));
+      const toolMsg: ContextMessage = { role: 'tool', toolCallId: 'tc1', name: 'read', content: '[image: image/png]', images: [p], imagesSentAt: '2026-01-01T00:00:00.000Z' };
       const session = mkSession([
         { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.png"}' }] },
-        { role: 'tool', toolCallId: 'tc1', name: 'read', content: '[image: image/png]', images: [p], imagesSentAt: '2026-01-01T00:00:00.000Z' },
+        toolMsg,
       ]);
       const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
-      const sent = view.messages.find(m => m.role === 'tool');
-      // 不再内联 base64
-      expect(sent?.images).toBeUndefined();
-      // 占位符含原始路径与重新查看指引（无损：原图仍在磁盘，可用 read 重看）
-      expect(sent?.content).toContain(p);
-      expect(sent?.content).toContain('占位符');
-      expect(sent?.content).toContain('read');
-      // 已发送过 → 不进入待标记集合
-      expect(view.imageMessagesToMark).toHaveLength(0);
+      const tool = view.messages.find(m => m.role === 'tool');
+      // 图片持续内联（默认留存；仅在字节超预算时才淘汰）
+      expect(tool?.images).toHaveLength(1);
+      expect(tool?.content).not.toContain('占位符');
+      // 已内联 → 进入待标记集合（原始对象）
+      expect(view.imageMessagesToMark).toContain(toolMsg);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('图片只发一次：未发送的图片被内联，并回填原始 session 消息进 imageMessagesToMark', () => {
+  test('字节超预算：已看图优先淘汰，未看图保留且最新图恒内联', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'moss-view-img-evict-'));
+    try {
+      const p1 = join(dir, 'a.png');
+      const p2 = join(dir, 'b.png');
+      writeFileSync(p1, Buffer.alloc(600_000)); // base64 ≈ 800_000 字节
+      writeFileSync(p2, Buffer.alloc(600_000));
+      const session = mkSession([
+        { role: 'user', content: '旧图（已看过）', attachments: [p1], imagesSentAt: '2026-01-01T00:00:00.000Z' },
+        { role: 'assistant', content: '好的' },
+        { role: 'user', content: '新图（未看过）', attachments: [p2] },
+      ]);
+      const view = buildRequestView(session, 'SYSTEM', {
+        toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
+        budgetBytes: 900_000, // 仅容得下一张图
+      });
+      const oldMsg = view.messages.find(m => m.content.includes('旧图'));
+      const newMsg = view.messages.find(m => m.content.includes('新图'));
+      // 已看过的旧图被淘汰 → 占位符（保留路径，可 read 重看）
+      expect(oldMsg?.images).toBeUndefined();
+      expect(oldMsg?.content).toContain('占位符');
+      expect(oldMsg?.content).toContain(p1);
+      // 未看过的新图保留内联（不被“还没读就压掉”）
+      expect(newMsg?.images).toHaveLength(1);
+      expect(view.evictedImages).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('未发送的图片被内联，并回填原始 session 消息进 imageMessagesToMark', () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-view-img-unsent-'));
     try {
       const p = join(dir, 'a.png');

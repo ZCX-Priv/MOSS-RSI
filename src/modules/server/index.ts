@@ -184,6 +184,10 @@ import {
   createVoiceInstallHandler,
   createVoiceUninstallHandler,
 } from './routes/voice';
+import {
+  createVoiceWasmManifestHandler,
+  createVoiceWasmDataHandler,
+} from './routes/voice-wasm';
 import { McpExpose } from '../mcp/expose';
 import type { AgentEvent } from '../contracts';
 
@@ -516,6 +520,9 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'PUT', pattern: '/api/voice/provider', handler: createVoiceSetProviderHandler(services, config), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/voice/models/:id/install', handler: createVoiceInstallHandler(services, this.ctx.logger), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/voice/models/:id', handler: createVoiceUninstallHandler(services), auth: true });
+    // voice-wasm（浏览器本地推理：模型字节流 + 文件表；Emscripten 加载器直接 GET，故 auth:false）
+    this.router.addRoute({ method: 'GET', pattern: '/api/voice/wasm/manifest', handler: createVoiceWasmManifestHandler(env.dataDir, this.ctx.logger), auth: false });
+    this.router.addRoute({ method: 'GET', pattern: '/api/voice/wasm/data', handler: createVoiceWasmDataHandler(env.dataDir, this.ctx.logger), auth: false });
   }
 
   private async startServer(): Promise<void> {

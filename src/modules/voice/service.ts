@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import type { Logger, ModuleContext, ProviderConfig } from '../../core/types';
 import { VOICE_MODEL_CATALOG, defaultModelId, findModelDef } from './catalog';
 import { downloadAndExtract } from './downloader';
-import { SAMPLE_RATE, createLocalSession, listFilesRecursive, loadSherpa, sherpaVersion } from './engine';
+import { SAMPLE_RATE, createLocalSession, getSherpaLoadError, listFilesRecursive, loadSherpa, sherpaVersion } from './engine';
 import type {
   VoiceModelDef,
   VoiceModelStatus,
@@ -154,6 +154,27 @@ class OnlineTranscriptionSession implements VoiceSession {
 // 服务实现
 // ============================================================================
 
+/** sherpa-onnx-node 提供预编译原生库的平台（node 平台名-arch；安卓/bionic 不在其列） */
+const SUPPORTED_PLATFORMS = new Set([
+  'win32-x64',
+  'win32-ia32',
+  'darwin-x64',
+  'darwin-arm64',
+  'linux-x64',
+  'linux-arm64',
+]);
+
+/**
+ * 运行平台识别：安卓/Termux 记为 android-<arch> 并判定为不受支持
+ * （sherpa-onnx-node 无 bionic 预编译库；Termux 原生 Bun 亦非官方支持）。
+ */
+function detectPlatform(): { platform: string; supported: boolean } {
+  const isTermux =
+    Boolean(process.env.TERMUX_VERSION) || (process.env.PREFIX ?? '').includes('com.termux');
+  const platform = isTermux ? `android-${process.arch}` : `${process.platform}-${process.arch}`;
+  return { platform, supported: !isTermux && SUPPORTED_PLATFORMS.has(platform) };
+}
+
 export interface VoiceServiceDeps {
   logger: WarnLogger;
   config: ConfigApi;
@@ -182,7 +203,11 @@ export class VoiceServiceImpl implements VoiceService {
       if (mod) {
         this.deps.logger.info('voice runtime ready', { version: sherpaVersion(mod) });
       } else {
-        this.deps.logger.warn('voice runtime unavailable (sherpa-onnx-node 未加载)');
+        // 记录真实失败原因与平台，便于诊断「为什么不可用」
+        this.deps.logger.warn('voice runtime unavailable (sherpa-onnx-node 未加载)', {
+          platform: detectPlatform().platform,
+          error: getSherpaLoadError() ?? 'unknown',
+        });
       }
     });
   }
@@ -230,10 +255,14 @@ export class VoiceServiceImpl implements VoiceService {
   getStatus(): VoiceStatus {
     const cfg = this.voiceCfg();
     const installed = VOICE_MODEL_CATALOG.filter((m) => this.isInstalled(m.id)).map((m) => m.id);
+    const { platform, supported } = detectPlatform();
     return {
       enabled: cfg.enabled,
       runtimeAvailable: Boolean(this.runtime),
       runtimeVersion: this.runtime ? sherpaVersion(this.runtime) : undefined,
+      platform,
+      platformSupported: supported,
+      runtimeError: this.runtime ? undefined : (getSherpaLoadError() ?? undefined),
       defaultModel: this.activeModelId(),
       installed,
       providerId: cfg.providerId,

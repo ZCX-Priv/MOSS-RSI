@@ -35,12 +35,20 @@ const PARTIAL_INTERVAL_MS = 800;
 
 let cached: SherpaModule | null = null;
 let loading: Promise<SherpaModule | null> | null = null;
+/** 最近一次加载失败的原因（供状态展示/诊断；成功时清空） */
+let loadError: string | null = null;
+
+/** 取最近一次 sherpa-onnx 加载失败原因（null = 无失败记录/已成功） */
+export function getSherpaLoadError(): string | null {
+  return loadError;
+}
 
 /**
  * 懒加载 sherpa-onnx-node（失败不抛出，返回 null；由上层降级提示）。
  *
  * 不缓存失败：瞬时失败（依赖尚未就绪等）不应让运行时永久卡在不可用；
  * 并发调用共享同一个加载 promise，避免重复 import。
+ * 失败原因记录到 loadError，便于前端展示「为什么不可用」。
  */
 export async function loadSherpa(): Promise<SherpaModule | null> {
   if (cached) return cached;
@@ -48,8 +56,10 @@ export async function loadSherpa(): Promise<SherpaModule | null> {
   loading = (async () => {
     try {
       cached = (await import('sherpa-onnx-node')) as SherpaModule;
+      loadError = null;
       return cached;
-    } catch {
+    } catch (err) {
+      loadError = err instanceof Error ? err.message : String(err);
       return null;
     } finally {
       loading = null;

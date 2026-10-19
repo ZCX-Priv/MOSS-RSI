@@ -92,6 +92,12 @@ export interface VoiceStatus {
   runtimeAvailable: boolean;
   /** sherpa-onnx 版本（可用时） */
   runtimeVersion?: string;
+  /** 运行平台标识：`${process.platform}-${process.arch}`（安卓/Termux 记为 android-<arch>） */
+  platform: string;
+  /** 该平台是否存在 sherpa-onnx 本地推理预编译原生库 */
+  platformSupported: boolean;
+  /** 运行时加载失败原因（runtimeAvailable=false 时给出，便于前端精确说明） */
+  runtimeError?: string;
   /** 当前默认本地模型 id（空串 = 未选择） */
   defaultModel: string;
   /** 已安装模型 id 列表 */

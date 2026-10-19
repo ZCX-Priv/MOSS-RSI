@@ -1,0 +1,62 @@
+{
+  "name": "context",
+  "description": "上下文工具（action 分派）。action=compact：AI 自主压缩当前对话的上下文（把较早的消息折叠为结构化摘要，缓解上下文占用；运行中也可用）。action=search：检索历史上下文（BM25 智能检索）——scope=current 检索本对话原始上下文（含已被压缩折叠的原文，原文始终保存在会话中），scope=all 跨全部会话检索；可查证此前读过/讨论过的内容。",
+  "description_en": "Context tool (dispatched by action). action=compact: the AI proactively compacts the current conversation context (folds earlier messages into a structured summary to relieve context pressure; usable while running). action=search: retrieves historical context (BM25 smart search) — scope=current searches this conversation's original context (including messages already folded by compaction; the originals are always kept in the session), scope=all searches across all sessions; useful to recover previously read/discussed content.",
+  "icon": "layers",
+  "annotations": {
+    "readOnlyHint": false,
+    "idempotentHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["compact", "search"],
+        "description": "上下文操作",
+        "description_en": "Context operation"
+      },
+      "focus": {
+        "type": "string",
+        "description": "compact：压缩时的附加焦点（优先保留的内容，可选）",
+        "description_en": "compact: additional focus to preserve when compacting (optional)"
+      },
+      "query": {
+        "type": "string",
+        "description": "search：检索查询（自然语言关键词）",
+        "description_en": "search: natural language query"
+      },
+      "scope": {
+        "type": "string",
+        "enum": ["current", "all"],
+        "description": "search：检索范围。current=本对话原始上下文（含已压缩原文，默认）；all=跨全部会话",
+        "description_en": "search: scope. current=this conversation (including compacted originals, default); all=all sessions"
+      },
+      "includeCompacted": {
+        "type": "boolean",
+        "description": "search：是否包含已被压缩折叠的消息原文（默认 true）",
+        "description_en": "search: include messages folded by compaction (default true)"
+      },
+      "includeTool": {
+        "type": "boolean",
+        "description": "search：是否包含工具结果消息（默认 false，噪声较大）",
+        "description_en": "search: include tool-result messages (default false, noisier)"
+      },
+      "topK": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "search：返回条数上限（默认 10，最大 50）",
+        "description_en": "search: max results (default 10, max 50)"
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true
+    },
+    "schema": {}
+  }
+}

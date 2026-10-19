@@ -10,6 +10,7 @@ import { SessionStore, type ContextFile, type Session, type ActiveSkill } from '
 import { TaskStore, type TaskItem, type TaskGroup } from './task-store';
 import { LiveDraftStore, type LiveDraft } from './live-draft';
 import { computeHistorySlice, describeSlice } from './history-page';
+import { searchHistoryDocs, type HistorySearchDoc } from './history-search';
 import { LLMError, type UnifiedRequest, type UnifiedMessage } from '../llm/types';
 import type {
   AgentMessage,
@@ -18,6 +19,8 @@ import type {
   AgentRunInput,
   AgentRunResult,
   ContextEngine,
+  HistorySearchInput,
+  HistorySearchResult,
   RunStats,
   TruncatePreview,
   TruncateResult,
@@ -240,7 +243,10 @@ export class AgentEngineImpl implements AgentEngine {
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const { sessionId, userMessage, cwd, onEvent, signal } = input;
-    const cfg = this.config.getAppConfig().agent;
+    const appCfg = this.config.getAppConfig();
+    const cfg = appCfg.agent;
+    // 思考回传（OpenAI 兼容 provider 消费；默认 false，按 DeepSeek 规范不回传 reasoning_content）
+    const replayThinking = appCfg.context?.thinking?.replayOpenAICompat ?? false;
     const model = input.model ?? cfg.defaultModel;
 
     this.logger.info(t('agent.runStart'), { sessionId, model });
@@ -584,11 +590,14 @@ export class AgentEngineImpl implements AgentEngine {
         stream: true,
         max_tokens: maxOutputTokens,
         toolChoice: 'auto',
+        ...(replayThinking ? { replayThinking: true } : {}),
       };
 
       // 流式调用 LLM
       let assistantText = '';
       let assistantThinking = '';
+      /** 思考签名累积（Anthropic signature_delta；回传工具轮次时必须携带） */
+      let assistantThinkingSignature = '';
       const toolCallAccumulators = new Map<number, { id: string; name: string; args: string }>();
       // 本轮计时与 usage（usage 各字段在流内单调不减，按字段取 max 合并以兼容
       // Anthropic 流式拆分 message_start/message_delta、Gemini 累积值）
@@ -625,6 +634,10 @@ export class AgentEngineImpl implements AgentEngine {
               assistantThinking += delta.text;
               streamAccount.produced.thinking += delta.text.length;
               emit({ type: 'assistant-thinking', sessionId, text: delta.text });
+              break;
+            case 'thinking_signature':
+              // 思考签名（Anthropic）：累积落库，供后续轮次原样回传
+              assistantThinkingSignature += delta.signature;
               break;
             case 'tool_call': {
               // 首个工具调用分片：思考阶段结束
@@ -696,6 +709,7 @@ export class AgentEngineImpl implements AgentEngine {
               assistantThinking || undefined,
               turnMessageId,
               computeThinkingMs(),
+              assistantThinkingSignature || undefined,
             );
           }
           break;
@@ -719,6 +733,7 @@ export class AgentEngineImpl implements AgentEngine {
             assistantThinking || undefined,
             turnMessageId,
             computeThinkingMs(),
+            assistantThinkingSignature || undefined,
           );
         }
         // 持久化「模型请求失败」错误消息：刷新后经历史恢复仍渲染为红色错误卡片。
@@ -807,6 +822,7 @@ export class AgentEngineImpl implements AgentEngine {
         assistantThinking || undefined,
         turnMessageId,
         computeThinkingMs(),
+        assistantThinkingSignature || undefined,
       );
 
       // 无工具调用：本轮结束
@@ -1410,6 +1426,47 @@ export class AgentEngineImpl implements AgentEngine {
       }
     }
     return { tasks, messages };
+  }
+
+  /**
+   * 历史智能检索（BM25）：检索「本对话原始上下文」或「跨 session 全量历史」。
+   * 原始消息始终保存在 session JSON 中；压缩折叠只是从发送视图移除，检索仍可命中
+   * （includeCompacted 默认 true）。供 context 工具 action=search 调用。
+   */
+  searchMessages(input: HistorySearchInput): HistorySearchResult[] {
+    const topK = Math.max(1, Math.min(50, input.topK ?? 10));
+    const includeCompacted = input.includeCompacted !== false;
+    const includeTool = input.includeTool === true;
+
+    const sessions: Session[] =
+      input.scope === 'current'
+        ? (() => {
+            const s = input.sessionId ? this.sessions.get(input.sessionId) : null;
+            return s ? [s] : [];
+          })()
+        : this.sessions.list();
+
+    const docs: HistorySearchDoc[] = [];
+    for (const session of sessions) {
+      const msgs = session.messages;
+      for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i];
+        if (m.deletedAt) continue;
+        if (m.compacted && !includeCompacted) continue;
+        if (m.role === 'system') continue;
+        if (m.role === 'tool' && !includeTool) continue;
+        if (!m.content) continue;
+        docs.push({
+          sessionId: session.id,
+          index: i,
+          role: m.role,
+          text: m.content,
+          compacted: m.compacted === true,
+          ...(m.timestamp ? { timestamp: m.timestamp } : {}),
+        });
+      }
+    }
+    return searchHistoryDocs(input.query, docs, topK);
   }
 
   // ========================================================================

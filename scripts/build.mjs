@@ -96,6 +96,7 @@ function buildBackend() {
     '--format', 'esm',
     '--external', 'nativefiledialog-for-bun',
     '--external', 'sherpa-onnx-node',
+    '--external', 'sharp',
   ]);
   if (!existsSync(BACKEND_OUT)) {
     error(`Backend build output not found: ${BACKEND_OUT}`);

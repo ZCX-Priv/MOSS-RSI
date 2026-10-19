@@ -355,7 +355,6 @@ export const zh = {
     readPathRequired: '必须提供 path 或 paths',
     readFileNotFound: '文件不存在：{{path}}',
     readPathIsDirectory: '路径是目录而非文件：{{path}}',
-    readFileUnchanged: '文件自上次读取后未变化：{{path}}',
     readTooLarge: '文件过大（{{bytes}} 字节，{{sizeMB}}MB，上限 50MB）：{{path}}',
     readTooLargeHint: '提示：文件超过 50MB 上限。你可以：\n1. 使用 mode=precise + offset + limit 精确读取某行范围（例如 offset=1&limit=1000 读取前 1000 行）\n2. 使用 grep 工具搜索特定内容，而非全量读取\n3. 写一个程序解析该文件（例如：写个 Node.js 脚本用 readline 逐行处理，或用 fs.createReadStream 流式读取）',
     terminalCommandRequired: 'command 为必填项',

@@ -144,6 +144,9 @@ export class AnthropicProvider implements LLMProvider {
           deltas.push({ type: 'text', text: data.delta.text ?? '' });
         } else if (data.delta?.type === 'thinking_delta') {
           deltas.push({ type: 'thinking', text: data.delta.thinking ?? '' });
+        } else if (data.delta?.type === 'signature_delta') {
+          // Anthropic 思考签名增量：回传工具轮次时必须携带
+          deltas.push({ type: 'thinking_signature', signature: data.delta.signature ?? '' });
         } else if (data.delta?.type === 'input_json_delta') {
           deltas.push({
             type: 'tool_call',
@@ -252,6 +255,9 @@ function toAnthropicMessage(msg: UnifiedMessage): unknown {
   // assistant 消息含 tool_calls：用 content blocks
   if (msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0) {
     const blocks: unknown[] = [];
+    // 思考块必须置于最前（工具轮次 Anthropic 要求原样回传 thinking+signature）
+    const tb = toAnthropicThinkingBlock(msg);
+    if (tb) blocks.push(tb);
     if (msg.content) {
       blocks.push({ type: 'text', text: msg.content });
     }
@@ -271,6 +277,15 @@ function toAnthropicMessage(msg: UnifiedMessage): unknown {
     }
     return { role: 'assistant', content: blocks };
   }
+  // assistant 带思考（有签名）：转为 blocks，思考块置前（Anthropic 要求原样回传）
+  if (msg.role === 'assistant') {
+    const tb = toAnthropicThinkingBlock(msg);
+    if (tb) {
+      const blocks: unknown[] = [tb];
+      if (msg.content) blocks.push({ type: 'text', text: msg.content });
+      return { role: 'assistant', content: blocks };
+    }
+  }
   // user 带图片：多模态内容块
   if (msg.images && msg.images.length > 0) {
     const blocks: unknown[] = [];
@@ -288,6 +303,15 @@ function toAnthropicImage(img: UnifiedImage): unknown {
     type: 'image',
     source: { type: 'base64', media_type: img.mimeType, data: img.data },
   };
+}
+
+/**
+ * 思考块（Anthropic 原生）：仅当 thinking 与 signature 同时存在时返回，
+ * 否则返回 null（缺签名的 thinking 回传会触发 400）。
+ */
+function toAnthropicThinkingBlock(msg: UnifiedMessage): unknown | null {
+  if (!msg.thinking || !msg.thinkingSignature) return null;
+  return { type: 'thinking', thinking: msg.thinking, signature: msg.thinkingSignature };
 }
 
 function mapStopReason(r: string | undefined): 'stop' | 'tool_use' | 'length' | 'error' {
@@ -344,6 +368,8 @@ interface AnthropicStreamEvent {
     type?: string;
     text?: string;
     thinking?: string;
+    /** 思考签名（signature_delta 事件携带） */
+    signature?: string;
     partial_json?: string;
     stop_reason?: string;
   };

@@ -7,9 +7,9 @@ import { extname } from 'node:path';
 /** 文件类型分类，决定分派到哪个 handler */
 export type FileType = 'text' | 'image' | 'video' | 'pdf' | 'office' | 'notebook' | 'ebook';
 
-/** 图片扩展名集合 */
+/** 图片扩展名集合（不含 .svg —— SVG 为文本/代码，由 text handler 返回源码） */
 const IMAGE_EXTS = new Set<string>([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp',
 ]);
 
 /**

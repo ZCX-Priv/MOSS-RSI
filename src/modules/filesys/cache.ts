@@ -13,8 +13,6 @@ export interface FileCacheEntry {
   /** sha256(rawBuffer) */
   sha256: string;
   kind: FileContentKind;
-  /** 上次被 read 工具读取的时间戳（dedup 语义，替代旧 read/shared/dedup.ts） */
-  lastReadAt: number;
 }
 
 export interface CacheLimits {
@@ -30,7 +28,6 @@ export interface CacheUpsertInput {
   kind: FileContentKind;
   mtimeMs: number;
   size: number;
-  lastReadAt?: number;
 }
 
 export class FileCache {
@@ -86,20 +83,12 @@ export class FileCache {
       rawBuffer: keepBuffer ? input.rawBuffer : null,
       sha256: input.sha256,
       kind: input.kind,
-      lastReadAt: input.lastReadAt ?? prev?.lastReadAt ?? 0,
     };
     if (keepBuffer) this.totalBytes += input.rawBuffer.length;
     this.entries.delete(absPath);
     this.entries.set(absPath, entry);
     this.evictIfNeeded();
     return entry;
-  }
-
-  /** 仅更新 lastReadAt（read 工具 dedup 标记，条目可能无 buffer——大文件） */
-  touchRead(absPath: string): void {
-    const entry = this.entries.get(absPath);
-    if (!entry) return;
-    entry.lastReadAt = Date.now();
   }
 
   /**
@@ -118,7 +107,6 @@ export class FileCache {
       rawBuffer: null,
       sha256: meta.sha256,
       kind: meta.kind,
-      lastReadAt: prev?.lastReadAt ?? 0,
     };
     this.entries.delete(absPath);
     this.entries.set(absPath, entry);

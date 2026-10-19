@@ -12,8 +12,8 @@ import { COMPACTION_SUMMARY_MSG_NAME } from '../compiler/view-builder';
 
 /** 尾部保底最少消息数（即使超预算也保留最近 2 条，避免空尾部） */
 const MIN_RECENT_KEEP = 2;
-/** 可压缩区最少消息数（低于此值跳过压缩） */
-export const MIN_COMPACT_MESSAGES = 2;
+/** 可压缩区最少消息数（低于此值跳过压缩；可被配置覆盖） */
+export const MIN_COMPACT_MESSAGES = 4;
 
 export interface CompactionPlan {
   /** 可压缩区起始索引（含；基于传入的活跃消息数组） */
@@ -42,12 +42,14 @@ export function shouldCompact(estimatedTokens: number, windowTokens: number, com
  * @param windowTokens 上下文窗口 token
  * @param tailKeepRatio 尾部保留比例（占窗口）
  * @param minFoldTokens 可压缩区最小 token（经济学检查）
+ * @param minCompactMessages 可压缩区最少消息数（默认 MIN_COMPACT_MESSAGES）
  */
 export function planCompaction(
   activeMsgs: readonly ContextMessage[],
   windowTokens: number,
   tailKeepRatio: number,
   minFoldTokens: number,
+  minCompactMessages: number = MIN_COMPACT_MESSAGES,
 ): CompactionPlan {
   // head：env-context 锚定之后的消息才可压缩（env-context 恒为第 0 条活跃消息）
   let head = 0;
@@ -64,7 +66,8 @@ export function planCompaction(
     reason,
   });
 
-  if (activeMsgs.length - head < MIN_COMPACT_MESSAGES) {
+  const minMsgs = Math.max(2, minCompactMessages);
+  if (activeMsgs.length - head < minMsgs) {
     return invalid('too few compactable messages');
   }
 
@@ -90,10 +93,17 @@ export function planCompaction(
     return invalid('tail retention covers all messages');
   }
   const regionCount = start - head;
-  if (regionCount < MIN_COMPACT_MESSAGES) {
+  if (regionCount < minMsgs) {
     return invalid(`compactable region too small (${regionCount} messages)`);
   }
-  const regionTokens = estimateMessagesTokens(activeMsgs.slice(head, start));
+  const region = activeMsgs.slice(head, start);
+  // 反“摘要再摘要”死循环：可压缩区必须含至少一条非摘要消息
+  // （否则只是在反复重写旧摘要，信息只减不增 → 越压越傻）
+  const nonSummary = region.filter(m => !isCompactionSummaryMessage(m));
+  if (nonSummary.length === 0) {
+    return invalid('region has no non-summary messages (would only re-summarize summary)');
+  }
+  const regionTokens = estimateMessagesTokens(region);
   if (regionTokens < minFoldTokens) {
     return invalid(`fold economics: region ${regionTokens} tokens < min ${minFoldTokens}`);
   }

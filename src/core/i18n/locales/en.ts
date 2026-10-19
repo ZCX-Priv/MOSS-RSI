@@ -357,7 +357,6 @@ export const en = {
     readPathRequired: 'path or paths is required',
     readFileNotFound: 'file not found: {{path}}',
     readPathIsDirectory: 'path is a directory, not a file: {{path}}',
-    readFileUnchanged: 'File unchanged since last read: {{path}}',
     readTooLarge: 'file too large ({{bytes}} bytes, {{sizeMB}}MB, max 50MB): {{path}}',
     readTooLargeHint: 'Tip: the file exceeds the 50MB limit. You can:\n1. Use mode=precise + offset + limit to read a specific line range (e.g. offset=1&limit=1000 for the first 1000 lines)\n2. Use the grep tool to search for specific content instead of reading the whole file\n3. Write a program to parse the file (e.g. a Node.js script using readline, or fs.createReadStream for streaming)',
     terminalCommandRequired: 'command is required',

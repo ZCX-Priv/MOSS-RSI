@@ -44,9 +44,11 @@ export type {
   ContextStats,
   HealResult,
   HealLogEntry,
+  ImageOptimizationConfig,
   PreparedRequest,
   SessionContextTelemetry,
   SessionStoreBridge,
   SystemSection,
+  ThinkingReplayConfig,
 } from './types';
 export { DEFAULT_CONTEXT_CONFIG } from './types';

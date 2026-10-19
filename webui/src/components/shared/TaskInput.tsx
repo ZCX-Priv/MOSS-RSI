@@ -49,7 +49,8 @@ import { resolveSkillIcon } from '@/lib/skill-icons';
 import { api } from '../../api/http';
 import { MentionMenu } from './MentionMenu';
 import { VoiceWaveform } from './VoiceWaveform';
-import { useVoiceInput, useVoiceStatus } from '../../hooks/useVoiceInput';
+import { useVoiceInput, useVoiceStatus, useVoiceModels } from '../../hooks/useVoiceInput';
+import { isLocalAsrSupported } from '@/lib/asr-local';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { SendAttachmentCard } from './AttachmentCard';
 import { fileTypeIconComponent } from './FileTypeIcon';
@@ -84,6 +85,20 @@ interface AttachmentItem {
 
 /** 粘贴附件单文件体积上限（与后端 PASTE_MAX_BYTES 一致）：25MB */
 const PASTE_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
+/** 语音采集错误码 → i18n 文案键（未知码按原始错误文本原样展示） */
+const VOICE_ERROR_KEYS: Record<string, string> = {
+  INSECURE_CONTEXT: 'taskInput.voiceErrInsecure',
+  MEDIA_DEVICES_UNAVAILABLE: 'taskInput.voiceErrNoMediaDevices',
+  NOT_ALLOWED: 'taskInput.voiceErrPermission',
+  NOT_FOUND: 'taskInput.voiceErrNoDevice',
+  NOT_READABLE: 'taskInput.voiceErrBusy',
+  NOT_SUPPORTED: 'taskInput.voiceErrUnsupported',
+  AUDIO_WORKLET_UNAVAILABLE: 'taskInput.voiceErrWorklet',
+  WS_NOT_CONNECTED: 'taskInput.voiceErrWs',
+  LOCAL_MODEL_UNAVAILABLE: 'taskInput.voiceErrLocalModel',
+  LOCAL_ENGINE_FAILED: 'taskInput.voiceErrLocalEngine',
+};
 
 /** 剪贴板文件扩展名推断（clipboard File 常无有效 name，用 mime 兜底；未知类型回退 bin） */
 function extFromMime(mime: string): string {
@@ -525,9 +540,27 @@ export function TaskInput({
   // 语音输入（默认关闭；仅在 设置>服务商>语音 开启且后端可用时显示麦克风按钮）
   // ==========================================================================
   const { status: voiceStatus } = useVoiceStatus();
+  const { models: voiceModels } = useVoiceModels();
   const voiceEnabled = Boolean(voiceStatus?.available && voiceStatus.enabled);
+  // 服务端可用：配置了在线语音服务商，或运行时可用且已安装本地模型
+  const serverVoiceReady =
+    Boolean(voiceStatus?.providerId) ||
+    Boolean(voiceStatus?.runtimeAvailable && (voiceStatus?.installed?.length ?? 0) > 0);
+  // 浏览器端本地推理（WASM）：需要已安装的流式 zipformer 模型
+  const localModel = voiceModels.find((m) => m.state === 'installed' && m.engine === 'zipformer');
+  const localWasmReady = isLocalAsrSupported() && Boolean(localModel);
+  // 执行位置：优先服务端本地引擎；不可用时用浏览器端 WASM
+  const voiceEngine: 'server' | 'local' | null = serverVoiceReady
+    ? 'server'
+    : localWasmReady
+      ? 'local'
+      : null;
+  const voiceReady = voiceEngine !== null;
 
   const voice = useVoiceInput({
+    engine: voiceEngine ?? 'server',
+    localModelId: localModel?.id,
+    onNotice: (key) => toast.info(t(key)),
     onPartial: (text) => editorRef.current?.setVoiceDraft(text),
     onFinal: (text) => {
       const trimmed = text.trim();
@@ -536,7 +569,10 @@ export function TaskInput({
       editorRef.current?.setVoiceDraft(`${trimmed} `);
       editorRef.current?.commitVoice();
     },
-    onError: (message) => toast.error(t('taskInput.voiceFailed'), { description: message }),
+    onError: (code) => {
+      const key = VOICE_ERROR_KEYS[code];
+      toast.error(t('taskInput.voiceFailed'), { description: key ? t(key) : code });
+    },
   });
 
   const canSend = Boolean(input.trim()) || attachments.length > 0;
@@ -848,9 +884,15 @@ export function TaskInput({
             <Button
               variant={voice.recording ? 'destructive' : 'ghost'}
               size="icon-sm"
-              title={voice.recording ? t('taskInput.voiceStop') : t('common.voiceInput')}
+              title={
+                voice.recording
+                  ? t('taskInput.voiceStop')
+                  : voiceReady
+                    ? t('common.voiceInput')
+                    : t('taskInput.voiceUnavailableTitle')
+              }
               onClick={voice.toggle}
-              disabled={voice.busy && !voice.recording}
+              disabled={(voice.busy && !voice.recording) || (!voice.recording && !voiceReady)}
             >
               {voice.recording ? (
                 <VoiceWaveform level={voice.level} />

@@ -125,6 +125,22 @@ function resolveBunExe() {
 
 const children = [];
 
+/**
+ * Linux/macOS：sherpa-onnx 原生 addon 依赖的共享库需经 LD_LIBRARY_PATH/DYLD_LIBRARY_PATH 解析
+ * （官方文档要求；Windows 的 DLL 与 .node 同目录，自动加载，无需设置）。
+ * 因 glibc/dyld 在「进程启动时」读取该变量，必须在 spawn 时注入。
+ */
+function nativeLibEnv() {
+  const libDir = resolve(ROOT, 'node_modules', 'sherpa-onnx-node', 'lib');
+  if (process.platform === 'linux') {
+    return { LD_LIBRARY_PATH: `${libDir}:${process.env.LD_LIBRARY_PATH ?? ''}` };
+  }
+  if (process.platform === 'darwin') {
+    return { DYLD_LIBRARY_PATH: `${libDir}:${process.env.DYLD_LIBRARY_PATH ?? ''}` };
+  }
+  return {};
+}
+
 function spawnChild(name, cmd, args, opts = {}) {
   log(name, `spawning: ${cmd} ${args.join(' ')}`);
   const child = spawn(cmd, args, {
@@ -168,13 +184,13 @@ function startBackend() {
   if (bunExe === 'bun') {
     log('backend', 'Warning: bun 将以 shell 方式启动，Ctrl+C 时可能出现"终止批处理操作吗"提示');
   }
-  const child = spawnChild('backend', bunExe, args, { env: { ...process.env, MOSS_DEV: '1' } });
+  const child = spawnChild('backend', bunExe, args, { env: { ...process.env, MOSS_DEV: '1', ...nativeLibEnv() } });
   child.once('error', err => {
     if (err.code === 'ENOENT') {
       log('backend', `${bunExe} not found, retrying with shell...`);
       const idx = children.indexOf(child);
       if (idx >= 0) children.splice(idx, 1);
-      spawnChild('backend', 'bun', args, { shell: isWin, env: { ...process.env, MOSS_DEV: '1' } });
+      spawnChild('backend', 'bun', args, { shell: isWin, env: { ...process.env, MOSS_DEV: '1', ...nativeLibEnv() } });
     }
   });
   return child;

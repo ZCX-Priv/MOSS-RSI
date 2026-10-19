@@ -188,10 +188,6 @@ export class FilesysServiceImpl implements FilesysService {
     }
   }
 
-  touchRead(absPath: string): void {
-    this.cache.touchRead(absPath);
-  }
-
   recordExternalWrite(
     absPath: string,
     meta: { sha256: string; bytes: number; kind?: 'utf8' | 'legacy-text' | 'binary' },
@@ -211,13 +207,6 @@ export class FilesysServiceImpl implements FilesysService {
       sessionId: opts.sessionId,
       toolCallId: opts.toolCallId,
     });
-  }
-
-  isUnchangedSinceRead(absPath: string): boolean {
-    const stat = this.statOf(absPath);
-    if (!stat) return false;
-    const entry = this.cache.get(absPath, stat);
-    return !!entry && entry.lastReadAt > 0;
   }
 
   onFileChange(handler: (e: FileChangeEvent) => void): () => void {

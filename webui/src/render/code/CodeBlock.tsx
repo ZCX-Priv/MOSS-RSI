@@ -9,6 +9,7 @@ import { getCachedHighlight, highlightCode } from './shiki';
 import { MermaidDiagram } from '../diagram/MermaidDiagram';
 import { SmilesDiagram } from '../chem/SmilesDiagram';
 import { useRenderSettings } from '../core/settings';
+import { copyText } from '../../lib/clipboard';
 
 export interface CodeBlockProps {
   code: string;
@@ -57,12 +58,10 @@ export function CodeBlock({ code, lang, closed }: CodeBlockProps) {
   }
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(code);
+    // copyText 内部已做 execCommand 兜底（非安全上下文同样可用）
+    if (await copyText(code)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 剪贴板不可用（非安全上下文）静默忽略
     }
   };
 

@@ -3,13 +3,21 @@
 // 后端流式识别 → partial/final 回调（供编辑器实时上屏）。
 //
 // 本地推理：音频经本机 WS 发往后端 sherpa-onnx 识别，全程不出本机、不调云 API。
+//
+// 健壮性设计（三端 + 移动端兼容）：
+//   - 前置环境校验（安全上下文 / mediaDevices 可用性），失败给出可读错误码；
+//   - getUserMedia 约束渐进降级 + 设备占用（NotReadableError）延迟重试；
+//   - AudioContext 采样率兜底（16k 创建失败则用系统采样率，由 worklet 重采样回 16k）；
+//   - AudioWorklet 加载兜底（静态资源 → blob URL）；
+//   - DOMException 统一映射为可读错误码，交由上层做多语言提示。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
+import { createLocalAsrEngine, isLocalAsrSupported, type LocalAsrSession } from '../lib/asr-local';
 import type { VoiceModelStatus, VoiceStatus } from '../types/api';
 
-/** AudioWorklet 处理器源码（内联 Blob URL 加载，避免额外静态资源与构建配置） */
+/** AudioWorklet 处理器源码（仅作 blob 兜底；首选静态资源 /voice-capture-worklet.js） */
 const CAPTURE_WORKLET_SOURCE = `
 class VoiceCaptureProcessor extends AudioWorkletProcessor {
   constructor() { super(); this.chunks = []; this.length = 0; }
@@ -35,6 +43,57 @@ registerProcessor('voice-capture', VoiceCaptureProcessor);
 
 /** 采集采样率：与后端识别统一 16kHz */
 const TARGET_SAMPLE_RATE = 16000;
+
+/** 设备占用（NotReadableError）重试等待 */
+const BUSY_RETRY_DELAY_MS = 350;
+
+/** 语音采集错误码（上层据此做多语言提示；非本枚举值则视为原始错误文本原样展示） */
+export type VoiceErrorCode =
+  | 'INSECURE_CONTEXT'
+  | 'MEDIA_DEVICES_UNAVAILABLE'
+  | 'NOT_ALLOWED'
+  | 'NOT_FOUND'
+  | 'NOT_READABLE'
+  | 'NOT_SUPPORTED'
+  | 'AUDIO_WORKLET_UNAVAILABLE'
+  | 'WS_NOT_CONNECTED'
+  | 'LOCAL_MODEL_UNAVAILABLE'
+  | 'LOCAL_ENGINE_FAILED';
+
+/** 带错误码的启动异常 */
+class VoiceStartError extends Error {
+  constructor(public readonly code: VoiceErrorCode) {
+    super(code);
+    this.name = 'VoiceStartError';
+  }
+}
+
+/** getUserMedia 渐进降级约束序列（从严到宽） */
+const AUDIO_CONSTRAINTS: MediaTrackConstraints[] = [
+  { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: TARGET_SAMPLE_RATE },
+  { channelCount: 1 },
+  {},
+];
+
+/** DOMException → 错误码/原文 */
+function mapStartError(err: unknown): string {
+  if (err instanceof VoiceStartError) return err.code;
+  const name = err instanceof DOMException ? err.name : (err as { name?: string } | null)?.name;
+  switch (name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'NOT_ALLOWED';
+    case 'NotFoundError':
+      return 'NOT_FOUND';
+    case 'NotReadableError':
+      return 'NOT_READABLE';
+    case 'NotSupportedError':
+    case 'OverconstrainedError':
+      return 'NOT_SUPPORTED';
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
+}
 
 export interface UseVoiceStatusResult {
   status: VoiceStatus | null;
@@ -94,12 +153,18 @@ export function useVoiceModels(): UseVoiceModelsResult {
 }
 
 export interface UseVoiceInputOptions {
+  /** 识别执行位置：server = 后端本地引擎（WS 传输音频）；local = 浏览器端 WASM 本地推理 */
+  engine?: 'server' | 'local';
+  /** local 模式使用的模型 id */
+  localModelId?: string;
+  /** 提示（如 local 模式准备模型耗时时的告知）：参数为 i18n 文案键 */
+  onNotice?: (key: string) => void;
   /** 中间态文本（可被覆盖） */
   onPartial: (text: string) => void;
   /** 确定文本 */
   onFinal: (text: string) => void;
-  /** 错误提示 */
-  onError?: (message: string) => void;
+  /** 错误提示：已知错误码（VoiceErrorCode）或原始错误文本 */
+  onError?: (code: string) => void;
 }
 
 export interface UseVoiceInputResult {
@@ -115,7 +180,7 @@ export interface UseVoiceInputResult {
 
 /** 语音输入：点击开始/再次点击停止，识别文本实时上屏 */
 export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResult {
-  const { onPartial, onFinal, onError } = options;
+  const { onPartial, onFinal, onError, onNotice, engine = 'server', localModelId } = options;
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [level, setLevel] = useState(0);
@@ -124,9 +189,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const onPartialRef = useRef(onPartial);
   const onFinalRef = useRef(onFinal);
   const onErrorRef = useRef(onError);
+  const onNoticeRef = useRef(onNotice);
+  const engineRef = useRef<'server' | 'local'>(engine);
+  const localModelIdRef = useRef<string | undefined>(localModelId);
   onPartialRef.current = onPartial;
   onFinalRef.current = onFinal;
   onErrorRef.current = onError;
+  onNoticeRef.current = onNotice;
+  engineRef.current = engine;
+  localModelIdRef.current = localModelId;
 
   const streamRef = useRef<MediaStream | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -140,9 +211,25 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const readyRef = useRef(false);
   /** 就绪前缓冲的音频帧 */
   const pendingFramesRef = useRef<ArrayBuffer[]>([]);
+  /** 浏览器本地推理会话（engine=local 时） */
+  const sessionRef = useRef<LocalAsrSession | null>(null);
+  /** 本地推理轮询定时器 */
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /** 释放采集资源（幂等） */
   const teardown = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (sessionRef.current) {
+      try {
+        sessionRef.current.close();
+      } catch {
+        // 忽略
+      }
+      sessionRef.current = null;
+    }
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -205,41 +292,116 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     return off;
   }, [teardown]);
 
+  /** 停止：无条件可靠释放（即使处于 busy 态或非录音态） */
   const stop = useCallback(() => {
-    if (!recording) return;
-    wsClient.send({ type: 'voice.stop' });
+    const isLocal = engineRef.current === 'local';
+    if (recording) {
+      if (isLocal) {
+        // 本地推理：冲刷剩余结果并上屏（teardown 会关闭会话，故先取结果）
+        const session = sessionRef.current;
+        if (session) {
+          try {
+            const res = session.finish();
+            if (res?.text) onFinalRef.current(res.text);
+          } catch {
+            // 忽略
+          }
+        }
+      } else {
+        wsClient.send({ type: 'voice.stop' });
+      }
+    }
     teardown();
     setRecording(false);
     setBusy(false);
   }, [recording, teardown]);
+
+  /** 获取麦克风流：前置校验 + 约束渐进降级 + 设备占用重试 */
+  const acquireStream = useCallback(async (): Promise<MediaStream> => {
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      throw new VoiceStartError('INSECURE_CONTEXT');
+    }
+    const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    if (!md || typeof md.getUserMedia !== 'function') {
+      throw new VoiceStartError('MEDIA_DEVICES_UNAVAILABLE');
+    }
+    let lastErr: unknown = null;
+    for (let round = 0; round < 2; round++) {
+      for (const audio of AUDIO_CONSTRAINTS) {
+        try {
+          return await md.getUserMedia({ video: false, audio });
+        } catch (err) {
+          lastErr = err;
+          const name = err instanceof DOMException ? err.name : (err as { name?: string } | null)?.name;
+          // 权限/安全问题需用户处理，继续降级无意义 → 直接抛出
+          if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'NotFoundError') {
+            throw err;
+          }
+          // OverconstrainedError / NotSupportedError / 未知 → 尝试更宽松的约束
+        }
+      }
+      const lastName = lastErr instanceof DOMException ? lastErr.name : (lastErr as { name?: string } | null)?.name;
+      // 设备被占用（NotReadableError）：等待片刻再整体重试一次
+      if (lastName === 'NotReadableError' && round === 0) {
+        await new Promise((r) => setTimeout(r, BUSY_RETRY_DELAY_MS));
+        continue;
+      }
+      break;
+    }
+    throw lastErr;
+  }, []);
 
   const start = useCallback(async () => {
     if (startingRef.current || recording) return;
     startingRef.current = true;
     setBusy(true);
     try {
-      if (!wsClient.isOpen()) {
-        throw new Error('WS_NOT_CONNECTED');
+      const isLocal = engineRef.current === 'local';
+      if (isLocal) {
+        // 浏览器本地推理：先备好引擎（可能需下载模型），再做麦克风采集
+        if (!isLocalAsrSupported()) throw new VoiceStartError('LOCAL_MODEL_UNAVAILABLE');
+        const modelId = localModelIdRef.current;
+        if (!modelId) throw new VoiceStartError('LOCAL_MODEL_UNAVAILABLE');
+        onNoticeRef.current?.('taskInput.voiceLocalPreparing');
+        const eng = await createLocalAsrEngine(modelId);
+        sessionRef.current = eng.createSession();
+      } else if (!wsClient.isOpen()) {
+        throw new VoiceStartError('WS_NOT_CONNECTED');
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: false,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          channelCount: 1,
-          sampleRate: TARGET_SAMPLE_RATE,
-        },
-      });
+      const stream = await acquireStream();
       streamRef.current = stream;
 
-      const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      // AudioContext：优先 16k；不支持则用系统采样率（worklet 会重采样回 16k）
+      let ctx: AudioContext;
+      try {
+        ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      } catch {
+        ctx = new AudioContext();
+      }
       ctxRef.current = ctx;
       if (ctx.state === 'suspended') await ctx.resume();
 
-      const blob = new Blob([CAPTURE_WORKLET_SOURCE], { type: 'application/javascript' });
-      const url = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
+      // AudioWorklet：静态资源优先，失败回退 blob URL
+      let workletLoaded = false;
+      try {
+        await ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}voice-capture-worklet.js`);
+        workletLoaded = true;
+      } catch {
+        workletLoaded = false;
+      }
+      if (!workletLoaded) {
+        const blob = new Blob([CAPTURE_WORKLET_SOURCE], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        try {
+          await ctx.audioWorklet.addModule(url);
+          workletLoaded = true;
+        } catch {
+          workletLoaded = false;
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+      if (!workletLoaded) throw new VoiceStartError('AUDIO_WORKLET_UNAVAILABLE');
 
       const source = ctx.createMediaStreamSource(stream);
       sourceRef.current = source;
@@ -248,11 +410,18 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       analyser.fftSize = 512;
       analyserRef.current = analyser;
 
-      const worklet = new AudioWorkletNode(ctx, 'voice-capture');
+      const worklet = new AudioWorkletNode(ctx, 'voice-capture', {
+        processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE },
+      });
       workletRef.current = worklet;
       worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         const samples = event.data;
         if (!samples || samples.length === 0) return;
+        if (isLocal) {
+          // 本地推理：Float32 直接喂给 WASM 会话（无需 int16/WS）
+          sessionRef.current?.acceptSamples(samples);
+          return;
+        }
         const i16 = new Int16Array(samples.length);
         for (let i = 0; i < samples.length; i++) {
           const s = Math.max(-1, Math.min(1, samples[i]));
@@ -293,19 +462,32 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       };
       rafRef.current = requestAnimationFrame(tick);
 
-      readyRef.current = false;
-      pendingFramesRef.current = [];
-      wsClient.send({ type: 'voice.start' });
-      setRecording(true);
-      // busy 由 voice.ready 清除
+      if (isLocal) {
+        // 本地推理：定时轮询会话产出（partial / final）
+        pollRef.current = setInterval(() => {
+          const session = sessionRef.current;
+          if (!session) return;
+          const res = session.poll();
+          if (!res) return;
+          if (res.isFinal) onFinalRef.current(res.text);
+          else onPartialRef.current(res.text);
+        }, 100);
+        setRecording(true);
+      } else {
+        readyRef.current = false;
+        pendingFramesRef.current = [];
+        wsClient.send({ type: 'voice.start' });
+        setRecording(true);
+        // busy 由 voice.ready 清除
+      }
     } catch (err) {
       teardown();
       setBusy(false);
-      onErrorRef.current?.(err instanceof Error ? err.message : String(err));
+      onErrorRef.current?.(mapStartError(err));
     } finally {
       startingRef.current = false;
     }
-  }, [recording, teardown]);
+  }, [recording, acquireStream, teardown]);
 
   const toggle = useCallback(() => {
     if (recording) stop();

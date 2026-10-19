@@ -50,6 +50,8 @@ export function classifyRisk(
   if (toolName === 'memory') return action === 'save' ? 'L3' : 'L0';
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
   if (toolName === 'skill') return 'L0';
+  // context：会话级状态操作（压缩/历史检索），无文件或外部副作用 → L1（ask 模式放行）
+  if (toolName === 'context') return 'L1';
 
   if (STATE_TOOLS.has(toolName)) return 'L1';
   if (RECOVERABLE_WRITE_TOOLS.has(toolName)) return 'L2';

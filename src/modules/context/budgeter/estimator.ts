@@ -27,10 +27,11 @@ export function estimateTextTokens(text: string): number {
   return Math.ceil(bytes / 4); // 拉丁主导
 }
 
-/** 单条消息 token 估算（thinking 不计——发送视图不携带 thinking） */
+/** 单条消息 token 估算（含 thinking：思考内容计入上下文占用核算） */
 export function estimateMessageTokens(m: ContextMessage): number {
   let total = MSG_FRAMING_TOKENS;
   total += estimateTextTokens(m.content);
+  if (m.thinking) total += estimateTextTokens(m.thinking);
   if (m.toolCallId) total += estimateTextTokens(m.toolCallId);
   if (m.name) total += estimateTextTokens(m.name);
   if (m.toolCalls) {
@@ -57,6 +58,7 @@ export function estimateTextBytes(text: string): number {
  */
 export function estimateMessageBytes(m: ContextMessage): number {
   let total = estimateTextBytes(m.content);
+  if (m.thinking) total += estimateTextBytes(m.thinking);
   if (m.toolCallId) total += estimateTextBytes(m.toolCallId);
   if (m.name) total += estimateTextBytes(m.name);
   if (m.toolCalls) {
@@ -81,6 +83,7 @@ export function estimateMessagesTokens(msgs: readonly ContextMessage[]): number 
 /** 消息实际发送字符数（校准用：与 provider 计费的 prompt 对齐的内容口径） */
 export function messageChars(m: ContextMessage): number {
   let n = m.content.length;
+  if (m.thinking) n += m.thinking.length;
   if (m.name) n += m.name.length;
   if (m.toolCallId) n += m.toolCallId.length;
   if (m.toolCalls) {

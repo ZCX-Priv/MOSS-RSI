@@ -30,7 +30,7 @@ import type {
 import { DEFAULT_CONTEXT_CONFIG, TELEMETRY_BUFFER_SIZE as BUFFER_SIZE } from '../types';
 import { TokenCalibrator } from '../budgeter/calibration';
 import { estimateTextTokens, messagesChars, parseContextWindow } from '../budgeter/estimator';
-import { buildStaticSystemPrompt, buildRequestView, getSystemSections } from '../compiler';
+import { buildStaticSystemPrompt, buildRequestView, getSystemSections, ImageOptimizer } from '../compiler';
 import type { RulesSectionInput } from '../compiler/system-prompt';
 import { ensureEnvProbed } from '../compiler/env-probe';
 import { buildRulesSection } from '../../rules/inject';
@@ -95,7 +95,13 @@ export class ContextEngineServiceImpl {
    * prepareRequest 写入；调用方在请求成功送达后 confirm、失败/中断时 discard。
    */
   private readonly pendingImageMarks = new Map<string, ContextMessage[]>();
+  /** 自动压缩冷却水位：sessionId → { at, tokens }（防反复徒劳压缩） */
+  private readonly compactionGuard = new Map<string, { at: number; tokens: number }>();
+  /** 压缩重入锁：sessionId 正在压缩（防 governor 自动压缩与模型自主压缩并发） */
+  private readonly compactingSessions = new Set<string>();
   private sessionStore: SessionStoreBridge | null = null;
+  /** 图片优化器（发送前压缩；sharp 不可用时自动降级为不压缩） */
+  private readonly imageOptimizer: ImageOptimizer;
   /** 文件索引模块（三引擎；默认关闭，配置打开后激活） */
   private readonly fileIndex: FileIndexService;
 
@@ -104,6 +110,7 @@ export class ContextEngineServiceImpl {
     this.config = deps.config;
     this.services = deps.services;
     this.logger = deps.logger;
+    this.imageOptimizer = new ImageOptimizer(deps.logger, () => this.getConfig().imageOptimization);
     this.fileIndex = new FileIndexService({
       env: deps.env,
       config: deps.config,
@@ -129,6 +136,11 @@ export class ContextEngineServiceImpl {
   /** 文件索引服务访问器（glob/grep 工具 / governor 注入 / API 路由使用） */
   getFileIndex(): FileIndexService {
     return this.fileIndex;
+  }
+
+  /** 图片优化器访问器 */
+  getImageOptimizer(): ImageOptimizer {
+    return this.imageOptimizer;
   }
 
   /** 配置热重载：文件索引引擎启停（config:changed 时由 server 路由调用） */
@@ -161,6 +173,8 @@ export class ContextEngineServiceImpl {
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules, ...ctx.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks, ...ctx.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory, ...ctx.memory },
+      imageOptimization: { ...DEFAULT_CONTEXT_CONFIG.imageOptimization, ...ctx.imageOptimization },
+      thinking: { ...DEFAULT_CONTEXT_CONFIG.thinking, ...ctx.thinking },
       maxRequestBytes:
         typeof ctx.maxRequestBytes === 'number' && Number.isFinite(ctx.maxRequestBytes)
           ? ctx.maxRequestBytes
@@ -337,10 +351,13 @@ export class ContextEngineServiceImpl {
     if (this.busySessions.has(sessionId)) {
       return { ok: false, reason: 'session is running; compaction is only available when idle' };
     }
+    if (this.compactingSessions.has(sessionId)) {
+      return { ok: false, reason: 'compaction already in progress' };
+    }
     const model = this.resolveMainModel();
     const windowTokens = this.resolveWindowTokens(model);
     const deps = this.buildGovernorDeps();
-    this.markBusy(sessionId);
+    this.compactingSessions.add(sessionId);
     try {
       const outcome = await governorManualCompact(deps, {
         session,
@@ -354,7 +371,43 @@ export class ContextEngineServiceImpl {
         ? { ok: true, compaction: outcome.record }
         : { ok: false, reason: outcome.reason ?? 'compaction not applicable' };
     } finally {
-      this.markIdle(sessionId);
+      this.compactingSessions.delete(sessionId);
+    }
+  }
+
+  /**
+   * 模型自主压缩（运行中可用；context 工具 action=compact 调用）。
+   * 与 manualCompact 复用同一压缩流程，但**跳过 busy 检查**（模型在工具阶段主动压缩），
+   * 并以重入锁防止与 governor 自动压缩并发。
+   */
+  async compactNow(sessionId: string, focus?: string): Promise<ManualCompactResult> {
+    const session = this.sessionStore?.get(sessionId);
+    if (!session) return { ok: false, reason: 'session not found' };
+    if (this.compactingSessions.has(sessionId)) {
+      return { ok: false, reason: 'compaction already in progress' };
+    }
+    const model = this.resolveMainModel();
+    const windowTokens = this.resolveWindowTokens(model);
+    const deps = this.buildGovernorDeps();
+    this.compactingSessions.add(sessionId);
+    try {
+      const outcome = await governorManualCompact(deps, {
+        session,
+        cwd: this.lastCwd ?? process.cwd(),
+        model,
+        modelDisplayName: model,
+        windowTokens,
+        ...(focus !== undefined ? { focus } : {}),
+      });
+      if (outcome.record) {
+        // 模型自主压缩完成后也记水位，避免 governor 紧接再来一轮自动压缩
+        this.compactionGuard.set(sessionId, { at: Date.now(), tokens: outcome.record.afterTokens });
+      }
+      return outcome.record
+        ? { ok: true, compaction: outcome.record }
+        : { ok: false, reason: outcome.reason ?? 'compaction not applicable' };
+    } finally {
+      this.compactingSessions.delete(sessionId);
     }
   }
 
@@ -510,6 +563,11 @@ export class ContextEngineServiceImpl {
         void this.fileIndex.ensureProject(cwd).catch(() => {
           // 单次失败静默（下次请求会重试）
         });
+      },
+      getImageOptimizer: () => this.imageOptimizer,
+      getCompactionGuard: (sessionId: string) => this.compactionGuard.get(sessionId),
+      setCompactionGuard: (sessionId: string, guard: { at: number; tokens: number }) => {
+        this.compactionGuard.set(sessionId, guard);
       },
       persistSession: session => this.sessionStore?.persist(session),
       emitWs: (sessionId, message) => this.emitWs(sessionId, message),

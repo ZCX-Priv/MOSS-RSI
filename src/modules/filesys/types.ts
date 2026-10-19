@@ -177,12 +177,6 @@ export interface FilesysService {
     opts: { source: string; sessionId?: string; toolCallId?: string; existed: boolean },
   ): void;
 
-  /** 标记"刚被工具读取"（read 工具调用；dedup 语义，进缓存条目） */
-  touchRead(absPath: string): void;
-
-  /** dedup 检查：与上次 read 相比文件是否未变（true = 可跳过重复输出） */
-  isUnchangedSinceRead(absPath: string): boolean;
-
   /** 变更事件订阅（engine 转 WS 推送用），返回取消订阅函数 */
   onFileChange(handler: (e: FileChangeEvent) => void): () => void;
 

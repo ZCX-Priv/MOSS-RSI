@@ -152,6 +152,11 @@ export interface ContextEngine {
   ): void;
   /** 手动压缩（空闲时；focus 为附加焦点） */
   manualCompact(sessionId: string, focus?: string): Promise<ManualCompactResult>;
+  /**
+   * 模型自主压缩（运行中可用；context 工具 action=compact 调用）。
+   * 与 manualCompact 复用同一压缩流程，但跳过 busy 检查，并以重入锁防并发。
+   */
+  compactNow(sessionId: string, focus?: string): Promise<ManualCompactResult>;
   /** 手动压缩预览（确认框数据） */
   previewCompact(sessionId: string): CompactPreview | null;
   /** 会话上下文统计（token 构成/缓存命中/压缩状态/系统分段） */
@@ -266,6 +271,43 @@ export interface AgentEngine {
 
   /** 进行中的流式草稿（刷新/重连后恢复半截回复 + 续接 offset） */
   getLiveDraft?(sessionId: string): import('./agent/live-draft').LiveDraft | null;
+
+  /**
+   * 历史智能检索（BM25）：检索「本对话原始上下文」或「跨 session 全量历史」。
+   * 原始消息始终保存在 session JSON 中；压缩折叠只是从发送视图移除，检索仍可命中。
+   * @param input.scope 'current'=仅 sessionId 指定会话；'all'=全部会话
+   * @param input.includeCompacted 是否纳入已压缩（compacted）消息（默认 true）
+   */
+  searchMessages(input: HistorySearchInput): HistorySearchResult[];
+}
+
+/** 历史检索输入 */
+export interface HistorySearchInput {
+  query: string;
+  scope: 'current' | 'all';
+  /** scope='current' 时的目标会话 */
+  sessionId?: string;
+  /** 返回条数上限（默认 10，最大 50） */
+  topK?: number;
+  /** 是否包含已压缩（compacted）消息（默认 true） */
+  includeCompacted?: boolean;
+  /** 是否包含工具结果消息（默认 false，通常噪声较大） */
+  includeTool?: boolean;
+}
+
+/** 历史检索命中项 */
+export interface HistorySearchResult {
+  sessionId: string;
+  /** 消息在该会话全量数组中的下标 */
+  index: number;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  /** 命中片段（截断展示） */
+  snippet: string;
+  /** BM25 得分（降序） */
+  score: number;
+  /** 该消息是否已被压缩折叠（原文仍在，仅不在发送视图） */
+  compacted: boolean;
+  timestamp?: string;
 }
 
 export interface AgentRunInput {
@@ -418,6 +460,11 @@ export interface AgentMessage {
   toolCallId?: string;
   thinking?: string;
   /**
+   * 思考签名（Anthropic thinking block 的 signature；流式 signature_delta 采集）。
+   * 回传给 Anthropic 时须与 thinking 一同原样携带；其他 provider 不使用。
+   */
+  thinkingSignature?: string;
+  /**
    * 本轮流式思考耗时（毫秒）：首个 thinking 分片到首个非思考内容分片之间的时长。
    * 落盘用于前端刷新/重进会话后展示「已完成思考 · Ns」。
    */
@@ -434,6 +481,11 @@ export interface AgentMessage {
   timestamp?: string;
   /** 软删除时间（ISO 8601）。非空表示已被消息撤回截断，构建 LLM 上下文时过滤 */
   deletedAt?: string;
+  /**
+   * 压缩折叠标记：该消息已被压缩摘要替代（发送视图排除）。
+   * 上下文引擎物理折叠时写入；原始上下文仍保存在 session JSON 中供检索。
+   */
+  compacted?: boolean;
 }
 
 /** 消息撤回（截断）预览结果 */

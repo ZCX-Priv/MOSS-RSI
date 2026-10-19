@@ -32,6 +32,7 @@ import { useMcp } from '../../hooks/useMcp';
 import { parseMcpJsonInput, type ParsedMcpDef } from '../../lib/mcp-json';
 import { useStore } from '../../store';
 import { api } from '../../api/http';
+import { copyText } from '../../lib/clipboard';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import type { McpServer } from '../../types/api';
 
@@ -594,15 +595,14 @@ function MossServerCard() {
         },
       },
     };
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(snippet, null, 2));
+    if (await copyText(JSON.stringify(snippet, null, 2))) {
       toast.success(
         token
           ? `${t('plugins.mossServerJsonCopied')}（${t('plugins.mossServerTokenHint')}）`
           : t('plugins.mossServerJsonCopied'),
       );
-    } catch {
-      toast.error(t('plugins.mossServerCopyFailed'));
+    } else {
+      toast.error(t('common.copyManualHint'));
     }
   }, [appConfig, endpoint, t]);
 
@@ -640,11 +640,10 @@ function MossServerCard() {
         },
       },
     };
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(snippet, null, 2));
+    if (await copyText(JSON.stringify(snippet, null, 2))) {
       toast.success(`${t('plugins.mossServerStdioCopied')}（${t('plugins.mossServerStdioHint')}）`);
-    } catch {
-      toast.error(t('plugins.mossServerCopyFailed'));
+    } else {
+      toast.error(t('common.copyManualHint'));
     }
   }, [t]);
 

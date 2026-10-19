@@ -35,6 +35,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { api } from '@/api/http';
+import { copyText } from '@/lib/clipboard';
 import { useRemote } from '@/hooks/useRemote';
 import type { RemoteStatus } from '@/types/api';
 import { RebindProgressDialog } from './RebindProgressDialog';
@@ -223,10 +224,9 @@ export function RemoteSettingsSection() {
   }, [tunnelPhase]);
 
   const copyUrl = useCallback((url: string): void => {
-    void navigator.clipboard.writeText(url).then(() => {
-      toast.success(t('settings.remote.copied'));
-    }).catch(() => {
-      toast.error(t('settings.remote.copyFailed'));
+    void copyText(url).then((ok) => {
+      if (ok) toast.success(t('settings.remote.copied'));
+      else toast.error(t('common.copyManualHint'));
     });
   }, [t]);
 

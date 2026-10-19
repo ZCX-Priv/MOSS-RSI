@@ -205,6 +205,12 @@ const contextSchema = z.object({
       summaryMaxTokens: z.number().int().positive().default(8192),
       minFoldTokens: z.number().int().positive().default(400),
       summaryModel: z.string().default('inherit'),
+      // 收缩比上限（摘要必须 ≤ 可压缩区 × 本值，否则放弃本轮）
+      maxShrinkRatio: z.number().min(0.1).max(0.95).default(0.5),
+      minCompactMessages: z.number().int().min(2).max(100).default(4),
+      // 冷却水位（token）与冷却时间窗（ms）
+      cooldownGrowthTokens: z.number().int().min(0).default(2000),
+      cooldownMs: z.number().int().min(0).default(60000),
     })
     .default({}),
   toolPruning: z
@@ -275,6 +281,25 @@ const contextSchema = z.object({
       recallTokenBudget: z.number().int().positive().default(2000),
       l1ImportanceThreshold: z.number().min(0).max(1).default(0.75),
       l1MaxEntries: z.number().int().min(1).max(100).default(20),
+    })
+    .default({}),
+  // 图片发送前优化（TinyPNG 式；sharp 不可用时自动降级为不压缩发送原图）
+  imageOptimization: z
+    .object({
+      enabled: z.boolean().default(true),
+      maxEdgePx: z.number().int().min(256).max(8192).default(1568),
+      quality: z.number().int().min(1).max(100).default(82),
+      format: z.enum(['auto', 'png', 'jpeg', 'webp']).default('auto'),
+      lossless: z.boolean().default(false),
+      maxInlineBytesPerImage: z.number().int().min(0).default(1024 * 1024),
+      skipBelowBytes: z.number().int().min(0).default(64 * 1024),
+      maxTotalImageBytes: z.number().int().min(0).default(4 * 1024 * 1024),
+    })
+    .default({}),
+  // 思考内容回传（计入估算对所有 provider 生效；回传按 provider 语义）
+  thinking: z
+    .object({
+      replayOpenAICompat: z.boolean().default(false),
     })
     .default({}),
   // 单次请求体字节上限（256 KiB–64 MiB；默认 8 MiB）。
@@ -423,6 +448,8 @@ export function defaultAppConfig(): AppConfig {
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory },
+      imageOptimization: { ...DEFAULT_CONTEXT_CONFIG.imageOptimization },
+      thinking: { ...DEFAULT_CONTEXT_CONFIG.thinking },
       maxRequestBytes: DEFAULT_CONTEXT_CONFIG.maxRequestBytes,
     },
     safety: {

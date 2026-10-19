@@ -318,6 +318,20 @@ function insertNodesAtCaret(root: HTMLElement, nodes: Node[]): void {
 }
 
 /**
+ * HTML → 纯文本（仅用于剪贴板只提供 text/html 的环境，如部分 WebView / iOS）。
+ * 先给块级元素/`<br>` 补换行，再取 textContent，避免多段文字粘连成一行。
+ */
+function htmlToPlainText(html: string): string {
+  const el = document.createElement('div');
+  el.innerHTML = html;
+  el.querySelectorAll('br').forEach((br) => br.replaceWith(document.createTextNode('\n')));
+  el.querySelectorAll('p,div,li,tr,h1,h2,h3,h4,h5,h6').forEach((block) =>
+    block.append(document.createTextNode('\n')),
+  );
+  return el.textContent ?? '';
+}
+
+/**
  * 在光标处插入换行。
  *
  * 必须交给浏览器原生 `insertLineBreak`：手动插入单个 `<br>` 或 `'\n'` 时，
@@ -973,12 +987,20 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       return;
     }
 
-    const text = e.clipboardData.getData('text/plain');
+    // 纯文本优先；取不到时回退 text/html（部分 WebView / iOS 只提供 html）
+    let rawText = e.clipboardData.getData('text/plain');
+    if (!rawText) {
+      const html = e.clipboardData.getData('text/html');
+      if (html) rawText = htmlToPlainText(html);
+    }
+    if (!rawText) return;
+    // 清理零宽字符与对象替换符（\uFFFC）——否则会作为隐形字符落进正文
+    const text = rawText.replace(/[\u200B-\u200D\uFEFF\uFFFC]/g, '');
     if (!text) return;
     e.preventDefault();
     const root = rootRef.current;
     if (!root) return;
-    const segments = parseMentionText(text.replace(/\uFFFC/g, ''), lookupsRef.current);
+    const segments = parseMentionText(text, lookupsRef.current);
     const existing = filePaths();
     const dupes: string[] = [];
     const nodes: Node[] = [];
