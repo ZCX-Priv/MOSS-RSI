@@ -8,6 +8,7 @@ import { t } from '../../core/i18n';
 import type { Logger } from '../../core/types';
 import { resolveInterpreter, makeMarker, type InteractiveInterpreter } from './interpreter';
 import { TerminalPersistence, type PersistedTerminal } from './persistence';
+import { stripAnsi, cleanRunOutput } from './clean-output';
 import {
   TERMINAL_LIMITS,
   type InterpreterKind,
@@ -66,13 +67,6 @@ export type TerminalEmitter = (sessionId: string, message: Record<string, unknow
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
-}
-
-/** 去除 ANSI 转义序列（工具返回给模型的可读输出） */
-function stripAnsi(s: string): string {
-  return s
-    .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
-    .replace(/\u001b\][^\u0007]*(\u0007|\u001b\\)/g, '');
 }
 
 /** 转义正则元字符 */
@@ -372,12 +366,9 @@ export class TerminalManager implements TerminalService {
       }
     });
 
-    // 清理：去 ANSI；剔除含完成标记的行（回显的标记命令行）
-    const cleaned = stripAnsi(res.output)
-      .split(/\r?\n/)
-      .filter((line) => !line.includes(marker))
-      .join('\n')
-      .replace(/\s+$/, '');
+    // 清洗：剔除命令回显（跨硬换行复原）与内部完成标记/语法碎片/提示符噪声，
+    // 只把本次命令的真实输出交给模型（不再混入 __MOSS_DONE 标记与回显）。
+    const cleaned = cleanRunOutput(res.output, [command, rt.interpreter.encodingInit]);
 
     return {
       output: cleaned,

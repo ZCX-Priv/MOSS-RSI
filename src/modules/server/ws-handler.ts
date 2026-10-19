@@ -2,6 +2,7 @@
 // WebSocket 消息分发：处理前端 WS 消息，转发 Agent 事件到客户端。
 
 import { t } from '../../core/i18n';
+import { release } from 'node:os';
 import type { Environment, Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { WSMessage, WSMessageHandler, WSConnection } from './types';
@@ -944,16 +945,29 @@ export class WsHandler {
     return this.services.tryResolve<TerminalService>(ServiceNames.TERMINAL);
   }
 
+  /**
+   * Windows ConPTY 兼容信息：xterm 的 `windowsPty` 启发式仅在提供 buildNumber 时生效
+   * （缺 buildNumber 会静默退回「reflow 启用」的错误默认，正是终端回显错乱/重复的根因）。
+   * 非 Windows 或解析失败 → 不下发（保持原行为）。
+   */
+  private ptyBackendInfo(): { backend: 'conpty'; buildNumber: number } | undefined {
+    if (!this.env.isWindows) return undefined;
+    const build = Number(release().split('.')[2]);
+    return Number.isFinite(build) ? { backend: 'conpty', buildNumber: build } : undefined;
+  }
+
   /** 列出会话终端（连接先订阅该会话，保证后续 terminal.data 可达） */
   private handleTerminalList(state: ConnectionState, msg: WSMessage): void {
     const sessionId = msg.sessionId ?? state.sessionId ?? '';
     if (sessionId) state.subscribedSessions.add(sessionId);
     const svc = this.terminalService();
     const terminals = svc ? svc.list(sessionId) : [];
+    const ptyBackend = this.ptyBackendInfo();
     state.conn.send({
       type: 'terminal.list',
       sessionId,
-      payload: { sessionId, terminals },
+      // ptyBackend 与终端列表同帧到达 → 前端创建 xterm 前即可拿到 windowsPty 参数
+      payload: { sessionId, terminals, ...(ptyBackend ? { ptyBackend } : {}) },
     });
   }
 

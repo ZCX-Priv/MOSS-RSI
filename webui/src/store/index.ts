@@ -301,6 +301,12 @@ interface UIState {
    * 值为 { list, activeId }。
    */
   terminalsBySession: Record<string, { list: TerminalInfo[]; activeId?: string } | undefined>;
+  /**
+   * 终端 PTY 后端兼容信息（Windows ConPTY；随 terminal.list 同帧下发）。
+   * xterm 的 `windowsPty` 启发式依赖 buildNumber 才能生效（用于修正 ConPTY
+   * 回显/reflow 的重复错乱）；非 Windows 或未知为 null。
+   */
+  terminalPtyBackend: { backend: 'conpty'; buildNumber: number } | null;
   /** 右侧面板展开态（会话级内存态：各会话独立互不影响，重挂载不重置；'' key = 空白页） */
   rightPanelOpenBySession: Record<string, boolean | undefined>;
   /**
@@ -634,6 +640,8 @@ interface UIActions {
   updateTerminal: (terminalId: string, patch: Partial<TerminalInfo>) => void;
   /** 设置某会话的活跃终端 id */
   setActiveTerminal: (sessionId: string, terminalId: string) => void;
+  /** 记录 PTY 后端兼容信息（terminal.list 同帧下发；null = 非 Windows / 未知） */
+  setTerminalPtyBackend: (info: { backend: 'conpty'; buildNumber: number } | null) => void;
 
   // 右侧面板展开态（会话级），内存态不持久化
   setRightPanelOpen: (sessionId: string, v: boolean) => void;
@@ -868,6 +876,7 @@ export const useStore = create<Store>((set, get) => ({
 
   // --- 持久终端元数据（会话级；内存态，终端本体在后端进程） ---
   terminalsBySession: {},
+  terminalPtyBackend: null,
 
   // --- 右侧面板展开态（内存态；默认收起） ---
   rightPanelOpenBySession: {},
@@ -1963,6 +1972,7 @@ export const useStore = create<Store>((set, get) => ({
         terminalsBySession: { ...state.terminalsBySession, [sessionId]: { ...cur, activeId: terminalId } },
       };
     }),
+  setTerminalPtyBackend: (info) => set({ terminalPtyBackend: info }),
 
   // --- Actions: 右侧面板展开态/宽度（内存态，不持久化） ---
   setRightPanelOpen: (sessionId, v) =>

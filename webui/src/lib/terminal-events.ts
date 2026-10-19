@@ -10,6 +10,8 @@ import { terminalScopeOf } from './terminal-scope';
 interface TerminalListPayload {
   sessionId?: string;
   terminals?: TerminalInfo[];
+  /** Windows ConPTY 兼容信息（xterm windowsPty 参数；后端同帧下发） */
+  ptyBackend?: { backend?: string; buildNumber?: number };
 }
 interface TerminalCreatedPayload {
   terminal?: TerminalInfo;
@@ -36,6 +38,11 @@ export function handleTerminalMessage(msg: WSMessage): boolean {
       const p = (msg.payload ?? {}) as TerminalListPayload;
       const sessionId = p.sessionId ?? msg.sessionId ?? s.activeSessionId ?? '';
       if (sessionId) s.setTerminalList(sessionId, p.terminals ?? []);
+      // Windows ConPTY：记录 ptyBackend，供 TerminalPanel 创建 xterm 时注入 windowsPty
+      const pb = p.ptyBackend;
+      if (pb?.backend === 'conpty' && typeof pb.buildNumber === 'number') {
+        s.setTerminalPtyBackend({ backend: 'conpty', buildNumber: pb.buildNumber });
+      }
       return true;
     }
     case 'terminal.created': {

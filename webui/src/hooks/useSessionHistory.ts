@@ -242,7 +242,15 @@ export function useSessionHistory(
   // setup→cleanup→setup）下首屏请求被丢弃且第二次 setup 跳过重发 → 刷新后消息永远不加载。
   // 视图相关的守卫统一由 activeSessionId 判定（见 reconcileFromState）。
   useEffect(() => {
-    if (!taskId) return;
+    if (!taskId) {
+      // 空白页（路由 /task 无 taskId）：store 的 active 指针必须与可见页面一致。
+      // 否则 sendMessage 会回退到遗留的 activeTaskId，把消息投递给旧会话（且不导航），
+      // 其它消费方（权限模式 / 终端作用域 / 文件预览 sessionId）也会误用旧会话。
+      const st = useStore.getState();
+      if (st.activeSessionId !== null) st.setActiveSession(null);
+      if (st.activeTaskId !== null) st.setActiveTaskId(null);
+      return;
+    }
     // 先订阅：后端 session.subscribed 会带回权威快照（running / liveDraft / 游标）
     wsClient.subscribeSession(taskId);
 

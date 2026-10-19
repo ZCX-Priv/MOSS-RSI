@@ -145,6 +145,10 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
       el.style.display = 'none';
       host.appendChild(el);
 
+      // Windows ConPTY 兼容：xterm 的 windowsPty 启发式必须同时提供 buildNumber 才生效
+      // （缺失会静默退回「reflow 启用」的错误默认 → 手动输入/切换/重绘出现重复与错乱）。
+      // 必须创建时给定（构造选项），故依赖 terminal.list 同帧下发的 terminalPtyBackend。
+      const ptyBackend = useStore.getState().terminalPtyBackend;
       const term = new Terminal({
         convertEol: false,
         cursorBlink: true,
@@ -153,6 +157,9 @@ export function TerminalPanel({ sessionId }: TerminalPanelProps) {
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace',
         theme: xtermTheme(dark),
         allowProposedApi: true,
+        ...(ptyBackend
+          ? { windowsPty: { backend: ptyBackend.backend, buildNumber: ptyBackend.buildNumber } }
+          : {}),
         // 离线历史项（后端已重启，终端本体不存在）：只读回放，禁止输入
         disableStdin: Boolean(info.offline),
       });

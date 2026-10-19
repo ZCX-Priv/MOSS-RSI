@@ -740,6 +740,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         // 通过 onSessionReady 立即导航 —— 配合 flushSync 同步应用路由，点发送即刻就是任务页，
         // 不存在「taskId 为空」的过渡帧（无需居中/底部加载态）。
         sendMessage(text, {
+          // 显式声明空白页 = 新建会话：禁止 sendMessage 回退到遗留的 activeTaskId
+          // （否则会静默投递到旧 session 且因未视为新建而不导航）
+          taskId: '',
           attachments,
           onSessionReady: (id) => {
             // 面板开合状态随对话转移到新会话，避免 navigate 重挂载后收起
