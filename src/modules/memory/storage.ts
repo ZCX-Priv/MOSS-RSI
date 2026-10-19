@@ -222,6 +222,25 @@ export function removeMemoryFile(file: string): boolean {
   return false;
 }
 
+/** 清空某作用域宫殿的全部记忆（保留根级 scripts 目录）。返回删除的记忆条数。 */
+export function clearMemoryRoot(root: string): number {
+  if (!existsSync(root)) return 0;
+  let count = 0;
+  for (const wingEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!wingEntry.isDirectory() || wingEntry.name === 'scripts') continue;
+    const wingDir = join(root, wingEntry.name);
+    for (const roomEntry of readdirSync(wingDir, { withFileTypes: true })) {
+      if (!roomEntry.isDirectory()) continue;
+      const roomDir = join(wingDir, roomEntry.name);
+      for (const file of readdirSync(roomDir)) {
+        if (file.endsWith('.json')) count++;
+      }
+    }
+    rmSync(wingDir, { recursive: true, force: true });
+  }
+  return count;
+}
+
 /** 宫殿树枚举（WebUI 三栏数据源） */
 export function buildPalaceTree(
   env: Environment,

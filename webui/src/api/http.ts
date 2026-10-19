@@ -612,6 +612,11 @@ export const api = {
     request<MemoryItem>('PATCH', `/api/memory/${encodeURIComponent(id)}${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`, patch),
   deleteMemory: (id: string, cwd?: string) =>
     request<{ ok: boolean }>('DELETE', `/api/memory/${encodeURIComponent(id)}${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
+  clearMemory: (scope: 'all' | 'global' | 'project', cwd?: string) =>
+    request<{ ok: boolean; removed: number }>(
+      'DELETE',
+      `/api/memory?scope=${scope}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''}`,
+    ),
   distillMemory: (data: { sessionId: string; cwd?: string }) =>
     request<MemoryDistillResult>('POST', '/api/memory/distill', data),
 

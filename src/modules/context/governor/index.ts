@@ -16,6 +16,7 @@ import type { LLMRouter } from '../../contracts';
 import type {
   CompactionRecord,
   ContextEngineConfig,
+  ContextMessage,
   ContextSessionLike,
   PreparedRequest,
 } from '../types';
@@ -26,6 +27,7 @@ import { MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from '../compiler/view-bui
 import { ensureProjectContext } from '../file-index/project-context';
 import { compactSession, resolveSummaryModel } from '../compressor';
 import { planCompaction } from '../compressor/planner';
+import { loadPromptFile, renderTemplate } from '../prompt-loader';
 import { estimateTextTokens, estimateMessagesTokens } from '../budgeter/estimator';
 import { shouldCompact, needsHardCeiling, compactionActive } from './triggers';
 import { buildRulesSection } from '../../rules/inject';
@@ -121,6 +123,36 @@ function buildRulesSectionForRequest(
     });
     return null;
   }
+}
+
+/** 上下文过半提醒消息 name（ephemeral；仅本次请求视图、不持久化） */
+export const CONTEXT_PRESSURE_MSG_NAME = 'context-pressure';
+
+/** 提醒提示词缺失时的内置兜底文本（占位符由 renderTemplate 替换） */
+const PRESSURE_REMINDER_FALLBACK =
+  '当前上下文占用已达 {{PERCENT}}%（约 {{USED}} / {{MAX}} tokens 的模型上下文窗口）。\n\n' +
+  '请在继续工作前先做好交接（写清关键结论、涉及文件/路径、未完成事项与下一步），' +
+  '随后调用 context 工具（action=compact）自主压缩较早的上下文。';
+
+/**
+ * 构造「上下文过半提醒」文本（纯函数，便于单测）。
+ * @param usedTokens 当前上下文占用估算（token）
+ * @param maxTokens 模型支持的上下文窗口（token）
+ * @param ratio 占用比例（used/max）
+ */
+export function buildContextPressureReminder(
+  env: Environment,
+  usedTokens: number,
+  maxTokens: number,
+  ratio: number,
+): string {
+  const template = loadPromptFile(env, 'context/pressure.md', PRESSURE_REMINDER_FALLBACK);
+  // PERCENT 仅数字（模板中自带 % 号，避免渲染出 "62%%"）
+  return renderTemplate(template, {
+    PERCENT: String(Math.round(ratio * 100)),
+    USED: String(usedTokens),
+    MAX: String(maxTokens),
+  });
 }
 
 /**
@@ -285,6 +317,32 @@ export async function prepareRequest(
 
   const preview = buildView();
   const byteBudget = config.maxRequestBytes;
+
+  // 上下文过半提醒（每轮注入、不持久化）：占用估算 ≥ 阈值时，提醒 AI 先交接、再自主压缩。
+  // 排在 ephemeral 末尾（紧邻模型下一个回复），只在本次发送视图生效，占用回落后自动消失。
+  if (config.pressureReminder.enabled && windowTokens > 0) {
+    const usedRatio = preview.breakdown.total / windowTokens;
+    if (usedRatio >= config.pressureReminder.ratio) {
+      const reminder: ContextMessage = {
+        role: 'user',
+        name: CONTEXT_PRESSURE_MSG_NAME,
+        content: buildContextPressureReminder(
+          deps.env,
+          preview.breakdown.total,
+          windowTokens,
+          usedRatio,
+        ),
+        timestamp: new Date().toISOString(),
+      };
+      ephemeralMessages = [...(ephemeralMessages ?? []), reminder];
+      deps.logger.debug('context: pressure reminder injected', {
+        sessionId: session.id,
+        usedTokens: preview.breakdown.total,
+        windowTokens,
+        ratio: Number(usedRatio.toFixed(3)),
+      });
+    }
+  }
   // 图片 base64 对 token 估算不可见 → 字节维度独立判定，驱动最终视图的图片淘汰/字节兜底。
   const byteOverBudget = preview.bytes > byteBudget;
 

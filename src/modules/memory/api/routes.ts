@@ -6,6 +6,7 @@
 //   GET    /api/memory/:id?cwd=         单条记忆
 //   PATCH  /api/memory/:id              更新记忆（body 含 cwd）
 //   DELETE /api/memory/:id?cwd=         删除记忆
+//   DELETE /api/memory?cwd=&scope=all|global|project  批量清空记忆
 //   POST   /api/memory/distill          手动蒸馏（body: { sessionId, cwd }）
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../../server/types';
@@ -178,6 +179,19 @@ export function createDeleteMemoryHandler(services: ServicesLike): RouteHandler 
     const ok = engine.delete(cwdFromQuery(req), id);
     if (!ok) return { status: 404, body: { error: 'memory not found' } };
     return { status: 200, body: { ok: true } };
+  };
+}
+
+export function createClearMemoryHandler(services: ServicesLike): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const engine = resolveEngine(services);
+    if (!engine) return { status: 503, body: { error: 'memory engine unavailable' } };
+    const url = new URL(req.url, 'http://localhost');
+    const cwd = url.searchParams.get('cwd') || process.cwd();
+    const raw = url.searchParams.get('scope');
+    const scope: 'all' | 'global' | 'project' = raw === 'global' || raw === 'project' ? raw : 'all';
+    const removed = engine.clear(cwd, scope);
+    return { status: 200, body: { ok: true, removed } };
   };
 }
 

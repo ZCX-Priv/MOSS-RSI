@@ -40,6 +40,7 @@ export type {
   CompactionRecord,
   ContextBreakdown,
   ContextMessage,
+  ContextPressureConfig,
   ContextSessionLike,
   ContextStats,
   HealResult,

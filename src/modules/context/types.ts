@@ -70,6 +70,14 @@ export interface ThinkingReplayConfig {
   replayOpenAICompat: boolean;
 }
 
+/** 上下文过半提醒配置（每轮注入、不持久化；占用 ≥ ratio 时提醒 AI 交接并自主压缩） */
+export interface ContextPressureConfig {
+  /** 是否启用（默认开） */
+  enabled: boolean;
+  /** 触发阈值：占用估算 ≥ 窗口 × ratio 时注入提醒（默认 0.5） */
+  ratio: number;
+}
+
 export interface ToolPruningConfig {
   enabled: boolean;
   /** 工具结果超过此字符数触发中段修剪（仅发送视图，session 原文不动） */
@@ -140,6 +148,8 @@ export interface ContextEngineConfig {
   imageOptimization: ImageOptimizationConfig;
   /** 思考内容回传（默认严格按 provider 语义；OpenAI 兼容默认不回传） */
   thinking: ThinkingReplayConfig;
+  /** 上下文过半提醒（默认开；每轮注入、不持久化） */
+  pressureReminder: ContextPressureConfig;
   /**
    * 单次 LLM 请求体字节上限（序列化后的 JSON body）。
    * 用途：token 预算看不到图片 base64 字节，服务端却按字节判 413；
@@ -175,6 +185,11 @@ export const DEFAULT_IMAGE_OPTIMIZATION_CONFIG: ImageOptimizationConfig = {
 
 export const DEFAULT_THINKING_REPLAY_CONFIG: ThinkingReplayConfig = {
   replayOpenAICompat: false,
+};
+
+export const DEFAULT_CONTEXT_PRESSURE_CONFIG: ContextPressureConfig = {
+  enabled: true,
+  ratio: 0.5,
 };
 
 export const DEFAULT_TOOL_PRUNING_CONFIG: ToolPruningConfig = {
@@ -230,6 +245,7 @@ export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   memory: { ...DEFAULT_MEMORY_CONFIG },
   imageOptimization: { ...DEFAULT_IMAGE_OPTIMIZATION_CONFIG },
   thinking: { ...DEFAULT_THINKING_REPLAY_CONFIG },
+  pressureReminder: { ...DEFAULT_CONTEXT_PRESSURE_CONFIG },
   maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES,
 };
 

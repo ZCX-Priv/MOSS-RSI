@@ -14,6 +14,7 @@ import { distillSession } from './distiller';
 import {
   buildMemoryRecord,
   buildPalaceTree,
+  clearMemoryRoot,
   findMemoryAnywhere,
   globalMemoryRoot,
   isSystemScope,
@@ -360,6 +361,20 @@ export class MemoryEngineServiceImpl {
     const ok = removeMemoryFile(found.file);
     if (ok) this.retriever.invalidate();
     return ok;
+  }
+
+  /** 批量清空记忆（scope: all=全局+当前项目 | global | project）。返回删除条数。 */
+  clear(cwd: string, scope: 'all' | 'global' | 'project'): number {
+    const { global: globalRoot, project } = memoryRoots(this.env, cwd);
+    let removed = 0;
+    if (scope === 'all' || scope === 'global') {
+      removed += clearMemoryRoot(globalRoot);
+    }
+    if ((scope === 'all' || scope === 'project') && project) {
+      removed += clearMemoryRoot(project);
+    }
+    if (removed > 0) this.retriever.invalidate();
+    return removed;
   }
 
   /** 当前项目 wing 名（工具展示用） */

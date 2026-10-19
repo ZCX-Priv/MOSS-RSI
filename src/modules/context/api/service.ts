@@ -175,6 +175,7 @@ export class ContextEngineServiceImpl {
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory, ...ctx.memory },
       imageOptimization: { ...DEFAULT_CONTEXT_CONFIG.imageOptimization, ...ctx.imageOptimization },
       thinking: { ...DEFAULT_CONTEXT_CONFIG.thinking, ...ctx.thinking },
+      pressureReminder: { ...DEFAULT_CONTEXT_CONFIG.pressureReminder, ...ctx.pressureReminder },
       maxRequestBytes:
         typeof ctx.maxRequestBytes === 'number' && Number.isFinite(ctx.maxRequestBytes)
           ? ctx.maxRequestBytes

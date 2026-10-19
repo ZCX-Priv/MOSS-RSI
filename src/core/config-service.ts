@@ -302,6 +302,13 @@ const contextSchema = z.object({
       replayOpenAICompat: z.boolean().default(false),
     })
     .default({}),
+  // 上下文过半提醒（每轮注入、不持久化；占用 ≥ ratio 时提醒 AI 交接并自主压缩）
+  pressureReminder: z
+    .object({
+      enabled: z.boolean().default(true),
+      ratio: z.number().min(0.1).max(0.95).default(0.5),
+    })
+    .default({}),
   // 单次请求体字节上限（256 KiB–64 MiB；默认 8 MiB）。
   // 旧 config.json 缺该字段时由 .default() 自动补全；热更新经 config:changed 生效。
   maxRequestBytes: z
@@ -450,6 +457,7 @@ export function defaultAppConfig(): AppConfig {
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory },
       imageOptimization: { ...DEFAULT_CONTEXT_CONFIG.imageOptimization },
       thinking: { ...DEFAULT_CONTEXT_CONFIG.thinking },
+      pressureReminder: { ...DEFAULT_CONTEXT_CONFIG.pressureReminder },
       maxRequestBytes: DEFAULT_CONTEXT_CONFIG.maxRequestBytes,
     },
     safety: {

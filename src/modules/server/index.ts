@@ -173,6 +173,7 @@ import {
   createGetMemoryHandler,
   createUpdateMemoryHandler,
   createDeleteMemoryHandler,
+  createClearMemoryHandler,
   createDistillMemoryHandler,
 } from './routes/memory';
 import {
@@ -511,6 +512,7 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/memory/:id', handler: createGetMemoryHandler(services), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/memory/:id', handler: createUpdateMemoryHandler(services), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/memory/:id', handler: createDeleteMemoryHandler(services), auth: true });
+    this.router.addRoute({ method: 'DELETE', pattern: '/api/memory', handler: createClearMemoryHandler(services), auth: true });
 
     // voice（语音识别：总览 / 模型目录 / 开关 / 默认模型 / 安装 / 卸载）
     this.router.addRoute({ method: 'GET', pattern: '/api/voice/status', handler: createVoiceStatusHandler(services), auth: true });

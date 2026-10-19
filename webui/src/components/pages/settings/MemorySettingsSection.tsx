@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search } from 'lucide-react';
+import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,13 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
 import {
   Dialog,
   DialogBody,
@@ -88,6 +95,9 @@ export function MemorySettingsSection() {
   const [form, setForm] = useState<MemoryForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<MemoryItem | null>(null);
+  const [clearScope, setClearScope] = useState<'all' | 'global' | 'project' | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -175,18 +185,41 @@ export function MemorySettingsSection() {
     }
   };
 
-  const remove = async (m: MemoryItem) => {
+  const requestDelete = (m: MemoryItem) => {
     if (deleting) return;
-    if (!window.confirm(t('settings.memory.deleteConfirm'))) return;
+    setDeleteTarget(m);
+  };
+
+  const confirmDelete = async () => {
+    const m = deleteTarget;
+    if (!m || deleting) return;
     setDeleting(m.id);
     try {
       await api.deleteMemory(m.id);
       toast.success(t('settings.memory.deleted'));
+      setDeleteTarget(null);
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('settings.memory.deleteFailed'));
+      setDeleteTarget(null);
     } finally {
       setDeleting(null);
+    }
+  };
+
+  const doClear = async () => {
+    if (!clearScope || clearing) return;
+    setClearing(true);
+    try {
+      const res = await api.clearMemory(clearScope, cwd);
+      toast.success(t('settings.memory.cleared', { count: res.removed }));
+      setClearScope(null);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('settings.memory.clearFailed'));
+      setClearScope(null);
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -201,6 +234,10 @@ export function MemorySettingsSection() {
 
   const rooms = tree?.wings.find(w => w.wing === wingFilter)?.rooms ?? [];
   const allRooms = [...new Set((tree?.wings ?? []).flatMap(w => w.rooms.map(r => r.room)))].sort();
+  const wings = tree?.wings ?? [];
+  const globalCount = wings.filter(w => w.scope === 'global').reduce((s, w) => s + w.total, 0);
+  const projectCount = wings.filter(w => w.scope === 'project').reduce((s, w) => s + w.total, 0);
+  const hasAnyMemory = globalCount + projectCount > 0;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -325,6 +362,46 @@ export function MemorySettingsSection() {
             <Button variant="ghost" size="icon-sm" title={t('common.refresh')} onClick={() => void load()}>
               <RefreshCw className="size-3.5" />
             </Button>
+            <div className="flex items-center">
+              <Button
+                variant="outline"
+                className="gap-1.5 rounded-r-none"
+                disabled={!hasAnyMemory || clearing}
+                onClick={() => setClearScope('all')}
+              >
+                <Trash2 className="size-3.5" />
+                <span className="hidden sm:inline">{t('settings.memory.clear')}</span>
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    className="rounded-l-none border-l-0"
+                    title={t('settings.memory.clear')}
+                    disabled={!hasAnyMemory || clearing}
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8}>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={globalCount === 0}
+                    onSelect={() => setClearScope('global')}
+                  >
+                    {t('settings.memory.clearGlobal')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={projectCount === 0}
+                    onSelect={() => setClearScope('project')}
+                  >
+                    {t('settings.memory.clearProject')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             <Button className="gap-1.5" onClick={openCreate}>
               <Plus className="size-3.5" />
               <span className="hidden sm:inline">{t('settings.memory.create')}</span>
@@ -445,7 +522,7 @@ export function MemorySettingsSection() {
                       size="icon-sm"
                       title={t('common.delete')}
                       disabled={deleting === m.id}
-                      onClick={() => void remove(m)}
+                      onClick={() => requestDelete(m)}
                     >
                       {deleting === m.id ? (
                         <Loader2 className="size-3.5 animate-spin" />
@@ -578,6 +655,35 @@ export function MemorySettingsSection() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 删除单条记忆确认 */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={t('common.confirmDelete')}
+        description={t('settings.memory.deleteConfirm')}
+        destructive
+        loading={deleting !== null}
+        onConfirm={() => void confirmDelete()}
+        onOpenChange={(o) => !o && !deleting && setDeleteTarget(null)}
+      />
+
+      {/* 清空记忆确认（全部 / 全局 / 项目） */}
+      <ConfirmDialog
+        open={clearScope !== null}
+        title={t('settings.memory.clear')}
+        description={
+          clearScope === 'global'
+            ? t('settings.memory.clearGlobalConfirm')
+            : clearScope === 'project'
+              ? t('settings.memory.clearProjectConfirm')
+              : t('settings.memory.clearAllConfirm')
+        }
+        destructive
+        loading={clearing}
+        confirmText={t('settings.memory.clear')}
+        onConfirm={() => void doClear()}
+        onOpenChange={(o) => !o && !clearing && setClearScope(null)}
+      />
     </div>
   );
 }

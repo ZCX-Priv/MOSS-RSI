@@ -64,6 +64,7 @@ export function ensureContextPrompts(env: Environment): void {
   const relatives = [
     'compact/compaction.md',
     'heal/tool-error.md',
+    'context/pressure.md',
   ];
   for (const rel of relatives) {
     const dest = join(env.dataDir, 'agent', 'prompts', rel);

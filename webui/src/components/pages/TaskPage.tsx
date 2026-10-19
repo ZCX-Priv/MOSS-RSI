@@ -54,7 +54,7 @@ import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-blo
 import { stripInjectBlock } from '@/lib/inject-block';
 import { onSessionTruncated } from '@/lib/ws-events';
 import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
-import { computeReplyEnds } from '@/lib/reply-end';
+import { computeReplyEnds, isSystemCard } from '@/lib/reply-end';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
@@ -1236,8 +1236,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       const showActions = replyEndIds.has(msg.id);
       // 重新生成 / 诊断(Harness)：仅最新的一段回复结尾
       const isLastReply = msg.id === lastReplyEndId;
+      // 续接气泡（同一段回复内的中间轮次：assistant 且非回复结尾、非系统卡）→ 收紧底部留白，
+      // 使多轮工具调用（每轮一个气泡）读起来像紧凑的工具序列；段结尾/用户/系统卡保留 16px 分隔。
+      const isContinuation = msg.role === 'assistant' && !replyEndIds.has(msg.id) && !isSystemCard(msg);
       return (
-        <div className="px-4 pb-4">
+        <div className={isContinuation ? 'px-4 pb-1' : 'px-4 pb-4'}>
           <MessageErrorBoundary>
             <MessageBubble
               message={msg}
@@ -2682,7 +2685,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       {/* 非 todo/ask/agent 工具调用（可折叠：展开显示参数与结果）。
           agent 工具已由上方专属卡片渲染。 */}
       {otherCalls.length > 0 && (
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-0.5">
           {otherCalls.map((tc) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             // 结果文本/错误标记回退到全局索引：长耗时工具的结果消息可能不紧邻本消息
@@ -2704,7 +2707,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               // 非 JSON，原样显示
             }
             return (
-              <details key={tc.id} className="group px-2 py-1">
+              <details key={tc.id} className="group px-2 py-0.5">
                 <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
                   <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
                   {tc.status === 'generating' || tc.status === 'executing' ? (

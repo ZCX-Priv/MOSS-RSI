@@ -20,7 +20,7 @@
     "postinstall": "node scripts/install-webui.mjs",
     "build": "node scripts/build.mjs",
     "build:ui": "cd webui && npm run build",
-    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external nativefiledialog-for-bun --external sherpa-onnx-node",
+    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external nativefiledialog-for-bun --external sherpa-onnx-node --external sharp",
     "start": "bun src/main.ts start --foreground",
     "start:daemon": "bun src/main.ts start",
     "stop": "bun src/main.ts stop",

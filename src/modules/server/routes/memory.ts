@@ -8,5 +8,6 @@ export {
   createGetMemoryHandler,
   createUpdateMemoryHandler,
   createDeleteMemoryHandler,
+  createClearMemoryHandler,
   createDistillMemoryHandler,
 } from '../../memory/api/routes';
