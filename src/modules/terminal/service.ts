@@ -1,14 +1,26 @@
 // src/modules/terminal/service.ts
 // 持久终端管理器：原生 PTY（Bun.spawn({ terminal })）承载交互式终端；PTY 不可用时回退管道模式。
 // - 人类（WS）与 agent（terminal 工具）共用同一批终端；
-// - 每个终端维护输出环形缓冲，供订阅/重连复原与 agent read；
+// - 命令完成/退出码由 **shell 集成 OSC 133 序列**判定（不可见；不再向 PTY 敲入任何标记命令）；
+// - 每个终端用 @xterm/headless 镜像输出，输出缓冲以「序列化（带格式、可回滚）」形式供订阅/复原；
 // - 输出经注入的 emitter 按会话路由到 WS 订阅者。
 
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { release } from 'node:os';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { t } from '../../core/i18n';
 import type { Logger } from '../../core/types';
-import { resolveInterpreter, makeMarker, type InteractiveInterpreter } from './interpreter';
+import {
+  resolveInterpreter,
+  MOSS_RCDIR_PLACEHOLDER,
+  MOSS_RCFILE_PLACEHOLDER,
+  type InteractiveInterpreter,
+  type ShellIntegration,
+} from './interpreter';
 import { TerminalPersistence, type PersistedTerminal } from './persistence';
-import { stripAnsi, cleanRunOutput } from './clean-output';
+import { cleanRunOutput } from './clean-output';
+import { OscScanner, makeNonce } from './osc';
 import {
   TERMINAL_LIMITS,
   type InterpreterKind,
@@ -44,8 +56,41 @@ interface PtyCtor {
   }): PtyLike;
 }
 
+/** @xterm/headless 的最小结构（仅用到的 API；避免依赖其类型解析） */
+interface HeadlessTerm {
+  write(data: string, callback?: () => void): void;
+  resize(cols: number, rows: number): void;
+  dispose(): void;
+  loadAddon(addon: unknown): void;
+}
+/** @xterm/addon-serialize 的最小结构 */
+interface SerializeAddonLike {
+  serialize(opts?: { scrollback?: number }): string;
+}
+
+/** 无头镜像的 scrollback 行数（决定"可回滚到多早"；含首行） */
+const HEADLESS_SCROLLBACK = 20_000;
+
+let headlessLibsCache: { Terminal: new (opts: Record<string, unknown>) => HeadlessTerm; SerializeAddon: new () => SerializeAddonLike } | null | undefined;
+/** 惰性加载 CJS 版 headless + serialize（createRequire：Node/Bun 均可稳定解析 CJS 入口） */
+function headlessLibs(): typeof headlessLibsCache {
+  if (headlessLibsCache !== undefined) return headlessLibsCache;
+  try {
+    const req = createRequire(import.meta.url);
+    const { Terminal } = req('@xterm/headless') as { Terminal: new (o: Record<string, unknown>) => HeadlessTerm };
+    const { SerializeAddon } = req('@xterm/addon-serialize') as { SerializeAddon: new () => SerializeAddonLike };
+    headlessLibsCache = { Terminal, SerializeAddon };
+  } catch {
+    headlessLibsCache = null; // 依赖不可用 → 快照降级为原始流（不影响终端可用）
+  }
+  return headlessLibsCache;
+}
+
 interface Waiter {
-  marker: string;
+  /** OSC 集成模式：需等待的「第几个 D 标记」（rt.dCount 达到即完成） */
+  targetCount?: number;
+  /** 兼容模式：完成标记（shell 集成不可用时） */
+  marker?: string;
   start: number;
   resolve: (r: { output: string; found: boolean; exitCode?: number }) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -57,9 +102,23 @@ interface Runtime {
   pty: PtyLike | null;
   interpreter: InteractiveInterpreter;
   decoder: TextDecoder;
+  /** 原始输出流（命令回显剔除 / run 切片用；capped） */
   buffer: string;
+  /** 无头终端镜像（带格式历史快照；依赖不可用时为 null） */
+  headless: HeadlessTerm | null;
+  serializer: SerializeAddonLike | null;
+  /** shell 集成 nonce（解析器据此防伪） */
+  nonce: string;
+  /** OSC 增量扫描器 */
+  scanner: OscScanner;
+  /** 已完成的 D 标记计数 */
+  dCount: number;
+  /** 最近一次 D 的退出码 */
+  lastExit: number | undefined;
   waiters: Set<Waiter>;
   closed: boolean;
+  /** shell 集成 rc 临时目录（关闭时清理） */
+  rcDir: string | null;
 }
 
 /** 输出投递函数（按会话路由到 WS 订阅者） */
@@ -69,22 +128,47 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+// ── 兼容模式（仅当 shell 集成不可用时使用；标记会出现在终端里，非首选路径） ──
+
+/** 生成唯一完成标记 */
+function makeMarker(): string {
+  return `__MOSS_DONE_${Math.random().toString(36).slice(2, 10)}__`;
+}
+
+/** 各 shell 的「完成标记 + 退出码」命令（兼容模式） */
+function legacyMarkerCommand(shell: InteractiveInterpreter['shell'], marker: string): string {
+  switch (shell) {
+    case 'powershell':
+      return `Write-Output "${marker} $(if ($?) {0} else {1})"`;
+    case 'cmd':
+      return `echo ${marker} %errorlevel%`;
+    default:
+      return `printf '${marker} %s\\n' "$?"`;
+  }
+}
+
 /** 转义正则元字符 */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** 标记与状态 token 之间可能插入的 ANSI CSI 序列（ConPTY 常见） */
+/** 标记与退出码之间可能插入的 ANSI CSI 序列（ConPTY 常见） */
 const ANSI_CSI = '(?:\\u001b\\[[0-9;?]*[A-Za-z])*';
-/** 状态 token：整数（bash $? / cmd %errorlevel% / PS 数值）或 True/False（PS $?） */
-const SENTINEL_TOKEN = '(True|False|-?\\d+)(?!\\d)';
 
-/** 状态 token → 退出码（解析不到返回 undefined） */
-function tokenToExitCode(token: string): number | undefined {
-  if (/^-?\d+$/.test(token)) return parseInt(token, 10);
-  if (token === 'True') return 0;
-  if (token === 'False') return 1;
-  return undefined;
+/**
+ * 在缓冲中定位「兼容完成标记 + 退出码」的真实输出（取最后一个匹配）。
+ * 回显的命令行里标记后跟的是语法片段（$(if… / %errorlevel% / %s），不会被数字匹配。
+ */
+function findSentinel(buffer: string, from: number, marker: string): { index: number; exitCode?: number } | null {
+  const re = new RegExp(escapeRegExp(marker) + ANSI_CSI + '[ \\t]*(-?\\d+)(?!\\d)', 'g');
+  re.lastIndex = from;
+  let last: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(buffer)) !== null) {
+    last = m;
+    if (re.lastIndex === m.index) re.lastIndex++;
+  }
+  return last ? { index: last.index, exitCode: parseInt(last[1], 10) } : null;
 }
 
 export class TerminalManager implements TerminalService {
@@ -94,13 +178,15 @@ export class TerminalManager implements TerminalService {
   private readonly emit: TerminalEmitter;
   private readonly logger: Logger;
   private readonly isWindows: boolean;
-  /** 落盘存储（元数据 + 输出缓冲）：进程重启后 list/snapshot 仍可还原（离线只读） */
+  private readonly dataDir: string;
+  /** 落盘存储（元数据 + 序列化历史）：进程重启后 list/snapshot 仍可还原（离线只读） */
   private readonly storage: TerminalPersistence;
 
   constructor(deps: { emitter: TerminalEmitter; logger: Logger; isWindows: boolean; dataDir: string }) {
     this.emit = deps.emitter;
     this.logger = deps.logger;
     this.isWindows = deps.isWindows;
+    this.dataDir = deps.dataDir;
     this.storage = new TerminalPersistence(deps.dataDir);
     this.storage.loadAll();
   }
@@ -136,6 +222,7 @@ export class TerminalManager implements TerminalService {
       pty: usePty,
     };
 
+    const nonce = makeNonce();
     const rt: Runtime = {
       info,
       proc: null,
@@ -143,11 +230,33 @@ export class TerminalManager implements TerminalService {
       interpreter,
       decoder: new TextDecoder('utf-8', { fatal: false }),
       buffer: '',
+      headless: this.createHeadless(cols, rows),
+      serializer: null,
+      nonce,
+      scanner: new OscScanner(nonce),
+      dCount: 0,
+      lastExit: undefined,
       waiters: new Set(),
       closed: false,
+      rcDir: null,
     };
+    // 载入 serialize 插件（与 headless 同源加载）
+    const libs = headlessLibs();
+    if (rt.headless && libs) {
+      try {
+        rt.serializer = new libs.SerializeAddon();
+        rt.headless.loadAddon(rt.serializer);
+      } catch {
+        rt.serializer = null;
+      }
+    }
 
-    const env = this.buildEnv();
+    // shell 集成注入（启动期、零可见回显）：rc 文件落地 + 占位符替换
+    const integration = this.materializeIntegration(id, interpreter.makeIntegration(nonce));
+    rt.rcDir = integration.rcDir;
+
+    const env = this.buildEnv(integration.env);
+    const argv = [interpreter.bin, ...interpreter.args, ...integration.extraArgs];
     try {
       if (usePty && ptyCtor) {
         const pty = new ptyCtor({
@@ -157,9 +266,9 @@ export class TerminalManager implements TerminalService {
           exit: (_term, code) => this.onExit(rt, code),
         });
         rt.pty = pty;
-        rt.proc = this.spawn([interpreter.bin, ...interpreter.args], { cwd, env, terminal: pty });
+        rt.proc = this.spawn(argv, { cwd, env, terminal: pty });
       } else {
-        const proc = this.spawn([interpreter.bin, ...interpreter.args], {
+        const proc = this.spawn(argv, {
           cwd,
           env,
           stdin: 'pipe',
@@ -172,6 +281,7 @@ export class TerminalManager implements TerminalService {
         this.pump(proc.stderr, rt);
       }
     } catch (err) {
+      this.disposeRuntime(rt);
       throw new Error(
         t('terminal.spawnFailed', { message: err instanceof Error ? err.message : String(err) }),
       );
@@ -179,9 +289,6 @@ export class TerminalManager implements TerminalService {
 
     this.runtimes.set(id, rt);
     void rt.proc.exited.then((code) => this.onExit(rt, code)).catch(() => this.onExit(rt, -3));
-
-    // 输出编码初始化（cmd/powershell 中文防乱码）
-    if (interpreter.encodingInit) this.submit(rt, interpreter.encodingInit);
 
     this.logger.info(t('terminal.created'), {
       id,
@@ -251,8 +358,16 @@ export class TerminalManager implements TerminalService {
   resize(id: string, cols: number, rows: number): boolean {
     const rt = this.runtimes.get(id);
     if (!rt || rt.closed || !rt.pty) return false;
+    const c = clamp(Math.floor(cols), 20, 500);
+    const r = clamp(Math.floor(rows), 5, 200);
     try {
-      rt.pty.resize(clamp(Math.floor(cols), 20, 500), clamp(Math.floor(rows), 5, 200));
+      rt.pty.resize(c, r);
+      // 无头镜像同步尺寸 → 回滚/reflow 与前端一致
+      try {
+        rt.headless?.resize(c, r);
+      } catch {
+        /* 镜像 resize 失败不影响本体 */
+      }
       return true;
     } catch {
       return false;
@@ -286,6 +401,7 @@ export class TerminalManager implements TerminalService {
     } catch {
       /* 静默 */
     }
+    this.disposeRuntime(rt);
     this.runtimes.delete(id);
     // 同步清除落盘条目（关闭后刷新不应复活该标签）；同时并入其余在线终端的最新缓冲
     this.storage.save(
@@ -319,10 +435,11 @@ export class TerminalManager implements TerminalService {
     return [...live, ...dead].sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** 输出快照：优先返回**序列化历史**（行导向、带 ANSI 颜色、可回滚），依赖不可用时降级为原始流 */
   snapshot(id: string): string | undefined {
-    const live = this.runtimes.get(id)?.buffer;
-    if (live !== undefined) return live;
-    // 离线历史项：回放落盘缓冲（刷新/后端重启后仍能看到历史输出）
+    const rt = this.runtimes.get(id);
+    if (rt) return this.serializeHistory(rt);
+    // 离线历史项：回放落盘（序列化）历史
     return this.storage.getById(id)?.buffer;
   }
 
@@ -331,16 +448,19 @@ export class TerminalManager implements TerminalService {
     if (!rt) throw new Error(t('terminal.notFound', { id }));
     if (!command || !command.trim()) throw new Error(t('terminal.commandRequired'));
     if (rt.closed) {
-      return { output: stripAnsi(rt.buffer), info: rt.info, completed: false };
+      return { output: rt.buffer, info: rt.info, completed: false };
     }
 
     const timeout = clamp(Math.floor(timeoutMs ?? TERMINAL_LIMITS.defaultTimeoutMs), 1000, 600_000);
-    const marker = makeMarker();
     const start = rt.buffer.length;
+    // shell 集成可用性：启动提示符应已发过 OSC；从未见过任何标记 → 判定集成不可用（走兼容标记）
+    const useOsc = rt.scanner.count > 0;
+    const marker = useOsc ? '' : makeMarker();
+    const targetCount = rt.dCount + 1;
 
     const res = await new Promise<{ output: string; found: boolean; exitCode?: number }>((resolve) => {
       const waiter: Waiter = {
-        marker,
+        ...(useOsc ? { targetCount } : { marker }),
         start,
         resolve: (r) => resolve(r),
         timer: setTimeout(() => {
@@ -356,8 +476,10 @@ export class TerminalManager implements TerminalService {
       };
       rt.waiters.add(waiter);
       try {
+        // 只提交用户命令：完成/退出码由 shell 集成 OSC 标记给出（不敲入任何可见标记命令）
         this.submit(rt, command);
-        this.submit(rt, rt.interpreter.markerCommand(marker));
+        // 集成不可用时才敲入兼容标记（会出现在终端里，非首选路径）
+        if (!useOsc) this.submit(rt, legacyMarkerCommand(rt.interpreter.shell, marker));
       } catch {
         // 提交失败（PTY/管道已关闭等中断场景）：立即以「未完成」收尾，避免空等到超时
         clearTimeout(waiter.timer);
@@ -366,9 +488,8 @@ export class TerminalManager implements TerminalService {
       }
     });
 
-    // 清洗：剔除命令回显（跨硬换行复原）与内部完成标记/语法碎片/提示符噪声，
-    // 只把本次命令的真实输出交给模型（不再混入 __MOSS_DONE 标记与回显）。
-    const cleaned = cleanRunOutput(res.output, [command, rt.interpreter.encodingInit]);
+    // 清洗：剔除命令回显（含 ConPTY 硬换行切断）与残留的标记/提示符噪声，只留真实输出。
+    const cleaned = cleanRunOutput(res.output, [command]);
 
     return {
       output: cleaned,
@@ -399,13 +520,44 @@ export class TerminalManager implements TerminalService {
     return out;
   }
 
-  /** 组装落盘条目：在线终端（当前 info + buffer）覆盖同 id 的既有历史条目 */
+  /** 建无头镜像终端（cols/rows 同 PTY；windowsPty 与前端一致，保证回滚/reflow 行为一致） */
+  private createHeadless(cols: number, rows: number): HeadlessTerm | null {
+    const libs = headlessLibs();
+    if (!libs) return null;
+    try {
+      const build = Number(release().split('.')[2]);
+      return new libs.Terminal({
+        cols,
+        rows,
+        scrollback: HEADLESS_SCROLLBACK,
+        allowProposedApi: true,
+        convertEol: false,
+        ...(this.isWindows ? { windowsPty: { backend: 'conpty', buildNumber: Number.isFinite(build) ? build : 19045 } } : {}),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** 序列化可回滚历史（带格式）；失败/依赖缺失时降级为原始流 */
+  private serializeHistory(rt: Runtime): string {
+    if (rt.serializer) {
+      try {
+        return rt.serializer.serialize({ scrollback: HEADLESS_SCROLLBACK });
+      } catch {
+        /* 降级 */
+      }
+    }
+    return rt.buffer;
+  }
+
+  /** 组装落盘条目：在线终端（当前 info + 序列化历史）覆盖同 id 的既有历史条目 */
   private snapshotEntries(sessionId: string): PersistedTerminal[] {
     const entries = new Map<string, PersistedTerminal>();
     for (const e of this.storage.list(sessionId)) entries.set(e.info.id, e);
     for (const rt of this.runtimes.values()) {
       if (rt.info.sessionId !== sessionId) continue;
-      entries.set(rt.info.id, { info: rt.info, buffer: rt.buffer });
+      entries.set(rt.info.id, { info: rt.info, buffer: this.serializeHistory(rt) });
     }
     return Array.from(entries.values());
   }
@@ -415,7 +567,57 @@ export class TerminalManager implements TerminalService {
     this.storage.save(sessionId, this.snapshotEntries(sessionId));
   }
 
-  private buildEnv(): Record<string, string> {
+  /**
+   * 落地 shell 集成注入：写 rc 文件（bash --rcfile / zsh ZDOTDIR）并把占位符替换为真实路径；
+   * 任何失败都静默降级（终端仍可用，只是没有不可见完成标记）。
+   */
+  private materializeIntegration(id: string, integration: ShellIntegration): {
+    extraArgs: string[];
+    env: Record<string, string>;
+    rcDir: string | null;
+  } {
+    let extraArgs = integration.extraArgs ?? [];
+    let env = integration.env ?? {};
+    let rcDir: string | null = null;
+    const files = integration.rcFiles;
+    if (files && files.length > 0) {
+      try {
+        const dir = join(this.dataDir, 'terminals', 'rc', id);
+        mkdirSync(dir, { recursive: true });
+        for (const f of files) writeFileSync(join(dir, f.name), f.body, 'utf8');
+        const firstPath = join(dir, files[0].name);
+        const repl = (s: string): string =>
+          s.split(MOSS_RCDIR_PLACEHOLDER).join(dir).split(MOSS_RCFILE_PLACEHOLDER).join(firstPath);
+        extraArgs = extraArgs.map(repl);
+        env = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, repl(v)]));
+        rcDir = dir;
+      } catch {
+        /* 注入失败：降级为无集成 */
+      }
+    }
+    return { extraArgs, env, rcDir };
+  }
+
+  /** 释放运行时的镜像/临时文件（关闭/退出/spawn 失败时调用，幂等） */
+  private disposeRuntime(rt: Runtime): void {
+    try {
+      rt.headless?.dispose();
+    } catch {
+      /* 静默 */
+    }
+    rt.headless = null;
+    rt.serializer = null;
+    if (rt.rcDir) {
+      try {
+        rmSync(rt.rcDir, { recursive: true, force: true });
+      } catch {
+        /* 静默 */
+      }
+      rt.rcDir = null;
+    }
+  }
+
+  private buildEnv(extra?: Record<string, string>): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (typeof v === 'string') env[k] = v;
@@ -426,6 +628,7 @@ export class TerminalManager implements TerminalService {
       env.LANG = env.LANG ?? 'zh_CN.UTF-8';
       env.LC_ALL = env.LC_ALL ?? 'zh_CN.UTF-8';
     }
+    if (extra) Object.assign(env, extra);
     return env;
   }
 
@@ -462,12 +665,25 @@ export class TerminalManager implements TerminalService {
     const text = rt.decoder.decode(bytes, { stream: true });
     if (!text) return;
     this.append(rt, text);
+    // 无头镜像（带格式历史的单一事实源）
+    try {
+      rt.headless?.write(text);
+    } catch {
+      /* 镜像写入失败不影响本体 */
+    }
+    // shell 集成 OSC：命令完成（D）计数（A 不参与完成计数）；随后统一结算等待者
+    for (const m of rt.scanner.push(text)) {
+      if (m.kind === 'D') {
+        rt.dCount += 1;
+        rt.lastExit = m.exitCode;
+      }
+    }
+    this.settleWaiters(rt);
     this.emit(rt.info.sessionId, {
       type: 'terminal.data',
       sessionId: rt.info.sessionId,
       payload: { terminalId: rt.info.id, sessionId: rt.info.sessionId, data: text },
     });
-    this.settleWaiters(rt);
     // 高频输出：去抖落盘（刷新/后端重启后仍能看到历史输出）。
     // 传入「惰性构建器」：snapshotEntries 会复制整会话缓冲，必须延后到写盘时执行，
     // 否则每个输出分片都复制一次完整缓冲（O(分片×缓冲) 二次开销）。
@@ -484,44 +700,30 @@ export class TerminalManager implements TerminalService {
     }
   }
 
+  /** 结算等待者：OSC 模式看 D 计数；兼容模式看缓冲区中的完成标记 */
   private settleWaiters(rt: Runtime): void {
     for (const w of Array.from(rt.waiters)) {
-      const hit = this.findSentinel(rt.buffer, w.start, w.marker);
-      if (!hit) continue;
+      if (w.marker) {
+        const hit = findSentinel(rt.buffer, w.start, w.marker);
+        if (!hit) continue;
+        clearTimeout(w.timer);
+        rt.waiters.delete(w);
+        w.resolve({
+          output: rt.buffer.slice(w.start, hit.index),
+          found: true,
+          ...(hit.exitCode !== undefined ? { exitCode: hit.exitCode } : {}),
+        });
+        continue;
+      }
+      if (w.targetCount === undefined || rt.dCount < w.targetCount) continue;
       clearTimeout(w.timer);
       rt.waiters.delete(w);
       w.resolve({
-        output: rt.buffer.slice(w.start, hit.index),
+        output: rt.buffer.slice(w.start),
         found: true,
-        exitCode: hit.exitCode,
+        ...(rt.lastExit !== undefined ? { exitCode: rt.lastExit } : {}),
       });
     }
-  }
-
-  /**
-   * 在原始 PTY 输出流中定位「完成标记 + 退出状态」的真实输出行（取最后一个匹配）。
-   *
-   * 不能用「换行 + 标记」判定：ConPTY（Bun.Terminal/Windows）会在输出行前插入光标显示等
-   * ANSI 序列（实测为 `\u001b[?25h`），标记并不紧跟 `\n` —— 旧实现 `indexOf('\n'+marker)`
-   * 恒为 -1，每条命令都等到超时（本 bug 根因）。改为在标记之后匹配退出状态 token：真实输出
-   * 形如 `<marker> 0`；而回显的命令行里标记后跟的是语法片段（`$(if…` / `%errorlevel%` / `%s`），
-   * 不会被误判。取最后一个匹配（回显在前、输出在后）。
-   */
-  private findSentinel(
-    buffer: string,
-    from: number,
-    marker: string,
-  ): { index: number; exitCode?: number } | null {
-    const re = new RegExp(escapeRegExp(marker) + ANSI_CSI + '[ \\t]*' + SENTINEL_TOKEN, 'g');
-    re.lastIndex = from;
-    let last: RegExpExecArray | null = null;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(buffer)) !== null) {
-      last = m;
-      if (re.lastIndex === m.index) re.lastIndex++; // 零宽保险
-    }
-    if (!last) return null;
-    return { index: last.index, exitCode: tokenToExitCode(last[1]) };
   }
 
   private onExit(rt: Runtime, code: number): void {
@@ -543,7 +745,8 @@ export class TerminalManager implements TerminalService {
       sessionId: rt.info.sessionId,
       payload: { terminalId: rt.info.id, sessionId: rt.info.sessionId, exitCode: code },
     });
-    // 退出：同步落盘（含退出码），刷新/重启后历史与状态一致
+    // 退出：同步落盘（含退出码）+ 释放镜像/临时文件
     this.persistNow(rt.info.sessionId);
+    this.disposeRuntime(rt);
   }
 }

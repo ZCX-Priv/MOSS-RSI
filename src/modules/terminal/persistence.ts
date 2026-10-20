@@ -9,11 +9,13 @@
 import { mkdirSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../../utils/fs-atomic';
-import { TERMINAL_LIMITS, type TerminalInfo } from './types';
+import { type TerminalInfo } from './types';
 
 /** 单个持久化终端条目 */
 export interface PersistedTerminal {
   info: TerminalInfo;
+  /** 输出历史：**@xterm/addon-serialize 序列化串**（行导向、带 ANSI 颜色、可回放/可回滚）；
+   *  serialize 依赖不可用时降级为原始流。 */
   buffer: string;
 }
 
@@ -26,6 +28,19 @@ interface PersistedFile {
 const SAVE_DEBOUNCE_MS = 1500;
 /** 单会话最多保留的终端条目数（含离线历史项） */
 const MAX_PERSISTED_PER_SESSION = 12;
+/** 单条序列化历史字符上限（超限在"行边界"截尾——序列化串不可从中间硬截断，否则回放损坏） */
+const MAX_PERSIST_CHARS = 400_000;
+
+/**
+ * 序列化历史超限截尾：序列化串是「行导向 + 光标定位」序列，**不能从中间硬切**（会破坏回放）。
+ * 只在行边界（\r\n）截断并保留尾部；仅当整串超限时才丢最早的行（超大历史的降级）。
+ */
+function clipHistory(s: string): string {
+  if (s.length <= MAX_PERSIST_CHARS) return s;
+  const tail = s.slice(-MAX_PERSIST_CHARS);
+  const nl = tail.indexOf('\r\n');
+  return nl >= 0 ? tail.slice(nl + 2) : tail;
+}
 
 export class TerminalPersistence {
   /** 终端持久化目录：<dataDir>/terminals */
@@ -126,12 +141,11 @@ export class TerminalPersistence {
 
   // ── 内部 ──
 
-  /** 限条数（保留最新）+ 截断单条缓冲 */
+  /** 限条数（保留最新）+ 超限历史「行边界截尾」 */
   private trim(entries: PersistedTerminal[]): PersistedTerminal[] {
-    const max = TERMINAL_LIMITS.bufferChars;
     return entries.slice(-MAX_PERSISTED_PER_SESSION).map((e) => ({
       info: e.info,
-      buffer: e.buffer.length > max ? e.buffer.slice(-max) : e.buffer,
+      buffer: clipHistory(e.buffer),
     }));
   }
 

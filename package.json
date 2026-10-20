@@ -36,6 +36,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "cfb": "^1.2.2",
     "cheerio": "^1.2.0",
     "cron-parser": "^5.7.0",
