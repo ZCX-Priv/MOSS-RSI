@@ -143,7 +143,8 @@ export function useTasks() {
   const createTask = useCallback(
     async (title: string, groupId?: string) => {
       try {
-        const task = await api.createTask(title, groupId);
+        const { task, group } = await api.createTask(title, groupId);
+        if (group) useStore.getState().addTaskGroup(group);
         useStore.getState().addTask(task);
         return task;
       } catch (err) {

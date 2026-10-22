@@ -16,7 +16,8 @@ import { statSync } from 'node:fs';
 import type { FilesysService, TerminalChangeReport, TerminalService } from '../../contracts';
 import { SYSTEM_SCOPE, systemRoot } from '../../filesys/roots';
 import { resolveInterpreter } from '../../terminal/interpreter';
-import type { InterpreterKind, TerminalInfo } from '../../terminal/types';
+import { digestCommandOutput } from '../../terminal/output-digest';
+import type { InterpreterKind, TerminalInfo, TerminalRunResult } from '../../terminal/types';
 import type { ToolContext, ToolResult } from '../types';
 
 /** terminal 工具输入参数 */
@@ -48,6 +49,45 @@ function errText(err: unknown): string {
 /** 终端状态展示串 */
 function statusLabel(info: TerminalInfo): string {
   return info.running ? t('tools.terminalStatusRunning') : t('tools.terminalStatusExited', { code: info.exitCode ?? 0 });
+}
+
+/** 发给模型的精简摘要上限（完整输出落盘，可按 ref 读取） */
+const DIGEST_MAX_CHARS = 60_000;
+/** terminal read 的精简上限（查看历史时更保守） */
+const READ_DIGEST_MAX_CHARS = 30_000;
+
+/** 精简摘要 + 省略/全文提示（完整输出路径由 service 落盘后返回） */
+function digestParts(
+  output: string,
+  exitCode: number | undefined,
+  outputRef: string | undefined,
+  totalLines: number | undefined,
+): { text: string; digestNote: string; refNote: string; omittedLines: number } {
+  const out = digestCommandOutput(output, { exitCode, maxChars: DIGEST_MAX_CHARS });
+  const digestNote =
+    out.stats.omittedLines > 0
+      ? `\n${t('tools.terminalDigestOmitted', { lines: out.stats.omittedLines })}`
+      : '';
+  const refNote = outputRef
+    ? `\n${t('tools.terminalFullOutputRef', {
+        lines: totalLines ?? out.stats.totalLines,
+        path: outputRef,
+      })}`
+    : '';
+  return { text: out.text, digestNote, refNote, omittedLines: out.stats.omittedLines };
+}
+
+/** 本次执行的异常状态提示（中止 / 语法不完整 / 超时），按需拼接到结果末尾 */
+function runStateNote(res: TerminalRunResult, timeoutMs: number): string {
+  if (res.aborted) return `\n${t('tools.terminalRunAborted')}`;
+  if (res.syntaxIncomplete) return `\n${t('tools.terminalRunSyntaxIncomplete')}`;
+  if (!res.completed) return `\n${t('tools.terminalRunTimeoutInterrupted', { timeoutMs })}`;
+  return '';
+}
+
+/** 自动重启提示（连续超时触发） */
+function restartNote(res: TerminalRunResult): string {
+  return res.restarted ? `\n${t('tools.terminalRunRestarted')}` : '';
 }
 
 export default {
@@ -115,33 +155,19 @@ async function handleRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysSe
   const rawTimeout = p.timeout ?? (ctx.toolConfig?.timeout as number | undefined) ?? 30_000;
   const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
 
-  // 选择目标终端：默认复用会话默认终端；仅当请求了「另一种解释器」时才另起终端（不改默认）
+  // 选择目标终端：按解释器复用该会话的专属默认终端（CMD 与 PowerShell 各一个，互不串用）
   let info: TerminalInfo;
-  let explicitNew = false;
-  // 请求的解释器解析后的实际类型（不可用时回退默认）——据此判断是否与默认终端同类，避免误判导致反复新建
+  // 请求的解释器解析后的实际类型（不可用时回退平台默认）——用于回告模型
   const requestedKind = p.interpreter
     ? resolveInterpreter(process.platform === 'win32', p.interpreter).kind
     : undefined;
   try {
-    const defaultId = svc.getDefaultId(ctx.sessionId);
-    const defaultInfo = defaultId ? svc.get(defaultId) : undefined;
-    const sameInterpreter = !requestedKind || !defaultInfo || defaultInfo.interpreterKind === requestedKind;
-    if (!defaultInfo || sameInterpreter) {
-      info = await svc.ensureDefault({
-        sessionId: ctx.sessionId,
-        cwd: cwdRes.cwd,
-        interpreter: p.interpreter,
-        creator: 'ai',
-      });
-    } else {
-      info = await svc.create({
-        sessionId: ctx.sessionId,
-        cwd: cwdRes.cwd,
-        interpreter: p.interpreter,
-        creator: 'ai',
-      });
-      explicitNew = true;
-    }
+    info = await svc.ensureDefault({
+      sessionId: ctx.sessionId,
+      cwd: cwdRes.cwd,
+      interpreter: p.interpreter,
+      creator: 'ai',
+    });
   } catch (err) {
     return textResult(`Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`, true);
   }
@@ -155,25 +181,37 @@ async function handleRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysSe
   const startedAt = Date.now();
   const snap = await filesys.beginTerminalSnapshot(info.cwd);
   try {
-    const res = await svc.run(info.id, command, timeoutMs);
+    const res = await svc.run(info.id, command, timeoutMs, ctx.signal);
     const workspaceNote = await finishSnapshot(filesys, snap, ctx);
 
     const header = t('tools.terminalRunHeader', { title: info.title, status: statusLabel(res.info) });
-    const explicitNote = explicitNew
-      ? `\n${t('tools.terminalRunExplicitTerminal', { id: info.id, label: info.interpreterLabel })}`
-      : '';
-    const timeoutNote = res.completed ? '' : `\n${t('tools.terminalRunTimeoutInterrupted', { timeoutMs })}`;
-    const body = res.output.trim() ? res.output : t('tools.terminalEmpty');
+    const stateNote = runStateNote(res, timeoutMs);
+    const out = digestParts(
+      res.output.trim() ? res.output : t('tools.terminalEmpty'),
+      res.exitCode,
+      res.outputRef,
+      res.totalLines,
+    );
 
     const isError = res.exitCode !== undefined && res.exitCode !== 0;
-    return textResult(`${header}${explicitNote}${fallbackNote}\n${body}${timeoutNote}${workspaceNote}`, isError, {
-      terminalId: info.id,
-      cwd: info.cwd,
-      running: res.info.running,
-      completed: res.completed,
-      ...(res.exitCode !== undefined ? { exitCode: res.exitCode } : {}),
-      durationMs: Date.now() - startedAt,
-    });
+    return textResult(
+      `${header}${fallbackNote}\n${out.text}${stateNote}${restartNote(res)}${out.digestNote}${out.refNote}${workspaceNote}`,
+      isError,
+      {
+        terminalId: info.id,
+        cwd: info.cwd,
+        interpreter: info.interpreterKind,
+        running: res.info.running,
+        completed: res.completed,
+        ...(res.outputRef ? { outputRef: res.outputRef } : {}),
+        ...(out.omittedLines > 0 ? { omittedLines: out.omittedLines } : {}),
+        ...(res.exitCode !== undefined ? { exitCode: res.exitCode } : {}),
+        ...(res.aborted ? { aborted: true } : {}),
+        ...(res.syntaxIncomplete ? { syntaxIncomplete: true } : {}),
+        ...(res.restarted ? { restarted: true } : {}),
+        durationMs: Date.now() - startedAt,
+      },
+    );
   } catch (err) {
     return textResult(`Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`, true);
   }
@@ -237,13 +275,26 @@ async function handlePersistent(
     if (action === 'read') {
       const info = svc.get(terminalId);
       if (!info) return textResult(`Error: ${t('terminal.notFound', { id: terminalId })}`, true);
-      const snap = svc.snapshot(terminalId) ?? '';
-      const recent = snap.length > 8000 ? snap.slice(-8000) : snap;
-      const body = recent.trim() ? recent.trimEnd() : t('tools.terminalEmpty');
+      const snap = (await svc.snapshotAsync(terminalId)) ?? '';
+      const digest = digestCommandOutput(snap, { maxChars: READ_DIGEST_MAX_CHARS });
+      const omitted = digest.stats.omittedLines;
+      const ref = omitted > 0 ? await svc.saveOutput(terminalId, snap) : null;
+      const body = digest.text.trim() ? digest.text : t('tools.terminalEmpty');
+      const note =
+        omitted > 0 ? `\n${t('tools.terminalDigestOmitted', { lines: omitted })}` : '';
+      const refNote = ref
+        ? `\n${t('tools.terminalFullOutputRef', { lines: digest.stats.totalLines, path: ref })}`
+        : '';
       return textResult(
-        `${t('tools.terminalReadHeader', { id: terminalId, status: statusLabel(info) })}\n${body}`,
+        `${t('tools.terminalReadHeader', { id: terminalId, status: statusLabel(info) })}\n${body}${note}${refNote}`,
         false,
-        { terminalId, running: info.running, exitCode: info.exitCode },
+        {
+          terminalId,
+          running: info.running,
+          exitCode: info.exitCode,
+          ...(omitted > 0 ? { omittedLines: omitted } : {}),
+          ...(ref ? { outputRef: ref } : {}),
+        },
       );
     }
 
@@ -276,19 +327,33 @@ async function handlePersistent(
     const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
 
     const snap = await filesys.beginTerminalSnapshot(info.cwd);
-    const res = await svc.run(terminalId, command, timeoutMs);
+    const res = await svc.run(terminalId, command, timeoutMs, ctx.signal);
     const workspaceNote = await finishSnapshot(filesys, snap, ctx);
 
     const header = t('tools.terminalSendHeader', { id: terminalId, status: statusLabel(res.info) });
-    const timeoutNote = res.completed ? '' : `\n${t('tools.terminalRunTimeoutInterrupted', { timeoutMs })}`;
-    const body = res.output.trim() ? res.output : t('tools.terminalEmpty');
+    const stateNote = runStateNote(res, timeoutMs);
+    const out = digestParts(
+      res.output.trim() ? res.output : t('tools.terminalEmpty'),
+      res.exitCode,
+      res.outputRef,
+      res.totalLines,
+    );
     const isError = res.exitCode !== undefined && res.exitCode !== 0;
-    return textResult(`${header}\n${body}${timeoutNote}${workspaceNote}`, isError, {
-      terminalId,
-      running: res.info.running,
-      completed: res.completed,
-      ...(res.exitCode !== undefined ? { exitCode: res.exitCode } : {}),
-    });
+    return textResult(
+      `${header}\n${out.text}${stateNote}${restartNote(res)}${out.digestNote}${out.refNote}${workspaceNote}`,
+      isError,
+      {
+        terminalId,
+        running: res.info.running,
+        completed: res.completed,
+        ...(res.outputRef ? { outputRef: res.outputRef } : {}),
+        ...(out.omittedLines > 0 ? { omittedLines: out.omittedLines } : {}),
+        ...(res.exitCode !== undefined ? { exitCode: res.exitCode } : {}),
+        ...(res.aborted ? { aborted: true } : {}),
+        ...(res.syntaxIncomplete ? { syntaxIncomplete: true } : {}),
+        ...(res.restarted ? { restarted: true } : {}),
+      },
+    );
   } catch (err) {
     return textResult(
       `Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`,

@@ -7,8 +7,8 @@
 // 后端（service）解析序列即可精确取边界/退出码，人与自然端都看不到标记。
 //
 // 各 shell 的钩子与注入方式（均启动期、零可见回显）：
-//   PowerShell → prompt 函数；启动参数 -NoExit -Command <脚本>（脚本同时设输出编码）
-//   cmd.exe    → PROMPT 环境变量（无退出码：cmd 的 PROMPT 不能展开 %errorlevel%）
+//   PowerShell → prompt 函数 + PSConsoleHostReadLine 包装；启动参数 -NoExit -Command <脚本>
+//   cmd.exe    → 无 OSC（PROMPT 无法取上一条退出码）：固定 `prompt $P$G`，service 用提示符结算
 //   bash       → PROMPT_COMMAND（--rcfile 注入，先 source 用户 rc 再覆盖钩子）
 //   zsh        → precmd 钩子（ZDOTDIR 指向临时目录的 .zshrc/.zshenv；同 VS Code 做法）
 
@@ -41,6 +41,8 @@ export interface InteractiveInterpreter {
   kind: InterpreterKind;
   /** 实际 shell 家族（kind 归并了 bash/zsh；集成写法按此区分） */
   shell: 'powershell' | 'cmd' | 'bash' | 'zsh';
+  /** 是否具备不可见 OSC 完成标记（cmd 无钩子 → false，由 service 走标记兜底） */
+  hasOsc: boolean;
   /** 生成本次终端的集成注入（含 per-terminal nonce） */
   makeIntegration(nonce: string): ShellIntegration;
 }
@@ -60,14 +62,37 @@ function posixEmit(nonce: string): string {
   return `printf '\\033]133;D;%s;${nonce}\\a\\033]133;A;${nonce}\\a' "$?"`;
 }
 
-/** PowerShell 集成脚本：设输出编码 + 定义 prompt 函数（运行期发不可见 OSC） */
+/** OSC 133 C 标记（命令已读入、开始执行）：作为精确输出起点，避免依赖文本回显匹配 */
+function posixEmitC(nonce: string): string {
+  return `printf '\\033]133;C;${nonce}\\a'`;
+}
+
+/**
+ * PowerShell 集成脚本：设输出编码 + 定义 prompt 函数（运行期发不可见 OSC）。
+ *
+ * 两个实测要点（缺一不可）：
+ * 1. `$?` 必须是 prompt 的**第一条语句**读取：任何赋值/命令都会重置 `$?`，否则失败命令会被报成 0；
+ * 2. 用 `IsInExecution` 门控：PSReadLine 会在「输入重绘」时提前调用 prompt（此时命令尚未执行），
+ *    提前发出的 D 会落在命令回显之前（被回显门控丢弃）甚至造成早结算；只在
+ *    `PSConsoleHostReadLine`（命令行已读入、开始执行）之后的下一次 prompt 才发 D。
+ */
 function powershellScript(nonce: string): string {
   return (
     `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ` +
+    `$global:__MossNonce='${nonce}'; $global:__MossInExec=$false; $global:__MossCode=$null; ` +
+    // 不能用 Get-Module 判断：启动期 PSReadLine 尚未作为模块枚举出来（实测 Get-Module 为 0），
+    // 但读行钩子函数已存在。显式 import 后按函数存在性判断，才能可靠安装 C/D 标记包装。
+    `Import-Module PSReadLine -ErrorAction SilentlyContinue; ` +
+    `if (Get-Command -Name PSConsoleHostReadLine -ErrorAction SilentlyContinue) { ` +
+    `$global:__MossReadLine=$function:PSConsoleHostReadLine; ` +
+    `function global:PSConsoleHostReadLine { ` +
+    `$l=$global:__MossReadLine.Invoke(); $global:__MossInExec=$true; ` +
+    `[Console]::Write("$([char]27)]133;C;$($global:__MossNonce)$([char]7)"); $l } }; ` +
     `function global:prompt { ` +
-    `$e=[char]27; $b=[char]7; $n='${nonce}'; ` +
-    `$code = if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }; ` +
-    `[Console]::Write("$e]133;D;$code;$n$b$e]133;A;$n$b"); ` +
+    `$code = if ($global:?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }; ` +
+    `$global:__MossCode=$code; $e=[char]27; $b=[char]7; $n=$global:__MossNonce; ` +
+    `if ($global:__MossInExec) { $global:__MossInExec=$false; [Console]::Write("$e]133;D;$code;$n$b") }; ` +
+    `[Console]::Write("$e]133;A;$n$b"); ` +
     `return "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> " }`
   );
 }
@@ -82,18 +107,20 @@ function powershellInterpreter(): InteractiveInterpreter {
   }
   return {
     bin,
-    // 基础参数保持简洁；集成经 -NoExit -Command 注入（不产生回显）
-    args: ['-NoLogo', '-NoProfile'],
+    // 基础参数保持简洁；集成经 -NoExit -Command 注入（不产生回显）。
+    // -ExecutionPolicy Bypass：长命令会落盘为 .ps1 后 dot-source，默认 Restricted 策略会阻止执行。
+    args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'],
     label: 'PowerShell',
     kind: 'powershell',
     shell: 'powershell',
+    hasOsc: true,
     makeIntegration: (nonce) => ({
       extraArgs: ['-NoExit', '-Command', powershellScript(nonce)],
     }),
   };
 }
 
-/** CMD 交互式配置（/K 执行编码初始化并保持交互；PROMPT 内嵌不可见 OSC，无退出码） */
+/** CMD 交互式配置（无 OSC 钩子：用固定提示符 `$P$G` 供 service 做提示符结算） */
 function cmdInterpreter(): InteractiveInterpreter {
   return {
     bin: 'cmd.exe',
@@ -101,29 +128,34 @@ function cmdInterpreter(): InteractiveInterpreter {
     label: 'CMD',
     kind: 'cmd',
     shell: 'cmd',
-    makeIntegration: (nonce) => ({
-      extraArgs: ['/K', 'chcp 65001>nul'],
-      // cmd 的 $E = ESC；ST 用 ESC + '\'；末尾保留标准提示符 $P$G
-      env: { PROMPT: `$E]133;D;${nonce}$E\\$E]133;A;${nonce}$E\\$P$G` },
+    hasOsc: false,
+    // prompt $P$G 强制提示符为 `<盘符>:\<路径>>`（UNC 为 `\\server\share>`）：
+    // AutoRun / 用户自定义 PROMPT 不再影响完成判定；输出里也绝不会出现标记命令。
+    makeIntegration: () => ({
+      extraArgs: ['/K', 'chcp 65001>nul & prompt $P$G'],
     }),
   };
 }
 
 /** POSIX / Git Bash 配置（bash：--rcfile 注入 PROMPT_COMMAND 钩子） */
 function bashInterpreter(bin: string, label: string): InteractiveInterpreter {
+  // PS0 在「命令已读入、开始执行前」展开：用它发 C 标记（bash 4.4+；不支持时静默退化，
+  // 由 service 的 marker 兜底接管）。两个 nonce 占位符都要替换。
   const body =
     `[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n` +
     `__moss_pc(){ ${posixEmit('__NONCE__')}; }\n` +
-    `PROMPT_COMMAND=__moss_pc\n`;
+    `PROMPT_COMMAND=__moss_pc\n` +
+    `PS0='$(printf "\\033]133;C;__NONCE__\\a")'\n`;
   return {
     bin,
     args: ['-i'],
     label,
     kind: 'bash',
     shell: 'bash',
+    hasOsc: true,
     makeIntegration: (nonce) => ({
       extraArgs: ['--rcfile', MOSS_RCFILE_PLACEHOLDER],
-      rcFiles: [{ name: 'moss-bashrc', body: body.replace('__NONCE__', nonce) }],
+      rcFiles: [{ name: 'moss-bashrc', body: body.split('__NONCE__').join(nonce) }],
     }),
   };
 }
@@ -136,13 +168,17 @@ function zshInterpreter(bin: string, label: string): InteractiveInterpreter {
     `__z="\${MOSS_ORIG_ZDOTDIR:-$HOME}"; [ -f "$__z/.zshrc" ] && . "$__z/.zshrc"\n` +
     `autoload -Uz add-zsh-hook\n` +
     `__moss_precmd(){ ${posixEmit('__NONCE__')}; }\n` +
-    `add-zsh-hook precmd __moss_precmd\n`;
+    // preexec 在命令执行前触发：发 C 标记（精确输出起点）
+    `__moss_preexec(){ ${posixEmitC('__NONCE__')}; }\n` +
+    `add-zsh-hook precmd __moss_precmd\n` +
+    `add-zsh-hook preexec __moss_preexec\n`;
   return {
     bin,
     args: ['-i'],
     label,
     kind: 'bash',
     shell: 'zsh',
+    hasOsc: true,
     makeIntegration: (nonce) => ({
       env: {
         ZDOTDIR: MOSS_RCDIR_PLACEHOLDER,
@@ -150,7 +186,7 @@ function zshInterpreter(bin: string, label: string): InteractiveInterpreter {
       },
       rcFiles: [
         { name: '.zshenv', body: zshenv },
-        { name: '.zshrc', body: zshrc.replace('__NONCE__', nonce) },
+        { name: '.zshrc', body: zshrc.split('__NONCE__').join(nonce) },
       ],
     }),
   };

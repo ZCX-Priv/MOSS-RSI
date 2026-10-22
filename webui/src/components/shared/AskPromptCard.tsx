@@ -219,14 +219,14 @@ export function AskPromptCard({ asks, onOpenAttachment, className }: AskPromptCa
       const answers: AskAnswer[] = a.questions.map((q, i) =>
         buildAnswer(q, drafts[`${a.toolCallId}::${q.id || i}`] ?? EMPTY_DRAFT),
       );
-      replyAsk(a.toolCallId, { action: 'accept', answers });
+      replyAsk(a.sessionId, a.toolCallId, { action: 'accept', answers });
     }
   }, [asks, drafts, sending, steps, replyAsk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cancel = useCallback(() => {
     if (sending) return;
     setSending(true);
-    for (const a of asks) replyAsk(a.toolCallId, { action: 'cancel' });
+    for (const a of asks) replyAsk(a.sessionId, a.toolCallId, { action: 'cancel' });
   }, [asks, sending, replyAsk]);
 
   // ESC = 取消整卡（挂在卡片容器，避免全局 ESC 误伤其他弹窗；

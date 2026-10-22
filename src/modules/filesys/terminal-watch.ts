@@ -35,15 +35,22 @@ function isFileSystemRoot(p: string): boolean {
 }
 
 /**
- * 轻量目录遍历：固定剪枝 + 超时检查，产出文件绝对路径（条目上限由调用方统计判断）。
- * **异步（fs/promises）**：分片 `await` 让出事件循环，扫描期间 PTY 输出仍可被读取——
+ * 轻量目录收集：固定剪枝 + 超时检查，把文件绝对路径及其 stat 写入 into。
+ * @returns false = 被 deadline / maxFiles 截断。调用方必须按截断处理（begin 放弃、end 不 diff），
+ *   绝不把半截清单当作完整快照——否则未扫到的文件会被成片误判为 deleted。
+ * **异步（fs/promises）**：逐条 `await` 让出事件循环，扫描期间 PTY 输出仍可被读取——
  * 旧实现用同步 readdirSync/statSync，会在事件循环上阻塞数秒到数十秒（实测默认工作目录
  * C:\ 扫 1.3 万文件 >15s 仍未结束），导致命令「跑完却迟迟无结果 / 脚本超时」。
  */
-async function* walkSnapshotFiles(root: string, deadline: number): AsyncGenerator<string> {
+async function collectRoot(
+  root: string,
+  maxFiles: number,
+  deadline: number,
+  into: Map<string, { mtimeMs: number; size: number }>,
+): Promise<boolean> {
   const stack: string[] = [root];
   while (stack.length > 0) {
-    if (Date.now() > deadline) return;
+    if (Date.now() > deadline) return false;
     const dir = stack.pop()!;
     let entries;
     try {
@@ -52,16 +59,23 @@ async function* walkSnapshotFiles(root: string, deadline: number): AsyncGenerato
       continue; // 无权限/竞态删除
     }
     for (const ent of entries) {
-      if (Date.now() > deadline) return;
+      if (Date.now() > deadline) return false;
       const full = join(dir, ent.name);
       if (ent.isDirectory()) {
         if (SNAPSHOT_SKIP_DIRS.has(ent.name)) continue;
         stack.push(full);
       } else if (ent.isFile()) {
-        yield full;
+        if (into.size > maxFiles) return false;
+        try {
+          const s = await stat(full);
+          into.set(full, { mtimeMs: s.mtimeMs, size: s.size });
+        } catch {
+          /* walk 与 stat 之间被删除：忽略 */
+        }
       }
     }
   }
+  return true;
 }
 
 /**
@@ -107,18 +121,27 @@ export class TerminalWatcher {
     }
 
     const entries = new Map<string, { mtimeMs: number; size: number }>();
-    // 与 end 同源的真实 deadline：此前为 Infinity，大目录会无限阻塞事件循环（性能事故根因）
-    const deadline = Date.now() + cfg.timeoutMs;
+    const startedAt = Date.now();
+    // 旧配置可能没有 totalTimeoutMs：回退为两倍单阶段超时，避免 NaN deadline 导致永不超时
+    const totalBudget =
+      Number.isFinite(cfg.totalTimeoutMs) && cfg.totalTimeoutMs > 0
+        ? cfg.totalTimeoutMs
+        : cfg.timeoutMs * 2;
+    // begin 最多用共享总预算的 60%（给 end 留出 diff 时间）；实测大工作区 3s×2 会让每条命令固定多等 6s
+    const budget = Math.min(cfg.timeoutMs, Math.floor(totalBudget * 0.6));
+    const deadline = startedAt + budget;
     const ok = await this.collectInto(roots, cfg.maxFiles, deadline, entries);
     if (!ok) {
       // 超时/超限：跳过本次检测（大仓库保护），不产生半截快照
-      this.deps.logger.warn('filesys: terminal snapshot skipped, truncated or exceeds limit', {
+      this.deps.logger.debug('filesys: terminal snapshot skipped, truncated or exceeds limit', {
         maxFiles: cfg.maxFiles,
         timeoutMs: cfg.timeoutMs,
+        totalTimeoutMs: cfg.totalTimeoutMs,
       });
       return null;
     }
-    return { roots, entries };
+    // end 的可用预算 = totalTimeoutMs - 本次 begin 实际扫描耗时（命令执行时间不计入）
+    return { roots, entries, elapsedMs: Date.now() - startedAt };
   }
 
   /** 终端命令执行后 diff + 缓存回填备份。返回变更报告（快照无法 diff 时返回 null） */
@@ -132,7 +155,13 @@ export class TerminalWatcher {
       skipped: false,
       truncated: false,
     };
-    const deadline = Date.now() + cfg.timeoutMs;
+    // end 的预算只扣减 begin 的扫描耗时；命令执行多久与快照预算无关
+    const totalBudget =
+      Number.isFinite(cfg.totalTimeoutMs) && cfg.totalTimeoutMs > 0
+        ? cfg.totalTimeoutMs
+        : cfg.timeoutMs * 2;
+    const remaining = Math.max(0, totalBudget - snap.elapsedMs);
+    const deadline = Date.now() + Math.min(cfg.timeoutMs, remaining);
 
     const after = new Map<string, { mtimeMs: number; size: number }>();
     const ok = await this.collectInto(snap.roots, cfg.maxFiles, deadline, after);
@@ -141,7 +170,7 @@ export class TerminalWatcher {
       // 大量未扫描文件误判为 deleted（多轮命令执行时被放大为成片误报），
       // 对齐 begin 的"不产生半截快照"哲学——宁可不跟踪，不可错跟踪。
       report.truncated = true;
-      this.deps.logger.warn('filesys: terminal snapshot truncated on end, diff skipped', {
+      this.deps.logger.debug('filesys: terminal snapshot truncated on end, diff skipped', {
         timeoutMs: cfg.timeoutMs,
         maxFiles: cfg.maxFiles,
         sessionId,
@@ -222,10 +251,11 @@ export class TerminalWatcher {
   }
 
   /**
-   * walk + stat 收集清单。
-   * @returns false = 超时/超限被截断（begin 视为放弃，end 按 truncated 处理）。
-   * 超时判定必须在调用方循环内做：walkSnapshotFiles 超时直接 return（generator 正常
-   * 结束），否则半截清单被当作完整结果返回（历史缺陷：截断被静默吞掉）。
+   * 收集 roots 下的 stat 清单。
+   * @returns false = 任一 root 被超时/超限截断（begin 视为放弃，end 按 truncated 处理）。
+   * 截断信号必须由遍历函数显式返回，不能依赖"最后有没有再产出一个文件"来判断——
+   * 旧实现用 generator，超时时正常结束，调用方的 deadline 检查被跳过，半截清单被当作
+   * 完整结果返回（成片 deleted 误报的根因）。
    */
   private async collectInto(
     roots: readonly string[],
@@ -235,21 +265,14 @@ export class TerminalWatcher {
   ): Promise<boolean> {
     for (const root of roots) {
       try {
-        for await (const abs of walkSnapshotFiles(root, deadline)) {
-          if (into.size > maxFiles) return false;
-          if (Date.now() > deadline) return false;
-          try {
-            const s = await stat(abs);
-            into.set(abs, { mtimeMs: s.mtimeMs, size: s.size });
-          } catch {
-            /* walk 与 stat 之间被删除：忽略 */
-          }
-        }
+        if (!(await collectRoot(root, maxFiles, deadline, into))) return false;
       } catch (err) {
+        // 遍历中途异常同样意味着该 root 未扫全，必须按截断处理
         this.deps.logger.debug('filesys: terminal snapshot walk root failed', {
           root,
           error: err instanceof Error ? err.message : String(err),
         });
+        return false;
       }
     }
     return true;

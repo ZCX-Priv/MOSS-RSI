@@ -14,8 +14,10 @@ export interface TerminalWatchConfig {
   enabled: boolean;
   /** 快照最大文件数（超出跳过本次检测，防止大仓库性能问题） */
   maxFiles: number;
-  /** diff 阶段超时（毫秒），超时返回已检出部分 */
+  /** 单阶段（begin/end）超时（毫秒） */
   timeoutMs: number;
+  /** 一次命令的 begin+end 快照扫描工作总预算（毫秒）：只统计扫描耗时，不含命令执行时间 */
+  totalTimeoutMs: number;
 }
 
 /** filesys 服务配置（config.filesys） */
@@ -37,7 +39,11 @@ export const DEFAULT_FILESYS_CONFIG: FilesysConfig = {
   cacheMaxBytes: 64 * 1024 * 1024,
   cacheMaxEntries: 2048,
   cacheMaxFileBytes: 4 * 1024 * 1024,
-  terminalWatch: { enabled: true, maxFiles: 20_000, timeoutMs: 3000 },
+  // 实测：MOSS-OS 这类含大目录的工作区，全量 stat 会打满 3s deadline ×2（每条命令 +6s）；
+  // 收紧到共享 1.2s 后仍实测打满（begin 722ms + end 482ms），故进一步收紧为 600ms 总预算。
+  // 预算只统计 begin+end 的扫描耗时（不含命令执行时间）；超限按 truncated 语义放弃追踪
+  // （宁可不追踪，也不能让每条命令固定多等，更不能输出半截清单导致的伪变更）。
+  terminalWatch: { enabled: true, maxFiles: 4000, timeoutMs: 3000, totalTimeoutMs: 600 },
 };
 
 // ============================================================================
@@ -135,6 +141,8 @@ export interface TerminalSnapshot {
   roots: string[];
   /** 执行前 stat 清单（path → mtime/size） */
   entries: Map<string, { mtimeMs: number; size: number }>;
+  /** begin 阶段实际扫描耗时（end 可用预算 = totalTimeoutMs - 本值；命令执行时间不计入） */
+  elapsedMs: number;
 }
 
 // ============================================================================

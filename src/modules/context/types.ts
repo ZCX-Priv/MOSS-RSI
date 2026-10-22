@@ -335,6 +335,8 @@ export interface ContextSessionLike {
   rulesState?: SessionRulesState;
   /** 记忆引擎状态（L1 注入标记 / 召回去重 / 蒸馏水位；随 session 落盘） */
   memoryState?: SessionMemoryState;
+  /** 本会话最近一次 run 的工作目录（随 session 落盘；手动压缩/遥测按会话取，勿用全局 lastCwd） */
+  lastCwd?: string;
   updatedAt: string;
 }
 

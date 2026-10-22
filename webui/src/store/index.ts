@@ -514,7 +514,7 @@ interface UIActions {
 
   // PendingAsk
   addPendingAsk: (ask: PendingAsk) => void;
-  removePendingAsk: (toolCallId: string) => void;
+  removePendingAsk: (sessionId: string, toolCallId: string) => void;
   clearPendingAsks: () => void;
   /** 仅清除指定 session 的 pendingAsks */
   clearPendingAsksBySession: (sessionId: string) => void;
@@ -524,7 +524,7 @@ interface UIActions {
 
   // PendingConfirm
   addPendingConfirm: (confirm: PendingConfirm) => void;
-  removePendingConfirm: (toolCallId: string) => void;
+  removePendingConfirm: (sessionId: string, toolCallId: string) => void;
   clearPendingConfirmsBySession: (sessionId: string) => void;
 
   // WS
@@ -1510,13 +1510,17 @@ export const useStore = create<Store>((set, get) => ({
   addPendingAsk: (ask) =>
     set((state) => ({
       pendingAsks: [
-        ...state.pendingAsks.filter((a) => a.toolCallId !== ask.toolCallId),
+        ...state.pendingAsks.filter(
+          (a) => !(a.sessionId === ask.sessionId && a.toolCallId === ask.toolCallId),
+        ),
         ask,
       ],
     })),
-  removePendingAsk: (toolCallId) =>
+  removePendingAsk: (sessionId, toolCallId) =>
     set((state) => ({
-      pendingAsks: state.pendingAsks.filter((a) => a.toolCallId !== toolCallId),
+      pendingAsks: state.pendingAsks.filter(
+        (a) => !(a.sessionId === sessionId && a.toolCallId === toolCallId),
+      ),
     })),
   clearPendingAsks: () => set({ pendingAsks: [] }),
   clearPendingAsksBySession: (sessionId) =>
@@ -1534,13 +1538,17 @@ export const useStore = create<Store>((set, get) => ({
   addPendingConfirm: (confirm) =>
     set((state) => ({
       pendingConfirms: [
-        ...state.pendingConfirms.filter((c) => c.toolCallId !== confirm.toolCallId),
+        ...state.pendingConfirms.filter(
+          (c) => !(c.sessionId === confirm.sessionId && c.toolCallId === confirm.toolCallId),
+        ),
         confirm,
       ],
     })),
-  removePendingConfirm: (toolCallId) =>
+  removePendingConfirm: (sessionId, toolCallId) =>
     set((state) => ({
-      pendingConfirms: state.pendingConfirms.filter((c) => c.toolCallId !== toolCallId),
+      pendingConfirms: state.pendingConfirms.filter(
+        (c) => !(c.sessionId === sessionId && c.toolCallId === toolCallId),
+      ),
     })),
   clearPendingConfirmsBySession: (sessionId) =>
     set((state) => ({

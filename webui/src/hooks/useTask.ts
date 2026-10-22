@@ -24,7 +24,7 @@ import { stripInjectBlock } from '../lib/inject-block';
 import { buildMentionLookups, stripMentionTokens } from '../components/shared/mention-data';
 import { fileNameOf } from '../render/file/detector';
 import i18n from '../i18n';
-import type { AskOutcome, TaskMessage } from '../types/api';
+import type { AskOutcome, TaskGroup, TaskItem, TaskMessage } from '../types/api';
 
 function genId(): string {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -42,13 +42,33 @@ function deriveGroupName(workingDirectory: string): string {
   return resolveWorkingDirectoryName(workingDirectory) ?? i18n.t('directoryPicker.system');
 }
 
+/**
+ * 新建任务（同 id 幂等）：最多 3 次退避重试。
+ * 必须**先**拿到服务端权威分组再开跑，否则乐观任务会先挂到 default，随后才被移走。
+ */
+async function createTaskWithRetry(
+  title: string,
+  groupName: string,
+  id: string,
+): Promise<{ task: TaskItem; group?: TaskGroup } | null> {
+  const delays = [0, 150, 450];
+  for (const ms of delays) {
+    if (ms > 0) await new Promise<void>((r) => setTimeout(r, ms));
+    try {
+      return await api.createTask(title, undefined, groupName, id);
+    } catch {
+      /* 网络/引擎未就绪：退避后重试 */
+    }
+  }
+  return null;
+}
+
 export function useTask() {
   const addMessage = useStore((s) => s.addMessage);
   const setActiveSession = useStore((s) => s.setActiveSession);
   const setActiveTaskId = useStore((s) => s.setActiveTaskId);
   const setGenerating = useStore((s) => s.setGenerating);
   const finalizeStreamingMessages = useStore((s) => s.finalizeStreamingMessages);
-  const addTask = useStore((s) => s.addTask);
   const touchTask = useStore((s) => s.touchTask);
   const removePendingAsk = useStore((s) => s.removePendingAsk);
   const removePendingConfirm = useStore((s) => s.removePendingConfirm);
@@ -77,6 +97,8 @@ export function useTask() {
       let sessionId = opts?.sessionId ?? '';
       // 是否本次新建了会话（空白页首条消息）：决定是否在写入消息后触发即时导航回调
       let createdNew = false;
+      // 新建任务的待落库信息：拿到服务端权威分组后才发送 task.stream
+      let pendingNewTask: { id: string; title: string; groupName: string } | null = null;
 
       // 2. 若无 sessionId，尝试从已有 task 获取或创建新 task
       if (!sessionId) {
@@ -105,30 +127,13 @@ export function useTask() {
             visible
           ).slice(0, 50);
           const groupName = deriveGroupName(state.workingDirectory);
-          // 乐观任务条目：分组先命中「现有同名分组」，否则 default；后端返回后按真实分组校正
-          const optimisticGroupId =
-            state.taskGroups.find((g) => g.name === groupName)?.id ?? 'default';
-          const nowIso = new Date().toISOString();
-          addTask({
-            id: localId,
-            title,
-            groupId: optimisticGroupId,
-            createdAt: nowIso,
-            updatedAt: nowIso,
-            sessionId: localId,
-          });
-          // 后台用同一 id 创建任务：成功 → 用后端条目校正分组/顺序；
-          // 失败 → 保留本地乐观会话（降级，仍可正常对话）
-          void api
-            .createTask(title, undefined, groupName, localId)
-            .then((t) => {
-              useStore.getState().updateTask(localId, t);
-            })
-            .catch(() => {});
+          // 不在此处乐观插入 default：先由后端（deriveGroupName）解析/创建分组，
+          // 拿到权威条目后再写入 store —— 新会话第一次出现就在正确分组里。
+          pendingNewTask = { id: localId, title, groupName };
         }
       }
 
-      // 活跃置顶：已有任务发送消息时乐观置顶（新建走 addTask 已置顶；后端 touchTask 持久化）
+      // 活跃置顶：已有任务发送消息时乐观置顶（新建任务落库时已置顶；后端 touchTask 持久化）
       if (taskId) touchTask(taskId);
 
       // 3. 若该 session 正在生成，根据跟进行为决定处理方式
@@ -203,6 +208,39 @@ export function useTask() {
       //（同一同步栈内触发；配合 navigate 的 flushSync 实现零过渡帧）
       if (createdNew && taskId) opts?.onSessionReady?.(taskId);
 
+      // 5.5 新建会话先落任务（同 id 幂等 + 重试），拿到服务端权威分组后再开跑。
+      // 这是「首次执行被归到 default、过一会儿才移到正确分组」的根治点：
+      // 侧边栏条目从出现的第一帧起就在正确分组里，不存在中间态。
+      if (pendingNewTask) {
+        const created = await createTaskWithRetry(
+          pendingNewTask.title,
+          pendingNewTask.groupName,
+          pendingNewTask.id,
+        );
+        const st = useStore.getState();
+        if (created) {
+          if (created.group && !st.taskGroups.some((g) => g.id === created.group!.id)) {
+            st.addTaskGroup(created.group);
+          }
+          if (st.tasks.some((t) => t.id === created.task.id)) {
+            st.updateTask(created.task.id, created.task);
+          } else {
+            st.addTask(created.task);
+          }
+        } else if (!st.tasks.some((t) => t.id === pendingNewTask!.id)) {
+          // 后端不可达：降级为本地占位会话（仍可正常对话），分组按同名分组兜底
+          const nowIso = new Date().toISOString();
+          st.addTask({
+            id: pendingNewTask.id,
+            title: pendingNewTask.title,
+            groupId: st.taskGroups.find((g) => g.name === pendingNewTask!.groupName)?.id ?? 'default',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            sessionId: pendingNewTask.id,
+          });
+        }
+      }
+
       // 6. 通过 WS 发送流式任务请求（带 runId + agentId + 权限模式）
       wsClient.send({
         type: 'task.stream',
@@ -224,7 +262,7 @@ export function useTask() {
 
       return taskId;
     },
-    [addMessage, setActiveSession, setActiveTaskId, setGenerating, finalizeStreamingMessages, addTask, touchTask],
+    [addMessage, setActiveSession, setActiveTaskId, setGenerating, finalizeStreamingMessages, touchTask],
   );
 
   const abort = useCallback((sessionIdOverride?: string) => {
@@ -258,29 +296,33 @@ export function useTask() {
   );
 
   const replyAsk = useCallback(
-    (toolCallId: string, outcome: AskOutcome) => {
-      const ask = useStore.getState().pendingAsks.find((a) => a.toolCallId === toolCallId);
+    (sessionId: string, toolCallId: string, outcome: AskOutcome) => {
+      const ask = useStore
+        .getState()
+        .pendingAsks.find((a) => a.sessionId === sessionId && a.toolCallId === toolCallId);
       if (!ask) return;
       wsClient.send({
         type: 'tool.ask.reply',
         sessionId: ask.sessionId,
         payload: { toolCallId, action: outcome.action, answers: outcome.answers },
       });
-      removePendingAsk(toolCallId);
+      removePendingAsk(ask.sessionId, toolCallId);
     },
     [removePendingAsk],
   );
 
   const replyConfirm = useCallback(
-    (toolCallId: string, ok: boolean, remember?: 'session' | 'global') => {
-      const cf = useStore.getState().pendingConfirms.find((c) => c.toolCallId === toolCallId);
+    (sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global') => {
+      const cf = useStore
+        .getState()
+        .pendingConfirms.find((c) => c.sessionId === sessionId && c.toolCallId === toolCallId);
       if (!cf) return;
       wsClient.send({
         type: 'tool.confirm.reply',
         sessionId: cf.sessionId,
         payload: { toolCallId, ok, remember },
       });
-      removePendingConfirm(toolCallId);
+      removePendingConfirm(cf.sessionId, toolCallId);
     },
     [removePendingConfirm],
   );

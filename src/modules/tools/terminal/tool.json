@@ -53,8 +53,8 @@
           "cmd",
           "bash"
         ],
-        "description": "解释器类型。仅在默认终端尚未创建或需要另一种解释器时使用；不指定时用系统信息中声明的默认解释器（实测探测）。",
-        "description_en": "Interpreter type. Only used when the default terminal does not exist yet or a different interpreter is needed; defaults to the probed default interpreter declared in system info."
+        "description": "解释器类型。指定后会使用该解释器在本会话的专属默认终端并持续复用（CMD 与 PowerShell 各一个，互不串用）；不指定时用系统信息中声明的默认解释器（实测探测）。",
+        "description_en": "Interpreter type. When specified, the tool uses and reuses that interpreter's dedicated default terminal for this session (CMD and PowerShell are kept separate and never silently substituted); when omitted, the probed default interpreter from system info is used."
       }
     },
     "required": [],

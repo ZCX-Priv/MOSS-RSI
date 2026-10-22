@@ -817,10 +817,13 @@ export class WsHandler {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TOOLCALLID_ANSWER_REQUIRED } });
       return;
     }
-    const ok = agent.resolveAsk(payload.toolCallId, {
-      action: payload.action,
-      ...(payload.action === 'accept' && answers ? { answers } : {}),
-    });
+    // 会话 ID 必填：pending ask 以 session+toolCallId 为键，缺失时不匹配任何会话
+    const ok = msg.sessionId
+      ? agent.resolveAsk(msg.sessionId, payload.toolCallId, {
+          action: payload.action,
+          ...(payload.action === 'accept' && answers ? { answers } : {}),
+        })
+      : false;
     if (!ok) {
       state.conn.send({
         type: 'error',
@@ -828,7 +831,7 @@ export class WsHandler {
       });
       return;
     }
-    state.conn.send({ type: 'tool.ask.accepted', toolCallId: payload.toolCallId });
+    state.conn.send({ type: 'tool.ask.accepted', sessionId: msg.sessionId, toolCallId: payload.toolCallId });
   }
 
   /** 处理前端对 confirm 确认的回复 */
@@ -843,7 +846,9 @@ export class WsHandler {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TOOLCALLID_ANSWER_REQUIRED } });
       return;
     }
-    const ok = agent.resolveConfirm(payload.toolCallId, payload.ok, payload.remember);
+    const ok = msg.sessionId
+      ? agent.resolveConfirm(msg.sessionId, payload.toolCallId, payload.ok, payload.remember)
+      : false;
     if (!ok) {
       state.conn.send({
         type: 'error',
@@ -851,7 +856,7 @@ export class WsHandler {
       });
       return;
     }
-    state.conn.send({ type: 'tool.confirm.accepted', toolCallId: payload.toolCallId });
+    state.conn.send({ type: 'tool.confirm.accepted', sessionId: msg.sessionId, toolCallId: payload.toolCallId });
   }
 
   /**
@@ -1014,13 +1019,25 @@ export class WsHandler {
     }
   }
 
-  /** 订阅单个终端：回送当前输出缓冲快照（刷新/重连后复原历史） */
-  private handleTerminalSubscribe(state: ConnectionState, msg: WSMessage): void {
-    const payload = (msg.payload ?? {}) as { terminalId?: string };
+  /** 订阅单个终端：先按客户端当前网格校正 PTY/镜像尺寸，再回送快照（避免前端按旧尺寸 reflow） */
+  private async handleTerminalSubscribe(state: ConnectionState, msg: WSMessage): Promise<void> {
+    const payload = (msg.payload ?? {}) as { terminalId?: string; cols?: number; rows?: number };
     const terminalId = payload.terminalId;
     const svc = this.terminalService();
     if (!svc || !terminalId) return;
-    const data = svc.snapshot(terminalId);
+    const { cols, rows } = payload;
+    // 客户端带上当前 xterm 网格：先 resize 再序列化 → 快照与前端屏幕同尺寸，reset+write 不再触发重排
+    if (
+      typeof cols === 'number' &&
+      typeof rows === 'number' &&
+      Number.isFinite(cols) &&
+      Number.isFinite(rows) &&
+      cols > 0 &&
+      rows > 0
+    ) {
+      svc.resize(terminalId, cols, rows);
+    }
+    const data = await svc.snapshotAsync(terminalId);
     if (data !== undefined) {
       state.conn.send({ type: 'terminal.snapshot', payload: { terminalId, data } });
     }
@@ -1034,8 +1051,11 @@ export class WsHandler {
 
   private handleTerminalResize(_state: ConnectionState, msg: WSMessage): void {
     const payload = (msg.payload ?? {}) as { terminalId?: string; cols?: number; rows?: number };
-    if (!payload.terminalId || typeof payload.cols !== 'number' || typeof payload.rows !== 'number') return;
-    this.terminalService()?.resize(payload.terminalId, payload.cols, payload.rows);
+    const { terminalId, cols, rows } = payload;
+    if (!terminalId || typeof cols !== 'number' || typeof rows !== 'number') return;
+    // 边界校验：NaN/Infinity/非正数会被 clamp 原样带进 PTY（NaN 会让 pty.resize 传 NaN）
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return;
+    this.terminalService()?.resize(terminalId, cols, rows);
   }
 
   private handleTerminalClose(_state: ConnectionState, msg: WSMessage): void {

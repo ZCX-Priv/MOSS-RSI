@@ -23,6 +23,11 @@ import {
   fsyncSync,
   closeSync,
 } from 'node:fs';
+import {
+  writeFile as writeFileAsync,
+  rename as renameAsync,
+  unlink as unlinkAsync,
+} from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
 import { hasUtf8Bom } from './encoding';
 
@@ -123,6 +128,35 @@ export function atomicWriteFile(
   } catch (err) {
     // 任何异常：清理 tmp 文件（best-effort），原文件保持不变
     try { unlinkSync(tmpPath); } catch { /* 静默 */ }
+    throw err;
+  }
+}
+
+/**
+ * 原子写入（异步版）：tmp + rename，不阻塞事件循环。
+ * 用于高频/大体积的运行时数据（如终端历史 JSON）；不保留 BOM/权限（调用方均为内部数据文件）。
+ */
+export async function atomicWriteFileAsync(
+  filePath: string,
+  data: string | Buffer,
+): Promise<void> {
+  const realPath = resolveRealPath(filePath);
+  const tmpPath = buildTmpPath(realPath);
+  try {
+    await writeFileAsync(tmpPath, data);
+    try {
+      await renameAsync(tmpPath, realPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+        // Windows 跨盘：回退直接写（牺牲原子性但保证可用）
+        await writeFileAsync(realPath, data);
+        try { await unlinkAsync(tmpPath); } catch { /* 静默 */ }
+      } else {
+        throw err;
+      }
+    }
+  } catch (err) {
+    try { await unlinkAsync(tmpPath); } catch { /* 静默 */ }
     throw err;
   }
 }

@@ -539,7 +539,7 @@ export class McpTaskRegistry {
         }
         case 'confirm-required': {
           // 外部派发没有确认通道：安全默认拒绝，否则 run 会永久挂起
-          const resolved = engine.resolveConfirm(event.toolCallId, false, 'session');
+          const resolved = engine.resolveConfirm(record.sessionId, event.toolCallId, false, 'session');
           this.pushEvent(record, {
             at: Date.now(),
             kind: 'notice',
@@ -548,7 +548,7 @@ export class McpTaskRegistry {
           break;
         }
         case 'ask': {
-          const resolved = engine.resolveAsk(event.toolCallId, { action: 'cancel' });
+          const resolved = engine.resolveAsk(record.sessionId, event.toolCallId, { action: 'cancel' });
           this.pushEvent(record, {
             at: Date.now(),
             kind: 'notice',

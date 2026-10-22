@@ -1202,8 +1202,22 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             </div>
           </>
         )}
-        {activeTab?.type === 'terminal' && (
-          <TerminalPanel key={taskId} sessionId={taskId || TERMINAL_SCRATCH_SCOPE} />
+        {/* 终端面板常驻保活：切到其它侧栏标签时只隐藏、不卸载。
+            旧实现每次切回都重建全部 xterm 并重放整段历史，是切换卡顿的主因。 */}
+        {hasTerminalTab && (
+          <div
+            className={
+              activeTab?.type === 'terminal'
+                ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                : 'hidden'
+            }
+          >
+            <TerminalPanel
+              key={taskId}
+              sessionId={taskId || TERMINAL_SCRATCH_SCOPE}
+              active={activeTab?.type === 'terminal'}
+            />
+          </div>
         )}
         {activeTab?.type === 'agenteam' && <AgenteamPanel />}
         {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}
@@ -2450,13 +2464,6 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   // assistant 消息
   return (
     <div className="group/message flex flex-col gap-2">
-      {/* 上次进程中断遗留的未完成回复：明确标注（避免被误认为完整回答） */}
-      {message.interrupted && (
-        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-          <CircleAlert className="size-3.5 shrink-0" />
-          <span>{t('task.interruptedReply')}</span>
-        </div>
-      )}
       {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时） */}
       {message.thinking && (
         <details className="group">
@@ -2785,6 +2792,13 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               </details>
             );
           })}
+        </div>
+      )}
+      {/* 上次进程中断遗留的未完成回复：标注在真正的断点（所有正文与工具卡片之后） */}
+      {message.interrupted && (
+        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+          <CircleAlert className="size-3.5 shrink-0" />
+          <span>{t('task.interruptedReply')}</span>
         </div>
       )}
       {/* 统一 AI 回复操作栏：仅在「一段回复的结尾」渲染（复制每条都有；重新生成/诊断仅最新一段） */}

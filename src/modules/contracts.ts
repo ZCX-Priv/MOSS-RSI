@@ -210,16 +210,17 @@ export interface AgentEngine {
 
   /**
    * 前端回复 ask 工具的提问（accept=已回答 / cancel=取消）。
-   * @returns true 表示匹配到 pending ask 并已 resolve；false 表示无匹配（可能已超时或不存在）。
+   * 必须携带会话 ID：不同会话的 toolCallId 可能重复，按 session+toolCallId 定位避免串话。
+   * @returns true 表示匹配到本会话的 pending ask 并已 resolve；false 表示无匹配（可能已超时或不存在）。
    */
-  resolveAsk(toolCallId: string, outcome: AskOutcome): boolean;
+  resolveAsk(sessionId: string, toolCallId: string, outcome: AskOutcome): boolean;
 
   /**
    * 前端回复 confirm 确认。
    * @param remember 「始终允许」级别：session=写会话规则（内存）；global=写 config.safety.rules（持久）
-   * @returns true 表示匹配到 pending confirm 并已 resolve；false 表示无匹配（可能已超时或不存在）。
+   * @returns true 表示匹配到本会话的 pending confirm 并已 resolve；false 表示无匹配（可能已超时或不存在）。
    */
-  resolveConfirm(toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean;
+  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean;
 
   /**
    * 消息撤回预览（dryRun）：定位目标用户消息，列出将被删除的消息与将被回滚的文件变更。

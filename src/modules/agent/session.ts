@@ -273,11 +273,43 @@ export class SessionStore {
   }
 
   /**
+   * 运行期归位：把磁盘上错位的 session 文件搬回索引目录。
+   * 触发场景：索引缺失期间文件被兜底写进 default / 移组与首次落盘并发 / 旧版本遗留。
+   * 索引缺失（任务已删/孤儿文件）或目标已存在时不动。返回是否已归位。
+   */
+  relocate(sessionId: string): boolean {
+    const indexedDir = this.resolveSessionDir(sessionId);
+    if (!indexedDir) return false;
+    const sid = safeSessionId(sessionId);
+    const rel = safeRelDir(indexedDir) || 'default';
+    const dest = join(this.tasksDir, rel, `${sid}.json`);
+    if (existsSync(dest)) return true;
+    const diskDir = this.findDirOnDisk(sid);
+    if (!diskDir || diskDir === rel) return false;
+    try {
+      mkdirSync(join(this.tasksDir, rel), { recursive: true });
+      renameSync(join(this.tasksDir, diskDir, `${sid}.json`), dest);
+      this.logger.info(t('agent.taskStoreMigrated', { count: 1 }), {
+        sessionId,
+        from: diskDir,
+        to: rel,
+      });
+      return true;
+    } catch (err) {
+      // 目标被占用/跨盘等：保留原位，后续读写仍按磁盘位置兜底
+      this.logger.warn(t('agent.taskStoreCleanupFailed'), {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
    * session 文件路径：tasks/<dir>/<sessionId>.json（dir 为分组相对存储目录，支持嵌套）。
-   * 解析顺序：索引目录 → 若该目录已有文件则原地读写；否则磁盘扫描定位既有文件
-   * （存量错位文件自愈：索引与物理位置不一致时按物理位置读写，下次 saveSession 归位）；
-   * 磁盘无既有文件的新 session 直接落索引目录（避免错落 default/，保证 subagent/agenteam
-   * 落盘到各自目录）。索引缺失时回退磁盘扫描 / 默认组。sessionId 经 safeSessionId 清洗防路径穿越。
+   * 解析顺序：索引目录有文件 → 原地读写；否则运行期归位（把错位文件搬回索引目录）；
+   * 磁盘无既有文件的新 session 直接落索引目录（绝不兜底 default——那正是「先归 default
+   * 再被移走」的根因）。索引缺失时回退磁盘扫描 / 默认组。sessionId 经清洗防路径穿越。
    */
   private sessionFilePath(sessionId: string): string {
     const sid = safeSessionId(sessionId);
@@ -286,8 +318,8 @@ export class SessionStore {
       const rel = safeRelDir(indexedDir) || 'default';
       const indexed = join(this.tasksDir, rel, `${sid}.json`);
       if (existsSync(indexed)) return indexed;
-      const onDisk = this.findDirOnDisk(sid);
-      return join(this.tasksDir, onDisk ?? rel, `${sid}.json`);
+      this.relocate(sessionId);
+      return indexed;
     }
     const diskDir = this.findDirOnDisk(sid);
     return join(this.tasksDir, diskDir ?? 'default', `${sid}.json`);

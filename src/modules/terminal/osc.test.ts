@@ -42,11 +42,14 @@ describe('OscScanner', () => {
     expect(s.push(intro('133;D;0;forged', BEL)).length).toBe(0);
   });
 
-  it('非 133 / 非 A|D 被忽略', () => {
+  it('非 133 / 非 A|C|D 被忽略；C 可识别', () => {
     const n = 'abc';
     const s = new OscScanner(n);
     expect(s.push(intro(`0;title`, BEL)).length).toBe(0);
-    expect(s.push(intro(`133;C;${n}`, BEL)).length).toBe(0);
+    expect(s.push(intro(`133;X;${n}`, BEL)).length).toBe(0);
+    const ms = s.push(intro(`133;C;${n}`, BEL));
+    expect(ms.length).toBe(1);
+    expect(ms[0].kind).toBe('C');
   });
 
   it('跨分片续接：序列被切断仍能识别', () => {
@@ -69,6 +72,25 @@ describe('OscScanner', () => {
     expect(first[0].seq).toBe(1);
     expect(second[0].seq).toBe(2);
     expect(s.count).toBe(2);
+  });
+
+  it('at 为累计流绝对偏移且单调递增', () => {
+    const n = 'abc';
+    const s = new OscScanner(n);
+    const first = s.push(`pre${intro(`133;A;${n}`, BEL)}`);
+    expect(first[0].at).toBe(3);
+    const second = s.push(`x${intro(`133;D;0;${n}`, BEL)}`);
+    expect(second[0].at).toBeGreaterThan(first[0].at);
+  });
+
+  it('跨分片时 at 与整段一致', () => {
+    const n = 'abc';
+    const full = `pre${intro(`133;D;0;${n}`, BEL)}post`;
+    const cut = 8;
+    const split = new OscScanner(n);
+    expect(split.push(full.slice(0, cut)).length).toBe(0);
+    const ms = split.push(full.slice(cut));
+    expect(ms[0].at).toBe(full.indexOf('\u001b]'));
   });
 
   it('makeNonce 生成唯一且非空', () => {

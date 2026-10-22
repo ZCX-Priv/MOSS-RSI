@@ -165,8 +165,9 @@ const filesysSchema = z.object({
   terminalWatch: z
     .object({
       enabled: z.boolean().default(true),
-      maxFiles: z.number().int().positive().default(20_000),
+      maxFiles: z.number().int().positive().default(4000),
       timeoutMs: z.number().int().positive().default(3000),
+      totalTimeoutMs: z.number().int().positive().default(600),
     })
     .default({}),
 });

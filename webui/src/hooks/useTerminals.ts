@@ -46,9 +46,25 @@ export function useTerminals(sessionId: string) {
     [sessionId],
   );
 
-  /** 写入原始输入 */
+  /**
+   * 写入原始输入。超长数据（粘贴/多行脚本）按 8KB 分片发送：
+   * 避免单帧过大与 ConPTY 单次写入被截断；WS 同一连接保序，分片不会乱序。
+   * 切分点若落在 UTF-16 高代理上则后移一位，避免拆断 emoji 等代理对。
+   */
   const write = useCallback((terminalId: string, data: string) => {
-    wsClient.send({ type: 'terminal.input', payload: { terminalId, data } });
+    const CHUNK = 8192;
+    if (data.length <= CHUNK) {
+      wsClient.send({ type: 'terminal.input', payload: { terminalId, data } });
+      return;
+    }
+    let start = 0;
+    while (start < data.length) {
+      let end = Math.min(start + CHUNK, data.length);
+      const code = data.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff && end < data.length) end += 1;
+      wsClient.send({ type: 'terminal.input', payload: { terminalId, data: data.slice(start, end) } });
+      start = end;
+    }
   }, []);
 
   /** 调整尺寸 */
@@ -56,9 +72,12 @@ export function useTerminals(sessionId: string) {
     wsClient.send({ type: 'terminal.resize', payload: { terminalId, cols, rows } });
   }, []);
 
-  /** 订阅（回送当前缓冲快照，用于刷新/重连后复原） */
-  const subscribe = useCallback((terminalId: string) => {
-    wsClient.send({ type: 'terminal.subscribe', payload: { terminalId } });
+  /**
+   * 订阅（回送当前缓冲快照，用于刷新/重连后复原）。
+   * cols/rows：当前 xterm 网格；后端先 resize 再序列化，快照与前端屏幕同尺寸（避免 reflow 错位）。
+   */
+  const subscribe = useCallback((terminalId: string, cols?: number, rows?: number) => {
+    wsClient.send({ type: 'terminal.subscribe', payload: { terminalId, cols, rows } });
   }, []);
 
   /** 关闭终端 */

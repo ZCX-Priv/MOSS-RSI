@@ -365,7 +365,7 @@ export const api = {
         // 前端预分配会话 id（乐观导航）：后端以此 id 创建任务，保证前后端 id 一致
         ...(id ? { id } : {}),
       },
-    ).then((resp) => resp.task),
+    ),
   getTask: async (id: string) => {
     const resp = await request<{ task: TaskItem; messages: unknown[]; todos: TodoItem[]; contextFiles: ContextFile[] }>(
       'GET',

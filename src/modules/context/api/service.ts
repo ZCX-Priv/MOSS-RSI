@@ -362,7 +362,7 @@ export class ContextEngineServiceImpl {
     try {
       const outcome = await governorManualCompact(deps, {
         session,
-        cwd: this.lastCwd ?? process.cwd(),
+        cwd: session.lastCwd ?? this.lastCwd ?? process.cwd(),
         model,
         modelDisplayName: model,
         windowTokens,
@@ -394,7 +394,7 @@ export class ContextEngineServiceImpl {
     try {
       const outcome = await governorManualCompact(deps, {
         session,
-        cwd: this.lastCwd ?? process.cwd(),
+        cwd: session.lastCwd ?? this.lastCwd ?? process.cwd(),
         model,
         modelDisplayName: model,
         windowTokens,
@@ -626,7 +626,7 @@ export class ContextEngineServiceImpl {
   private recomputeView(session: ContextSessionLike, t: SessionTelemetry): void {
     try {
       const model = this.resolveMainModel();
-      const cwd = this.lastCwd ?? process.cwd();
+      const cwd = session.lastCwd ?? this.lastCwd ?? process.cwd();
       const skillName =
         session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
       const rulesSection = this.buildRulesSectionForTelemetry(cwd);

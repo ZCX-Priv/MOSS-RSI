@@ -114,21 +114,25 @@ export class AgentEngineImpl implements AgentEngine {
   private readonly env: Environment;
   /** filesys 事件订阅取消函数（destroy 时调用） */
   private unsubFilesys: (() => void) | null = null;
-  /** pending ask 调用：toolCallId -> { resolve, reject, timer?, sessionId, payload } */
+  /** pending ask 调用：复合键 sessionId+toolCallId -> { resolve, reject, timer?, sessionId, toolCallId, payload } */
   private readonly pendingAsks = new Map<string, {
     resolve: (outcome: AskOutcome) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout> | null;
     sessionId: string;
+    /** 原始 toolCallId（复合键后缀；对外恢复/回包必须用它，不能暴露复合键） */
+    toolCallId: string;
     payload: AskPayload;
   }>();
 
-  /** pending confirm 调用：toolCallId -> { resolve, reject, timer, sessionId, question, ruleSuggestion } */
+  /** pending confirm 调用：复合键 sessionId+toolCallId -> { resolve, reject, timer, sessionId, toolCallId, question, ruleSuggestion } */
   private readonly pendingConfirms = new Map<string, {
     resolve: (ok: boolean) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
     sessionId: string;
+    /** 原始 toolCallId（复合键后缀；对外恢复/回包必须用它，不能暴露复合键） */
+    toolCallId: string;
     question: string;
     /** 「始终允许」规则建议（confirm-required 事件携带，前端卡片展示） */
     ruleSuggestion?: string;
@@ -955,7 +959,7 @@ export class AgentEngineImpl implements AgentEngine {
         }
         contextEngine?.confirmImagesSent(sessionId);
         contextEngine?.markIdle(sessionId);
-        this.cleanupPendingAsks();
+        this.cleanupPendingAsks(sessionId);
         // 本轮流式草稿作废：最终消息已由 addAssistantMessage 落盘
         this.liveDraft.clear(sessionId);
         return {
@@ -1034,8 +1038,8 @@ export class AgentEngineImpl implements AgentEngine {
 
     onEvent({ type: 'done', sessionId, finishReason });
 
-    // 兜底清理未完成的 ask（正常流程下应已被 resolve/reject）
-    this.cleanupPendingAsks();
+    // 兜底清理本会话未完成的 ask（正常流程下应已被 resolve/reject）
+    this.cleanupPendingAsks(sessionId);
 
     this.logger.info(t('agent.runComplete'), { sessionId, turn, finishReason });
 
@@ -1360,11 +1364,17 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   createTask(title: string, groupId?: string, id?: string): TaskItem {
-    return this.tasks.createTask(title, groupId, id);
+    const task = this.tasks.createTask(title, groupId, id);
+    // 运行期归位：若该 session 文件已存在于别的分组目录（并发创建/索引缺失期写入），
+    // 立即搬回正确目录——不再等下一次进程重启才自愈。
+    this.sessions.relocate(task.id);
+    return task;
   }
 
   updateTask(id: string, patch: { title?: string; groupId?: string }): TaskItem | null {
-    return this.tasks.updateTask(id, patch);
+    const task = this.tasks.updateTask(id, patch);
+    if (task) this.sessions.relocate(id);
+    return task;
   }
 
   deleteTask(id: string): boolean {
@@ -1892,18 +1902,20 @@ export class AgentEngineImpl implements AgentEngine {
           } catch {
             // config 不可用：永不超时
           }
+          const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
           const timer = timeoutMs > 0 ? setTimeout(() => {
-            if (this.pendingAsks.delete(ctx.toolCallId)) {
+            if (this.pendingAsks.delete(pendingKey)) {
               reject(new Error(`ask timeout after ${Math.round(timeoutMs / 60000)}min`));
               // 通知前端移除残留卡片
               ctx.onEvent({ type: 'ask-timeout', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
             }
           }, Math.min(timeoutMs, ASK_TIMEOUT_CEILING_MS)) : null;
-          this.pendingAsks.set(ctx.toolCallId, {
+          this.pendingAsks.set(pendingKey, {
             resolve,
             reject,
             timer,
             sessionId: ctx.sessionId,
+            toolCallId: ctx.toolCallId,
             payload,
           });
           // 中断时立即 reject
@@ -1911,10 +1923,10 @@ export class AgentEngineImpl implements AgentEngine {
             ctx.signal.addEventListener(
               'abort',
               () => {
-                const pending = this.pendingAsks.get(ctx.toolCallId);
+                const pending = this.pendingAsks.get(pendingKey);
                 if (pending) {
                   if (pending.timer) clearTimeout(pending.timer);
-                  this.pendingAsks.delete(ctx.toolCallId);
+                  this.pendingAsks.delete(pendingKey);
                   reject(new Error('aborted'));
                 }
               },
@@ -1944,12 +1956,22 @@ export class AgentEngineImpl implements AgentEngine {
     return result;
   }
 
-  /** 前端回复 ask 提问（accept/cancel）。匹配到 pending 则 resolve 并返回 true。 */
-  resolveAsk(toolCallId: string, outcome: AskOutcome): boolean {
-    const pending = this.pendingAsks.get(toolCallId);
+  /**
+   * pending ask/confirm 的进程级唯一键。
+   * toolCallId 由模型服务商生成，跨会话可能重复（部分兼容实现形如 `call_0`）；
+   * 只用 toolCallId 会在并发会话间覆盖/串话，因此必须拼上 sessionId。
+   */
+  private pendingKey(sessionId: string, toolCallId: string): string {
+    return `${sessionId}\u0000${toolCallId}`;
+  }
+
+  /** 前端回复 ask 提问（accept/cancel）。匹配到本会话的 pending 则 resolve 并返回 true。 */
+  resolveAsk(sessionId: string, toolCallId: string, outcome: AskOutcome): boolean {
+    const key = this.pendingKey(sessionId, toolCallId);
+    const pending = this.pendingAsks.get(key);
     if (!pending) return false;
     if (pending.timer) clearTimeout(pending.timer);
-    this.pendingAsks.delete(toolCallId);
+    this.pendingAsks.delete(key);
     pending.resolve(outcome);
     return true;
   }
@@ -1957,23 +1979,24 @@ export class AgentEngineImpl implements AgentEngine {
   /** 列出某 session 的待答 ask（供 WS 重连恢复 pending asks，携带完整提问载荷）。 */
   getPendingAsks(sessionId: string): Array<{ toolCallId: string; sessionId: string; payload: AskPayload }> {
     const out: Array<{ toolCallId: string; sessionId: string; payload: AskPayload }> = [];
-    for (const [toolCallId, pending] of this.pendingAsks) {
+    for (const [, pending] of this.pendingAsks) {
       if (pending.sessionId === sessionId) {
-        out.push({ toolCallId, sessionId: pending.sessionId, payload: pending.payload });
+        out.push({ toolCallId: pending.toolCallId, sessionId: pending.sessionId, payload: pending.payload });
       }
     }
     return out;
   }
 
   /**
-   * 前端回复 confirm 确认。匹配到 pending 则 resolve 并返回 true。
+   * 前端回复 confirm 确认。匹配到本会话的 pending 则 resolve 并返回 true。
    * @param remember 「始终允许」级别：session=写入会话规则（内存）；global=写入 config.safety.rules（持久+广播）
    */
-  resolveConfirm(toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean {
-    const pending = this.pendingConfirms.get(toolCallId);
+  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean {
+    const key = this.pendingKey(sessionId, toolCallId);
+    const pending = this.pendingConfirms.get(key);
     if (!pending) return false;
     clearTimeout(pending.timer);
-    this.pendingConfirms.delete(toolCallId);
+    this.pendingConfirms.delete(key);
     // 用户选择「始终允许」：按建议规则写入对应层级的 allow 列表
     if (ok && remember && pending.ruleSuggestion) {
       const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
@@ -1992,9 +2015,9 @@ export class AgentEngineImpl implements AgentEngine {
   /** 列出某 session 的待确认 confirm（供 WS 重连恢复 pending confirms）。 */
   getPendingConfirms(sessionId: string): Array<{ toolCallId: string; sessionId: string; question: string; ruleSuggestion?: string }> {
     const out: Array<{ toolCallId: string; sessionId: string; question: string; ruleSuggestion?: string }> = [];
-    for (const [toolCallId, pending] of this.pendingConfirms) {
+    for (const [, pending] of this.pendingConfirms) {
       if (pending.sessionId === sessionId) {
-        out.push({ toolCallId, sessionId: pending.sessionId, question: pending.question, ruleSuggestion: pending.ruleSuggestion });
+        out.push({ toolCallId: pending.toolCallId, sessionId: pending.sessionId, question: pending.question, ruleSuggestion: pending.ruleSuggestion });
       }
     }
     return out;
@@ -2027,16 +2050,18 @@ export class AgentEngineImpl implements AgentEngine {
       } catch {
         // config 不可用：默认 5 分钟
       }
+      const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
       const timer = setTimeout(() => {
-        this.pendingConfirms.delete(ctx.toolCallId);
+        this.pendingConfirms.delete(pendingKey);
         resolve(false);
       }, timeoutMs);
       const question = customQuestion ?? `Tool "${toolName}" requires confirmation (permission mode)`;
-      this.pendingConfirms.set(ctx.toolCallId, {
+      this.pendingConfirms.set(pendingKey, {
         resolve,
         reject,
         timer,
         sessionId: ctx.sessionId,
+        toolCallId: ctx.toolCallId,
         question,
         ruleSuggestion,
       });
@@ -2044,9 +2069,9 @@ export class AgentEngineImpl implements AgentEngine {
         ctx.signal.addEventListener(
           'abort',
           () => {
-            if (this.pendingConfirms.has(ctx.toolCallId)) {
+            if (this.pendingConfirms.has(pendingKey)) {
               clearTimeout(timer);
-              this.pendingConfirms.delete(ctx.toolCallId);
+              this.pendingConfirms.delete(pendingKey);
               reject(new Error('aborted'));
             }
           },
@@ -2088,18 +2113,24 @@ export class AgentEngineImpl implements AgentEngine {
     }
   }
 
-  /** 清理所有未完成的 pending ask 与 confirm（run 结束时兜底）。 */
-  private cleanupPendingAsks(): void {
-    for (const [, pending] of this.pendingAsks) {
+  /**
+   * 清理本会话未完成的 pending ask 与 confirm（run 结束时兜底）。
+   * 必须按 session 隔离：多个会话可并发 run，全局清理会以 'session ended'
+   * 误杀其他会话正在等待的提问/确认。
+   */
+  private cleanupPendingAsks(sessionId: string): void {
+    for (const [key, pending] of this.pendingAsks) {
+      if (pending.sessionId !== sessionId) continue;
       if (pending.timer) clearTimeout(pending.timer);
+      this.pendingAsks.delete(key);
       pending.reject(new Error('session ended'));
     }
-    this.pendingAsks.clear();
-    for (const [, pending] of this.pendingConfirms) {
+    for (const [key, pending] of this.pendingConfirms) {
+      if (pending.sessionId !== sessionId) continue;
       clearTimeout(pending.timer);
+      this.pendingConfirms.delete(key);
       pending.resolve(false);
     }
-    this.pendingConfirms.clear();
   }
 
   /** 从 skill 注册表解析当前 prompt 全文（skill 被删/禁用时返回 null，注入自然为空） */
@@ -2255,14 +2286,15 @@ export class AgentEngineImpl implements AgentEngine {
           } catch {
             // config 不可用：永不超时
           }
+          const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
           const timer = askTimeoutMs > 0 ? setTimeout(() => {
-            if (this.pendingAsks.delete(ctx.toolCallId)) {
+            if (this.pendingAsks.delete(pendingKey)) {
               resolve({ action: 'decline' });
               ctx.onEvent({ type: 'ask-timeout', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
             }
           }, Math.min(askTimeoutMs, ASK_TIMEOUT_CEILING_MS)) : null;
           const elicitationQuestion: AskQuestion = { id: 'q0', question, answerType: 'form', formSchema };
-          this.pendingAsks.set(ctx.toolCallId, {
+          this.pendingAsks.set(pendingKey, {
             resolve: outcome => {
               const form = outcome.action === 'accept' ? outcome.answers?.[0]?.form : undefined;
               if (form) {
@@ -2274,15 +2306,16 @@ export class AgentEngineImpl implements AgentEngine {
             reject,
             timer,
             sessionId: ctx.sessionId,
+            toolCallId: ctx.toolCallId,
             payload: { questions: [elicitationQuestion] },
           });
           if (ctx.signal) {
             ctx.signal.addEventListener(
               'abort',
               () => {
-                if (this.pendingAsks.has(ctx.toolCallId)) {
+                if (this.pendingAsks.has(pendingKey)) {
                   if (timer) clearTimeout(timer);
-                  this.pendingAsks.delete(ctx.toolCallId);
+                  this.pendingAsks.delete(pendingKey);
                   reject(new Error('aborted'));
                 }
               },

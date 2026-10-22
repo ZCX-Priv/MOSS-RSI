@@ -37,12 +37,13 @@ export function handleTerminalMessage(msg: WSMessage): boolean {
     case 'terminal.list': {
       const p = (msg.payload ?? {}) as TerminalListPayload;
       const sessionId = p.sessionId ?? msg.sessionId ?? s.activeSessionId ?? '';
-      if (sessionId) s.setTerminalList(sessionId, p.terminals ?? []);
-      // Windows ConPTY：记录 ptyBackend，供 TerminalPanel 创建 xterm 时注入 windowsPty
+      // Windows ConPTY：先记录 ptyBackend 再写入终端列表。同一批更新内 effect 看到的就是
+      // 「列表 + ptyBackend」的最终态，避免 TerminalPanel 先建 xterm（缺 windowsPty）后补不上。
       const pb = p.ptyBackend;
       if (pb?.backend === 'conpty' && typeof pb.buildNumber === 'number') {
         s.setTerminalPtyBackend({ backend: 'conpty', buildNumber: pb.buildNumber });
       }
+      if (sessionId) s.setTerminalList(sessionId, p.terminals ?? []);
       return true;
     }
     case 'terminal.created': {

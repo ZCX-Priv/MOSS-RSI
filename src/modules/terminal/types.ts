@@ -32,6 +32,12 @@ export interface TerminalInfo {
   createdAt: number;
   /** 是否使用原生 PTY（false = 管道降级） */
   pty: boolean;
+  /**
+   * Windows ConPTY 兼容信息（前端 xterm 的 `windowsPty` 参数；非 Windows / 非 PTY 不提供）。
+   * 随 terminal.created 单帧下发，避免前端在 terminal.list 之前创建 xterm 时拿不到而
+   * 退回错误的 reflow 行为（cmd 错位/重复的根因之一）。
+   */
+  ptyBackend?: { backend: 'conpty'; buildNumber: number };
   /** 仅剩历史（后端进程已重启，终端本体不存在）：只读回放，不可输入 */
   offline?: boolean;
 }
@@ -60,8 +66,20 @@ export interface TerminalRunResult {
   info: TerminalInfo;
   /** 是否在超时前等到完成标记 */
   completed: boolean;
+  /** 完整清洗输出的落盘路径（仅大输出提供；模型可按 ref 用 read 工具读取全文） */
+  outputRef?: string;
+  /** 完整清洗输出的总行数 */
+  totalLines?: number;
+  /** 完整清洗输出的总字符数 */
+  totalChars?: number;
   /** 命令退出状态（由标记行解析；解析不到时为 undefined） */
   exitCode?: number;
+  /** 被调用方中止（AbortSignal / 工具取消）：命令已发 Ctrl+C，输出为中止前已产生的部分 */
+  aborted?: boolean;
+  /** shell 停在续行提示符（命令语法不完整，如缺少右括号/引号），已由看门狗取消 */
+  syntaxIncomplete?: boolean;
+  /** 连续超时后会话默认终端已被自动重启（下一次 exec 落在新终端） */
+  restarted?: boolean;
 }
 
 /** 终端服务接口（ServiceNames.TERMINAL） */
@@ -86,10 +104,12 @@ export interface TerminalService {
   get(id: string): TerminalInfo | undefined;
   /** 列出某会话全部终端 */
   list(sessionId: string): TerminalInfo[];
-  /** 当前输出环形缓冲内容（供订阅/重连复原） */
-  snapshot(id: string): string | undefined;
-  /** 在终端内执行一条命令并等待完成标记，返回该次输出 */
-  run(id: string, command: string, timeoutMs?: number): Promise<TerminalRunResult>;
+  /** 当前输出快照（等待 headless 解析完成后返回，供订阅/重连/读取全文） */
+  snapshotAsync(id: string): Promise<string | undefined>;
+  /** 在终端内执行一条命令并等待完成标记，返回该次输出（signal 中止 → Ctrl+C 并提前返回） */
+  run(id: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<TerminalRunResult>;
+  /** 把一段文本保存为该终端的完整输出文件（返回路径；失败 null） */
+  saveOutput(id: string, text: string): Promise<string | null>;
   /** 清理某会话全部终端（会话删除 / 进程退出时） */
   disposeSession(sessionId: string): void;
 }

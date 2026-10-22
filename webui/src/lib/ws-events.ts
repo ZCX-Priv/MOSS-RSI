@@ -458,7 +458,8 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'ask-timeout': {
       const event = (msg.payload ?? {}) as { toolCallId?: string };
-      if (event.toolCallId) useStore.getState().removePendingAsk(event.toolCallId);
+      const sid = msg.sessionId ?? sessionId;
+      if (event.toolCallId && sid) useStore.getState().removePendingAsk(sid, event.toolCallId);
       break;
     }
     case 'confirm-required': {
@@ -681,12 +682,14 @@ export function applyWsMessage(msg: WSMessage): void {
     }
     case 'tool.ask.accepted': {
       const toolCallId = (msg as { toolCallId?: string }).toolCallId;
-      if (toolCallId) useStore.getState().removePendingAsk(toolCallId);
+      const sid = msg.sessionId;
+      if (toolCallId && sid) useStore.getState().removePendingAsk(sid, toolCallId);
       break;
     }
     case 'tool.confirm.accepted': {
       const toolCallId = (msg as { toolCallId?: string }).toolCallId;
-      if (toolCallId) useStore.getState().removePendingConfirm(toolCallId);
+      const sid = msg.sessionId;
+      if (toolCallId && sid) useStore.getState().removePendingConfirm(sid, toolCallId);
       break;
     }
 
@@ -850,7 +853,13 @@ export function applyWsMessage(msg: WSMessage): void {
         const st = useStore.getState();
         const group = payload.group;
         if (group && !st.taskGroups.some((g) => g.id === group.id)) st.addTaskGroup(group);
-        if (!st.tasks.some((tk) => tk.id === payload.task!.id)) st.addTask(payload.task);
+        // 已存在同 id（本端已乐观插入 / HTTP 响应先到）→ 用服务端条目覆盖合并：
+        // 关键是把 groupId 校正为服务端权威分组，并在分组栏中归位，而不是直接丢弃事件。
+        if (st.tasks.some((tk) => tk.id === payload.task!.id)) {
+          st.updateTask(payload.task.id, payload.task);
+        } else {
+          st.addTask(payload.task);
+        }
       }
       break;
     }

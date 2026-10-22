@@ -54,7 +54,7 @@ export function ConfirmPromptCard({ confirm, className }: ConfirmPromptCardProps
     setSending(true);
     // replyConfirm 同步发送 WS tool.confirm.reply（含 remember 级别）并 removePendingConfirm，
     // 本组件随 store 变化自动卸载，无需额外清理
-    replyConfirm(confirm.toolCallId, ok, remember);
+    replyConfirm(confirm.sessionId, confirm.toolCallId, ok, remember);
   };
 
   const detailsText = formatDetails(confirm.toolName, confirm.details);

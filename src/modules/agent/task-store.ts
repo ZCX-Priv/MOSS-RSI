@@ -159,7 +159,9 @@ export class TaskStore {
    * 普通组 = 组目录名；嵌套组（如 agenteam/<teamId>）= group.dir。未知返回 null。
    */
   getDirOf(taskId: string): string | null {
-    const gid = this.index[taskId]?.groupId;
+    // 索引可能在极端时序下缺失（创建/移组与首次落盘并发）→ 回落到任务实体，
+    // 避免 SessionStore 把会话文件兜底写进 default 目录。
+    const gid = this.index[taskId]?.groupId ?? this.findTask(taskId)?.groupId;
     if (!gid) return null;
     return this.dirOf(gid);
   }
@@ -173,10 +175,24 @@ export class TaskStore {
   }
 
   createTask(title: string, groupId?: string, id?: string): TaskItem {
+    // 幂等：同 id 已存在 → 直接返回现有任务（显式给了不同合法分组则移组）。
+    // 前端会先建任务再开跑，HTTP 重试 / WS 重放 / 并发创建都可能用同一 id 再次到达；
+    // 旧实现会静默新建一个随机 UUID 的幽灵任务，并让调用方以为 id 未命中。
+    if (id) {
+      const existing = this.findTask(id);
+      if (existing) {
+        const gid = this.validGroupId(groupId);
+        if (gid && gid !== existing.groupId) {
+          const moved = this.updateTask(id, { ...(title ? { title } : {}), groupId: gid });
+          if (moved) return moved;
+        }
+        return { ...existing };
+      }
+    }
     const now = new Date().toISOString();
     // 前端可预分配会话 id（乐观导航：点发送即刻进入任务页，task.id 即 sessionId）。
-    // 传入且未被占用则沿用；缺失或与已有任务冲突时回退新 UUID（绝不覆盖已有任务）。
-    const taskId = id && !this.findTask(id) ? id : crypto.randomUUID();
+    // 传入且未被占用则沿用；缺失时回退新 UUID。
+    const taskId = id ?? crypto.randomUUID();
     const gid = this.validGroupId(groupId) ?? DEFAULT_GROUP_ID;
     const groupTasks = this.tasksByGroup.get(gid) ?? [];
     // 新任务置于分组顶部：取分组内现有最小 order - 1（无任务时 0）

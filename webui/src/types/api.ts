@@ -1545,6 +1545,8 @@ export interface TerminalInfo {
   createdAt: number;
   /** 是否原生 PTY（false = 管道降级） */
   pty: boolean;
+  /** Windows ConPTY 兼容信息（xterm windowsPty；随 terminal.created 单帧下发） */
+  ptyBackend?: { backend: 'conpty'; buildNumber: number };
   /** 仅剩历史（后端进程已重启，终端本体不存在）：只读回放，不可输入 */
   offline?: boolean;
 }
