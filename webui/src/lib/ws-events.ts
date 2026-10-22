@@ -510,6 +510,7 @@ export function applyWsMessage(msg: WSMessage): void {
           timestamp: new Date().toISOString(),
         });
         s.setGenerating(sessionId, false);
+        s.setStopping(sessionId, false);
         s.setTaskError(sessionId, true);
         pendingAssistant.delete(sessionId);
         // 防御：终态同步清理 runId，防残留值误杀未来带 runId 的外部 run 事件
@@ -539,6 +540,7 @@ export function applyWsMessage(msg: WSMessage): void {
         }
         pendingRunId.delete(sessionId);
         s.setGenerating(sessionId, false);
+        s.setStopping(sessionId, false);
         useStore.getState().clearPendingAsksBySession(sessionId);
         useStore.getState().clearPendingConfirmsBySession(sessionId);
         // 轮数触顶：插入提示卡（幂等防重）
@@ -595,6 +597,7 @@ export function applyWsMessage(msg: WSMessage): void {
         }
         pendingRunId.delete(sessionId);
         s.setGenerating(sessionId, false);
+        s.setStopping(sessionId, false);
         emitSettled(sessionId, 'done');
       }
       break;
@@ -602,8 +605,7 @@ export function applyWsMessage(msg: WSMessage): void {
     case 'task.aborted': {
       flushPending();
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
-      // 用户主动中断：仅清理流式状态（不写错误消息、不改 generating——
-      // 停止按钮场景 useTask.abort 已置 false；打断发送场景新流已置 true）
+      // 用户主动中断：后端 run 已结束，这里才是「彻底停下」的权威收敛点
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
         const pending = pendingAssistant.get(sessionId);
@@ -619,6 +621,8 @@ export function applyWsMessage(msg: WSMessage): void {
           pendingAssistant.delete(sessionId);
         }
         pendingRunId.delete(sessionId);
+        s.setGenerating(sessionId, false);
+        s.setStopping(sessionId, false);
         emitSettled(sessionId, 'aborted');
       }
       break;
@@ -869,7 +873,11 @@ export function applyWsMessage(msg: WSMessage): void {
       if (typeof payload.running === 'boolean') {
         const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
         // 运行态是权威信号（后端 run 生命周期广播）：可升可降
-        if (sid) st.setGenerating(sid, payload.running);
+        if (sid) {
+          st.setGenerating(sid, payload.running);
+          // 后端确认已非运行 → 结束停止转圈（覆盖 task.stream 与外部 run）
+          if (!payload.running) st.setStopping(sid, false);
+        }
       }
       if (payload.task) st.updateTask(payload.task.id, payload.task);
       break;

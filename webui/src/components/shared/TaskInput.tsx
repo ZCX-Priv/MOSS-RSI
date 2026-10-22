@@ -154,6 +154,10 @@ interface TaskInputProps {
   /** 发送回调：text = 最终消息文本（含附件块 / 命令注入块），attachments = 附件绝对路径（结构化字段） */
   onSend?: (text: string, attachments: string[]) => void;
   isGenerating?: boolean;
+  /** 发送流程进行中：发送按钮转圈，直至前端发送流程（建任务 + WS 下发）完成 */
+  isSending?: boolean;
+  /** 停止流程进行中：停止按钮转圈，直至后端确认 run 彻底结束 */
+  isStopping?: boolean;
   /** 仅首屏空白（会话无消息且未生成）时显示工作目录 Badge */
   showDirectoryBadge?: boolean;
   onAbort?: () => void;
@@ -166,6 +170,8 @@ export function TaskInput({
   onOpenOverlay,
   onSend,
   isGenerating = false,
+  isSending = false,
+  isStopping = false,
   showDirectoryBadge = true,
   onAbort,
   onOpenAttachment,
@@ -487,6 +493,8 @@ export function TaskInput({
   };
 
   const handleSend = () => {
+    // 发送/停止流程进行中：忽略点击与快捷键，避免重复提交
+    if (isSending || isStopping) return;
     const raw = (editorRef.current?.getValue() ?? input).trim();
     if (!raw && attachments.length === 0) return;
 
@@ -903,7 +911,25 @@ export function TaskInput({
               )}
             </Button>
           )}
-          {isGenerating && !canSend ? (
+          {isStopping ? (
+            <Button
+              size="icon-sm"
+              variant="destructive"
+              title={t('common.stop')}
+              disabled
+            >
+              <Loader2 className="animate-spin" />
+            </Button>
+          ) : isSending ? (
+            <Button
+              size="icon-sm"
+              variant="default"
+              title={t('common.send')}
+              disabled
+            >
+              <Loader2 className="animate-spin" />
+            </Button>
+          ) : isGenerating && !canSend ? (
             <Button
               size="icon-sm"
               variant="destructive"

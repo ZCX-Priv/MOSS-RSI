@@ -318,6 +318,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   /** token 名单：队列预览 / 标题剥离用（与气泡渲染同口径） */
   const lookups = useMentionLookups();
   const isGenerating = useStore((s) => s.generatingBySession[taskId] ?? false);
+  const isSending = useStore((s) => s.sendingBySession[taskId] ?? false);
+  const isStopping = useStore((s) => s.stoppingBySession[taskId] ?? false);
   const task = useStore((s) => s.tasks.find((tk) => tk.id === taskId));
   // 隐藏会话（subagent / agenteam 衍生任务）不在侧边栏列表，store.tasks 查不到 → 直连接口兜底标题
   const [fallbackTitle, setFallbackTitle] = useState<string | null>(null);
@@ -1802,6 +1804,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         <div className="shrink-0 p-3 pt-1.5">
           <TaskInput
             isGenerating={isGenerating}
+            isSending={isSending}
+            isStopping={isStopping}
             showDirectoryBadge={messages.length === 0 && !isGenerating}
             onAbort={() => abort(taskId)}
             onOpenOverlay={onOpenOverlay}

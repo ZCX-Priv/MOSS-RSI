@@ -68,6 +68,8 @@ export function useTask() {
   const setActiveSession = useStore((s) => s.setActiveSession);
   const setActiveTaskId = useStore((s) => s.setActiveTaskId);
   const setGenerating = useStore((s) => s.setGenerating);
+  const setSending = useStore((s) => s.setSending);
+  const setStopping = useStore((s) => s.setStopping);
   const finalizeStreamingMessages = useStore((s) => s.finalizeStreamingMessages);
   const touchTask = useStore((s) => s.touchTask);
   const removePendingAsk = useStore((s) => s.removePendingAsk);
@@ -142,139 +144,167 @@ export function useTask() {
 
         if (behavior === 'queue') {
           // 排队模式：消息加入队列，不中断当前任务
-          const queuedMsg = {
-            id: genId(),
-            content,
-            timestamp: new Date().toISOString(),
-            ...(attachments ? { attachments } : {}),
-          };
-          useStore.getState().addToMessageQueue(sessionId, queuedMsg);
-          return taskId;
+          setSending(sessionId, true);
+          try {
+            const queuedMsg = {
+              id: genId(),
+              content,
+              timestamp: new Date().toISOString(),
+              ...(attachments ? { attachments } : {}),
+            };
+            useStore.getState().addToMessageQueue(sessionId, queuedMsg);
+            return taskId;
+          } finally {
+            // 入队即视为本次发送完成（转圈结束，随后仍显示停止按钮）
+            setSending(sessionId, false);
+          }
         }
 
         // 引导模式：发送 task.guide，后端在工具调用完成后中止旧 run 并启动新 run
-        const guideRunId = genRunId();
-        pendingRunId.set(sessionId, guideRunId);
-        finalizeStreamingMessages(sessionId);
+        setSending(sessionId, true);
+        try {
+          const guideRunId = genRunId();
+          pendingRunId.set(sessionId, guideRunId);
+          finalizeStreamingMessages(sessionId);
 
-        // clientMessageId：本地乐观消息与服务端持久化副本同身份（尾部补齐时按 id 去重）
-        const guideClientMessageId = genId();
+          // clientMessageId：本地乐观消息与服务端持久化副本同身份（尾部补齐时按 id 去重）
+          const guideClientMessageId = genId();
+          const userMsg: TaskMessage = {
+            id: guideClientMessageId,
+            clientMessageId: guideClientMessageId,
+            role: 'user',
+            content,
+            ...(attachments ? { attachments } : {}),
+            timestamp: new Date().toISOString(),
+          };
+          addMessage(sessionId, userMsg);
+
+          wsClient.send({
+            type: 'task.guide',
+            sessionId,
+            payload: {
+              message: content,
+              runId: guideRunId,
+              attachments,
+              clientMessageId: guideClientMessageId,
+            },
+          });
+          return taskId;
+        } finally {
+          setSending(sessionId, false);
+        }
+      }
+
+      // 4. 生成 runId（前端生成，后端原样注入事件，用于 run 级别隔离）
+      // 发送态覆盖「导航 → 新会话落任务 → WS 下发」全过程；finally 保证结束必清除
+      setSending(sessionId, true);
+      try {
+        const runId = genRunId();
+        pendingRunId.set(sessionId, runId);
+
+        setActiveSession(sessionId);
+        if (taskId) setActiveTaskId(taskId);
+
+        // 5. 写入用户消息
+        // clientMessageId：本地乐观消息与服务端持久化副本同身份，
+        // 一轮结束后尾部补齐时按 id 天然去重（避免同一条消息渲染两份）
+        const clientMessageId = genId();
         const userMsg: TaskMessage = {
-          id: guideClientMessageId,
-          clientMessageId: guideClientMessageId,
+          id: clientMessageId,
+          clientMessageId,
           role: 'user',
           content,
           ...(attachments ? { attachments } : {}),
           timestamp: new Date().toISOString(),
         };
         addMessage(sessionId, userMsg);
+        setGenerating(sessionId, true);
 
+        // 新建会话：消息与运行态已写入 store，此刻通知调用方立即导航到任务页
+        //（同一同步栈内触发；配合 navigate 的 flushSync 实现零过渡帧）
+        if (createdNew && taskId) opts?.onSessionReady?.(taskId);
+
+        // 5.5 新建会话先落任务（同 id 幂等 + 重试），拿到服务端权威分组后再开跑。
+        // 这是「首次执行被归到 default、过一会儿才移到正确分组」的根治点：
+        // 侧边栏条目从出现的第一帧起就在正确分组里，不存在中间态。
+        if (pendingNewTask) {
+          const created = await createTaskWithRetry(
+            pendingNewTask.title,
+            pendingNewTask.groupName,
+            pendingNewTask.id,
+          );
+          const st = useStore.getState();
+          if (created) {
+            if (created.group && !st.taskGroups.some((g) => g.id === created.group!.id)) {
+              st.addTaskGroup(created.group);
+            }
+            if (st.tasks.some((t) => t.id === created.task.id)) {
+              st.updateTask(created.task.id, created.task);
+            } else {
+              st.addTask(created.task);
+            }
+          } else if (!st.tasks.some((t) => t.id === pendingNewTask!.id)) {
+            // 后端不可达：降级为本地占位会话（仍可正常对话），分组按同名分组兜底
+            const nowIso = new Date().toISOString();
+            st.addTask({
+              id: pendingNewTask.id,
+              title: pendingNewTask.title,
+              groupId: st.taskGroups.find((g) => g.name === pendingNewTask!.groupName)?.id ?? 'default',
+              createdAt: nowIso,
+              updatedAt: nowIso,
+              sessionId: pendingNewTask.id,
+            });
+          }
+        }
+
+        // 6. 通过 WS 发送流式任务请求（带 runId + agentId + 权限模式）
         wsClient.send({
-          type: 'task.guide',
+          type: 'task.stream',
           sessionId,
           payload: {
             message: content,
-            runId: guideRunId,
+            // 前端消息 id（后端随用户消息持久化，前端据此与本地乐观副本对齐去重）
+            clientMessageId,
+            // 附件绝对路径（后端结构化字段持久化 + 前端渲染卡片）
             attachments,
-            clientMessageId: guideClientMessageId,
+            model: state.currentModel || undefined,
+            agentId: state.currentAgent || undefined,
+            cwd: state.workingDirectory || undefined,
+            runId,
+            // 权限模式（会话级覆盖优先，缺省回退全局默认；后端 safety 统一决策）
+            permissionMode: state.permissionModeBySession[sessionId] ?? state.permissionMode,
           },
         });
+
         return taskId;
+      } finally {
+        // 发送流程完成（含新会话落库 + WS 下发）→ 结束转圈，按真实生成态显示发送/停止
+        setSending(sessionId, false);
       }
-
-      // 4. 生成 runId（前端生成，后端原样注入事件，用于 run 级别隔离）
-      const runId = genRunId();
-      pendingRunId.set(sessionId, runId);
-
-      setActiveSession(sessionId);
-      if (taskId) setActiveTaskId(taskId);
-
-      // 5. 写入用户消息
-      // clientMessageId：本地乐观消息与服务端持久化副本同身份，
-      // 一轮结束后尾部补齐时按 id 天然去重（避免同一条消息渲染两份）
-      const clientMessageId = genId();
-      const userMsg: TaskMessage = {
-        id: clientMessageId,
-        clientMessageId,
-        role: 'user',
-        content,
-        ...(attachments ? { attachments } : {}),
-        timestamp: new Date().toISOString(),
-      };
-      addMessage(sessionId, userMsg);
-      setGenerating(sessionId, true);
-
-      // 新建会话：消息与运行态已写入 store，此刻通知调用方立即导航到任务页
-      //（同一同步栈内触发；配合 navigate 的 flushSync 实现零过渡帧）
-      if (createdNew && taskId) opts?.onSessionReady?.(taskId);
-
-      // 5.5 新建会话先落任务（同 id 幂等 + 重试），拿到服务端权威分组后再开跑。
-      // 这是「首次执行被归到 default、过一会儿才移到正确分组」的根治点：
-      // 侧边栏条目从出现的第一帧起就在正确分组里，不存在中间态。
-      if (pendingNewTask) {
-        const created = await createTaskWithRetry(
-          pendingNewTask.title,
-          pendingNewTask.groupName,
-          pendingNewTask.id,
-        );
-        const st = useStore.getState();
-        if (created) {
-          if (created.group && !st.taskGroups.some((g) => g.id === created.group!.id)) {
-            st.addTaskGroup(created.group);
-          }
-          if (st.tasks.some((t) => t.id === created.task.id)) {
-            st.updateTask(created.task.id, created.task);
-          } else {
-            st.addTask(created.task);
-          }
-        } else if (!st.tasks.some((t) => t.id === pendingNewTask!.id)) {
-          // 后端不可达：降级为本地占位会话（仍可正常对话），分组按同名分组兜底
-          const nowIso = new Date().toISOString();
-          st.addTask({
-            id: pendingNewTask.id,
-            title: pendingNewTask.title,
-            groupId: st.taskGroups.find((g) => g.name === pendingNewTask!.groupName)?.id ?? 'default',
-            createdAt: nowIso,
-            updatedAt: nowIso,
-            sessionId: pendingNewTask.id,
-          });
-        }
-      }
-
-      // 6. 通过 WS 发送流式任务请求（带 runId + agentId + 权限模式）
-      wsClient.send({
-        type: 'task.stream',
-        sessionId,
-        payload: {
-          message: content,
-          // 前端消息 id（后端随用户消息持久化，前端据此与本地乐观副本对齐去重）
-          clientMessageId,
-          // 附件绝对路径（后端结构化字段持久化 + 前端渲染卡片）
-          attachments,
-          model: state.currentModel || undefined,
-          agentId: state.currentAgent || undefined,
-          cwd: state.workingDirectory || undefined,
-          runId,
-          // 权限模式（会话级覆盖优先，缺省回退全局默认；后端 safety 统一决策）
-          permissionMode: state.permissionModeBySession[sessionId] ?? state.permissionMode,
-        },
-      });
-
-      return taskId;
     },
-    [addMessage, setActiveSession, setActiveTaskId, setGenerating, finalizeStreamingMessages, touchTask],
+    [addMessage, setActiveSession, setActiveTaskId, setGenerating, setSending, finalizeStreamingMessages, touchTask],
   );
 
-  const abort = useCallback((sessionIdOverride?: string) => {
-    const sid = sessionIdOverride ?? useStore.getState().activeSessionId;
-    if (!sid) return;
-    wsClient.send({ type: 'task.abort', sessionId: sid });
-    setGenerating(sid, false);
-    // 立即清理前端状态，不等待后端 task.aborted 事件
-    pendingAssistant.delete(sid);
-    pendingRunId.delete(sid);
-    finalizeStreamingMessages(sid);
-  }, [setGenerating, finalizeStreamingMessages]);
+  const abort = useCallback(
+    (sessionIdOverride?: string, opts?: { forSend?: boolean }) => {
+      const sid = sessionIdOverride ?? useStore.getState().activeSessionId;
+      if (!sid) return;
+      wsClient.send({ type: 'task.abort', sessionId: sid });
+      if (opts?.forSend) {
+        // 中断发送：立即释放生成态，让随后的 sendMessage 走正常发送分支（不显示停止转圈）
+        setGenerating(sid, false);
+        setStopping(sid, false);
+      } else {
+        // 普通停止：保持生成态，仅置停止转圈；等后端终态确认后再切回发送
+        setStopping(sid, true);
+      }
+      // 立即清理前端流式状态（按钮状态由 stopping 单独承载）
+      pendingAssistant.delete(sid);
+      pendingRunId.delete(sid);
+      finalizeStreamingMessages(sid);
+    },
+    [setGenerating, setStopping, finalizeStreamingMessages],
+  );
 
   /** 编辑队列消息：移出队列并把内容（含附件）回填到消息发送框，供用户继续编辑后发送 */
   const editQueuedMessage = useCallback((sessionId: string, messageId: string) => {
@@ -288,8 +318,8 @@ export function useTask() {
     async (sessionId: string, messageId: string) => {
       const item = useStore.getState().takeFromMessageQueue(sessionId, messageId);
       if (!item) return;
-      // 先 abort（同步把生成态置 false），再发送，避免 sendMessage 再次进入排队分支
-      abort(sessionId);
+      // 先 abort（forSend：同步释放生成态、不显示停止转圈），再发送，避免 sendMessage 再次进入排队分支
+      abort(sessionId, { forSend: true });
       await sendMessage(item.content, { taskId: sessionId, attachments: item.attachments });
     },
     [abort, sendMessage],

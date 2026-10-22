@@ -383,6 +383,7 @@ export function useSessionHistory(
           const st = useStore.getState();
           st.finalizeStreamingMessages(sessionId);
           st.setGenerating(sessionId, false);
+          st.setStopping(sessionId, false);
           pendingAssistant.delete(sessionId);
         });
       } else if (payload.running === true) {
@@ -467,6 +468,7 @@ export function useSessionHistory(
       const st = useStore.getState();
       st.finalizeStreamingMessages(taskId);
       st.setGenerating(taskId, false);
+      st.setStopping(taskId, false);
       pendingAssistant.delete(taskId);
       pendingRunId.delete(taskId);
     };

@@ -154,6 +154,10 @@ interface UIState {
   historyMetaBySession: Record<string, HistoryMeta | undefined>;
   /** 是否正在生成（按 sessionId 索引；缺省视为 false）。写入只能来自权威信号（见 setRunning 注释） */
   generatingBySession: Record<string, boolean>;
+  /** 发送流程进行中（按 sessionId 索引；发送按钮显示转圈，流程结束即清除） */
+  sendingBySession: Record<string, boolean>;
+  /** 停止流程进行中（按 sessionId 索引；停止按钮显示转圈，后端确认 run 结束后清除） */
+  stoppingBySession: Record<string, boolean>;
   /** 最近一轮运行是否出错（按 sessionId 索引；缺省视为 false，新流开始自动清除） */
   errorBySession: Record<string, boolean>;
   /** 工具发起的、等待用户回复的提问列表 */
@@ -405,6 +409,10 @@ interface UIActions {
   // 生成态
   /** 写入权威运行态（历史拉取永不写 false；只由状态快照/WS 完成事件/本地发送-中断写） */
   setGenerating: (sessionId: string, v: boolean) => void;
+  /** 标记/清除发送流程进行中（发送按钮转圈） */
+  setSending: (sessionId: string, v: boolean) => void;
+  /** 标记/清除停止流程进行中（停止按钮转圈；只由后端终态信号清除） */
+  setStopping: (sessionId: string, v: boolean) => void;
   /** 标记/清除 session 的错误态（新流开始时由 setGenerating 自动清除） */
   setTaskError: (sessionId: string, v: boolean) => void;
   /** 将指定 session 中所有 streaming 的消息标记为已完成 */
@@ -765,6 +773,8 @@ export const useStore = create<Store>((set, get) => ({
   messagesBySession: {},
   historyMetaBySession: {},
   generatingBySession: {},
+  sendingBySession: {},
+  stoppingBySession: {},
   errorBySession: {},
   pendingAsks: [],
   pendingConfirms: [],
@@ -893,6 +903,8 @@ export const useStore = create<Store>((set, get) => ({
       const { [id]: _omitRestoring, ...restRestoring } = state.wsRestoringBySession;
       const { [id]: _omitSyncing, ...restSyncing } = state.syncingBySession;
       const { [id]: _omitGen, ...restGen } = state.generatingBySession;
+      const { [id]: _omitSending, ...restSending } = state.sendingBySession;
+      const { [id]: _omitStopping, ...restStopping } = state.stoppingBySession;
       const { [id]: _omitTodos, ...restTodos } = state.todosBySession;
       const { [id]: _omitCtx, ...restCtx } = state.contextBySession;
       const { [id]: _omitReadSeq, ...restReadSeq } = state.contextFileReadSeqBySession;
@@ -909,6 +921,8 @@ export const useStore = create<Store>((set, get) => ({
         wsRestoringBySession: restRestoring,
         syncingBySession: restSyncing,
         generatingBySession: restGen,
+        sendingBySession: restSending,
+        stoppingBySession: restStopping,
         todosBySession: restTodos,
         contextBySession: restCtx,
         contextFileReadSeqBySession: restReadSeq,
@@ -1150,6 +1164,14 @@ export const useStore = create<Store>((set, get) => ({
       generatingBySession: { ...state.generatingBySession, [sessionId]: v },
       // 新流开始自动清除上一轮错误态（发送消息 = 用户已看到错误并重试）
       ...(v ? { errorBySession: { ...state.errorBySession, [sessionId]: false } } : {}),
+    })),
+  setSending: (sessionId, v) =>
+    set((state) => ({
+      sendingBySession: { ...state.sendingBySession, [sessionId]: v },
+    })),
+  setStopping: (sessionId, v) =>
+    set((state) => ({
+      stoppingBySession: { ...state.stoppingBySession, [sessionId]: v },
     })),
   setTaskError: (sessionId, v) =>
     set((state) => ({
