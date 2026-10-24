@@ -1,5 +1,6 @@
 // webui/src/components/overlays/BrowserInstallConfirmDialog.tsx
-// 浏览器扩展自动安装失败后的全局确认弹窗：轮询状态，用户确认后重新触发全自动安装。
+// 浏览器扩展安装失败后的全局确认弹窗：轮询状态，用户确认后才重新触发安装。
+// 启动阶段不会自动安装，因此 checked=false 时本弹窗不会出现。
 // 「稍后」只在当前浏览器会话内隐藏，避免每次轮询都打断用户。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -23,7 +24,7 @@ const POLL_MS = 10_000;
 const SNOOZE_KEY = 'moss-browser-install-snooze';
 
 function failedBrowsers(status: BrowserStatus | null): BrowserInstallerBrowser[] {
-  if (!status || !status.installer.enabled || !status.installer.checked || status.installer.running) {
+  if (!status || !status.installer.checked || status.installer.running) {
     return [];
   }
   return status.installer.browsers.filter(

@@ -84,7 +84,7 @@ const DEFAULT_CONFIG: BrowserToolConfig = {
   maxImageDimension: 1600,
   browserPath: '',
   autoDownloadChromeForTesting: false,
-  autoInstallExtensions: true,
+  autoInstallExtensions: false,
   allowEvaluate: true,
 };
 
@@ -254,16 +254,7 @@ export class BrowserServiceImpl implements BrowserService {
     const cfg = this.getToolConfig();
     this.bridge.start(cfg.bridgePort);
     this.logger.info(`[browser] 模块已初始化（扩展目录 ${this.dirs.extension}）`);
-    if (cfg.autoInstallExtensions) {
-      // 首次启动自动安装：延迟执行，不阻塞内核；安装成功后会写标记跳过后续启动
-      setTimeout(() => {
-        void this.autoInstallExtensions(false).catch((err: unknown) => {
-          this.logger.warn(
-            `[browser] 首次启动自动安装扩展失败: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-      }, 3000);
-    }
+    // 启动阶段不触碰浏览器：扩展安装只在用户于「设置 → 浏览器」点击按钮或工具 action='setup' 时执行
   }
 
   async destroy(): Promise<void> {
@@ -402,6 +393,7 @@ export class BrowserServiceImpl implements BrowserService {
     return { ok, path: this.dirs.extension };
   }
 
+  /** 显式安装扩展；force=true 时忽略配置守卫（设置页按钮 / 工具 setup 使用） */
   async autoInstallExtensions(force = false): Promise<BrowserInstallerStatus> {
     await this.ensureExtension();
     return this.installer.run(force);

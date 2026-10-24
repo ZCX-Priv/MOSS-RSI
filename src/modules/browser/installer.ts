@@ -5,7 +5,8 @@
 // 设计背景：
 // - Chrome Windows 自 33 起禁止本地 CRX 外部安装；Edge 注册表 external install 只接受商店 update_url。
 // - 因此不依赖商店/native host 的自动安装只能走桌面 UI 自动化。
-// - 首次启动执行一次；成功后写 ~/.moss/browser/install-state.json，后续启动跳过。
+// - 安装仅由用户显式操作触发（设置页按钮 / 工具 action='setup'），启动阶段不执行。
+// - 成功后写 ~/.moss/browser/install-state.json，后续显式安装据此跳过已完成的浏览器。
 // - 任何一步失败都回退 manual，不反复骚扰用户。
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -224,7 +225,7 @@ export class BrowserExtensionInstaller {
         return this.stateFor(browser, 'manual', marker);
       }
       if (marker?.state === 'installed') {
-        return this.stateFor(browser, 'pending', marker, 'profile 中未检出扩展，启动时将自动重装');
+        return this.stateFor(browser, 'pending', marker, 'profile 中未检出扩展，可在「设置 → 浏览器」点击安装');
       }
       return this.stateFor(browser, 'pending', marker);
     });
@@ -272,7 +273,7 @@ export class BrowserExtensionInstaller {
     };
   }
 
-  /** 首次启动自动安装；force=true 忽略标记重跑 */
+  /** 显式安装扩展；force=true 忽略配置守卫 */
   async run(force = false): Promise<BrowserInstallerStatus> {
     if (this.running) return this.getStatus();
     const config = this.deps.getConfig();

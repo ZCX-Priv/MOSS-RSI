@@ -376,6 +376,8 @@ export interface MentionEditorHandle {
   setVoiceDraft(text: string): void;
   /** 语音输入：固化草稿（内容保留，清空草稿态） */
   commitVoice(): void;
+  /** 语音输入开始前：聚焦编辑器并确保光标可见（选区不在框内时落到末尾） */
+  focusForVoice(): void;
   /** 覆盖编辑器内容（「编辑队列消息」回填用）：清空后按 wire 格式写入文本（\n→<br>） */
   setValue(text: string): void;
 }
@@ -726,6 +728,22 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     voiceDraftLenRef.current = 0;
   }, []);
 
+  /** 语音开始前聚焦：确保输入框有可见光标；原本不在框内的选区则落到内容末尾 */
+  const focusForVoice = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const sel = window.getSelection();
+    const hasSelection =
+      sel !== null && sel.rangeCount > 0 && root.contains(sel.getRangeAt(0).startContainer);
+    root.focus();
+    if (hasSelection) return;
+    const range = document.createRange();
+    range.selectNodeContents(root);
+    range.collapse(false);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -749,6 +767,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       commitMention,
       setVoiceDraft,
       commitVoice,
+      focusForVoice,
       setValue: (text: string) => {
         const root = rootRef.current;
         if (!root) return;
@@ -768,7 +787,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         }
       },
     }),
-    [syncFromDom, insertTokenAtCaret, commitMention, setVoiceDraft, commitVoice],
+    [syncFromDom, insertTokenAtCaret, commitMention, setVoiceDraft, commitVoice, focusForVoice],
   );
 
   // 初始占位符状态 + 初始高度

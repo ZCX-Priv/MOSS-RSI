@@ -96,6 +96,7 @@ const VOICE_ERROR_KEYS: Record<string, string> = {
   NOT_SUPPORTED: 'taskInput.voiceErrUnsupported',
   AUDIO_WORKLET_UNAVAILABLE: 'taskInput.voiceErrWorklet',
   WS_NOT_CONNECTED: 'taskInput.voiceErrWs',
+  READY_TIMEOUT: 'taskInput.voiceErrReadyTimeout',
   LOCAL_MODEL_UNAVAILABLE: 'taskInput.voiceErrLocalModel',
   LOCAL_ENGINE_FAILED: 'taskInput.voiceErrLocalEngine',
 };
@@ -895,11 +896,19 @@ export function TaskInput({
               title={
                 voice.recording
                   ? t('taskInput.voiceStop')
-                  : voiceReady
-                    ? t('common.voiceInput')
-                    : t('taskInput.voiceUnavailableTitle')
+                  : voice.busy
+                    ? t('taskInput.voicePreparing')
+                    : voiceReady
+                      ? t('common.voiceInput')
+                      : t('taskInput.voiceUnavailableTitle')
               }
-              onClick={voice.toggle}
+              // 阻止按钮抢焦点：保持编辑器内光标/选区，录音时文字按光标位置实时上屏
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                // 开始录音前同步聚焦输入框（异步 WS 回调里不再抢焦点）
+                if (!voice.recording) editorRef.current?.focusForVoice();
+                voice.toggle();
+              }}
               disabled={(voice.busy && !voice.recording) || (!voice.recording && !voiceReady)}
             >
               {voice.recording ? (

@@ -281,7 +281,7 @@ export interface BrowserInstallerBrowser {
   at?: number;
 }
 
-/** 扩展自动安装状态（启动时首次执行，之后按标记跳过） */
+/** 扩展安装状态（仅在用户显式触发安装时执行） */
 export interface BrowserInstallerStatus {
   enabled: boolean;
   running: boolean;
@@ -319,7 +319,7 @@ export interface BrowserService {
   /** 后台启动 CfT 下载（失败写入状态，不抛错） */
   startChromeForTestingDownload(): Promise<void>;
 
-  /** 首次启动自动安装扩展；force=true 忽略标记重跑 */
+  /** 显式安装扩展；force=true 忽略配置守卫 */
   autoInstallExtensions(force?: boolean): Promise<BrowserInstallerStatus>;
   getInstallerStatus(): BrowserInstallerStatus;
 

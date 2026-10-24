@@ -81,8 +81,19 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
 
   process(inputs) {
     const input = inputs[0];
-    if (!input || !input[0]) return true;
-    let ch = input[0];
+    if (!input || input.length === 0) return true;
+    // 声道下混：设备可能是立体声，语音落在任一通道都不能丢
+    let ch;
+    if (input.length === 1) {
+      ch = input[0];
+    } else {
+      ch = new Float32Array(input[0].length);
+      for (let c = 0; c < input.length; c++) {
+        const src = input[c];
+        for (let i = 0; i < ch.length; i++) ch[i] += src[i];
+      }
+      for (let i = 0; i < ch.length; i++) ch[i] /= input.length;
+    }
     if (this.target && sampleRate !== this.target) {
       ch = this._resample(ch);
       if (!ch || ch.length === 0) return true;

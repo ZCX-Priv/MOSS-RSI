@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import type { Logger, ModuleContext, ProviderConfig } from '../../core/types';
 import { VOICE_MODEL_CATALOG, defaultModelId, findModelDef } from './catalog';
 import { downloadAndExtract } from './downloader';
-import { SAMPLE_RATE, createLocalSession, getSherpaLoadError, listFilesRecursive, loadSherpa, sherpaVersion } from './engine';
+import { SAMPLE_RATE, createLocalSession, getSherpaLoadError, invalidateLocalRecognizer, listFilesRecursive, loadSherpa, sherpaVersion } from './engine';
 import type {
   VoiceModelDef,
   VoiceModelStatus,
@@ -348,6 +348,8 @@ export class VoiceServiceImpl implements VoiceService {
         onProgress?.(p);
       });
       this.installing.delete(id);
+      // 模型文件已更新：丢弃旧识别器缓存，下次录音按新文件重建
+      invalidateLocalRecognizer();
       // 首次安装即为默认模型（若尚未设置）
       if (!this.voiceCfg().localModel) this.patchVoice({ localModel: id });
       this.deps.logger.info('voice model installed', { id });
@@ -366,6 +368,8 @@ export class VoiceServiceImpl implements VoiceService {
     this.installErrors.delete(id);
     this.installing.delete(id);
     rmSync(this.modelDir(id), { recursive: true, force: true });
+    // 模型目录已删除：丢弃缓存，避免继续使用已卸载模型的识别器
+    invalidateLocalRecognizer();
     if (this.voiceCfg().localModel === id) {
       this.patchVoice({ localModel: '' });
     }

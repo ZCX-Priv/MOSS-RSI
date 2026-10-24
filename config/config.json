@@ -62,7 +62,7 @@
     "ask":       { "enabled": true },
     "automation": { "enabled": true },
     "computer":  { "enabled": true, "requireConfirmation": true, "timeout": 120000, "maxImageDimension": 1280, "maxTreeElements": 250, "allowForeground": true },
-    "browser":   { "enabled": true, "requireConfirmation": false, "timeoutMs": 30000, "bridgePort": 7799, "bridgeToken": "", "tabGroupTitle": "MOSS", "tabGroupColor": "blue", "maxSnapshotNodes": 800, "maxImageDimension": 1600, "browserPath": "", "autoDownloadChromeForTesting": false, "autoInstallExtensions": true, "allowEvaluate": true }
+    "browser":   { "enabled": true, "requireConfirmation": false, "timeoutMs": 30000, "bridgePort": 7799, "bridgeToken": "", "tabGroupTitle": "MOSS", "tabGroupColor": "blue", "maxSnapshotNodes": 800, "maxImageDimension": 1600, "browserPath": "", "autoDownloadChromeForTesting": false, "autoInstallExtensions": false, "allowEvaluate": true }
   },
   "mcpServers": {},
   "mcp": {
