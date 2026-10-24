@@ -54,6 +54,13 @@ import {
   createComputerInstallHandler,
   createComputerControlHandler,
 } from './routes/computer';
+import {
+  createBrowserStatusHandler,
+  createBrowserOpenExtensionHandler,
+  createBrowserBuiltinHandler,
+  createBrowserChromeForTestingHandler,
+  createBrowserInstallHandler,
+} from './routes/browser';
 import { createVersionHandler } from './routes/version';
 import {
   createListProvidersHandler,
@@ -466,6 +473,12 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/computer/screenshot', handler: createComputerScreenshotHandler(services, config), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/computer/install', handler: createComputerInstallHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/computer/control', handler: createComputerControlHandler(services), auth: true });
+    // Browser：桥接/实例/内置 Chrome/扩展目录/CfT 下载（browser 模块注册服务；请求时解析）
+    this.router.addRoute({ method: 'GET', pattern: '/api/browser/status', handler: createBrowserStatusHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/browser/extension/open', handler: createBrowserOpenExtensionHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/browser/builtin', handler: createBrowserBuiltinHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/browser/chrome-for-testing', handler: createBrowserChromeForTestingHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/browser/install', handler: createBrowserInstallHandler(services), auth: true });
     // # 文件提及菜单：工作目录递归文件名搜索
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/search-files', handler: createSearchFilesHandler(env), auth: true });
     // 文件浏览器：列出目标目录直接子项（目录 + 文件；走 filesys roots 权限）

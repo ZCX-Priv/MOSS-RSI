@@ -1,0 +1,292 @@
+{
+  "name": "browser",
+  "description": "浏览器操作工具（CDP + MOSS 浏览器扩展）：可操作加载了 MOSS 扩展的任意 Chromium 浏览器（Chrome/Edge/Brave 等），也可启动 MOSS 内置 Chrome。MOSS 启动时会校验并自动安装缺失的扩展（保留现有登录态）。首次 action='open' 会新建独立的 MOSS 浏览器窗口：窗口在后台打开、不抢当前窗口焦点，标签仍自动归入「MOSS」标签组；后续 open 复用该窗口。绝不接管用户已有标签页。推荐循环：先 action='status' 查看桥接/实例与安装状态；页面操作前先 action='snapshot' 获取带 ref=eN 的可交互元素树，再用 click/type/press_key/select/hover/scroll/drag 按 ref 操作，页面变化后重新 snapshot；drag 用于滑块/地图/画布等按住拖拽；screenshot 返回截图；tabs 列出 AI 标签页；evaluate 可执行页面 JS（受配置限制）。",
+  "description_en": "Browser automation tool (CDP + MOSS browser extension): drives any Chromium browser with the MOSS extension installed (Chrome/Edge/Brave etc.), or launches MOSS built-in Chrome. On startup MOSS verifies and installs the extension into detected browsers while preserving existing logins. The first action='open' creates a dedicated MOSS browser window in the background (without stealing focus from the current window); tabs are still grouped under the \"MOSS\" tab group, and later opens reuse that window. It never takes over existing user tabs. Recommended loop: action='status' to inspect bridge/instances and installer state; before page actions call action='snapshot' to get the accessible element tree with ref=eN, then click/type/press_key/select/hover/scroll/drag by ref, and re-snapshot after page changes. drag performs press-move-release gestures for sliders/maps/canvases. screenshot returns an image; tabs lists AI tabs; evaluate runs page JS (subject to config).",
+  "icon": "app-window",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "status",
+          "setup",
+          "open",
+          "tabs",
+          "focus",
+          "close",
+          "navigate",
+          "snapshot",
+          "screenshot",
+          "click",
+          "hover",
+          "type",
+          "press_key",
+          "select",
+          "scroll",
+          "drag",
+          "evaluate",
+          "wait",
+          "console"
+        ],
+        "description": "操作类型。观察：status/snapshot/screenshot/tabs/console/wait；建页与管理：setup/open/focus/close；页面操作：navigate/click/hover/type/press_key/select/scroll/drag/evaluate。",
+        "description_en": "Operation. Observe: status/snapshot/screenshot/tabs/console/wait. Tabs: setup/open/focus/close. Page: navigate/click/hover/type/press_key/select/scroll/drag/evaluate."
+      },
+      "tab": {
+        "type": "string",
+        "description": "AI 标签页 id（如 t1；来自 open/tabs 的返回）。缺省使用当前 AI 标签页",
+        "description_en": "AI tab id (e.g. t1; from open/tabs). Defaults to the current AI tab."
+      },
+      "browser": {
+        "type": "string",
+        "description": "浏览器实例选择：auto（缺省）/ builtin / external（或 extension）/ status 返回的实例 id",
+        "description_en": "Browser instance: auto (default) / builtin / external (or extension) / an instance id from status."
+      },
+      "url": {
+        "type": "string",
+        "description": "要打开的网址（open/navigate）；无协议前缀时自动补 https://",
+        "description_en": "URL to open (open/navigate); https:// is prepended when the scheme is missing."
+      },
+      "back": {
+        "type": "boolean",
+        "description": "navigate 时后退",
+        "description_en": "Navigate back."
+      },
+      "forward": {
+        "type": "boolean",
+        "description": "navigate 时前进",
+        "description_en": "Navigate forward."
+      },
+      "reload": {
+        "type": "boolean",
+        "description": "navigate 时刷新当前页",
+        "description_en": "Reload the current page."
+      },
+      "ref": {
+        "type": "string",
+        "description": "snapshot 返回的元素引用（如 e3），用于 click/hover/type/select/scroll",
+        "description_en": "Element ref from snapshot (e.g. e3) for click/hover/type/select/scroll."
+      },
+      "selector": {
+        "type": "string",
+        "description": "CSS 选择器（ref 的替代定位方式）",
+        "description_en": "CSS selector (alternative to ref)."
+      },
+      "x": {
+        "type": "number",
+        "description": "点击坐标 X（视口像素，click 且无 ref/selector 时使用）",
+        "description_en": "Click X in viewport pixels (used when click has no ref/selector)."
+      },
+      "y": {
+        "type": "number",
+        "description": "点击坐标 Y（视口像素）",
+        "description_en": "Click Y in viewport pixels."
+      },
+      "from_ref": {
+        "type": "string",
+        "description": "拖动起点元素引用（drag，如 e3）",
+        "description_en": "Drag start element ref (drag, e.g. e3)."
+      },
+      "from_selector": {
+        "type": "string",
+        "description": "拖动起点 CSS 选择器（drag）",
+        "description_en": "Drag start CSS selector (drag)."
+      },
+      "from_x": {
+        "type": "number",
+        "description": "拖动起点 X（视口像素，drag 且无 from_ref/from_selector 时使用）",
+        "description_en": "Drag start X in viewport pixels (used when drag has no from_ref/from_selector)."
+      },
+      "from_y": {
+        "type": "number",
+        "description": "拖动起点 Y（视口像素）",
+        "description_en": "Drag start Y in viewport pixels."
+      },
+      "to_ref": {
+        "type": "string",
+        "description": "拖动终点元素引用（drag，如 e5）",
+        "description_en": "Drag end element ref (drag, e.g. e5)."
+      },
+      "to_selector": {
+        "type": "string",
+        "description": "拖动终点 CSS 选择器（drag）",
+        "description_en": "Drag end CSS selector (drag)."
+      },
+      "to_x": {
+        "type": "number",
+        "description": "拖动终点 X（视口像素）",
+        "description_en": "Drag end X in viewport pixels."
+      },
+      "to_y": {
+        "type": "number",
+        "description": "拖动终点 Y（视口像素）",
+        "description_en": "Drag end Y in viewport pixels."
+      },
+      "steps": {
+        "type": "integer",
+        "minimum": 2,
+        "maximum": 60,
+        "description": "拖动插值步数（drag；缺省 12，越多越接近真实手势）",
+        "description_en": "Drag interpolation steps (drag; default 12, higher is closer to a real gesture)."
+      },
+      "duration_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5000,
+        "description": "拖动总时长毫秒（drag；缺省 300）",
+        "description_en": "Total drag duration in ms (drag; default 300)."
+      },
+      "button": {
+        "type": "string",
+        "enum": ["left", "right", "middle"],
+        "description": "鼠标按键（click/drag；缺省 left）",
+        "description_en": "Mouse button for click/drag (default left)."
+      },
+      "click_count": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3,
+        "description": "点击次数（click；缺省 1，2=双击）",
+        "description_en": "Click count for click (default 1; 2 = double click)."
+      },
+      "modifiers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "修饰键（click/press_key）：ctrl/alt/shift/meta",
+        "description_en": "Modifier keys (click/press_key): ctrl/alt/shift/meta."
+      },
+      "text": {
+        "type": "string",
+        "description": "要输入的文字（type）",
+        "description_en": "Text to type (type)."
+      },
+      "replace": {
+        "type": "boolean",
+        "description": "type 时先全选替换原内容（缺省 false，追加输入）",
+        "description_en": "Select-all before typing (default false, append)."
+      },
+      "submit": {
+        "type": "boolean",
+        "description": "type 后按 Enter 提交",
+        "description_en": "Press Enter after typing."
+      },
+      "key": {
+        "type": "string",
+        "description": "按键名（press_key）：Enter/Tab/Escape/Backspace/Delete/ArrowUp/ArrowDown/Home/End/PageUp/PageDown/F1-F12/单字符",
+        "description_en": "Key name (press_key): Enter/Tab/Escape/Backspace/Delete/ArrowUp/ArrowDown/Home/End/PageUp/PageDown/F1-F12/single char."
+      },
+      "values": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "下拉框要选中的值/文本（select，可多个）",
+        "description_en": "Option values/texts to select (select, multiple allowed)."
+      },
+      "delta_x": {
+        "type": "number",
+        "description": "水平滚动量（scroll；缺省 0）",
+        "description_en": "Horizontal scroll delta (scroll; default 0)."
+      },
+      "delta_y": {
+        "type": "number",
+        "description": "垂直滚动量（scroll；缺省 600，正数向下）",
+        "description_en": "Vertical scroll delta (scroll; default 600, positive = down)."
+      },
+      "expression": {
+        "type": "string",
+        "description": "在页面执行的 JavaScript 表达式（evaluate；支持 await Promise）",
+        "description_en": "JavaScript expression to evaluate in the page (evaluate; awaits promises)."
+      },
+      "wait_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000,
+        "description": "等待毫秒数（wait）",
+        "description_en": "Milliseconds to wait (wait)."
+      },
+      "wait_selector": {
+        "type": "string",
+        "description": "等待 CSS 选择器出现（wait）",
+        "description_en": "Wait until this CSS selector appears (wait)."
+      },
+      "wait_text": {
+        "type": "string",
+        "description": "等待页面正文包含指定文本（wait）",
+        "description_en": "Wait until page text contains this string (wait)."
+      },
+      "full_page": {
+        "type": "boolean",
+        "description": "screenshot 是否截整页（缺省 false，仅视口）",
+        "description_en": "Capture the full page in screenshot (default false, viewport only)."
+      },
+      "clear": {
+        "type": "boolean",
+        "description": "console 读取后清空缓冲（缺省 false）",
+        "description_en": "Clear console buffer after reading (default false)."
+      },
+      "max_nodes": {
+        "type": "integer",
+        "minimum": 50,
+        "maximum": 3000,
+        "description": "snapshot 最大节点数（缺省取工具配置 maxSnapshotNodes）",
+        "description_en": "Max snapshot nodes (defaults to tool config maxSnapshotNodes)."
+      },
+      "all": {
+        "type": "boolean",
+        "description": "tabs 是否列出该浏览器全部标签页（缺省 false，仅 AI 标签页）",
+        "description_en": "List all tabs of the browser (default false, AI tabs only)."
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 300000,
+        "description": "本次操作超时毫秒数（缺省取工具配置 timeoutMs）",
+        "description_en": "Operation timeout in ms (defaults to tool config timeoutMs)."
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true,
+      "requireConfirmation": false,
+      "timeoutMs": 30000,
+      "bridgePort": 7799,
+      "bridgeToken": "",
+      "tabGroupTitle": "MOSS",
+      "tabGroupColor": "blue",
+      "maxSnapshotNodes": 800,
+      "maxImageDimension": 1600,
+      "browserPath": "",
+      "autoDownloadChromeForTesting": false,
+      "autoInstallExtensions": true,
+      "allowEvaluate": true
+    },
+    "schema": {
+      "timeoutMs": {
+        "type": "integer",
+        "min": 5000,
+        "max": 300000
+      },
+      "bridgePort": {
+        "type": "integer",
+        "min": 1024,
+        "max": 65535
+      },
+      "maxSnapshotNodes": {
+        "type": "integer",
+        "min": 100,
+        "max": 3000
+      },
+      "maxImageDimension": {
+        "type": "integer",
+        "min": 0,
+        "max": 4096
+      }
+    }
+  }
+}

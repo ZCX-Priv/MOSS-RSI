@@ -37,8 +37,10 @@ import {
   HooksSettingsSection,
   MemorySettingsSection,
   RemoteSettingsSection,
+  BrowserSettingsSection,
 } from './components/pages/SettingsPage';
 import { SearchModal } from './components/overlays/SearchModal';
+import { BrowserInstallConfirmDialog } from './components/overlays/BrowserInstallConfirmDialog';
 import { SplashScreen } from './components/shared/SplashScreen';
 import { FilePreviewDialog } from './render';
 import { SidebarProvider, SidebarInset, SidebarTrigger } from '@/components/ui/sidebar';
@@ -269,6 +271,7 @@ export default function App() {
               </Route>
               <Route path="tools" element={<ToolsSettings />} />
               <Route path="safety" element={<SafetySettings />} />
+              <Route path="browser" element={<BrowserSettingsSection />} />
               <Route path="remote" element={<RemoteSettingsSection />} />
               <Route path="logs" element={<LogsSettings />} />
               <Route path="about" element={<AboutSettings />} />
@@ -292,6 +295,7 @@ export default function App() {
       </SidebarProvider>
       {/* 全局文件预览弹层：移动端从消息流/附件等非侧边栏入口打开时使用 */}
       <GlobalFilePreviewDialog />
+      <BrowserInstallConfirmDialog />
       <Toaster position="top-center" />
     </TooltipProvider>
   );

@@ -232,11 +232,30 @@ absent('废弃子目录 main/rule 已删除', 'agent/prompts/main/rule');
 absent('已移除功能目录 main/spec 已删除', 'agent/prompts/main/spec');
 absent('已更名的 main/base.md 已删除', 'agent/prompts/main/base.md');
 absent('已并入 system.md 的 main/rules.md 已删除', 'agent/prompts/main/rules.md');
-ok('system.md 内容特征（环境指向 + 能力纪律 + 纪律规则，零动态变量）', 'agent/prompts/main/system.md', [
+ok('system.md 内容特征（环境指向 + 工具/指令/审美/专业场景 + 零动态变量）', 'agent/prompts/main/system.md', [
   '# 运行环境',
   '[环境上下文]',
+  '# 工具调用与操作协议',
   '# 能力使用纪律',
-  '# 核心原则',
+  '# 约束分层与工作哲学',
+  'L1 任务契约',
+  '苏格拉底式提问',
+  '# 平衡点',
+  '双旋钮',
+  '两阶段',
+  '冒进熔断',
+  '创作许可证',
+  '发散期',
+  '收敛期',
+  '# 任务尺度与执行策略',
+  '模块级',
+  '# 指令遵循与精度保真',
+  '事实源',
+  '# 任务适应、质量标准与验证预算',
+  '任务特征',
+  '验证预算',
+  '# 审美与设计质量',
+  '# 专业场景优先',
   '# 执行纪律',
   '# 输出渲染',
   '第一性原理',
@@ -269,7 +288,13 @@ ok('heal/tool-error.md 模板变量', 'agent/prompts/heal/tool-error.md', [
   '{{ISSUES}}',
   '{{USAGE}}',
   '{{CANDIDATES}}',
+  '连续失败两次',
 ]);
+ok('coder.md 验证预算与事实源', 'agent/prompts/agenteam/templates/coder.md', ['验证预算', '事实源']);
+ok('explorer.md 事实源纪律', 'agent/prompts/agenteam/templates/explorer.md', ['文档与实现冲突']);
+ok('reviewer.md 指令遵循', 'agent/prompts/agenteam/templates/reviewer.md', ['指令遵循']);
+ok('skill 播种 v2 哈希清单', 'src/modules/tools/shared/skill-registry.ts', ['version: 2', 'userOwned', 'sha256']);
+ok('skill 附属文件递归收集', 'src/modules/tools/shared/skill-registry.ts', ['collectSkillFiles', 'walk', 'SKILL.md']);
 ok('prompt-loader 播种清单（compact/heal）', 'src/modules/context/prompt-loader.ts', [
   "'compact/compaction.md'",
   "'heal/tool-error.md'",

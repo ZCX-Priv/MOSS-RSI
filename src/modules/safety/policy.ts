@@ -49,6 +49,19 @@ const COMPUTER_OBSERVE_ACTIONS = new Set([
 ]);
 
 /**
+ * browser 观察类动作：只读桥接状态/AI 标签页列表/页面快照/截图/console → L0。
+ * setup 打开扩展目录记为 L1；其余（建页/导航/点击/输入/执行 JS 等）一律 L3。
+ */
+const BROWSER_OBSERVE_ACTIONS = new Set([
+  'status',
+  'tabs',
+  'snapshot',
+  'screenshot',
+  'console',
+  'wait',
+]);
+
+/**
  * 风险分级：按工具名 + 注解综合判定。
  * 合并工具（memory/mcp/skill）按 params.action 分级，保持合并前的风险语义：
  *   memory: save=L3 / search|list_rooms=L0
@@ -65,6 +78,11 @@ export function classifyRisk(
   const action = (req.params as { action?: string } | null | undefined)?.action;
   if (toolName === 'computer') {
     return COMPUTER_OBSERVE_ACTIONS.has(action ?? '') ? 'L0' : 'L3';
+  }
+  if (toolName === 'browser') {
+    if (BROWSER_OBSERVE_ACTIONS.has(action ?? '')) return 'L0';
+    if (action === 'setup') return 'L1';
+    return 'L3';
   }
   if (toolName === 'memory') return action === 'save' ? 'L3' : 'L0';
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';

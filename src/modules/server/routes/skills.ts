@@ -21,7 +21,6 @@ function toSkillItem(
     source: 'user' as const,
     enabled: registry.isEnabled(s.name),
     ...(s.dir ? { dir: s.dir } : {}),
-    ...(s.greet ? { greet: s.greet } : {}),
     ...(s.icon ? { icon: s.icon } : {}),
     ...(s.allowedTools ? { allowedTools: s.allowedTools } : {}),
     ...(s.files && s.files.length > 0 ? { files: s.files } : {}),
@@ -133,11 +132,9 @@ function buildSkillMarkdown(data: {
   description: string;
   prompt: string;
   icon?: string;
-  greet?: string;
 }): string {
   const lines: string[] = ['---', `name: ${data.name}`, `description: ${yamlString(data.description)}`];
   if (data.icon) lines.push(`icon: ${data.icon}`);
-  if (data.greet) lines.push(`greet: ${yamlString(data.greet)}`);
   lines.push('---', '', data.prompt.trim(), '');
   return lines.join('\n');
 }
@@ -147,7 +144,6 @@ interface CreateSkillBody {
   description?: unknown;
   prompt?: unknown;
   icon?: unknown;
-  greet?: unknown;
 }
 
 /** POST /api/skills — 新建目录式 skill（写 ~/.moss/skills/<name>/SKILL.md） */
@@ -174,7 +170,6 @@ export function createCreateSkillHandler(
     }
     const prompt = typeof body?.prompt === 'string' ? body.prompt : '';
     const icon = typeof body?.icon === 'string' && body.icon.trim() ? body.icon.trim() : undefined;
-    const greet = typeof body?.greet === 'string' && body.greet.trim() ? body.greet.trim() : undefined;
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require('node:fs');
@@ -185,7 +180,7 @@ export function createCreateSkillHandler(
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(
         path.join(skillDir, 'SKILL.md'),
-        buildSkillMarkdown({ name, description, prompt, icon, greet }),
+        buildSkillMarkdown({ name, description, prompt, icon }),
         'utf8',
       );
       return { status: 200, body: { name } };

@@ -12,7 +12,8 @@
     "bin/",
     "skills/",
     "mcps/",
-    "agent/"
+    "agent/",
+    "browser-extension/"
   ],
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -36,6 +37,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@puppeteer/browsers": "^3.2.6",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "cfb": "^1.2.2",

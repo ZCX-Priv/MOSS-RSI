@@ -546,4 +546,6 @@ export const ServiceNames = {
   VOICE_SERVICE: 'voice.service',
   /** 计算机操作服务（由 computer 模块注册：cua-driver 进程生命周期 / 工具调用 / 截图 / 活动记录） */
   COMPUTER: 'computer.service',
+  /** 浏览器控制服务（由 browser 模块注册：扩展桥接 / 内置 Chrome / AI 标签页 / CDP 页面操作） */
+  BROWSER: 'browser.service',
 } as const;

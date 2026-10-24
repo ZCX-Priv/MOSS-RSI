@@ -35,6 +35,7 @@ import {
   Sparkles,
   X,
   Smartphone,
+  AppWindow,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -96,6 +97,8 @@ export { HooksSettingsSection } from './settings/HooksSettingsSection';
 export { MemorySettingsSection } from './settings/MemorySettingsSection';
 // 远程控制设置分区（App.tsx 从本模块导入）
 export { RemoteSettingsSection } from './settings/RemoteSettingsSection';
+// 浏览器设置分区（App.tsx 从本模块导入）
+export { BrowserSettingsSection } from './settings/BrowserSettingsSection';
 
 export interface NavItem {
   id: SettingsSection;
@@ -111,6 +114,7 @@ export const settingsNavItems: NavItem[] = [
   { id: 'context', labelKey: 'settings.nav.context', Icon: Layers },
   { id: 'tools', labelKey: 'settings.nav.tools', Icon: Wrench },
   { id: 'safety', labelKey: 'settings.nav.safety', Icon: ShieldCheck },
+  { id: 'browser', labelKey: 'settings.nav.browser', Icon: AppWindow },
   { id: 'remote', labelKey: 'settings.nav.remote', Icon: Smartphone },
   { id: 'logs', labelKey: 'settings.nav.logs', Icon: ScrollText },
   { id: 'commands', labelKey: 'settings.nav.commands', Icon: Terminal },
@@ -152,6 +156,7 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.nav.tools', section: 'tools' },
   { labelKey: 'settings.tools.maxTurnsLabel', descriptionKey: 'settings.tools.maxTurnsDesc', section: 'tools' },
   { labelKey: 'settings.nav.safety', section: 'safety' },
+  { labelKey: 'settings.nav.browser', section: 'browser' },
   { labelKey: 'settings.nav.remote', section: 'remote' },
   { labelKey: 'settings.remote.title', descriptionKey: 'settings.remote.desc', section: 'remote' },
   { labelKey: 'settings.remote.lan.title', descriptionKey: 'settings.remote.lan.desc', section: 'remote' },

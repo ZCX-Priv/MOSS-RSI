@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "MOSS Browser Bridge",
+  "version": "0.3.0",
+  "description": "允许本机 MOSS 通过 CDP 操作本浏览器；AI 标签页会自动归入「MOSS」分组。",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "offscreen"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "MOSS Browser Bridge",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*"
+  }
+}

@@ -385,7 +385,7 @@ async function cmdMcp(parsed: ParsedArgs): Promise<number> {
       foreground: true,
       logLevel: parsed.logLevel,
       // 不起 HTTP 服务（会与常驻 MOSS 抢端口）；daemon/update 与 stdio 会话无关
-      disabledModules: ['server', 'remote', 'daemon', 'update'],
+      disabledModules: ['server', 'remote', 'daemon', 'update', 'browser'],
     });
 
     const server = await startMcpStdio(ctx);

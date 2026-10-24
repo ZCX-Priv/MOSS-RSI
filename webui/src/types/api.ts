@@ -1305,8 +1305,6 @@ export interface SkillItem {
   enabled?: boolean;
   /** Lucide 图标名（kebab-case） */
   icon?: string;
-  /** 切入模式欢迎语 */
-  greet?: string;
   /** 激活时建议允许的工具列表 */
   allowedTools?: string[];
   /** 目录式 skill 的附属文件清单（references/scripts/assets 相对路径） */
@@ -1649,4 +1647,115 @@ export interface ComputerActivity {
   screenshotPath?: string;
   isError?: boolean;
   durationMs?: number;
+}
+
+// ============================================================================
+// Browser（扩展桥接 / 内置 Chrome / AI 标签页）
+// ============================================================================
+
+export interface BrowserBridgeStatus {
+  running: boolean;
+  port: number | null;
+  configuredPort: number;
+  tokenConfigured: boolean;
+  error: string | null;
+}
+
+export interface BrowserInstanceInfo {
+  id: string;
+  kind: 'builtin' | 'external';
+  browserName: string;
+  browserVersion: string;
+  extensionId: string;
+  extensionVersion: string;
+  connectedAt: number;
+  tabCount: number;
+}
+
+export interface BrowserBuiltinStatus {
+  running: boolean;
+  executable: string | null;
+  source: 'config' | 'local' | 'chrome-for-testing' | null;
+  version: string | null;
+  profileDir: string;
+  extensionLoaded: boolean;
+  extensionId: string | null;
+  error: string | null;
+}
+
+export interface BrowserExtensionStatus {
+  dir: string;
+  version: string | null;
+  seeded: boolean;
+}
+
+export interface BrowserCftStatus {
+  installed: boolean;
+  buildId: string | null;
+  executable: string | null;
+  downloading: boolean;
+  progress: { received: number; total: number; percent: number } | null;
+  error: string | null;
+}
+
+export type BrowserInstallerState =
+  | 'pending'
+  | 'installing'
+  | 'already'
+  | 'installed'
+  | 'reloaded'
+  | 'skipped'
+  | 'manual'
+  | 'failed';
+
+export interface BrowserInstallerBrowser {
+  id: string;
+  name: string;
+  executable: string;
+  state: BrowserInstallerState;
+  detail?: string;
+  at?: number;
+}
+
+export interface BrowserInstallerStatus {
+  enabled: boolean;
+  running: boolean;
+  /** 本次进程是否已完成至少一次真实安装校验 */
+  checked: boolean;
+  current: string | null;
+  browsers: BrowserInstallerBrowser[];
+}
+
+export interface BrowserTabInfo {
+  tab: string;
+  instanceId: string;
+  instanceKind: 'builtin' | 'external';
+  browserName: string;
+  browserVersion: string;
+  nativeTabId: number;
+  windowId?: number;
+  groupId: number | null;
+  url: string;
+  title: string;
+  active: boolean;
+  createdAt: number;
+}
+
+export interface BrowserStatus {
+  bridge: BrowserBridgeStatus;
+  instances: BrowserInstanceInfo[];
+  builtin: BrowserBuiltinStatus;
+  extension: BrowserExtensionStatus;
+  cft: BrowserCftStatus;
+  installer: BrowserInstallerStatus;
+  tabs: BrowserTabInfo[];
+  currentTab: string | null;
+  config: {
+    tabGroupTitle: string;
+    tabGroupColor: string;
+    maxSnapshotNodes: number;
+    maxImageDimension: number;
+    allowEvaluate: boolean;
+    timeoutMs: number;
+  };
 }

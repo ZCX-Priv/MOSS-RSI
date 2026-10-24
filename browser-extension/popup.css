@@ -1,0 +1,137 @@
+/* browser-extension/popup.css */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+body {
+  width: 300px;
+  margin: 0;
+  padding: 14px;
+  background: #0f1115;
+  color: #e6e8eb;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  object-fit: contain;
+}
+
+h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8b949e;
+  box-shadow: 0 0 0 3px rgba(139, 148, 158, 0.15);
+}
+
+.dot.on {
+  background: #3fb950;
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+}
+
+.dot.off {
+  background: #f85149;
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.15);
+}
+
+.status {
+  margin: 8px 0 12px;
+  color: #c9d1d9;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  color: #9da7b3;
+}
+
+label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: #c9d1d9;
+}
+
+input[type="number"],
+input[type="password"] {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #161b22;
+  color: #e6e8eb;
+  outline: none;
+}
+
+input[type="number"]:focus,
+input[type="password"]:focus {
+  border-color: #388bfd;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+button {
+  flex: 1;
+  height: 28px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #21262d;
+  color: #e6e8eb;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #8b949e;
+}
+
+button.primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #388bfd;
+}
+
+.hint {
+  margin: 0;
+  color: #8b949e;
+  line-height: 1.5;
+}
+
+.detail {
+  margin: 8px 0 0;
+  color: #6e7681;
+  font-size: 11px;
+  word-break: break-all;
+}

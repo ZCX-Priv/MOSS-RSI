@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MOSS Browser Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <img src="icons/icon48.png" alt="" class="logo" />
+        <h1>MOSS Browser Bridge</h1>
+      </div>
+      <span id="status-dot" class="dot off"></span>
+    </header>
+    <p id="status-text" class="status">正在检查连接…</p>
+
+    <label>
+      <span>桥接端口</span>
+      <input id="port" type="number" min="1024" max="65535" step="1" />
+    </label>
+    <label>
+      <span>访问令牌（可选）</span>
+      <input id="token" type="password" placeholder="留空表示不使用令牌" />
+    </label>
+    <label class="check">
+      <input id="auto" type="checkbox" />
+      <span>浏览器启动时自动连接</span>
+    </label>
+
+    <div class="actions">
+      <button id="save" class="primary">保存并重连</button>
+      <button id="reconnect">立即重连</button>
+      <button id="disconnect">断开</button>
+    </div>
+
+    <p class="hint">
+      MOSS 新建的标签页会自动归入「MOSS」分组，不会接管你已有的标签页。端口需与 MOSS
+      设置 → 浏览器 中显示的端口一致；MOSS 启动时会自动完成扩展安装与连接。
+    </p>
+    <p id="detail" class="detail"></p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

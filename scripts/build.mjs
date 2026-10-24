@@ -128,6 +128,21 @@ function copyToolsModule() {
 }
 
 // ============================================================================
+// 步骤 3b: 复制浏览器扩展目录到 dist（browser 模块播种到 ~/.moss/browser/extension）
+// ============================================================================
+function copyBrowserExtension() {
+  log('Copying browser extension...');
+  const src = resolve(ROOT, 'browser-extension');
+  const dest = resolve(DIST, 'browser-extension');
+  if (!existsSync(src)) {
+    error(`Browser extension source not found: ${src}`);
+    process.exit(1);
+  }
+  cpSync(src, dest, { recursive: true });
+  log(`Browser extension copied: ${dest}`);
+}
+
+// ============================================================================
 // 步骤 3c: 复制 agent/ 提示词目录到 dist（播种源：首次运行复制到 ~/.moss/agent/，
 // 运行时只读用户目录，但种子模板必须随包分发）
 // ============================================================================
@@ -235,6 +250,7 @@ function main() {
   cleanDist();
   buildBackend();
   copyToolsModule();
+  copyBrowserExtension();
   copyAgentPrompts();
   copyTreeSitterWasm();
   buildFrontend();

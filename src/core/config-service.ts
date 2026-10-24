@@ -720,20 +720,45 @@ class ConfigServiceImpl implements ConfigService {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fs = require('node:fs');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { basename } = require('node:path');
+      // 监听目录而非单个文件：编辑器/同步盘的原子替换（写临时文件后 rename）会让
+      // fs.watch(file) 丢失后续事件，目录监听不受影响
+      const watchDir = this.env.configDir;
+      const appName = String(basename(appPath)).toLowerCase();
+      const apiName = String(basename(apiPath)).toLowerCase();
+      const pending = new Set<'app' | 'api'>();
       let debounce: ReturnType<typeof setTimeout> | null = null;
-      const handle = (which: 'app' | 'api') => {
-        if (debounce) clearTimeout(debounce);
-        debounce = setTimeout(() => {
-          this.logger.info(t('config.fileChangedReloading', { which }));
-          this.reload().catch(err => {
-            this.logger.error(t('config.reloadFailed'), {
-              error: err instanceof Error ? err.message : String(err),
-            });
+      const flush = (): void => {
+        debounce = null;
+        const which = Array.from(pending).join(',') || 'unknown';
+        pending.clear();
+        // 实际是否变化由 reload() 内部做内容对比并以 reloadedFromDisk 记录
+        this.logger.debug(t('config.fileChangedReloading', { which }));
+        this.reload().catch(err => {
+          this.logger.error(t('config.reloadFailed'), {
+            error: err instanceof Error ? err.message : String(err),
           });
-        }, 300);
+        });
       };
-      fs.watch(appPath, () => handle('app'));
-      fs.watch(apiPath, () => handle('api'));
+      const enqueue = (which: 'app' | 'api'): void => {
+        pending.add(which);
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(flush, 300);
+      };
+      const watcher: { on(event: 'error', handler: (err: Error) => void): void } = fs.watch(
+        watchDir,
+        (_eventType: string, filename: string | null) => {
+          if (!filename) return;
+          const name = String(filename).toLowerCase();
+          if (name === appName) enqueue('app');
+          else if (name === apiName) enqueue('api');
+        },
+      );
+      // watcher 的 error 事件若无监听会抛出并终止进程
+      watcher.on('error', (err: Error) => {
+        this.logger.warn(t('config.watcherStartFailed'), { error: err.message });
+      });
       this.logger.debug(t('config.watcherStarted'));
     } catch (err) {
       this.logger.warn(t('config.watcherStartFailed'), {

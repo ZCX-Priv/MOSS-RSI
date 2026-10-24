@@ -72,6 +72,7 @@ import type {
   ResourceSnapshot,
   ComputerStatus,
   ComputerWindowInfo,
+  BrowserStatus,
 } from '../types/api';
 import i18n from '../i18n';
 
@@ -343,6 +344,19 @@ export const api = {
     request<{ ok: boolean; output: string }>('POST', '/api/computer/install'),
   controlComputer: (action: 'pause' | 'resume' | 'reconnect') =>
     request<ComputerStatus>('POST', '/api/computer/control', { action }),
+
+  // ==========================================================================
+  // Browser（扩展桥接 / 内置 Chrome / Chrome for Testing）
+  // ==========================================================================
+  getBrowserStatus: () => request<BrowserStatus>('GET', '/api/browser/status'),
+  openBrowserExtensionDir: () =>
+    request<{ ok: boolean; path: string }>('POST', '/api/browser/extension/open'),
+  controlBrowserBuiltin: (action: 'launch' | 'close') =>
+    request<BrowserStatus>('POST', '/api/browser/builtin', { action }),
+  downloadChromeForTesting: () =>
+    request<BrowserStatus>('POST', '/api/browser/chrome-for-testing', { action: 'download' }),
+  runBrowserInstaller: () =>
+    request<BrowserStatus>('POST', '/api/browser/install', { action: 'run' }),
   /** 面板实时画面：带 Authorization 直接拉二进制（不能走 <img src>，否则 token 丢失） */
   fetchComputerScreenshot: async (opts: {
     target: 'desktop' | 'window';
@@ -582,7 +596,7 @@ export const api = {
   updateSkill: (name: string, patch: { enabled: boolean }) =>
     request<{ name: string; enabled: boolean }>('PATCH', `/api/skills/${encodeURIComponent(name)}`, patch),
   /** 新建目录式技能（写 ~/.moss/skills/<name>/SKILL.md，watch 热重载生效） */
-  createSkill: (data: { name: string; description: string; prompt?: string; icon?: string; greet?: string }) =>
+  createSkill: (data: { name: string; description: string; prompt?: string; icon?: string }) =>
     request<{ name: string }>('POST', '/api/skills', data),
   /** 导入技能（前端 zip 解包：文本 content / 二进制 base64；批量写入技能目录） */
   importSkill: (data: {

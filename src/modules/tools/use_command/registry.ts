@@ -30,6 +30,14 @@ export interface Command {
   sourceFile: string;
 }
 
+/**
+ * 热重载结果：
+ *   reloaded  —— 内容有变化，已替换并需要通知订阅方
+ *   unchanged —— 语义内容未变（touch/幽灵事件），无需重复通知
+ *   conflict  —— 同名的另一个来源已占用，保留先注册者
+ */
+export type CommandReloadResult = 'reloaded' | 'unchanged' | 'conflict';
+
 export interface CommandRegistry {
   register(cmd: Command): void;
   unregister(name: string): void;
@@ -38,25 +46,46 @@ export interface CommandRegistry {
   /** 启用状态（实时读 config.commands[name].enabled，缺省 true） */
   isEnabled(name: string): boolean;
   /** 热重载：文件存在则替换，不存在则移除 */
-  reloadBySourceFile(sourceFile: string, cmd: Command): void;
-  removeBySourceFile(sourceFile: string): void;
+  reloadBySourceFile(sourceFile: string, cmd: Command): CommandReloadResult;
+  /** 移除指定来源对应的 command；返回被移除的命令名，未注册返回 null */
+  removeBySourceFile(sourceFile: string): string | null;
+}
+
+/** 语义指纹：注册表实际使用的字段 */
+function commandSignature(cmd: Command): string {
+  return JSON.stringify({
+    name: cmd.name,
+    description: cmd.description,
+    argumentHint: cmd.argumentHint ?? '',
+    icon: cmd.icon ?? '',
+    prompt: cmd.prompt,
+  });
 }
 
 class CommandRegistryImpl implements CommandRegistry {
   private readonly commands = new Map<string, Command>();
   private readonly fileIndex = new Map<string, string>();
+  /** sourceFile -> 最近一次注册的语义指纹（过滤未变化的重复事件） */
+  private readonly signatures = new Map<string, string>();
   private configReader: ((name: string) => boolean) | null = null;
 
   register(cmd: Command): void {
     const existing = this.commands.get(cmd.name);
-    if (existing?.sourceFile) this.fileIndex.delete(existing.sourceFile);
+    if (existing?.sourceFile) {
+      this.fileIndex.delete(existing.sourceFile);
+      this.signatures.delete(existing.sourceFile);
+    }
     this.commands.set(cmd.name, cmd);
     this.fileIndex.set(cmd.sourceFile, cmd.name);
+    this.signatures.set(cmd.sourceFile, commandSignature(cmd));
   }
 
   unregister(name: string): void {
     const existing = this.commands.get(name);
-    if (existing) this.fileIndex.delete(existing.sourceFile);
+    if (existing) {
+      this.fileIndex.delete(existing.sourceFile);
+      this.signatures.delete(existing.sourceFile);
+    }
     this.commands.delete(name);
   }
 
@@ -76,25 +105,31 @@ class CommandRegistryImpl implements CommandRegistry {
     this.configReader = reader;
   }
 
-  reloadBySourceFile(sourceFile: string, cmd: Command): void {
+  reloadBySourceFile(sourceFile: string, cmd: Command): CommandReloadResult {
+    // 同名 command 若已被其他来源占用，保留先注册的（此处不能先删旧条目，否则会丢失原 command）
+    const existing = this.commands.get(cmd.name);
+    if (existing && existing.sourceFile !== sourceFile) return 'conflict';
     const oldName = this.fileIndex.get(sourceFile);
     if (oldName && oldName !== cmd.name) {
       this.commands.delete(oldName);
       this.fileIndex.delete(sourceFile);
+      this.signatures.delete(sourceFile);
     }
-    // 同名 command 若已被其他来源占用，保留先注册的
-    const existing = this.commands.get(cmd.name);
-    if (existing && existing.sourceFile !== sourceFile) return;
+    const signature = commandSignature(cmd);
+    const unchanged = this.signatures.get(sourceFile) === signature;
     this.commands.set(cmd.name, cmd);
     this.fileIndex.set(sourceFile, cmd.name);
+    this.signatures.set(sourceFile, signature);
+    return unchanged ? 'unchanged' : 'reloaded';
   }
 
-  removeBySourceFile(sourceFile: string): void {
+  removeBySourceFile(sourceFile: string): string | null {
     const name = this.fileIndex.get(sourceFile);
-    if (name) {
-      this.commands.delete(name);
-      this.fileIndex.delete(sourceFile);
-    }
+    this.signatures.delete(sourceFile);
+    if (!name) return null;
+    this.commands.delete(name);
+    this.fileIndex.delete(sourceFile);
+    return name;
   }
 }
 
@@ -133,6 +168,9 @@ function parseCommandFile(filePath: string): Command | null {
   const seg = filePath.replace(/\\/g, '/').split('/').pop() ?? '';
   const name = seg.replace(/\.md$/i, '');
   if (!COMMAND_NAME_RE.test(name)) return null;
+  // 空 body 视为无效（与 routes/commands.ts 的 COMMAND_PROMPT_REQUIRED 一致）：
+  // 避免热重载时把半写入的文件当成合法命令，覆盖掉旧模板
+  if (!body.trim()) return null;
   const description = typeof frontMatter.description === 'string' ? frontMatter.description : '';
   const argumentHint =
     typeof frontMatter['argument-hint'] === 'string' && frontMatter['argument-hint']
@@ -219,7 +257,10 @@ function loadCommandsFromDirSync(reg: CommandRegistry, dir: string, logger: Logg
   }
 }
 
-/** watch 目录（单层）：文件增删改 → 重载/移除对应 command */
+/** 热重载事件聚合窗口（与 tools/skill/mcp 的 watcher 保持一致） */
+const COMMAND_WATCH_DEBOUNCE_MS = 300;
+
+/** watch 目录（单层）：文件增删改 → 防抖聚合后重载/移除对应 command */
 async function startWatch(
   reg: CommandRegistry,
   dir: string,
@@ -242,19 +283,30 @@ async function startWatch(
 
   const reloadFile = (full: string): void => {
     try {
-      if (fileExists(full) && full.endsWith('.md')) {
-        const cmd = parseCommandFile(full);
-        if (cmd) {
-          reg.reloadBySourceFile(full, cmd);
-          logger.info(t('tools.commandReloaded', { name: cmd.name }), { file: full });
-          notify(cmd.name);
-          return;
+      if (!fileExists(full) || !full.endsWith('.md')) {
+        // 仅当确实移除过注册项时才记日志/广播
+        const removed = reg.removeBySourceFile(full);
+        if (removed) {
+          logger.info(t('tools.commandRemoved', { name: removed }), { file: full });
+          notify(removed);
         }
+        return;
       }
-      reg.removeBySourceFile(full);
-      const seg = full.replace(/\\/g, '/').split('/').pop() ?? '';
-      logger.info(t('tools.commandRemoved', { name: seg.replace(/\.md$/i, '') }), { file: full });
-      notify(seg.replace(/\.md$/i, ''));
+      const cmd = parseCommandFile(full);
+      if (!cmd) {
+        // 半写入/暂态无效内容：保留旧版本，等下一次事件修复（不能当作删除）
+        logger.warn(t('tools.commandReloadInvalidSkipped', { file: full }));
+        return;
+      }
+      const result = reg.reloadBySourceFile(full, cmd);
+      if (result === 'reloaded') {
+        logger.info(t('tools.commandReloaded', { name: cmd.name }), { file: full });
+        notify(cmd.name);
+      } else if (result === 'unchanged') {
+        logger.debug(t('tools.commandReloadUnchanged', { name: cmd.name }), { file: full });
+      } else {
+        logger.debug(t('tools.commandReloadConflict', { name: cmd.name, file: full }));
+      }
     } catch (err) {
       logger.warn(t('tools.reloadCommandFailed', { file: full }), {
         error: err instanceof Error ? err.message : String(err),
@@ -262,10 +314,27 @@ async function startWatch(
     }
   };
 
+  // 同一文件的多个事件合并处理；删除后 300ms 内重建不会触发误移除
+  const pending = new Set<string>();
+  let debounce: ReturnType<typeof setTimeout> | null = null;
+  const flush = (): void => {
+    debounce = null;
+    const files = Array.from(pending);
+    pending.clear();
+    for (const full of files) reloadFile(full);
+  };
+
   watcher.on('change', (_eventType: string, filename: string | Buffer | null) => {
     if (filename === null || Buffer.isBuffer(filename)) return;
     const name: string = filename.replace(/\\/g, '/');
     if (!name || name.includes('/')) return; // 单层目录：忽略子路径事件
-    reloadFile(join(dir, name));
+    if (name.startsWith('.') || !name.endsWith('.md')) return; // 隐藏文件/临时文件不参与
+    pending.add(join(dir, name));
+    if (debounce) clearTimeout(debounce);
+    debounce = setTimeout(flush, COMMAND_WATCH_DEBOUNCE_MS);
+  });
+  // watcher 的 error 事件若无监听会抛出并终止进程
+  watcher.on('error', (err: Error) => {
+    logger.warn(t('tools.commandDirWatchUnavailable'), { error: err.message });
   });
 }

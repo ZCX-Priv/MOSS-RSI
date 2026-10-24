@@ -163,7 +163,7 @@ export function PluginMarketPage() {
   );
 }
 
-/* ===== 技能 tab（icon + greet + files + 启停） ===== */
+/* ===== 技能 tab（icon + files + 启停） ===== */
 export function SkillsTab() {
   const { t } = useTranslation();
   const { query } = useOutletContext<PluginOutletContext>();
@@ -199,11 +199,6 @@ export function SkillsTab() {
                   {skill.files && skill.files.length > 0 && (
                     <Badge variant="outline" className="font-normal">
                       {t('plugins.skillFiles', { count: skill.files.length })}
-                    </Badge>
-                  )}
-                  {skill.greet && (
-                    <Badge variant="secondary" className="max-w-48 truncate font-normal text-muted-foreground" title={skill.greet}>
-                      {t('plugins.skillGreet')}
                     </Badge>
                   )}
                 </div>
@@ -288,7 +283,6 @@ function SkillsDialog({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [icon, setIcon] = useState('');
-  const [greet, setGreet] = useState('');
   const [prompt, setPrompt] = useState('');
 
   // 导入状态
@@ -302,7 +296,7 @@ function SkillsDialog({
   useEffect(() => {
     if (open) {
       setMode('create');
-      setName(''); setDescription(''); setIcon(''); setGreet(''); setPrompt('');
+      setName(''); setDescription(''); setIcon(''); setPrompt('');
       setZipFile(''); setImportName(''); setImportDesc(''); setParsed(null); setZipError(null);
     }
   }, [open]);
@@ -325,7 +319,6 @@ function SkillsDialog({
         description: description.trim(),
         prompt: prompt || undefined,
         icon: icon.trim() || undefined,
-        greet: greet.trim() || undefined,
       });
       toast.success(t('plugins.skillCreated', { name: name.trim() }));
       onOpenChange(false);
@@ -335,7 +328,7 @@ function SkillsDialog({
     } finally {
       setBusy(false);
     }
-  }, [busy, name, description, prompt, icon, greet, onOpenChange, onDone, showSkillError, t]);
+  }, [busy, name, description, prompt, icon, onOpenChange, onDone, showSkillError, t]);
 
   const onZipChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -421,25 +414,14 @@ function SkillsDialog({
                   placeholder={t('plugins.skillDescPlaceholder')}
                 />
               </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="flex flex-col gap-2">
-                  <Label htmlFor="skill-icon">{t('plugins.skillIcon')}</Label>
-                  <Input
-                    id="skill-icon"
-                    value={icon}
-                    onChange={(e) => setIcon(e.target.value)}
-                    placeholder="sparkles"
-                  />
-                </div>
-                <div className="flex flex-col gap-2">
-                  <Label htmlFor="skill-greet">{t('plugins.skillGreetLabel')}</Label>
-                  <Input
-                    id="skill-greet"
-                    value={greet}
-                    onChange={(e) => setGreet(e.target.value)}
-                    placeholder={t('plugins.skillGreetPlaceholder')}
-                  />
-                </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="skill-icon">{t('plugins.skillIcon')}</Label>
+                <Input
+                  id="skill-icon"
+                  value={icon}
+                  onChange={(e) => setIcon(e.target.value)}
+                  placeholder="sparkles"
+                />
               </div>
               <div className="flex flex-col gap-2">
                 <Label htmlFor="skill-prompt">{t('plugins.skillPrompt')}</Label>

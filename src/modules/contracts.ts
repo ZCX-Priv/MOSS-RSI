@@ -27,6 +27,25 @@ export type {
   ComputerToolResult,
   ComputerCallOptions,
 } from './computer/types';
+export type {
+  BrowserService,
+  BrowserStatus,
+  BrowserInstanceInfo,
+  BrowserTabInfo,
+  BrowserBuiltinStatus,
+  BrowserExtensionStatus,
+  BrowserCftStatus,
+  BrowserBridgeStatus,
+  BrowserSnapshot,
+  BrowserScreenshot,
+  BrowserPageInfo,
+  BrowserConsoleEntry,
+  BrowserConsoleResult,
+  BrowserToolConfig,
+  BrowserInstallerStatus,
+  BrowserInstallerBrowser,
+  BrowserInstallerState,
+} from './browser/types';
 import type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 export type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 
@@ -403,7 +422,7 @@ export type AgentEvent =
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string }
-  | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; greet?: string; icon?: string; message?: string; runId?: string }
+  | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; icon?: string; message?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string; providerError?: string; messageId?: string }
   | { type: 'done'; sessionId: string; finishReason: string; runId?: string };

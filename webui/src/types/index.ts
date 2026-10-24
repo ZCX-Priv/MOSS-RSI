@@ -13,6 +13,7 @@ export type SettingsSection =
   | 'context'
   | 'tools'
   | 'safety'
+  | 'browser'
   | 'remote'
   | 'logs'
   | 'index'
