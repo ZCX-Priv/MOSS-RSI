@@ -33,6 +33,22 @@ const RECOVERABLE_WRITE_TOOLS = new Set(['write', 'edit', 'move', 'delete', 'cop
 const UNSAFE_TOOLS = new Set(['terminal']);
 
 /**
+ * computer 观察类动作：只读屏幕/UIA/窗口列表，不产生外部副作用 → L0。
+ * 其余动作（点击/输入/启动/剪贴板写/批量）一律 L3（fail-closed）。
+ */
+const COMPUTER_OBSERVE_ACTIONS = new Set([
+  'status',
+  'list_apps',
+  'list_windows',
+  'get_window_state',
+  'get_desktop_state',
+  'get_screen_size',
+  'get_cursor_position',
+  'zoom',
+  'wait',
+]);
+
+/**
  * 风险分级：按工具名 + 注解综合判定。
  * 合并工具（memory/mcp/skill）按 params.action 分级，保持合并前的风险语义：
  *   memory: save=L3 / search|list_rooms=L0
@@ -47,6 +63,9 @@ export function classifyRisk(
 
   // 合并工具：按 action 分级（单工具单份 annotations 无法表达混合语义）
   const action = (req.params as { action?: string } | null | undefined)?.action;
+  if (toolName === 'computer') {
+    return COMPUTER_OBSERVE_ACTIONS.has(action ?? '') ? 'L0' : 'L3';
+  }
   if (toolName === 'memory') return action === 'save' ? 'L3' : 'L0';
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
   if (toolName === 'skill') return 'L0';

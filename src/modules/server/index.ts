@@ -47,6 +47,13 @@ import {
   createToggleCommandHandler,
 } from './routes/commands';
 import { createListToolsHandler, createUpdateToolHandler } from './routes/tools';
+import {
+  createComputerStatusHandler,
+  createComputerWindowsHandler,
+  createComputerScreenshotHandler,
+  createComputerInstallHandler,
+  createComputerControlHandler,
+} from './routes/computer';
 import { createVersionHandler } from './routes/version';
 import {
   createListProvidersHandler,
@@ -452,6 +459,13 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/suggest-paths', handler: createSuggestPathsHandler(env), auth: true });
     // 终端：本机实测可用的解释器类型（前端「新建终端」菜单数据源）
     this.router.addRoute({ method: 'GET', pattern: '/api/terminal/interpreters', handler: createListInterpretersHandler(env), auth: true });
+
+    // Computer：cua-driver 状态/窗口/实时截图/安装/暂停（computer 模块注册服务；请求时解析）
+    this.router.addRoute({ method: 'GET', pattern: '/api/computer/status', handler: createComputerStatusHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/computer/windows', handler: createComputerWindowsHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/computer/screenshot', handler: createComputerScreenshotHandler(services, config), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/computer/install', handler: createComputerInstallHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/computer/control', handler: createComputerControlHandler(services), auth: true });
     // # 文件提及菜单：工作目录递归文件名搜索
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/search-files', handler: createSearchFilesHandler(env), auth: true });
     // 文件浏览器：列出目标目录直接子项（目录 + 文件；走 filesys roots 权限）

@@ -70,6 +70,8 @@ import type {
   VoiceStatus,
   VoiceModelStatus,
   ResourceSnapshot,
+  ComputerStatus,
+  ComputerWindowInfo,
 } from '../types/api';
 import i18n from '../i18n';
 
@@ -324,6 +326,53 @@ export const api = {
   listTools: () => request<{ tools: ToolItem[] }>('GET', '/api/tools'),
   updateTool: (name: string, patch: { enabled?: boolean; config?: Record<string, unknown> }) =>
     request<{ name: string; config?: Record<string, unknown> }>('PATCH', `/api/tools/${encodeURIComponent(name)}`, patch),
+
+  // ==========================================================================
+  // Computer（cua-driver）
+  // ==========================================================================
+  getComputerStatus: (sessionId?: string) => {
+    const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    return request<ComputerStatus>('GET', `/api/computer/status${qs}`);
+  },
+  listComputerWindows: (onScreenOnly = true) =>
+    request<{ windows: ComputerWindowInfo[] }>(
+      'GET',
+      `/api/computer/windows?onScreenOnly=${onScreenOnly ? '1' : '0'}`,
+    ),
+  installComputerDriver: () =>
+    request<{ ok: boolean; output: string }>('POST', '/api/computer/install'),
+  controlComputer: (action: 'pause' | 'resume' | 'reconnect') =>
+    request<ComputerStatus>('POST', '/api/computer/control', { action }),
+  /** 面板实时画面：带 Authorization 直接拉二进制（不能走 <img src>，否则 token 丢失） */
+  fetchComputerScreenshot: async (opts: {
+    target: 'desktop' | 'window';
+    pid?: number;
+    windowId?: number;
+    maxDimension?: number;
+  }): Promise<Blob> => {
+    const qs = new URLSearchParams({ target: opts.target });
+    if (opts.pid !== undefined) qs.set('pid', String(opts.pid));
+    if (opts.windowId !== undefined) qs.set('windowId', String(opts.windowId));
+    if (opts.maxDimension !== undefined) qs.set('maxDimension', String(opts.maxDimension));
+    const token = getAuthToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const resp = await fetch(`${BASE_URL}/api/computer/screenshot?${qs.toString()}`, {
+      headers,
+      cache: 'no-store',
+    });
+    if (!resp.ok) {
+      let message = `HTTP ${resp.status}`;
+      try {
+        const body = (await resp.json()) as { error?: string };
+        if (body?.error) message = body.error;
+      } catch {
+        // 非 JSON 错误体
+      }
+      throw new Error(message);
+    }
+    return resp.blob();
+  },
 
   // ==========================================================================
   // 任务 + 分组（见文档 3.2.1）

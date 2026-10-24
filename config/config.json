@@ -60,7 +60,8 @@
     "web":       { "enabled": true },
     "todo":      { "enabled": true },
     "ask":       { "enabled": true },
-    "automation": { "enabled": true }
+    "automation": { "enabled": true },
+    "computer":  { "enabled": true, "requireConfirmation": true, "timeout": 120000, "maxImageDimension": 1280, "maxTreeElements": 250, "allowForeground": true }
   },
   "mcpServers": {},
   "mcp": {

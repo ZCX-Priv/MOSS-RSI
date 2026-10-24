@@ -18,6 +18,15 @@ import type {
 } from './file-history/types';
 export type { FilesysService, TerminalChangeReport } from './filesys/types';
 export type { TerminalService, TerminalInfo, TerminalRunResult, InterpreterKind } from './terminal/types';
+export type {
+  ComputerService,
+  ComputerStatus,
+  ComputerActivity,
+  ComputerWindowInfo,
+  ComputerCapture,
+  ComputerToolResult,
+  ComputerCallOptions,
+} from './computer/types';
 import type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 export type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 

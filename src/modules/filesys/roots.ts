@@ -31,8 +31,9 @@ export function systemRoot(): string {
  * 需对 agent（read 工具）与前端预览（/api/filesystem/raw）放行。
  * terminal-output：terminal 工具执行命令的完整输出（发给模型的是精简摘要，
  * 模型按 ref 用 read 读取全文）。内容即当前用户自己的命令输出，不构成提权。
+ * computer：cua-driver 截图（Agent/面板看到的屏幕内容）与安装脚本；供 read 与前端预览访问。
  */
-const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills', 'analysis', 'terminal-output'];
+const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills', 'analysis', 'terminal-output', 'computer'];
 
 /** 路径归一化比较键：统一分隔符 + 小写（Windows 大小写不敏感） */
 function pathKey(p: string): string {

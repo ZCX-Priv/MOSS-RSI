@@ -35,6 +35,7 @@ import {
   SquarePen,
   ArrowUp,
   Stethoscope,
+  Monitor,
 } from 'lucide-react';
 import {
   Dialog,
@@ -103,6 +104,7 @@ import { AskPromptCard } from '../shared/AskPromptCard';
 import { AskAttachmentStrip } from '../shared/AskAttachmentStrip';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
 import { TerminalPanel } from '../shared/TerminalPanel';
+import { ComputerPanel } from '../shared/ComputerPanel';
 import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
 import { FileBrowserPanel } from '../shared/FileBrowserPanel';
 import { FileChangesPanel } from '../shared/FileChangesPanel';
@@ -536,12 +538,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const hasAgenteamTab = sidebarTabs.some((tab) => tab.type === 'agenteam');
   const hasFilesTab = sidebarTabs.some((tab) => tab.type === 'files');
   const hasChangesTab = sidebarTabs.some((tab) => tab.type === 'changes');
+  const hasComputerTab = sidebarTabs.some((tab) => tab.type === 'computer');
   const allTabTypesOpen =
-    hasSummaryTab && hasTerminalTab && hasAgenteamTab && hasFilesTab && hasChangesTab;
+    hasSummaryTab && hasTerminalTab && hasAgenteamTab && hasFilesTab && hasChangesTab && hasComputerTab;
 
   // 「开始」面板：打开/切换到某类型标签；「开始」标签存在时原地变身，不再新开标签
   const openTabType = useCallback(
-    (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes', titleKey: string) => {
+    (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer', titleKey: string) => {
       // 已开该类型 → 直接切换
       const existing = sidebarTabs.find((tab) => tab.type === type);
       if (existing) {
@@ -1040,6 +1043,14 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 {t('task.fileChanges')}
               </DropdownMenuItem>
             )}
+            {!hasComputerTab && (
+              <DropdownMenuItem
+                onSelect={() => addSidebarTab(taskId, 'computer', 'computer.title')}
+              >
+                <Monitor className="size-4" />
+                {t('computer.title')}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -1224,6 +1235,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {activeTab?.type === 'agenteam' && <AgenteamPanel />}
         {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}
         {activeTab?.type === 'changes' && <FileChangesPanel key={taskId} sessionId={taskId} />}
+        {activeTab?.type === 'computer' && (
+          <ComputerPanel key={taskId} sessionId={taskId} active />
+        )}
         {activeTab?.type === 'file' && (activeTab.filePath || activeTab.archiveEntry) && (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {fileTabSource ? (
@@ -2066,15 +2080,15 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
   );
 }
 
-/** 「开始」标签页：面板启动器（任务摘要 / 终端 / 专家团 / 文件 / 文件变更），点击行打开或切换到对应标签 */
+/** 「开始」标签页：面板启动器（任务摘要 / 终端 / 专家团 / 文件 / 文件变更 / Computer），点击行打开或切换到对应标签 */
 interface StartPanelProps {
   /** 点击某行：已开该类型标签则激活，未开则新建（title 为 i18n key） */
-  onOpen: (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes', titleKey: string) => void;
+  onOpen: (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer', titleKey: string) => void;
 }
 function StartPanel({ onOpen }: StartPanelProps) {
   const { t } = useTranslation();
   const rows: Array<{
-    type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes';
+    type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer';
     titleKey: string;
     descKey: string;
     Icon: typeof List;
@@ -2108,6 +2122,12 @@ function StartPanel({ onOpen }: StartPanelProps) {
       titleKey: 'task.fileChanges',
       descKey: 'start.changesDesc',
       Icon: FileDiff,
+    },
+    {
+      type: 'computer',
+      titleKey: 'computer.title',
+      descKey: 'start.computerDesc',
+      Icon: Monitor,
     },
   ];
   return (

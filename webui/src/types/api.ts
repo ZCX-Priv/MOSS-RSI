@@ -50,7 +50,9 @@ export type SidebarTabType =
   /** 文件浏览器（列目录 + 点击文件打开预览标签） */
   | 'files'
   /** 该任务的文件变更总览（按文件聚合 + 展开 diff） */
-  | 'changes';
+  | 'changes'
+  /** 计算机使用面板（cua-driver 实时画面 / 窗口 / 动作时间线） */
+  | 'computer';
 
 /** 右侧边栏标签页 */
 export interface SidebarTab {
@@ -1590,3 +1592,61 @@ export interface PickedFile {
 
 /** 任务执行权限模式（对齐 PermissionModeSelector 现有 UI：3 种；与后端 safety/types 对齐） */
 export type PermissionMode = 'ask' | 'auto' | 'skip';
+
+// ============================================================================
+// Computer（cua-driver）面板
+// ============================================================================
+
+export type ComputerConnectionState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'error'
+  | 'installing';
+
+export interface ComputerScreenInfo {
+  width: number;
+  height: number;
+  scale: number | null;
+}
+
+export interface ComputerStatus {
+  installed: boolean;
+  driverPath: string | null;
+  version: string | null;
+  connection: ComputerConnectionState;
+  toolCount: number;
+  screen: ComputerScreenInfo | null;
+  paused: boolean;
+  config: {
+    maxImageDimension: number;
+    allowForeground: boolean;
+  };
+  error: string | null;
+  activities: ComputerActivity[];
+}
+
+export interface ComputerWindowInfo {
+  window_id: number;
+  pid: number;
+  app_name?: string;
+  title?: string;
+  bounds?: { x: number; y: number; width: number; height: number };
+  is_on_screen?: boolean;
+  z_index?: number | null;
+}
+
+export interface ComputerActivity {
+  id: string;
+  ts: number;
+  sessionId?: string;
+  action: string;
+  tool: string;
+  target: string;
+  summary: string;
+  effect?: string;
+  verified?: boolean;
+  screenshotPath?: string;
+  isError?: boolean;
+  durationMs?: number;
+}

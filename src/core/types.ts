@@ -544,4 +544,6 @@ export const ServiceNames = {
   MCP_TASK_REGISTRY: 'mcp.task.registry',
   /** 语音识别服务（由 voice 模块注册：本地引擎 sherpa-onnx 承载 zipformer/SenseVoice/Whisper + 在线服务商） */
   VOICE_SERVICE: 'voice.service',
+  /** 计算机操作服务（由 computer 模块注册：cua-driver 进程生命周期 / 工具调用 / 截图 / 活动记录） */
+  COMPUTER: 'computer.service',
 } as const;

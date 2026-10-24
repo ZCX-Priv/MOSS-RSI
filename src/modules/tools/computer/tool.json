@@ -1,0 +1,331 @@
+{
+  "name": "computer",
+  "description": "计算机操作工具（集成 cua-driver，后台操作当前桌面）。默认不抢用户焦点、不移动真实鼠标：cua-driver 通过 UI Automation 与窗口消息在后台点击/输入，并返回每次动作的 effect（confirmed/unverifiable/suspected_noop/refused）、verified 与 escalation 建议。推荐流程：先 action='list_windows' 找到窗口，再用 action='get_window_state'（pid + window_id）同时拿到 UIA 元素树与截图；元素树中的 element_token 用于 click/type_text/press_key/set_value（优先语义元素），像素 x/y 只用于画布/自绘界面。动作后可用 get_window_state + since='latest' 增量读取验证。连续动作已知时用 action='run_steps'（steps 为 [{tool,args}]，最多 32 步）减少往返。delivery_mode 默认 background；仅当后台投递返回 unverifiable/refused 且确实需要时才显式 delivery_mode='foreground'（会短暂前置窗口）。action='status' 可查看驱动安装/连接/暂停状态；action='wait' 在本地等待。依赖外部 cua-driver（MIT，trycua/cua），未安装时请在右侧 Computer 面板安装。",
+  "description_en": "Computer use tool (cua-driver integration; drives the current desktop in the background). By default it does not steal focus or move the real pointer: cua-driver delivers clicks/typing in the background via UI Automation and window messages, and reports per-action effect (confirmed/unverifiable/suspected_noop/refused), verified, and escalation hints. Recommended loop: action='list_windows' to find a window, then action='get_window_state' (pid + window_id) to get the UIA tree and a screenshot together; use element_token from the tree for click/type_text/press_key/set_value (semantic elements first), and pixel x/y only for canvas/custom-drawn surfaces. Verify after acting with get_window_state + since='latest'. Use action='run_steps' (steps=[{tool,args}], max 32) to batch known actions. delivery_mode defaults to background; use delivery_mode='foreground' only when a background attempt returns unverifiable/refused and the action truly needs it (it briefly fronts the window). action='status' reports install/connection/pause state; action='wait' waits locally. Requires the external cua-driver (MIT, trycua/cua); install it from the Computer panel on the right if missing.",
+  "icon": "monitor",
+  "annotations": {
+    "destructiveHint": true,
+    "requireConfirmation": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "status",
+          "list_apps",
+          "list_windows",
+          "get_window_state",
+          "get_desktop_state",
+          "get_screen_size",
+          "get_cursor_position",
+          "zoom",
+          "click",
+          "double_click",
+          "right_click",
+          "drag",
+          "scroll",
+          "type_text",
+          "press_key",
+          "hotkey",
+          "set_value",
+          "launch_app",
+          "kill_app",
+          "clipboard_read",
+          "clipboard_write",
+          "run_steps",
+          "wait"
+        ],
+        "description": "操作类型。观察：status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom；动作：click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write；批量：run_steps；本地：wait。",
+        "description_en": "Operation. Observe: status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom. Act: click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write. Batch: run_steps. Local: wait."
+      },
+      "pid": {
+        "type": "integer",
+        "description": "目标进程 ID（窗口动作必填；来自 list_windows/list_apps 的返回）",
+        "description_en": "Target process ID (required for window actions; from list_windows/list_apps)"
+      },
+      "window_id": {
+        "type": "integer",
+        "description": "目标窗口 ID（来自 list_windows；get_window_state/zoom 等必填）",
+        "description_en": "Target window ID (from list_windows; required for get_window_state/zoom etc.)"
+      },
+      "element_token": {
+        "type": "string",
+        "description": "get_window_state 返回的元素句柄（形如 <snapshot_id>:<row>）；优先用它点击/输入，避免像素坐标",
+        "description_en": "Element handle from get_window_state (e.g. <snapshot_id>:<row>); prefer it over pixel coordinates for clicks and typing"
+      },
+      "x": {
+        "type": "number",
+        "description": "窗口截图内的像素 X（get_window_state 截图的坐标系）；scope=desktop 时为屏幕像素",
+        "description_en": "Pixel X inside the window screenshot (same space as get_window_state); screen pixels when scope=desktop"
+      },
+      "y": {
+        "type": "number",
+        "description": "窗口截图内的像素 Y（get_window_state 截图的坐标系）；scope=desktop 时为屏幕像素",
+        "description_en": "Pixel Y inside the window screenshot (same space as get_window_state); screen pixels when scope=desktop"
+      },
+      "display_id": {
+        "type": "string",
+        "description": "桌面目标显示器 id；缺省 'primary'",
+        "description_en": "Desktop target display id; defaults to 'primary'"
+      },
+      "scope": {
+        "type": "string",
+        "enum": ["window", "desktop"],
+        "description": "坐标作用域：window（缺省，窗口截图坐标）或 desktop（整屏坐标，仅前台投递）",
+        "description_en": "Coordinate scope: window (default, window-screenshot space) or desktop (full-screen pixels, foreground-only)"
+      },
+      "from_zoom": {
+        "type": "boolean",
+        "description": "x/y 是否来自最近一次 zoom 的裁剪图（仅 click/type_text 等像素动作）",
+        "description_en": "Whether x/y come from the latest zoom crop (pixel actions only)"
+      },
+      "button": {
+        "type": "string",
+        "enum": ["left", "right", "middle"],
+        "description": "鼠标按键（click；缺省 left）",
+        "description_en": "Mouse button (click; default left)"
+      },
+      "count": {
+        "type": "integer",
+        "description": "点击次数（像素路径；click 缺省 1）",
+        "description_en": "Click count (pixel path; click defaults to 1)"
+      },
+      "modifier": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "点击时按住的修饰键（如 [\"ctrl\"]）",
+        "description_en": "Modifier keys held during a click (e.g. [\"ctrl\"])"
+      },
+      "key": {
+        "type": "string",
+        "description": "单键名（press_key；如 return/tab/escape/up/down/space/f1 等）",
+        "description_en": "Single key name (press_key; e.g. return/tab/escape/up/down/space/f1)"
+      },
+      "modifiers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "按键修饰键（press_key；ctrl/shift/alt 等）",
+        "description_en": "Key modifiers for press_key (ctrl/shift/alt etc.)"
+      },
+      "keys": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 2,
+        "description": "组合键（hotkey；修饰键在前、主键最后，如 [\"ctrl\",\"s\"]）",
+        "description_en": "Key combination (hotkey; modifiers first, key last, e.g. [\"ctrl\",\"s\"])"
+      },
+      "text": {
+        "type": "string",
+        "description": "要输入的文字（type_text）；也用于 clipboard_write",
+        "description_en": "Text to type (type_text); also used by clipboard_write"
+      },
+      "value": {
+        "type": "string",
+        "description": "元素的新值（set_value；下拉框/滑块等）",
+        "description_en": "New element value (set_value; dropdowns/sliders etc.)"
+      },
+      "direction": {
+        "type": "string",
+        "enum": ["up", "down", "left", "right"],
+        "description": "滚动方向（scroll 必填）",
+        "description_en": "Scroll direction (required for scroll)"
+      },
+      "amount": {
+        "type": "number",
+        "description": "滚动量（scroll；具体单位由 cua 决定）",
+        "description_en": "Scroll amount (scroll; units determined by cua)"
+      },
+      "from_x": {
+        "type": "number",
+        "description": "拖拽起点 X（窗口截图像素）",
+        "description_en": "Drag start X (window screenshot pixels)"
+      },
+      "from_y": {
+        "type": "number",
+        "description": "拖拽起点 Y（窗口截图像素）",
+        "description_en": "Drag start Y (window screenshot pixels)"
+      },
+      "to_x": {
+        "type": "number",
+        "description": "拖拽终点 X（窗口截图像素）",
+        "description_en": "Drag end X (window screenshot pixels)"
+      },
+      "to_y": {
+        "type": "number",
+        "description": "拖拽终点 Y（窗口截图像素）",
+        "description_en": "Drag end Y (window screenshot pixels)"
+      },
+      "delivery_mode": {
+        "type": "string",
+        "enum": ["background", "foreground"],
+        "description": "输入投递方式：background（缺省，不抢焦点）/ foreground（短暂前置窗口；仅后台失败时使用）",
+        "description_en": "Input delivery: background (default, no focus steal) / foreground (briefly fronts the window; only after background fails)"
+      },
+      "include_screenshot": {
+        "type": "boolean",
+        "description": "get_window_state 是否返回截图（缺省 true；false 时只返回元素树，更省上下文）",
+        "description_en": "Whether get_window_state returns a screenshot (default true; false returns the tree only to save context)"
+      },
+      "include_accessibility_tree": {
+        "type": "boolean",
+        "description": "get_window_state 是否遍历 UIA 元素树（缺省 true；false 时只返回截图）",
+        "description_en": "Whether get_window_state walks the UIA tree (default true; false returns the screenshot only)"
+      },
+      "max_elements": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2000,
+        "description": "元素树最大节点数（缺省取工具配置 maxTreeElements，通常 250）",
+        "description_en": "Maximum tree nodes (defaults to the tool config maxTreeElements, usually 250)"
+      },
+      "max_depth": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "description": "元素树最大深度（可选）",
+        "description_en": "Maximum tree depth (optional)"
+      },
+      "query": {
+        "type": "string",
+        "description": "元素树过滤关键词（大小写不敏感；返回匹配行及其祖先）",
+        "description_en": "Tree filter keyword (case-insensitive; returns matching rows and ancestors)"
+      },
+      "since": {
+        "type": "string",
+        "description": "增量读取：'latest' 或上一次 get_window_state 的 snapshot_id；只返回变化行",
+        "description_en": "Diff read: 'latest' or a previous get_window_state snapshot_id; returns changed rows only"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 120000,
+        "description": "UIA 遍历时间预算（毫秒，get_window_state；缺省 1000）",
+        "description_en": "UIA walk time budget in ms (get_window_state; default 1000)"
+      },
+      "max_image_dimension": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4096,
+        "description": "截图长边上限（像素；0=原始尺寸；缺省取工具配置 maxImageDimension）",
+        "description_en": "Screenshot long-edge cap in pixels (0 = native; defaults to the tool config maxImageDimension)"
+      },
+      "on_screen_only": {
+        "type": "boolean",
+        "description": "list_windows 是否只返回当前屏幕可见窗口（缺省 false）",
+        "description_en": "Whether list_windows returns only on-screen windows (default false)"
+      },
+      "app": {
+        "type": "string",
+        "description": "launch_app 的应用名或可执行文件路径（Windows 可用完整路径）",
+        "description_en": "Application name or executable path for launch_app (a full path works on Windows)"
+      },
+      "wait_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000,
+        "description": "wait 动作的等待毫秒数（上限 10000）",
+        "description_en": "Wait duration in ms for the wait action (max 10000)"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "cua 动作工具名（click/double_click/right_click/set_value/type_text/press_key/hotkey/scroll/drag）",
+              "description_en": "cua action tool name (click/double_click/right_click/set_value/type_text/press_key/hotkey/scroll/drag)"
+            },
+            "args": {
+              "type": "object",
+              "description": "该动作的 cua 参数（与单独调用相同）",
+              "description_en": "Arguments for that action (same as a standalone call)"
+            }
+          },
+          "required": ["tool"],
+          "additionalProperties": true
+        },
+        "description": "run_steps 的顺序动作列表（1-32 步；首个失败即停止）",
+        "description_en": "Ordered action list for run_steps (1-32 steps; stops at the first failure)"
+      },
+      "delay_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2000,
+        "description": "run_steps 每步之间的停顿（毫秒，最大 2000）",
+        "description_en": "Pause between run_steps steps in ms (max 2000)"
+      },
+      "observe": {
+        "type": "object",
+        "description": "run_steps 结束后追加一次 get_window_state 的参数（如 {include_screenshot:true}）",
+        "description_en": "Optional get_window_state arguments for one observation after run_steps (e.g. {include_screenshot:true})"
+      },
+      "x1": {
+        "type": "number",
+        "description": "zoom 裁剪区域左上 X（窗口截图像素）",
+        "description_en": "Zoom region left X (window screenshot pixels)"
+      },
+      "y1": {
+        "type": "number",
+        "description": "zoom 裁剪区域左上 Y（窗口截图像素）",
+        "description_en": "Zoom region top Y (window screenshot pixels)"
+      },
+      "x2": {
+        "type": "number",
+        "description": "zoom 裁剪区域右下 X（窗口截图像素）",
+        "description_en": "Zoom region right X (window screenshot pixels)"
+      },
+      "y2": {
+        "type": "number",
+        "description": "zoom 裁剪区域右下 Y（窗口截图像素）",
+        "description_en": "Zoom region bottom Y (window screenshot pixels)"
+      },
+      "include_text": {
+        "type": "boolean",
+        "description": "clipboard_read 是否返回纯文本内容（缺省 false；隐私敏感）",
+        "description_en": "Whether clipboard_read returns plain text (default false; privacy-sensitive)"
+      },
+      "image_path": {
+        "type": "string",
+        "description": "clipboard_write 要写入剪贴板的图片绝对路径",
+        "description_en": "Absolute image path for clipboard_write"
+      },
+      "file_path": {
+        "type": "string",
+        "description": "clipboard_write 要写入剪贴板的文件绝对路径（文件 URL）",
+        "description_en": "Absolute file path for clipboard_write (file URL)"
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true,
+      "requireConfirmation": true,
+      "timeout": 120000,
+      "maxImageDimension": 1280,
+      "maxTreeElements": 250,
+      "allowForeground": true
+    },
+    "schema": {
+      "timeout": {
+        "type": "integer",
+        "min": 5000,
+        "max": 300000
+      },
+      "maxImageDimension": {
+        "type": "integer",
+        "min": 0,
+        "max": 4096
+      },
+      "maxTreeElements": {
+        "type": "integer",
+        "min": 10,
+        "max": 2000
+      }
+    }
+  }
+}

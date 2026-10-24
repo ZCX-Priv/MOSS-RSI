@@ -34,6 +34,7 @@ import update from '../modules/update';
 import agent from '../modules/agent';
 import filesys from '../modules/filesys';
 import terminal from '../modules/terminal';
+import computer from '../modules/computer';
 import safety from '../modules/safety';
 import fileHistory from '../modules/file-history';
 import daemon from '../modules/daemon';
@@ -74,6 +75,7 @@ const MODULE_FACTORIES: Array<{ name: string; create: () => Module }> = [
   { name: 'remote', create: remote },
   { name: 'tools', create: tools },
   { name: 'mcp', create: mcp },
+  { name: 'computer', create: computer },
   { name: 'update', create: update },
   { name: 'filesys', create: filesys },
   { name: 'terminal', create: terminal },
