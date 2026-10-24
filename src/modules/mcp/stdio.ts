@@ -39,7 +39,7 @@ export class McpStdioServer {
     )) as { ListToolsRequestSchema: unknown; CallToolRequestSchema: unknown };
 
     const server = new Server(
-      { name: 'moss', version: '1.0.0' },
+      { name: 'moss', version: '1.1.0' },
       { capabilities: { tools: {} } },
     );
     registerToolHandlers(server, this.deps, { ListToolsRequestSchema, CallToolRequestSchema });

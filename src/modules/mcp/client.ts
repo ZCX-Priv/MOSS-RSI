@@ -221,7 +221,7 @@ export class McpClient {
 
     // 创建 client 实例（elicitation 始终声明——agent 通道支持，无桥时 decline；sampling 按钩子注入声明）
     this.sdkClient = new Client(
-      { name: 'moss', version: '1.0.0' },
+      { name: 'moss', version: '1.1.0' },
       { capabilities: this.buildCapabilities() },
     );
     this.registerClientHandlers();
@@ -240,7 +240,7 @@ export class McpClient {
         transport = await this.createSseTransport();
         this.effectiveTransport = 'sse';
         this.sdkClient = new Client(
-          { name: 'moss', version: '1.0.0' },
+          { name: 'moss', version: '1.1.0' },
           { capabilities: this.buildCapabilities() },
         );
         this.registerClientHandlers();

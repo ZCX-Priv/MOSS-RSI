@@ -520,7 +520,7 @@ export class McpExpose {
       enableJsonResponse,
     });
     const server = new Server(
-      { name: 'moss', version: '1.0.0' },
+      { name: 'moss', version: '1.1.0' },
       { capabilities: { tools: {} } },
     );
 

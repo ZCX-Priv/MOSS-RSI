@@ -1,108 +1,64 @@
 # MOSS 前后端对接文档
 
-> 本文档基于新前端 `webui/`（React 19 + shadcn/ui）与现有后端 `src/modules/server/` 的现状，梳理**需要迁移的接口**、**需要新增的接口**、**前端需新增的模块**与**后端需新增的模组**，作为后续实施的契约依据。
+> 本文档以当前代码为唯一真相源：`src/modules/server/index.ts`（158 条 REST 路由）、`src/modules/remote/index.ts`（10 条，合计 168 条）、`src/modules/server/ws-handler.ts`（20 种 WS 入站消息）。接口变更时请同步更新本文件。
 >
-> **注**：本文档第一章为迁移启动时的历史快照，仅供追溯；文中标注"🆕 新增"的多数接口与模组（tasks/agenteam/automation/skills/specs/todos/version/search 等）现已实现，以 `src/modules/server/routes/` 实际代码为准。`/api/plugins`、`/api/extensions` 等扩展管理接口从未实施（系统无插件机制）。
+> 系统**不存在插件机制**，没有 `/api/plugins`、`/api/extensions`；扩展能力通过模组、Skill、Command、MCP 提供。
 >
-> 配套文档：[architecture.md](./architecture.md)（系统总览）
+> 配套文档：[architecture.md](./architecture.md)（系统总览、模组与数据持久化）
 
 ---
 
-## 一、现状分析
+## 一、通用约定
 
-### 1.1 新前端 `webui/` 现状
-
-| 维度 | 现状 |
-|---|---|
-| 技术栈 | React 19 + shadcn/ui + Tailwind 4 + i18next + idb + Vite 8 |
-| 页面 | HomePage / TaskRunningPage / PluginMarketPage / AutomationPage / SettingsPage |
-| 状态管理 | **无**（仅有 ThemeContext / I18nContext，无业务 store） |
-| API 客户端 | **无**（`webui/src/api/` 目录不存在） |
-| 业务 hooks | **无**（仅有 use-mobile / useLocale） |
-| 数据来源 | **全部硬编码 mock**（任务列表、模型列表、Agent 列表、插件列表、自动化模板等） |
-| 类型定义 | 仅 `types/index.ts` 定义了 PageType / OverlayType / TaskItem 等纯 UI 类型 |
-
-**结论**：新前端目前只有 UI 骨架，需要从零搭建 API 层、状态层、业务 hooks，并与后端对接。
-
-### 1.2 旧前端 `webui/` 现状（迁移来源）
-
-| 维度 | 现状 |
-|---|---|
-| 技术栈 | React 18 + zustand + react-markdown |
-| API 客户端 | `webui/src/api/http.ts` + `ws.ts`（完整实现） |
-| 状态管理 | `webui/src/store/index.ts`（zustand，完整） |
-| 业务 hooks | `useTask.ts`（WS 流式任务）+ `useConfig.ts`（配置加载） |
-| 类型定义 | `webui/src/types/index.ts`（完整的前后端共享类型） |
-
-**可迁移内容**：http/ws 客户端封装、类型定义、useTask/useConfig 的业务逻辑（需适配新前端的 React 19 + 无 zustand 环境）。
-
-### 1.3 后端 `src/modules/server/` 现状
-
-已实现的 HTTP 路由（14 个）：
-- `GET /api/health`
-- `GET|PUT /api/config`、`GET|PUT /api/api-config`
-- `GET /api/session`、`GET /api/session/:id`、`DELETE /api/session/:id`
-- `GET /api/mcp/servers`、`GET /api/mcp/tools`、`POST /api/mcp/call`、`POST /api/mcp/connect`、`POST /api/mcp/disconnect`
-
-已实现的 WS 消息（4 种入站）：
-- `task.stream` / `task.abort` / `session.subscribe` / `tool.ask.reply`
-
-已注册但**未暴露 HTTP**的后端服务：
-- `SkillRegistry`（`skill.registry`）—— Skills 已加载但无查询接口
-- `kernel.modules` —— 模块状态查询（仅 /api/health 间接暴露）
-
-**当时完全缺失的后端模组**（迁移启动时的状态，现已实现）：
-- `agenteam` 模组（Agent CRUD）
-- `automation` 模组（cron/once 定时任务调度）
-
----
-
-## 二、通用约定
-
-### 2.1 通信通道
+### 1.1 通信通道
 
 | 通道 | 用途 | 协议 |
 |---|---|---|
-| HTTP REST | 配置、会话、Agent、Automation、Plugins、Skills、Specs、Models 等 CRUD | `/api/*`，JSON |
-| WebSocket | 流式任务、ask 回复、todo 实时更新、automation 运行通知 | `/ws`，JSON 帧 |
+| HTTP REST | 配置、Provider、会话、任务、Agent 团队、MCP、Skill/Command、自动化、文件系统、终端、浏览器/桌面、日志、上下文、规则/钩子/记忆、语音、远程访问 | `/api/*`，JSON |
+| WebSocket | 流式任务、ask/confirm 回复、任务/终端/语音/自动化/AI 诊断 | `/ws`，JSON 帧 |
+| MCP over HTTP | 对外暴露 MOSS 工具（`mcpServer.enabled`） | `/mcp` |
+| MCP over stdio | `moss mcp` 供 Claude Desktop / Cursor 等客户端调用 | stdio |
 
-### 2.2 鉴权
+### 1.2 鉴权
 
 - 配置项：`config.security.authToken`（空字符串表示无需鉴权）
-- 客户端：HTTP 头 `Authorization: Bearer <token>`，WS 同源信任不强制
-- 服务端：`HttpRouter.checkAuth()` 校验，空 token 放行
-- 前端：`localStorage['moss-token']` 存储，`api/http.ts` 自动注入
+- HTTP：请求头 `Authorization: Bearer <token>`；前端从 `localStorage['moss-token']` 读取并自动注入
+- WebSocket：同源信任，不强制 Token；远程访问开启时由 `RemoteGuard` 在升级握手前校验远程密码 cookie
+- 免鉴权例外：`GET /api/health`、`GET /api/version`、`GET /api/filesystem/media`（query token 校验）、`GET /api/voice/wasm/*`（浏览器加载器直接请求）
 
-### 2.3 统一响应格式
+### 1.3 统一响应格式
 
 **成功**：HTTP 200，body 为业务数据 JSON。
 
 **错误**：HTTP 4xx/5xx，body 统一为：
+
 ```json
 { "error": "错误描述" }
 ```
 
-### 2.4 CORS
+### 1.4 CORS
 
 后端已开启（`Access-Control-Allow-Origin: *`），开发模式由 Vite 代理 `/api` + `/ws` → 7766。
 
-### 2.5 日期格式
+### 1.5 日期格式
 
 所有时间字段统一使用 ISO 8601 字符串（如 `2026-08-06T11:21:00.000Z`）。
 
 ---
 
-## 三、HTTP REST 接口
+## 二、HTTP REST 接口
 
-### 3.1 已有接口（需迁移对接）
+以下按业务域分组，共 **168 条**（server 158 + remote 10）。列 `/api/*` 均省略前缀。
 
-以下接口后端已实现，新前端需在 `webui/src/api/http.ts` 中封装并对接。
+### 2.1 健康与版本
 
-#### 3.1.1 健康检查
-```
-GET /api/health
-```
-**响应**：
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/health` | 否 | 服务状态、运行时长、模块数量与状态 |
+| GET | `/api/version` | 否 | 版本、channel、buildDate（读取根 `package.json`） |
+
+**`GET /api/health` 响应**：
+
 ```ts
 {
   status: 'ok';
@@ -114,429 +70,596 @@ GET /api/health
 }
 ```
 
-#### 3.1.2 应用配置
-```
-GET /api/config        → AppConfig
-PUT /api/config        ← Partial<AppConfig> → AppConfig
-```
+**`GET /api/version` 响应**：
 
-#### 3.1.3 API 配置（Provider/模型）
-```
-GET /api/api-config    → ApiConfig
-PUT /api/api-config    ← Partial<ApiConfig> → ApiConfig
-```
-
-#### 3.1.4 会话管理
-```
-GET    /api/session          → { sessions: Session[] }
-GET    /api/session/:id      → { sessionId: string; messages: TaskMessage[] }
-DELETE /api/session/:id      → { deleted: boolean }
-```
-
-#### 3.1.6 MCP 管理
-```
-GET  /api/mcp/servers                 → { servers: McpServer[] }
-GET  /api/mcp/tools?server=name       → { tools: McpTool[] }
-POST /api/mcp/call                    ← { server, tool, arguments }
-POST /api/mcp/connect                 ← { server }
-POST /api/mcp/disconnect              ← { server }
-```
-
----
-
-### 3.2 新增接口（后端需实现）
-
-以下接口后端**尚未实现**，需在 `src/modules/server/routes/` 下新增，并在 `index.ts` 注册。
-
-#### 3.2.1 任务管理（TaskRunningPage + Sidebar）
-
-> 新前端用「任务」概念替代旧前端的「会话」，任务支持分组。建议后端在 `agent` 模组内扩展 SessionStore，新增 `~/.moss/tasks.json` 持久化任务元信息（分组、标题、创建时间、最后活跃时间），消息历史仍复用 session。
-
-```
-GET    /api/tasks                     → { groups: TaskGroup[]; tasks: TaskItem[] }
-POST   /api/tasks                     ← { title: string; groupId?: string } → TaskItem
-GET    /api/tasks/:id                 → { task: TaskItem; messages: TaskMessage[]; todos: TodoItem[]; contextFiles: ContextFile[] }
-PATCH  /api/tasks/:id                 ← { title?: string; groupId?: string } → TaskItem
-DELETE /api/tasks/:id                 → { deleted: boolean }
-
-GET    /api/task-groups               → { groups: TaskGroup[] }
-POST   /api/task-groups               ← { name: string } → TaskGroup
-PATCH  /api/task-groups/:id           ← { name?: string } → TaskGroup
-DELETE /api/task-groups/:id           ← { moveTasksTo?: string } → { deleted: boolean }
-
-GET    /api/search?q=keyword          → { tasks: TaskItem[]; messages?: SearchResult[] }
-```
-
-**类型定义**：
 ```ts
-interface TaskItem {
-  id: string;
-  title: string;
-  groupId: string;
-  createdAt: string;
-  updatedAt: string;
-  active?: boolean;
-}
-interface TaskGroup {
-  id: string;
-  name: string;
-  expanded?: boolean;
-  taskCount?: number;
-}
-interface TodoItem {
-  id: string;
-  text: string;
-  status: 'pending' | 'in_progress' | 'completed';
-  sessionId?: string;
-}
-interface ContextFile {
-  path: string;
-  tokens?: number;
-  reason?: 'read' | 'edit' | 'write' | 'grep' | 'glob';
-}
+{ version: string; channel: string; buildDate?: string }
 ```
 
-#### 3.2.2 模型管理（ModelSelector + SettingsPage-Model）
+### 2.2 应用与模型配置
 
-> 从 `ApiConfig.providers` 聚合出扁平模型列表，支持前端选择与 thinking 配置。
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/config` | 是 | 读取 AppConfig |
+| PUT | `/api/config` | 是 | 更新 AppConfig（部分字段） |
+| GET | `/api/api-config` | 是 | 读取 ApiConfig（providers 结构） |
+| PUT | `/api/api-config` | 是 | 更新 ApiConfig |
 
-```
-GET    /api/models                    → { models: ModelItem[]; current: string }
-PUT    /api/models/current            ← { modelId: string } → { current: string }
-POST   /api/models                    ← { name: string; provider: string; contextWindow?: string; multiplier?: string } → ModelItem
-PATCH  /api/models/:id                ← Partial<ModelItem> → ModelItem
-DELETE /api/models/:id                → { deleted: boolean }
-```
+### 2.3 Provider 与模型
 
-**类型定义**：
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/providers` | 是 | Provider/模型总览与当前选择 |
+| PUT | `/api/providers/current` | 是 | 设置当前模型 |
+| PUT | `/api/providers/search-current` | 是 | 设置当前联网搜索服务商 |
+| PUT | `/api/providers/reorder` | 是 | Provider 排序 |
+| POST | `/api/providers` | 是 | 新建 Provider |
+| PATCH | `/api/providers/:id` | 是 | 更新 Provider |
+| DELETE | `/api/providers/:id` | 是 | 删除 Provider |
+| POST | `/api/providers/:id/models` | 是 | 添加模型 |
+| POST | `/api/providers/:id/models/fetch` | 是 | 从远端拉取模型列表 |
+| POST | `/api/providers/:id/balance` | 是 | 查询余额 |
+| POST | `/api/providers/:id/models/:modelId/test` | 是 | 测试模型可用性 |
+| PATCH | `/api/providers/:id/models/:modelId` | 是 | 更新模型 |
+| DELETE | `/api/providers/:id/models/:modelId` | 是 | 删除模型 |
+| POST | `/api/providers/:id/services` | 是 | 添加服务（搜索 / 语音等服务商项） |
+| PATCH | `/api/providers/:id/services/:serviceId` | 是 | 更新服务 |
+| DELETE | `/api/providers/:id/services/:serviceId` | 是 | 删除服务 |
+
+### 2.4 会话
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/session` | 是 | 会话列表 |
+| GET | `/api/session/:id` | 是 | 会话历史消息 |
+| DELETE | `/api/session/:id` | 是 | 删除会话 |
+| GET | `/api/session/:id/state` | 是 | 会话运行状态快照（与 `task.switch` 回复同构） |
+| GET | `/api/sessions/:id/context` | 是 | 上下文文件与 token 占用 |
+| GET | `/api/sessions/:id/truncate-preview` | 是 | 撤回预览（待删除消息范围） |
+| POST | `/api/sessions/:id/truncate` | 是 | 撤回消息 |
+| POST | `/api/sessions/:id/truncate-restore` | 是 | 恢复撤回 |
+| POST | `/api/sessions/:id/regenerate-target` | 是 | 计算重新生成目标 |
+
+### 2.5 MCP
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/mcp/servers` | 是 | MCP 服务器列表与状态 |
+| GET | `/api/mcp/tools` | 是 | 工具列表（可按 server 过滤） |
+| POST | `/api/mcp/call` | 是 | 调用 MCP 工具 |
+| POST | `/api/mcp/connect` | 是 | 连接服务器 |
+| POST | `/api/mcp/disconnect` | 是 | 断开服务器 |
+| POST | `/api/mcp/servers` | 是 | 新增服务器配置 |
+| PUT | `/api/mcp/servers/:name` | 是 | 更新服务器配置 |
+| DELETE | `/api/mcp/servers/:name` | 是 | 删除服务器配置 |
+
+另有对外 MCP Server 端点 `/mcp`（HTTP，`mcpServer.enabled` 时启用），不属于 `/api` REST 路由。
+
+### 2.6 Skill / Command / 工具
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/skills` | 是 | Skill 列表 |
+| GET | `/api/skills/:name` | 是 | Skill 详情 |
+| PATCH | `/api/skills/:name` | 是 | 启停 Skill |
+| POST | `/api/skills` | 是 | 新建 Skill |
+| POST | `/api/skills/import` | 是 | 导入 Skill |
+| GET | `/api/commands` | 是 | 自定义命令列表 |
+| POST | `/api/commands` | 是 | 新建命令 |
+| PUT | `/api/commands/:name` | 是 | 更新命令内容 |
+| DELETE | `/api/commands/:name` | 是 | 删除命令 |
+| PATCH | `/api/commands/:name` | 是 | 启停命令 |
+| GET | `/api/tools` | 是 | 内置工具列表与配置 |
+| PATCH | `/api/tools/:name` | 是 | 更新工具配置 |
+
+### 2.7 Todo 与文件历史
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/todos/:sessionId` | 是 | 读取会话 Todo |
+| PUT | `/api/todos/:sessionId` | 是 | 覆盖会话 Todo |
+| GET | `/api/file-history/:sessionId` | 是 | 会话文件变更历史 |
+| POST | `/api/file-history/:sessionId/undo` | 是 | 撤回最近变更 |
+| POST | `/api/file-history/:sessionId/restore` | 是 | 恢复被撤回变更 |
+
+### 2.8 任务与分组
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/tasks` | 是 | 任务分组 + 任务列表（分页参数） |
+| POST | `/api/tasks` | 是 | 创建任务 |
+| GET | `/api/tasks/:id` | 是 | 任务详情、消息、todo、上下文文件 |
+| PATCH | `/api/tasks/:id` | 是 | 更新标题 / 分组 |
+| DELETE | `/api/tasks/:id` | 是 | 删除任务 |
+| PUT | `/api/tasks/reorder` | 是 | 任务排序 |
+| GET | `/api/task-groups` | 是 | 分组列表 |
+| POST | `/api/task-groups` | 是 | 新建分组 |
+| PATCH | `/api/task-groups/:id` | 是 | 重命名 / 折叠状态 |
+| DELETE | `/api/task-groups/:id` | 是 | 删除分组（可迁移任务） |
+| GET | `/api/search` | 是 | 任务与消息搜索（query `q`） |
+
+### 2.9 Agent 与团队
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/agenteam` | 是 | Agent 列表与默认 Agent |
+| POST | `/api/agenteam` | 是 | 新建 Agent |
+| GET | `/api/agenteam/:id` | 是 | Agent 详情 |
+| PATCH | `/api/agenteam/:id` | 是 | 更新 Agent |
+| DELETE | `/api/agenteam/:id` | 是 | 删除 Agent |
+| PUT | `/api/agenteam/default` | 是 | 设置默认 Agent |
+| GET | `/api/agenteams` | 是 | 团队列表 |
+| GET | `/api/agenteams/:id` | 是 | 团队详情 |
+| GET | `/api/agenteams/:id/messages` | 是 | 团队消息 |
+| POST | `/api/agenteams` | 是 | 创建团队任务 |
+| POST | `/api/agenteams/:id/approve` | 是 | 审批团队计划 |
+| POST | `/api/agenteams/:id/discard` | 是 | 丢弃团队 |
+| POST | `/api/agenteams/:id/halt` | 是 | 暂停团队 |
+| POST | `/api/agenteams/:id/resume` | 是 | 恢复团队 |
+| DELETE | `/api/agenteams/:id` | 是 | 删除团队 |
+| GET | `/api/agenteam-profiles` | 是 | 团队模板列表 |
+| POST | `/api/agenteam-profiles` | 是 | 保存团队模板 |
+| DELETE | `/api/agenteam-profiles/:name` | 是 | 删除团队模板 |
+| POST | `/api/subagents/run` | 是 | 运行临时 subagent |
+
+### 2.10 自动化
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/automations` | 是 | 自动化任务列表 |
+| POST | `/api/automations` | 是 | 新建（cron / once） |
+| GET | `/api/automations/:id` | 是 | 任务详情 |
+| PATCH | `/api/automations/:id` | 是 | 更新任务 |
+| DELETE | `/api/automations/:id` | 是 | 删除任务 |
+| POST | `/api/automations/:id/trigger` | 是 | 立即触发 |
+| POST | `/api/automations/:id/pause` | 是 | 暂停 |
+| POST | `/api/automations/:id/resume` | 是 | 恢复 |
+| GET | `/api/automations/:id/history` | 是 | 运行历史 |
+
+### 2.11 文件系统
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/api/filesystem/resolve-paths` | 是 | 解析路径选择器结果 |
+| POST | `/api/filesystem/save-attachment` | 是 | 粘贴附件落盘到 `~/.moss/agent/attachments/` |
+| POST | `/api/filesystem/upload` | 是 | 上传文件到授权目录（重名 409，上限 12MB） |
+| GET | `/api/filesystem/suggest-paths` | 是 | 路径补全建议 |
+| GET | `/api/filesystem/search-files` | 是 | 工作目录文件名搜索（`@` 提及菜单） |
+| GET | `/api/filesystem/list` | 是 | 列出目录直接子项（走 roots 权限） |
+| GET | `/api/filesystem/drives` | 是 | 驱动器枚举与容量 |
+| GET | `/api/filesystem/raw` | 是 | 只读文件预览（白名单 + roots 权限） |
+| GET | `/api/filesystem/media` | 否 | 音视频直链（`<video>/<audio>` 无法带 Header，handler 内校验 query token） |
+| GET | `/api/filesystem/text` | 是 | 通用文本提取（Office / 电子书回退） |
+| GET | `/api/filesys/roots` | 是 | 授权 roots 列表 |
+| PUT | `/api/filesys/roots` | 是 | 更新授权 roots |
+
+### 2.12 终端 / 计算机 / 浏览器
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/terminal/interpreters` | 是 | 本机可用解释器类型（新建终端菜单数据源） |
+| GET | `/api/computer/status` | 是 | cua-driver 安装/连接/屏幕状态 |
+| GET | `/api/computer/windows` | 是 | 桌面窗口列表 |
+| GET | `/api/computer/screenshot` | 是 | 实时截图（返回图片） |
+| POST | `/api/computer/install` | 是 | 安装 cua-driver |
+| POST | `/api/computer/control` | 是 | 暂停 / 恢复 Agent 桌面控制 |
+| GET | `/api/browser/status` | 是 | 扩展桥接 / 内置 Chrome / 实例状态 |
+| POST | `/api/browser/extension/open` | 是 | 打开扩展目录（供手动加载） |
+| POST | `/api/browser/builtin` | 是 | 启动 / 停止内置 Chrome |
+| POST | `/api/browser/chrome-for-testing` | 是 | 下载 Chrome for Testing |
+| POST | `/api/browser/install` | 是 | 安装浏览器扩展 |
+
+### 2.13 日志与系统监控
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/logs/files` | 是 | 日志文件列表 |
+| GET | `/api/logs` | 是 | 日志查询（级别 / 关键字 / 分页过滤） |
+| POST | `/api/logs/cleanup` | 是 | 清理过期日志 |
+| GET | `/api/system-monitor/snapshot` | 是 | 系统资源 + MOSS 进程树占用快照 |
+
+### 2.14 上下文引擎
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/context/summary-models` | 是 | 可用摘要模型列表 |
+| GET | `/api/context/:sessionId/stats` | 是 | 会话上下文统计 |
+| GET | `/api/context/:sessionId/compactions` | 是 | 压缩历史 |
+| GET | `/api/context/:sessionId/compact-preview` | 是 | 手动压缩预览 |
+| POST | `/api/context/:sessionId/compact` | 是 | 手动触发压缩 |
+| GET | `/api/context/file-index/status` | 是 | 文件索引状态 |
+| POST | `/api/context/file-index/rebuild` | 是 | 重建文件索引 |
+
+### 2.15 规则 / 钩子 / 记忆
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/rules` | 是 | 规则列表（global / project 双作用域） |
+| POST | `/api/rules` | 是 | 新建规则 |
+| GET | `/api/rules/:id` | 是 | 规则详情 |
+| PATCH | `/api/rules/:id` | 是 | 更新规则 |
+| DELETE | `/api/rules/:id` | 是 | 删除规则 |
+| GET | `/api/hooks` | 是 | 钩子列表 |
+| POST | `/api/hooks` | 是 | 新建钩子 |
+| GET | `/api/hooks/history` | 是 | 钩子执行历史 |
+| GET | `/api/hooks/:id` | 是 | 钩子详情 |
+| PATCH | `/api/hooks/:id` | 是 | 更新钩子 |
+| DELETE | `/api/hooks/:id` | 是 | 删除钩子 |
+| POST | `/api/hooks/:id/test` | 是 | 手动触发测试 |
+| GET | `/api/memory/tree` | 是 | 记忆宫殿树 |
+| POST | `/api/memory/distill` | 是 | 手动蒸馏 |
+| GET | `/api/memory` | 是 | 记忆列表 / 搜索 |
+| POST | `/api/memory` | 是 | 新建记忆 |
+| GET | `/api/memory/:id` | 是 | 记忆详情 |
+| PATCH | `/api/memory/:id` | 是 | 更新记忆 |
+| DELETE | `/api/memory/:id` | 是 | 删除单条记忆 |
+| DELETE | `/api/memory` | 是 | 批量清空 |
+
+### 2.16 语音
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/voice/status` | 是 | 总览（开关 / 引擎 / 默认模型 / 服务商） |
+| GET | `/api/voice/models` | 是 | 模型目录与安装状态 |
+| POST | `/api/voice/enable` | 是 | 开关语音输入 |
+| POST | `/api/voice/default-model` | 是 | 设置默认本地模型 |
+| PUT | `/api/voice/provider` | 是 | 设置在线语音服务商 |
+| POST | `/api/voice/models/:id/install` | 是 | 下载并安装模型 |
+| DELETE | `/api/voice/models/:id` | 是 | 卸载模型 |
+| GET | `/api/voice/wasm/manifest` | 否 | 浏览器 WASM 推理文件表 |
+| GET | `/api/voice/wasm/data` | 否 | 模型字节流（Emscripten 加载器直接 GET） |
+
+### 2.17 远程访问
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/remote/status` | 是 | 远程总览（LAN / 隧道 / URL / 密码状态） |
+| POST | `/api/remote/enable` | 是 | 开启远程访问（热重绑 0.0.0.0） |
+| POST | `/api/remote/disable` | 是 | 关闭远程访问（热重绑回环） |
+| POST | `/api/remote/lan` | 是 | 局域网开关 |
+| POST | `/api/remote/lan/password` | 是 | 局域网密码操作（refresh/custom/enable/disable） |
+| POST | `/api/remote/lan-ip` | 是 | 手动指定局域网 IP |
+| POST | `/api/remote/tunnel/start` | 是 | 启动 cloudflared 隧道 |
+| POST | `/api/remote/tunnel/stop` | 是 | 停止隧道 |
+| POST | `/api/remote/tunnel/password` | 是 | 公网密码操作（refresh/custom） |
+| GET | `/api/remote/passwords` | 是 | 密码明文视图（仅已认证者） |
+
+### 2.18 关键接口请求/响应
+
+**`GET /api/session/:id/state`**
+
 ```ts
-interface ModelItem {
-  id: string;              // provider:model 格式，如 "glm:glm-4-plus"
-  name: string;            // 展示名，如 "GLM-5.2"
-  provider: string;        // provider id
-  providerFormat: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini';
-  multiplier?: string;     // 倍率，如 "0.6x"
-  contextWindow?: string;  // 如 "200K" / "1M"
-  thinking: {
-    enabled: boolean;
-    effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
-    budgetTokens?: number;
-  };
-  custom?: boolean;        // 是否用户自定义
+{
+  sessionId: string;
+  running: boolean;
+  totalMessages: number;
+  newestIndex: number;
+  liveDraft: unknown | null;
+  pendingAsks: Array<{ toolCallId: string; sessionId: string; questions: AskQuestion[] }>;
+  pendingConfirms: Array<{ toolCallId: string; sessionId: string; question: string; ruleSuggestion?: string }>;
+  permissionMode?: 'ask' | 'auto' | 'skip';
+  lastRunStats?: RunStats;
 }
 ```
 
-#### 3.2.3 Agent 管理（AgentSwitchMenu + SettingsPage-Agent）
+> WebSocket `session.subscribed` 与 `task.switch` 的回复载荷是精简版快照：`{ running, runId?, totalMessages, newestIndex, liveDraft? }`（不含 pending 列表，pending 由订阅逻辑单独补发）。
 
-> 需新建 `src/modules/agenteam/` 模组，注册 `agenteam.registry` 服务，持久化到 `~/.moss/agenteam.json`。
+**`GET /api/tasks/:id`**
 
-```
-GET    /api/agenteam                     → { agents: AgentItem[]; default: string }
-GET    /api/agenteam/:id                 → AgentDetail
-POST   /api/agenteam                     ← { name: string; systemPrompt?: string; model?: string; tools?: string[] } → AgentItem
-PATCH  /api/agenteam/:id                 ← Partial<AgentDetail> → AgentItem
-DELETE /api/agenteam/:id                 → { deleted: boolean }
-PUT    /api/agenteam/default             ← { id: string } → { default: string }
-```
-
-**类型定义**：
 ```ts
-interface AgentItem {
-  id: string;
-  name: string;
-  description?: string;
-  icon?: string;           // 图标标识（前端映射 LucideIcon）
-  builtIn: boolean;
-  default?: boolean;
-}
-interface AgentDetail extends AgentItem {
-  systemPrompt?: string;
-  model?: string;
-  provider?: string;
-  tools?: string[];        // 启用的工具白名单
-  maxTurns?: number;
-  maxTokens?: number;
+{
+  task: TaskItem;
+  messages: TaskMessage[];
+  todos: TodoItem[];
+  contextFiles: ContextFile[];
+  activeSkill?: string;
+  permissionMode?: 'ask' | 'auto' | 'skip';
 }
 ```
 
-#### 3.2.4 插件管理（PluginMarketPage）
+**`GET /api/providers`**
 
-> 此规划**未实施**：系统不存在插件机制，无 `/api/plugins` 路由。PluginMarketPage 实际对接 Skills 管理（`/api/skills` 系列）与 MCP 服务器管理（`/api/mcp/*` + config 更新）。
-
-~~GET    /api/plugins                    → { plugins: PluginItem[] }~~
-~~GET    /api/plugins/:id                → PluginDetail~~
-~~PATCH  /api/plugins/:id                ← { enabled?: boolean } → PluginItem~~
-
-#### 3.2.5 Skills 查询（PluginMarketPage-Skills 标签）
-
-> 后端 `SkillRegistry` 已注册，仅需在 `server/routes/` 新增路由。
-
-```
-GET    /api/skills                     → { skills: SkillItem[] }
-GET    /api/skills/:name               → { skill: SkillDetail }
-```
-
-**类型定义**：
 ```ts
-interface SkillItem {
-  name: string;
-  description: string;
-  source: 'builtin' | 'user';
-}
-interface SkillDetail extends SkillItem {
-  prompt: string;
-  sourceFile?: string;
+{
+  providers: ProviderConfig[];
+  current: string;               // 当前默认模型（config.agent.defaultModel）
+  currentSearchProvider: string; // 空串 = 本地免费引擎链
 }
 ```
 
-#### 3.2.7 自动化任务（AutomationPage）
+**`POST /api/mcp/call`**
 
-> 需新建 `src/modules/automation/` 模组，注册 `automation.service` 服务，持久化到 `~/.moss/automations.json` + `~/.moss/automations-history.json`。
-
-```
-GET    /api/automations                → { automations: AutomationItem[] }
-GET    /api/automations/:id            → AutomationDetail
-POST   /api/automations                ← { title: string; cron: string; prompt: string; agentId?: string } → AutomationItem
-PATCH  /api/automations/:id            ← Partial<AutomationDetail> → AutomationItem
-DELETE /api/automations/:id            → { deleted: boolean }
-POST   /api/automations/:id/trigger    → { runId: string }
-POST   /api/automations/:id/pause      → { paused: boolean }
-POST   /api/automations/:id/resume     → { paused: boolean }
-GET    /api/automations/:id/history    → { history: AutomationRun[] }
-
-GET    /api/automation-templates       → { templates: AutomationTemplate[] }
-```
-
-**类型定义**：
 ```ts
-interface AutomationItem {
-  id: string;
-  title: string;
-  description?: string;
-  cron: string;             // 5 字段 cron 表达式
-  prompt: string;           // 触发时发送给 agent 的消息
-  agentId?: string;
+// 请求
+{ server: string; tool: string; arguments: Record<string, unknown> }
+// 响应
+{ content: Array<{ type: 'text'; text: string } | { type: 'image'; source: { data: string; mimeType: string } }>; isError?: boolean }
+```
+
+**`GET /api/automations`**
+
+```ts
+{ automations: AutomationItem[] }
+```
+
+**`GET /api/voice/status`**
+
+```ts
+// 语音服务未就绪
+{ available: false }
+// 已就绪
+{
+  available: true;
   enabled: boolean;
-  paused: boolean;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  createdAt: string;
+  runtimeAvailable: boolean;
+  runtimeVersion?: string;
+  platform: string;
+  platformSupported: boolean;
+  runtimeError?: string;
+  defaultModel: string;   // 空串 = 未选择
+  installed: string[];
+  providerId: string;     // 空串 = 内置本地引擎
 }
-interface AutomationDetail extends AutomationItem {
-  history?: AutomationRun[];
-}
-interface AutomationRun {
-  id: string;
-  automationId: string;
-  startedAt: string;
-  finishedAt?: string;
-  status: 'running' | 'success' | 'failed' | 'timeout';
-  finishReason?: string;
-  finalText?: string;
-  error?: string;
-}
-interface AutomationTemplate {
-  id: string;
-  title: string;
-  description: string;
-  iconGradient?: string;
-  cron?: string;            // 建议的 cron
-  promptTemplate?: string;  // 含 {{占位符}} 的 prompt 模板
-}
-```
-
-#### 3.2.8 扩展状态（SettingsPage-About）
-
-> 此规划**未实施**：无 `/api/extensions` 路由与启用/禁用持久化。模块状态实际经 `GET /api/health` 的 `moduleStates` 字段暴露（数据源为 `kernel.modules` 服务的 `getList()`，仅含 name/state，无启用/禁用控制）。
-
-~~GET    /api/extensions                 → { modules: ExtensionState[]; plugins: ExtensionState[]; activeCount: number }~~
-~~PATCH  /api/extensions/:name           ← { enabled?: boolean } → { name: string; enabled: boolean }~~
-
-#### 3.2.9 Todo 管理（TaskRunningPage 右侧面板）
-
-> 后端 `tools/todo/` 已有工具实现，会话级持久化到 `~/.moss/todo/<sessionId>.json`。新增 HTTP 接口供前端直接读写。
-
-```
-GET    /api/todos/:sessionId           → { todos: TodoItem[] }
-PUT    /api/todos/:sessionId           ← { todos: TodoItem[] } → { todos: TodoItem[] }
-```
-
-#### 3.2.10 会话上下文（TaskRunningPage 右侧面板-Context）
-
-```
-GET    /api/sessions/:id/context       → { files: ContextFile[]; totalTokens: number; maxTokens: number }
-```
-
-#### 3.2.11 版本信息（SettingsPage-About）
-
-```
-GET    /api/version                    → { version: string; commit?: string; buildDate?: string; channel: string }
 ```
 
 ---
 
-## 四、WebSocket 协议
+## 三、WebSocket 协议
 
-### 4.1 已有消息（需迁移）
+### 3.1 连接
 
-#### 4.1.1 客户端 → 服务端
+- 地址：`ws://<host>:7766/ws`
+- 帧格式：`{ type: string; sessionId?: string; payload?: unknown }`
+- 连接后按需发送 `session.subscribe` / `terminal.list` 订阅会话与终端；重连后服务端会补发该会话 pending ask / confirm
 
-| type | 用途 | payload |
-|---|---|---|
-| `task.stream` | 流式任务 | `{ message, model?, provider?, cwd? }` |
-| `task.abort` | 中断任务 | `{}` |
-| `session.subscribe` | 订阅会话 | `{}` |
-| `tool.ask.reply` | 回复 ask 提问 | `{ toolCallId, answer }` |
-
-#### 4.1.2 服务端 → 客户端（AgentEvent）
+### 3.2 客户端 → 服务端（20 种）
 
 | type | 用途 | payload |
 |---|---|---|
-| `assistant-text` | 文本流 delta | `{ text }` |
-| `assistant-thinking` | 思考流 delta | `{ text }` |
-| `tool-call-start` | 工具调用开始 | `{ toolName, toolCallId, args }` |
-| `tool-call-end` | 工具调用结束 | `{ toolName, toolCallId, result }` |
-| `ask` | 工具提问 | `{ toolCallId, question }` |
-| `error` | 错误 | `{ message }` |
-| `done` | Agent 循环结束 | `{ finishReason }` |
-| `task.done` | 任务完成 | `{ finishReason, finalText }` |
-| `session.subscribed` | 订阅成功 | `{}` |
-| `tool.ask.accepted` | ask 回复已接受 | `{ toolCallId }` |
-
-### 4.2 新增消息
-
-#### 4.2.1 客户端 → 服务端
-
-| type | 用途 | payload |
-|---|---|---|
-| `task.create` | 创建新任务（替代直接发 task.stream） | `{ title?, groupId? }` → 返回 `{ task }` |
-| `task.switch` | 切换当前任务 | `{ taskId }` |
+| `task.stream` | 发送用户消息并启动流式任务 | `{ message, attachments?, model?, cwd?, runId?, agentId?, permissionMode?, clientMessageId? }` |
+| `task.guide` | 运行中追加引导消息 | `{ message, runId?, attachments?, clientMessageId? }` |
+| `task.abort` | 中断当前任务 | `{}` |
+| `task.create` | 创建任务 | `{ title, groupId?, id? }` |
+| `task.switch` | 切换/订阅任务会话（`taskId` 或 `sessionId`） | `{ taskId? }` |
+| `session.subscribe` | 订阅会话事件与 pending ask/confirm | `{ sessionId }` |
+| `tool.ask.reply` | 回复 ask 提问 | `{ toolCallId, action: 'accept' \| 'cancel', answers? }` |
+| `tool.confirm.reply` | 回复工具确认 | `{ toolCallId, ok: boolean, remember?: 'session' \| 'global' }` |
 | `automation.run` | 手动触发自动化 | `{ automationId }` |
+| `voice.start` | 开始语音识别会话 | `{ modelId? }` |
+| `voice.stop` | 结束语音识别 | `{}` |
+| `terminal.list` | 列出会话终端 | `{ sessionId? }` |
+| `terminal.create` | 创建终端 | `{ sessionId, cwd?, cols?, rows?, title?, interpreter?, creator? }` |
+| `terminal.subscribe` | 订阅终端快照 | `{ terminalId, cols?, rows? }` |
+| `terminal.input` | 写入终端输入 | `{ terminalId, data }` |
+| `terminal.resize` | 调整终端尺寸 | `{ terminalId, cols, rows }` |
+| `terminal.close` | 关闭终端 | `{ terminalId }` |
+| `ping` | 心跳 | `{}` |
+| `insight.diagnose` | 启动链路式 AI 诊断 | `{ requestId, kind: 'cause' \| 'harness' \| 'resource', sessionId?, providerError? }` |
+| `insight.diagnose.cancel` | 取消诊断 | `{ requestId }` |
 
-#### 4.2.2 服务端 → 客户端
+### 3.3 服务端 → 客户端
 
-| type | 用途 | payload |
-|---|---|---|
-| `todo-updated` | Todo 列表变更（工具调用 todo 工具时推送） | `{ sessionId, todos: TodoItem[] }` |
-| `context-updated` | 上下文文件变更（read/edit/write 工具触发） | `{ sessionId, files: ContextFile[], totalTokens, maxTokens }` |
-| `file-created` | 文件创建通知 | `{ sessionId, path }` |
-| `file-edited` | 文件编辑通知 | `{ sessionId, path, linesChanged }` |
-| `task.created` | 新任务创建 | `{ task: TaskItem }` |
-| `task.updated` | 任务元信息更新 | `{ task: Partial<TaskItem> }` |
-| `automation.started` | 自动化任务开始运行 | `{ automationId, runId }` |
-| `automation.finished` | 自动化任务运行结束 | `{ automationId, runId, status, finalText? }` |
-| `config.changed` | 配置文件热重载通知 | `{ which: 'app' \| 'api' }` |
+**任务流（AgentEvent）**
+
+| type | payload |
+|---|---|
+| `assistant-text` | `{ text }` |
+| `assistant-thinking` | `{ text }` |
+| `tool-call-start` | `{ toolName, toolCallId, args }` |
+| `tool-call-delta` | `{ toolName, toolCallId, offset, total }` |
+| `tool-call-executing` | `{ toolName, toolCallId }` |
+| `tool-call-end` | `{ toolName, toolCallId, result }` |
+| `ask` | `{ toolCallId, questions }` |
+| `ask-timeout` | `{ toolCallId }` |
+| `confirm-required` | `{ toolCallId, toolName, question, ruleSuggestion? }` |
+| `context-healed` | `{ toolCallId?, repaired? }` |
+| `stats-updated` | `{ stats: RunStats }` |
+| `error` | `{ message }` |
+| `done` | `{ finishReason }` |
+
+**任务元信息**
+
+| type | payload |
+|---|---|
+| `task.created` | `{ task }` |
+| `task.updated` | `{ taskId, task }` |
+| `task.deleted` | `{ taskId }` |
+| `task.done` | `{ finishReason, finalText }` |
+| `task.aborted` | `{ runId }` |
+| `tasks.changed` | 任务集合变化 |
+| `tasks.reordered` | `{ tasks }` |
+| `task-groups.changed` | `{ groups }` |
+
+**会话与文件**
+
+| type | payload |
+|---|---|
+| `session.subscribed` | 会话状态快照 |
+| `session-truncated` | 撤回结果 |
+| `session-restored` | 恢复结果 |
+| `todo-updated` | `{ sessionId, todos }` |
+| `context-updated` | `{ sessionId, files, totalTokens, maxTokens }` |
+| `file-created` | `{ sessionId, path }` |
+| `file-edited` | `{ sessionId, path, linesChanged? }` |
+| `file-deleted` | `{ sessionId, path }` |
+| `file-moved` | `{ sessionId, from, to }` |
+| `terminal-changed` | `{ sessionId }` |
+
+**终端**
+
+| type | payload |
+|---|---|
+| `terminal.list` | `{ sessionId, terminals, ptyBackend? }` |
+| `terminal.snapshot` | `{ terminalId, data }` |
+| `terminal.created` / `terminal.data` / `terminal.closed` / `terminal.exit` | 由 TerminalService emitter 广播 |
+
+**语音**
+
+| type | payload |
+|---|---|
+| `voice.ready` | 会话就绪 |
+| `voice.final` | `{ text }` |
+| `voice.stopped` | 会话结束 |
+| `voice.error` | `{ error }` |
+
+**自动化 / Agent 团队 / MCP / 诊断 / 配置**
+
+| type | payload |
+|---|---|
+| `automation.started` | `{ automationId, runId }` |
+| `automation.event` | 运行过程事件 |
+| `automation.finished` | `{ automationId, runId, status, finalText? }` |
+| `agenteam.team.changed` | 团队状态变化 |
+| `agenteam.member.event` | 成员事件 |
+| `mcp.status` | 服务器连接状态 |
+| `resources.changed` | MCP 资源列表变化 |
+| `insight.diagnose.event` | 诊断链路事件 |
+| `config.changed` | `{ which: 'app' \| 'api' }` |
+
+**回复确认与心跳**
+
+| type | payload |
+|---|---|
+| `tool.ask.accepted` | `{ toolCallId }` |
+| `tool.confirm.accepted` | `{ toolCallId }` |
+| `pong` | `{}` |
 
 ---
 
-## 五、数据类型定义
+## 四、数据类型定义
 
-### 5.1 前端需新增 `webui/src/types/api.ts`
+### 4.1 消息
 
 ```ts
-// ============================================================================
-// 基础类型（从旧前端 webui/src/types/index.ts 迁移）
-// ============================================================================
-
-export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
-export interface ToolResult {
-  content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'image'; source: { data: string; mimeType: string } }
-  >;
-  isError?: boolean;
-}
-
-export interface TaskMessage {
-  id: string;
-  role: MessageRole;
+export interface AgentMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** 本轮流式 assistant 消息的稳定身份（<sessionId>#<turn>） */
+  messageId?: string;
+  /** 用户消息附件绝对路径（纯路径引用） */
+  attachments?: string[];
+  /** 工具结果图片绝对路径（base64 不落库，发送时实时读盘编码） */
+  images?: string[];
+  imagesSentAt?: string;
+  /** 前端生成的稳定消息 id（用于乐观消息与历史回放去重） */
+  clientMessageId?: string;
+  toolCalls?: Array<{ id: string; name: string; arguments: string }>;  // arguments 为 JSON 字符串
+  toolCallId?: string;
   thinking?: string;
-  toolCalls?: ToolCall[];
-  toolResults?: Array<{ toolCallId: string; result: ToolResult }>;
-  timestamp: string;
-  streaming?: boolean;
+  thinkingSignature?: string;
+  thinkingMs?: number;
+  /** tool 消息的工具名 */
+  name?: string;
+  isError?: boolean;
+  metadata?: Record<string, unknown>;
+  todoSnapshot?: TodoItem[];
+  timestamp?: string;
+  /** 非空表示已被消息撤回（构建 LLM 上下文时过滤） */
+  deletedAt?: string;
+  /** 已被压缩摘要替代 */
+  compacted?: boolean;
 }
+```
 
-export interface Session {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  messageCount: number;
-}
+> 会话文件中 `messages` 即 `AgentMessage[]`；前端历史回放使用同一结构，`TaskMessage` 仅为旧前端视图命名的历史概念，当前代码不再导出该类型。
 
-// ============================================================================
-// 配置类型（与后端 src/core/types.ts 对齐）
-// ============================================================================
+### 4.2 配置
 
+```ts
 export interface AppConfig {
   version: number;
   server: { host: string; port: number; autoPort: boolean; locale?: string };
   daemon: { enabled: boolean };
-  logs: { level: string; retentionDays: number; maxFileMb: number };
+  logs: { level: 'debug' | 'info' | 'warn' | 'error' | 'fatal'; retentionDays: number; maxFileMb: number };
   update: { autoCheck: boolean; channel: 'stable' | 'beta'; checkIntervalHours: number };
-  agent: { defaultModel: string; maxTokens: number; maxTurns: number; workingDirectory: string };
+  agent: {
+    defaultModel: string;
+    maxTokens: number;
+    maxTurns: number;                 // 0 = 不限轮
+    workingDirectory: string;
+    llmStreamIdleTimeoutMs?: number;
+  };
   tools: Record<string, { enabled: boolean; requireConfirmation?: boolean; timeout?: number }>;
   mcpServers: Record<string, unknown>;
+  mcp?: { callTimeoutMs?: number; allowSampling?: boolean };
+  mcpServer?: {
+    enabled: boolean;
+    allowedTools: string[];
+    responseMode: 'json' | 'sse';
+    exposeInternalTools: boolean;
+    trackSummary: boolean;
+  };
+  skills?: Record<string, { enabled?: boolean }>;
+  commands?: Record<string, { enabled?: boolean }>;
   security: { authToken: string; bindLocalhostOnly: boolean };
+  remote: { enabled: boolean; lanEnabled: boolean; lanPasswordEnabled: boolean; lanIpOverride: string };
+  fileHistory?: { enabled: boolean; maxBackupsPerFile: number; transcriptEnabled: boolean; backupRetentionDays: number };
+  filesys?: { roots: string[]; cacheMaxBytes: number; cacheMaxEntries: number; cacheMaxFileBytes: number };
+  safety?: {
+    defaultMode: 'ask' | 'auto' | 'skip';
+    confirmTimeoutMinutes: number;
+    blockDangerousCommands: boolean;
+    cautionPolicy: 'ask' | 'deny';
+    rules: { allow: string[]; deny: string[]; ask: string[] };
+    protectedPaths: string[];
+  };
+  context?: Record<string, unknown>;  // 压缩/修剪/自愈/遥测参数，见 src/modules/context/types.ts
+  web: { searchProviderId: string };
+  voice: { enabled: boolean; providerId: string; localModel: string; language: string };
 }
 
 export type ThinkingEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface ProviderModelConfig {
-  id: string;               // 内部唯一 id，如 "model_1734..."
-  name: string;             // 显示名，如 "GPT-4o"
-  model: string;            // 发送给 API 的模型名，如 "gpt-4o"
-  thinking: { enabled: boolean; effort?: string; label?: string; budgetTokens?: number };
+  id: string;
+  name: string;
+  model: string;
+  thinking: { enabled: boolean; effort?: ThinkingEffort; label?: string; budgetTokens?: number };
+  contextWindow?: string;
   inputTokens?: number;
   outputTokens?: number;
   temperature?: number;
   topP?: number;
   topK?: number;
+  thinkingLevels?: Array<{ level: string; label?: string }>;
+}
+
+export interface ProviderServiceConfig {
+  id: string;
+  name: string;
+  type: 'file-storage';
+  endpoint: string;
+  apiKey: string;
+  maxQuota?: number;
+  quotaUnit?: 'MB' | 'GB' | 'TB';
 }
 
 export interface ProviderConfig {
-  id: string;               // 内部唯一 id，如 "provider_1734..."
-  name: string;             // 显示名，如 "OpenAI"
-  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini';
+  id: string;
+  name: string;
+  kind?: 'model' | 'search' | 'voice';    // 缺省 = model
+  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'search' | 'voice';
+  searchEngine?: 'zhipu' | 'bocha' | 'tavily';
+  voiceEngine?: 'openai-transcriptions';
+  voiceModel?: string;
   endpoint: string;
   apiKey: string;
+  balanceUrl?: string;
+  modelsUrl?: string;
+  icon?: string;
+  services?: ProviderServiceConfig[];
   models: ProviderModelConfig[];
 }
 
 export interface ApiConfig {
-  version: number;          // 2 = providers 数组结构（旧版 1 扁平结构自动迁移）
+  version: number;   // 2 = providers 数组结构（旧版 1 扁平结构自动迁移）
   providers: ProviderConfig[];
 }
+```
 
-// ============================================================================
-// MCP 类型（迁移）
-// ============================================================================
+### 4.3 任务 / Todo / 上下文
 
-export interface McpServer {
-  name: string;
-  status: 'connected' | 'disconnected' | 'error';
-  toolCount: number;
-}
-
-export interface McpTool {
-  server: string;
-  name: string;
-  description?: string;
-  inputSchema?: unknown;
-}
-
-// ============================================================================
-// 任务 / Todo / 上下文（新增，见 3.2.1 / 3.2.9 / 3.2.10）
-// ============================================================================
-
+```ts
 export interface TaskItem {
   id: string;
   title: string;
@@ -544,6 +667,8 @@ export interface TaskItem {
   createdAt: string;
   updatedAt: string;
   active?: boolean;
+  sessionId?: string;      // task.id 即 sessionId（当前实现同值）
+  order?: number;          // 分组内排序权重（小→前）
 }
 
 export interface TaskGroup {
@@ -551,354 +676,252 @@ export interface TaskGroup {
   name: string;
   expanded?: boolean;
   taskCount?: number;
+  source?: 'folder' | 'manual';  // folder=按工作目录自动创建；manual=手动新建
+  dir?: string;                  // tasks/ 下相对目录（agenteam/<teamId> 嵌套布局）
+  hidden?: boolean;              // 隐藏分组（subagent / agenteam 衍生会话）
 }
 
 export interface TodoItem {
   id: string;
   text: string;
   status: 'pending' | 'in_progress' | 'completed';
-  sessionId?: string;
+  priority: 'low' | 'medium' | 'high';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ContextFile {
   path: string;
   tokens?: number;
-  reason?: 'read' | 'edit' | 'write' | 'grep' | 'glob';
+  reason?: 'read' | 'edit' | 'write' | 'grep' | 'glob' | 'delete' | 'move' | 'copy';
+  missing?: boolean;       // 运行时磁盘校验后附加：文件已不存在
+}
+```
+
+### 4.4 Agent / Skill / 自动化 / MCP
+
+```ts
+export interface AgentItem {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  builtIn: boolean;
+  default?: boolean;
 }
 
-// ============================================================================
-// 模型 / Agent / Skill / Spec / 自动化（新增，见 3.2.x）
-// ============================================================================
+export interface AgentDetail extends AgentItem {
+  systemPrompt?: string;
+  model?: string;
+  tools?: string[];
+  maxTurns?: number;
+  maxTokens?: number;
+}
 
-export interface ModelItem { /* 见 3.2.2 */ }
-export interface AgentItem { /* 见 3.2.3 */ }
-export interface AgentDetail extends AgentItem { /* 见 3.2.3 */ }
-export interface SkillItem { /* 见 3.2.5 */ }
-export interface SkillDetail extends SkillItem { /* 见 3.2.5 */ }
-export interface AutomationItem { /* 见 3.2.7 */ }
-export interface AutomationRun { /* 见 3.2.7 */ }
-export interface AutomationTemplate { /* 见 3.2.7 */ }
+export interface SkillItem {
+  name: string;
+  description: string;
+  prompt: string;
+  sourceFile?: string;
+  source: 'user';          // 运行时唯一加载源为 ~/.moss/skills
+  enabled: boolean;
+  dir?: string;
+  icon?: string;
+  allowedTools?: string[];
+  files?: string[];
+}
 
-// ============================================================================
-// WebSocket 消息类型（迁移 + 新增）
-// ============================================================================
+export interface AutomationItem {
+  id: string;
+  title: string;
+  description?: string;
+  icon?: string;
+  scheduleType: 'cron' | 'once';
+  cron?: string;           // scheduleType='cron'
+  runAt?: string;          // scheduleType='once'（ISO，须未来）
+  completed?: boolean;     // once 已执行
+  cwd: string;             // '__system__' 表示本机全盘访问
+  prompt: string;
+  agentId?: string;
+  enabled: boolean;
+  paused: boolean;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  createdAt: string;
+}
 
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  taskId?: string;         // 本次运行创建的真实任务 id（即 sessionId）
+  startedAt: string;
+  finishedAt?: string;
+  status: 'running' | 'success' | 'failed' | 'timeout';
+  finishReason?: string;
+  finalText?: string;
+  error?: string;
+}
+
+export interface McpServer {
+  name: string;
+  status: 'connected' | 'disconnected' | 'error';
+  toolCount: number;
+  enabled: boolean;
+  transport?: string;
+}
+
+export interface McpTool {
+  server: string;
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchema?: unknown;
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+}
+```
+
+### 4.5 终端 / 计算机 / 浏览器 / 语音摘要
+
+```ts
+export interface TerminalInfo {
+  id: string;
+  sessionId: string;
+  title: string;
+  interpreterLabel: string;
+  interpreterKind: 'powershell' | 'cmd' | 'bash';
+  creator: 'user' | 'ai';
+  cwd: string;
+  running: boolean;
+  exitCode: number | null;
+  createdAt: number;                 // ms
+  pty: boolean;                      // false = 管道降级
+  ptyBackend?: { backend: 'conpty'; buildNumber: number };
+  offline?: boolean;                 // 仅剩历史回放（后端已重启）
+}
+
+export interface ComputerStatus {
+  installed: boolean;
+  driverPath: string | null;
+  version: string | null;
+  connection: 'disconnected' | 'connecting' | 'connected' | 'error' | 'installing';
+  toolCount: number;
+  screen: { width: number; height: number; scale: number | null } | null;
+  paused: boolean;
+  config: { maxImageDimension: number; allowForeground: boolean };
+  error: string | null;
+}
+
+export interface BrowserStatus {
+  bridge: { running: boolean; port: number | null; configuredPort: number; tokenConfigured: boolean; error: string | null };
+  instances: Array<{
+    id: string;
+    kind: 'builtin' | 'external';
+    browserName: string;
+    browserVersion: string;
+    extensionId: string;
+    extensionVersion: string;
+    builtinTag?: string;
+    connectedAt: number;
+    tabCount: number;
+  }>;
+  builtin: {
+    running: boolean;
+    executable: string | null;
+    source: 'config' | 'local' | 'chrome-for-testing' | null;
+    version: string | null;
+    profileDir: string;
+    extensionLoaded: boolean;
+    extensionId: string | null;
+    error: string | null;
+  };
+  extension: { dir: string; version: string | null; seeded: boolean };
+  cft: {
+    installed: boolean;
+    buildId: string | null;
+    executable: string | null;
+    downloading: boolean;
+    progress: { received: number; total: number; percent: number } | null;
+    error: string | null;
+  };
+  installer: {
+    enabled: boolean;
+    running: boolean;
+    checked: boolean;
+    current: string | null;
+    browsers: Array<Record<string, unknown>>;
+  };
+  tabs: Array<{
+    tab: string;
+    instanceId: string;
+    instanceKind: 'builtin' | 'external';
+    browserName: string;
+    browserVersion: string;
+    nativeTabId: number;
+    windowId?: number;
+    groupId: number | null;
+    url: string;
+    title: string;
+    active: boolean;
+    createdAt: number;
+  }>;
+  currentTab: string | null;
+  config: {
+    tabGroupTitle: string;
+    tabGroupColor: string;
+    maxSnapshotNodes: number;
+    maxImageDimension: number;
+    allowEvaluate: boolean;
+    timeoutMs: number;
+  };
+}
+
+export interface VoiceModelStatus {
+  id: string;
+  engine: 'zipformer' | 'sensevoice' | 'whisper';
+  mode: 'streaming' | 'offline';
+  name: string;
+  description: string;
+  sizeBytes: number;
+  languages: string[];
+  recommended: boolean;
+  state: 'not-installed' | 'downloading' | 'installed' | 'error';
+  progress?: number;        // 0..1（仅 downloading）
+  installedBytes?: number;
+  error?: string;
+}
+```
+
+### 4.6 WebSocket 消息
+
+```ts
 export interface WSMessage {
   type: string;
   sessionId?: string;
-  taskId?: string;
   payload?: unknown;
 }
-
-export type AgentEvent =
-  | { type: 'assistant-text'; sessionId: string; text: string }
-  | { type: 'assistant-thinking'; sessionId: string; text: string }
-  | { type: 'tool-call-start'; sessionId: string; toolName: string; toolCallId: string; args: unknown }
-  | { type: 'tool-call-end'; sessionId: string; toolName: string; toolCallId: string; result: ToolResult }
-  | { type: 'ask'; sessionId: string; toolCallId: string; question: string }
-  | { type: 'error'; sessionId: string; message: string }
-  | { type: 'done'; sessionId: string; finishReason: string };
-
-export interface PendingAsk {
-  toolCallId: string;
-  sessionId: string;
-  question: string;
-  createdAt: number;
-}
 ```
 
 ---
 
-## 六、前端需新增的模块
+## 五、数据持久化
 
-### 6.1 目录结构（建议）
+接口读写的数据落在 `~/.moss/`（项目级作用域为 `<cwd>/.moss/`），完整路径表见 [architecture.md 第八章](./architecture.md#八数据持久化)。核心对应关系：
 
-```
-webui/src/
-├── api/
-│   ├── http.ts              # HTTP 客户端（迁移自 webui，扩展新接口）
-│   ├── ws.ts                # WS 客户端（迁移自 webui，扩展新消息）
-│   └── endpoints.ts         # 按资源拆分的 API 函数（tasks/agents/automations/...）
-├── store/
-│   └── index.ts             # 全局状态（见 6.2 状态管理方案选型）
-├── hooks/
-│   ├── useTask.ts           # 任务 hook（迁移 + 扩展 task 概念）
-│   ├── useConfig.ts         # 配置 hook（迁移）
-│   ├── useTasks.ts          # 任务列表 + 分组
-│   ├── useModels.ts         # 模型列表 + 当前选择
-│   ├── useAgents.ts         # Agent 列表 + 切换
-│   ├── useAutomations.ts    # 自动化 CRUD + 历史
-│   ├── useSkills.ts         # Skills 查询
-│   ├── useTodos.ts          # 任务 todo 实时更新（WS）
-│   └── useContextFiles.ts   # 任务上下文文件实时更新（WS）
-├── types/
-│   ├── index.ts             # 现有 UI 类型（保留）
-│   └── api.ts               # 新增：API 类型定义（见第五章）
-└── ...
-```
-
-### 6.2 状态管理方案选型
-
-旧前端使用 zustand，新前端 `package.json` 暂未引入。两个选项：
-
-| 方案 | 优点 | 缺点 |
-|---|---|---|
-| **A. 引入 zustand**（推荐） | 迁移成本最低，API 与旧前端一致，性能好 | 新增 1 个依赖 |
-| B. React Context + useReducer | 无新依赖，符合 architecture.md 描述 | 复杂状态（如 messagesBySession 嵌套更新）代码冗长，性能需优化 |
-
-**建议方案 A**：在 `webui/package.json` 添加 `zustand`，直接迁移已移除旧前端的 store/index.ts 并扩展 task/model/agent/automation 等切片。
-
-### 6.3 关键 hook 设计要点
-
-#### useTask（迁移 + 扩展）
-- 旧版：基于 sessionId，sendMessage 直接发 `task.stream`
-- 新版：基于 taskId，sendMessage 时若 taskId 无对应 sessionId 则先创建任务，再发 `task.stream`（sessionId 复用 task 元信息中的 sessionId，或后端在 task.stream 时按 taskId 派生）
-- 新增：订阅 `todo-updated` / `context-updated` / `file-created` / `file-edited` 事件，更新 store
-
-#### useTasks（新增）
-- 挂载时 `GET /api/tasks` 拉取分组 + 任务
-- 创建任务 `POST /api/tasks`，切换任务发 `task.switch` WS 消息
-- 监听 `task.created` / `task.updated` WS 事件实时更新侧边栏
-
----
-
-## 七、后端需新增的模组
-
-### 7.1 `src/modules/agenteam/` 模组（新建）
-
-**职责**：自定义 Agent 的 CRUD，持久化到 `~/.moss/agenteam.json`。
-
-**注册方式**：模组无清单文件，由内核静态 import 编排（见 architecture.md 3.2 模组系统）。
-
-**注册服务**：`agenteam.registry`（`AgentRegistry` 接口：list/get/create/update/delete/setDefault）
-
-**路由**（在 server 模组注册）：
-- `GET/POST /api/agenteam`、`GET/PATCH/DELETE /api/agenteam/:id`、`PUT /api/agenteam/default`
-
-### 7.2 `src/modules/automation/` 模组（新建）
-
-**职责**：cron/once 定时任务调度，到点触发 agent.run，持久化到 `~/.moss/automations.json` + `~/.moss/automations-history.json`。
-
-**注册方式**：同上，内核静态 import 编排。
-
-**注册服务**：`automation.service`（`AutomationService` 接口：list/get/create/update/delete/trigger/pause/resume/history）
-
-**路由**：
-- `GET/POST /api/automations`、`GET/PATCH/DELETE /api/automations/:id`
-- `POST /api/automations/:id/trigger|pause|resume`、`GET /api/automations/:id/history`
-- `GET /api/automation-templates`
-
-**WS 推送**：运行开始/结束时通过 `server.instance.broadcastWS` 推送 `automation.started` / `automation.finished`。
-
-### 7.3 现有模组扩展
-
-#### server 模组
-- `routes/` 新增：`tasks.ts`、`models.ts`、`skills.ts`、`specs.ts`、`todos.ts`、`version.ts`（注：`plugins.ts`、`extensions.ts` 未实施）
-- `ws-handler.ts` 新增：`task.create` / `task.switch` / `automation.run` 入站消息处理
-- 推送新增：`todo-updated` / `context-updated` / `file-created` / `file-edited` / `config.changed`（注：`extension.changed` 未实施）
-
-#### agent 模组
-- 任务元信息持久化实际由 `task-store.ts`（TaskStore）实现：`~/.moss/tasks/<groupId>/` 分组目录，支持分组
-- 工具执行时通过 `server.instance.sendToSession` 推送 `todo-updated` / `context-updated` / `file-created` / `file-edited`
-
-#### tools 模组
-- `todo.ts` 工具执行后，额外推送 `todo-updated` WS 事件
-- `read.ts` / `edit.ts` / `write.ts` 执行后，推送 `context-updated` / `file-created` / `file-edited`
-
----
-
-## 八、数据持久化新增
-
-| 路径 | 用途 | 格式 | 负责模组 |
-|---|---|---|---|
-| `~/.moss/tasks/<groupId>/` | 任务分组目录（task.json 为任务元信息） | JSON | agent 模组（TaskStore） |
-| `~/.moss/tasks/<groupId>/<sessionId>.json` | 会话历史（每会话一文件） | JSON | agent 模组（SessionStore） |
-| `~/.moss/agenteam.json` | 自定义 Agent 列表 | JSON | agenteam 模组 |
-| `~/.moss/automations.json` | 自动化任务 | JSON | automation 模组 |
-| `~/.moss/automations-history.json` | 自动化运行历史 | JSON | automation 模组 |
-| `~/.moss/todo/<sessionId>.json` | 会话级 Todo 列表（每会话一文件） | JSON | tools 模组（todo 工具） |
-
-> 注：规划中的 `~/.moss/tasks.json`（单文件任务元信息）实际实现为 `~/.moss/tasks/<groupId>/` 分组目录结构；`~/.moss/extensions.json`（扩展启用/禁用）未实施。
-
----
-
-## 九、实施计划（建议顺序）
-
-### 阶段 1：前端基础设施（无后端改动）
-1. `webui/package.json` 添加 `zustand` 依赖
-2. 新建 `webui/src/api/http.ts` + `ws.ts`（迁移自已移除旧前端的 api/，适配 React 19）
-3. 新建 `webui/src/store/index.ts`（迁移 + 扩展 task/model/agent/automation 切片）
-4. 新建 `webui/src/types/api.ts`（第五章类型定义）
-
-### 阶段 2：迁移已有接口对接
-5. 实现 `useConfig` hook，对接 `GET /api/config` + `/api/api-config`，替换 SettingsPage 硬编码
-6. 实现 `useTask` hook，对接 WS `task.stream`，让 HomePage 输入框可发消息
-7. 实现 `useTasks` hook（基于现有 `/api/session` 适配），替换 Sidebar 硬编码任务列表
-8. 对接 `/api/health`、`/api/mcp/*`（SettingsPage-MCP 面板）
-
-### 阶段 3：后端新增接口
-9. 新增 `routes/skills.ts` + `specs.ts` + `extensions.ts` + `version.ts`（低风险，复用已有 Registry）
-10. 新增 `routes/models.ts`（聚合 ApiConfig）
-11. 新增 `routes/todos.ts` + `sessions/:id/context`（TaskRunningPage 右侧面板）
-12. agent 模组扩展任务元信息持久化，新增 `routes/tasks.ts` + `routes/search.ts`
-
-### 阶段 4：新模组
-13. 新建 `src/modules/agenteam/` 模组 + `routes/agents.ts`，对接 AgentSwitchMenu + SettingsPage-Agent
-14. 新建 `src/modules/automation/` 模组 + `routes/automations.ts`，对接 AutomationPage
-
-### 阶段 5：WS 增强
-15. agent/tools 模组在工具执行时推送 `todo-updated` / `context-updated` / `file-*` 事件
-16. 前端 useTask 订阅新事件，TaskRunningPage 右侧面板实时更新
-17. automation 模组推送 `automation.started` / `automation.finished`
-
-### 阶段 6：收尾
-18. ~~新增 `routes/plugins.ts`，对接 PluginMarketPage（启用/禁用 Switch）~~（未实施：系统无插件机制，PluginMarketPage 改为对接 Skills 与 MCP 管理）
-19. 配置热重载 WS 推送 `config.changed`，前端 useConfig 订阅自动刷新
-20. 移除 `webui/` 旧前端（确认新前端功能完备后）
-
----
-
-## 十、接口总览速查表
-
-| 资源 | 方法 | 路径 | 状态 |
-|---|---|---|---|
-| 健康 | GET | /api/health | ✅ 已有 |
-| 应用配置 | GET/PUT | /api/config | ✅ 已有 |
-| API 配置 | GET/PUT | /api/api-config | ✅ 已有 |
-| 会话 | GET/GET/DELETE | /api/session, /api/session/:id | ✅ 已有 |
-| MCP | GET/POST | /api/mcp/* | ✅ 已有 |
-| 任务 | GET/POST/GET/PATCH/DELETE | /api/tasks, /api/tasks/:id | 🆕 新增 |
-| 任务分组 | GET/POST/PATCH/DELETE | /api/task-groups, /api/task-groups/:id | 🆕 新增 |
-| 搜索 | GET | /api/search | 🆕 新增 |
-| 模型 | GET/PUT/POST/PATCH/DELETE | /api/models, /api/models/current, /api/models/:id | 🆕 新增 |
-| Agent | GET/POST/GET/PATCH/DELETE/PUT | /api/agenteam, /api/agenteam/:id, /api/agenteam/default | 🆕 新增 |
-| Skills | GET/GET | /api/skills, /api/skills/:name | 🆕 新增 |
-| 自动化 | GET/POST/GET/PATCH/DELETE/POST/GET | /api/automations, /api/automations/:id, .../:id/{trigger,pause,resume,history} | 🆕 新增 |
-| 自动化模板 | GET | /api/automation-templates | 🆕 新增 |
-| Todo | GET/PUT | /api/todos/:sessionId | 🆕 新增 |
-| 上下文 | GET | /api/sessions/:id/context | 🆕 新增 |
-| 版本 | GET | /api/version | 🆕 新增 |
-
-| WS 入站 | 用途 | 状态 |
-|---|---|---|
-| task.stream | 流式任务 | ✅ 已有 |
-| task.abort | 中断 | ✅ 已有 |
-| session.subscribe | 订阅会话 | ✅ 已有 |
-| tool.ask.reply | 回复 ask | ✅ 已有 |
-| task.create | 创建任务 | 🆕 新增 |
-| task.switch | 切换任务 | 🆕 新增 |
-| automation.run | 触发自动化 | 🆕 新增 |
-
-| WS 出站 | 用途 | 状态 |
-|---|---|---|
-| assistant-text/thinking | 文本/思考流 | ✅ 已有 |
-| tool-call-start/end | 工具调用 | ✅ 已有 |
-| ask / error / done | 提问/错误/完成 | ✅ 已有 |
-| task.done / session.subscribed / tool.ask.accepted | 控制消息 | ✅ 已有 |
-| todo-updated | Todo 变更 | 🆕 新增 |
-| context-updated | 上下文变更 | 🆕 新增 |
-| file-created / file-edited | 文件操作 | 🆕 新增 |
-| task.created / task.updated | 任务变更 | 🆕 新增 |
-| automation.started / finished | 自动化运行 | 🆕 新增 |
-| config.changed | 配置热重载 | 🆕 新增 |
-
----
-
-## 十一、消息处理链路重构（分页 / 状态快照 / 续传协议 / 实时列表）
-
-> 本节是**当前实现的权威契约**，用于替代前文中关于「历史全量拉取」「running 只由 session.subscribe 回传」
-> 等历史描述。目标：超长会话毫秒级首屏、刷新/重连后半截流式回复可续接、运行态与列表实时且不丢。
-
-### 11.1 会话历史分页 —— `GET /api/session/:id`
-
-| 参数 | 含义 |
+| 接口域 | 持久化路径 |
 |---|---|
-| （无） | 全量返回（**保持向后兼容**，旧调用方零改动） |
-| `limit=N` | 返回最新 N 条（首屏） |
-| `limit=N&before=<index>` | 返回 `index < before` 的靠后 N 条（上滑加载更早） |
-| `limit=N&after=<index>` | 返回 `index > after` 的 N 条（断线/完成后的尾部补齐） |
-
-- 游标 `index` = 「过滤软删除后的消息下标」。会话消息只在尾部追加，截断/恢复也只影响尾部，
-  因此头部下标天然稳定，分页与增量不会错位。
-- 分页响应额外返回 `page`：`{ total, oldestIndex, newestIndex, hasMoreBefore }`；
-  每条消息附带绝对 `index`。
-- 前端据此生成稳定消息 id `h<index>`（虚拟列表 key / 分页去重基准），并据此推进游标。
-
-### 11.2 会话状态快照 —— `GET /api/session/:id/state`
-
-```jsonc
-{
-  "sessionId": "...",
-  "running": true,              // 后端权威运行态（含 automation / MCP 等外部注册的 run）
-  "runId": "run_...",           // 当前 run（事件隔离对齐）
-  "totalMessages": 123,
-  "newestIndex": 122,           // 尾部游标（前端判断是否需要补拉）
-  "liveDraft": {                // 进行中的流式草稿（可为 null）
-    "messageId": "<sessionId>#<turn>",
-    "content": "...", "thinking": "...",
-    "toolCalls": [{ "id": "...", "name": "read", "arguments": "...", "status": "executing" }],
-    "contentLength": 567, "thinkingLength": 0,
-    "startedAt": "...", "updatedAt": "...",
-    "stale": false              // true = 进程重启残留（上次未完成的回复）
-  },
-  "pendingAsks": [...], "pendingConfirms": [...],
-  "permissionMode": "ask", "lastRunStats": { }
-}
-```
-
-`WS session.subscribed` 的 payload 与该结构同构（`running` / `runId` / `totalMessages` /
-`newestIndex` / `liveDraft`），因此「刷新恢复」与「订阅对齐」走同一套前端逻辑。
-
-**契约约束（前端不得违反）**：`running`（前端 `generatingBySession`）只能由以下权威信号写入，
-任何历史/快照拉取都**不得**把它置为 `false`：
-① 状态快照；② `session.subscribed`；③ `done` / `task.aborted` / `error` / `automation.finished`；
-④ 本地发送与主动中断。
-
-### 11.3 可续传流式协议（offset + messageId）
-
-后端为**每一轮**流式 assistant 消息分配稳定 id `messageId = "<sessionId>#<turnIndex>"`，
-并为每个高频分片附带偏移：
-
-| 事件 | 新增字段 | 含义 |
-|---|---|---|
-| `assistant-text` / `assistant-thinking` | `messageId`, `offset`, `total` | 分片在 content / thinking 中的起始下标与结束下标 |
-| `tool-call-delta` | `messageId`, `offset`, `total` | 分片在该工具 arguments 中的起始下标与结束下标 |
-| `tool-call-start` / `-executing` / `-end` | `messageId` | 让前端把工具卡片挂到同一轮的消息上 |
-
-- 合帧器（30ms）只在**同一 messageId** 内合并分片，并保留首分片 `offset` 与末分片 `total`
-  —— 跨轮（新一轮 offset 归零）绝不合并，否则会文本错位。
-- 前端 `nextChunkSlice(currentLength, offset, text)` 三态处理：
-  重复（`offset+len <= cur`）丢弃 / 缺口（`offset > cur`）触发 resync 对齐 / 正常续接（只取差额）。
-
-### 11.4 流式草稿持久化
-
-- 位置：`~/.moss/live/<sessionId>.json`（独立目录，避免被会话目录扫描误判为会话文件）。
-- 策略：内存态为权威（快照/WS 直接读内存），磁盘为进程重启兜底；
-  正文追加 ≥500ms 节流且长度未变不写盘（大文本自动降频到 2s），
-  工具生命周期变更（start/executing/end）强制立即写盘。
-- 生命周期：每轮开始 `begin()`（新 messageId）→ 轮次结束/run 结束 `clear()`（最终消息已由 session 落盘）。
-- 进程重启残留标 `stale`，前端渲染为「上次中断的回复」（不进 LLM 上下文）。
-
-### 11.5 列表实时化
-
-| 事件 | 触发时机 | 载荷 |
-|---|---|---|
-| `task.created` | `POST /api/tasks` 成功后 | `{ task }` |
-| `task.updated` | run 起止（含外部 run）、`PATCH /api/tasks/:id` | `{ taskId, running?, task? }` |
-| `task.deleted` | `DELETE /api/tasks/:id` | `{ taskId }` |
-| `tasks.reordered` | `PUT /api/tasks/reorder` | `{ tasks }`（完整可见列表） |
-| `tasks.changed` | 删除分组（组内任务批量迁移/删除） | `{ tasks, groups }` |
-| `task-groups.changed` | 分组增/改/删 | `{ groups }` |
-
-- `GET /api/tasks` 的每个 task 额外带 `running: boolean`（来源为 server 实例的 `activeRuns`）：
-  刷新后**首屏**即可渲染「运行中」；列表载荷只用于「置位」，清除运行态由权威信号负责
-  （避免「本地已发送、后端尚未注册 run」窗口内误灭转圈）。
-- 前端删除/移组后不再无条件全量重拉；仅在 WS 未连接（广播不可达）时兜底 `listTasks`。
-
-### 11.6 前端渲染：虚拟化 + 分页
-
-- `react-virtuoso`（`^4.18.16`）虚拟列表：无论会话多长，DOM 只挂载视口附近约 20 条消息。
-- `computeItemKey = message.id`（稳定 key）、`firstItemIndex` 随 prepend 递减（滚动锚定不跳动）。
-- `initialTopMostItemIndex` 配合「有数据才挂载列表」+ 首屏一次性定位，保证任何路径打开会话都落在最新消息。
-- `startReached` 触发加载更早一页时**校验 scrollTop**：Virtuoso 在 prepend 后可能重复触发，
-  不校验会在用户停留顶部时把整段历史级联加载（分页失效）。
+| 配置 | `~/.moss/config/config.json`、`api.json` |
+| 任务 / 会话 / Todo | `~/.moss/tasks/<groupId>/`、`~/.moss/todo/<sessionId>.json` |
+| Agent / 团队 | `~/.moss/agenteam.json`、`~/.moss/agenteam/`、`~/.moss/agenteam-profiles.json` |
+| 自动化 | `~/.moss/automations.json`、`automations-history.json` |
+| Skill / Command / 提示词 / 附件 | `~/.moss/skills/`、`commands/`、`agent/prompts/`、`agent/attachments/` |
+| 规则 / 钩子 / 记忆 | `~/.moss/{rules,hooks,memory}/`（项目级 `<cwd>/.moss/`） |
+| 文件历史 | `~/.moss/file-history/` |
+| 浏览器 / 桌面 / 语音 | `~/.moss/browser/`、`~/.moss/computer/`、`~/.moss/models/asr/` |
+| 远程访问 | `~/.moss/remote/` |
+| 文件索引 | `<cwd>/.moss/file-index/` |
