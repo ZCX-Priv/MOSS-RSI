@@ -2720,7 +2720,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       {/* 非 todo/ask/agent 工具调用（可折叠：展开显示参数与结果）。
           agent 工具已由上方专属卡片渲染。 */}
       {otherCalls.length > 0 && (
-        <div className="flex flex-col gap-0.5">
+        <div className="flex flex-col gap-1.5">
           {otherCalls.map((tc) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             // 结果文本/错误标记回退到全局索引：长耗时工具的结果消息可能不紧邻本消息

@@ -634,6 +634,8 @@ export default {
           replacements: r.replacements,
           fuzzyLevels: r.fuzzyLevels,
           hashAfter: r.hashAfter || null,
+          // diff 供前端逐文件渲染 diff 视图（失败文件无 diff）
+          diff: r.diff || undefined,
           error: r.error || undefined,
         })),
         succeeded: succeeded.length,

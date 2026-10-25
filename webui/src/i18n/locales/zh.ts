@@ -1083,6 +1083,22 @@ export const zh = {
     toolCallArguments: '参数',
     errorResult: '错误结果',
     result: '结果',
+    // 工具调用卡片（预览/源码切换 + diff 视图）
+    toolCard: {
+      statusDone: '已完成',
+      statusRunning: '执行中',
+      statusFailed: '失败',
+      modePreview: '预览',
+      modeSource: '源码',
+      copySource: '复制源码',
+      collapse: '收起详情',
+      pending: '等待结果…',
+      emptyResult: '（无输出）',
+      newFile: '新建',
+      modifiedFile: '修改',
+      dryRunPreview: '预览',
+      diffTruncated: '变更内容过长，已截断显示（可切换源码查看完整参数）',
+    },
   },
   start: {
     title: '开始',

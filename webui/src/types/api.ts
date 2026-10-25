@@ -30,6 +30,32 @@ export interface ToolResult {
     stderrLength?: number;
     truncated?: boolean;
     timedOut?: boolean;
+    /** terminal：是否仍在运行 / 终端 id（工具卡预览用） */
+    running?: boolean;
+    terminalId?: string;
+    /** 文件类工具（read/edit/write）的绝对路径与大小 */
+    path?: string;
+    sizeBytes?: number;
+    /** edit/write：unified diff、操作类型、dryRun、替换次数 */
+    diff?: string;
+    operation?: 'create' | 'overwrite';
+    dryRun?: boolean;
+    replacements?: number;
+    /** edit 多文件批量：逐文件结果（diff 供前端渲染多文件 diff 视图） */
+    files?: Array<{
+      path?: string;
+      ok?: boolean;
+      diff?: string;
+      error?: string;
+      replacements?: number;
+      dryRun?: boolean;
+    }>;
+    /** glob/grep：本页返回条数与匹配总数（预览按 returned 截取正文） */
+    returned?: number;
+    totalMatches?: number;
+    outputMode?: string;
+    pattern?: string;
+    root?: string;
     /** MCP 工具来源（mcp__server__tool） */
     server?: string;
     tool?: string;

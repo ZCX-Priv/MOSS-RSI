@@ -1082,6 +1082,22 @@ export const en = {
     toolCallArguments: 'Arguments',
     errorResult: 'Error result',
     result: 'Result',
+    // Tool call card (preview/source toggle + diff view)
+    toolCard: {
+      statusDone: 'Done',
+      statusRunning: 'Running',
+      statusFailed: 'Failed',
+      modePreview: 'Preview',
+      modeSource: 'Source',
+      copySource: 'Copy source',
+      collapse: 'Collapse details',
+      pending: 'Waiting for result…',
+      emptyResult: '(No output)',
+      newFile: 'New file',
+      modifiedFile: 'Modified',
+      dryRunPreview: 'Preview',
+      diffTruncated: 'Diff truncated (switch to Source for full arguments)',
+    },
   },
   start: {
     title: 'Start',
