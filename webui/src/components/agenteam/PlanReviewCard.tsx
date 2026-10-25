@@ -2,12 +2,13 @@
 // 团队计划审批卡片：phase=staged 时置顶展示。
 // 成员规划 + 任务 DAG 预览 + 批准/驳回按钮。
 
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, ClipboardCheck, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
+import { buildMemberAvatarSeeds, fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import type { Agenteam } from '../../types/api';
 
@@ -20,6 +21,11 @@ interface PlanReviewCardProps {
 export const PlanReviewCard = memo(function PlanReviewCard({ team, onApprove, onDiscard }: PlanReviewCardProps) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState<'approve' | 'discard' | null>(null);
+  // 成员头像唯一分配（避开四个模板固定头像）
+  const avatarSeeds = useMemo(
+    () => buildMemberAvatarSeeds(team.members, team.id),
+    [team.members, team.id],
+  );
 
   const handleApprove = async () => {
     setBusy('approve');
@@ -60,7 +66,10 @@ export const PlanReviewCard = memo(function PlanReviewCard({ team, onApprove, on
               key={m.id}
               className="flex items-center gap-1 rounded-full border border-border bg-card px-1.5 py-0.5 text-[11px]"
             >
-              <HumationAvatar seed={m.agentId || m.name} size={16} />
+              <HumationAvatar
+                seed={avatarSeeds.get(m.name) ?? fallbackAvatarSeed(m.agentId, m.name)}
+                size={16}
+              />
               {m.name}
               {m.role && <span className="text-muted-foreground">·{m.role}</span>}
             </span>

@@ -4,10 +4,11 @@
 //        + 任务行（成员头像 + 成员名 + 序号 + 树形任务描述 + 状态图标）。
 // 数据：工具参数静态计划立即渲染；result 解析出 teamId 后经 useTeamLive 实时刷新。
 
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bot, ChevronRight, CircleCheck, CircleDashed, CircleX, Loader2, TriangleAlert } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { buildMemberAvatarSeeds, fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import { AgentTaskFlow } from './AgentTaskFlow';
 import { useTeamLive } from '../../hooks/useTeamLive';
@@ -98,6 +99,11 @@ export const AgenteamInlineCard = memo(function AgenteamInlineCard({
       }));
   const phase = live?.phase;
   const memberByName = new Map(members.map((m) => [m.name, m]));
+  // 成员头像唯一分配（模板固定 seed；自定义成员避开四模板且互不重复）
+  const avatarSeeds = useMemo(
+    () => buildMemberAvatarSeeds(members, live?.id ?? plan?.name ?? 'plan'),
+    [members, live?.id, plan?.name],
+  );
 
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3 shadow-sm">
@@ -143,7 +149,9 @@ export const AgenteamInlineCard = memo(function AgenteamInlineCard({
       <div className="flex flex-col gap-1.5">
         {rows.map((task, i) => {
           const member = task.assignee ? memberByName.get(task.assignee) : undefined;
-          const seed = member?.agentId || member?.name || task.id || `t${i + 1}`;
+          const seed = member
+            ? (avatarSeeds.get(member.name) ?? fallbackAvatarSeed(member.agentId, member.name))
+            : (task.id || `t${i + 1}`);
           const memberLabel = task.assignee || t('agenteam.card.unassigned');
           const rowKey = task.id ?? `plan-${i}`;
           const isOpen = expandedRow === rowKey;

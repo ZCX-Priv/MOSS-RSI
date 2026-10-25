@@ -46,7 +46,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { resolveToolIcon } from '@/lib/tool-icons';
 import { FilePreviewPane, archiveEntrySource, fileNameOf, MarkdownRenderer } from '../../render';
 import { subscribeDrained } from '../../render/core/hydration-scheduler';
 import type { OverlayType } from '../../types';
@@ -118,6 +117,7 @@ import { StatsBar } from '../shared/StatsBar';
 import { CompactionCard } from '../shared/CompactionCard';
 import { MaxTurnsNoticeCard } from '../shared/MaxTurnsNoticeCard';
 import { OutputLimitNoticeCard } from '../shared/OutputLimitNoticeCard';
+import { ToolCallDetails } from '../shared/ToolCallDetails';
 import {
   useStore,
   DEFAULT_SIDEBAR_TABS,
@@ -2582,6 +2582,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
             key={tc.id}
             template={args.template ?? ''}
             task={args.task ?? ''}
+            toolCallId={tc.id}
             status={tc.status}
             resultText={resultText}
             isError={matched?.isError}
@@ -2724,96 +2725,15 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             // 结果文本/错误标记回退到全局索引：长耗时工具的结果消息可能不紧邻本消息
             const indexed = toolResults.get(tc.id);
-            const resultText = matchedResult
-              ? matchedResult.result.content
-                  .filter((c) => c.type === 'text')
-                  .map((c) => (c.type === 'text' ? c.text : ''))
-                  .join('\n')
-              : indexed?.text;
-            const isError = matchedResult?.result.isError ?? indexed?.isError;
-            // MCP 扩展：structuredContent（结构化输出）/ resources（资源引用）
-            const structured = matchedResult?.result.metadata?.structuredContent;
-            const resources = matchedResult?.result.metadata?.resources;
-            let prettyArgs = tc.arguments;
-            try {
-              prettyArgs = JSON.stringify(JSON.parse(tc.arguments || '{}'), null, 2);
-            } catch {
-              // 非 JSON，原样显示
-            }
             return (
-              <details key={tc.id} className="group px-2 py-0.5">
-                <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-                  <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
-                  {tc.status === 'generating' || tc.status === 'executing' ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : isError ? (
-                    <CircleAlert className="size-3.5 text-destructive" />
-                  ) : (
-                    (() => {
-                      const ToolIcon = resolveToolIcon(tc.name, toolIconMap);
-                      return <ToolIcon className="size-3.5" />;
-                    })()
-                  )}
-                  <span>{tc.name}</span>
-                </summary>
-                <div className="mt-1 flex flex-col gap-2 rounded-md border border-border p-2 text-xs max-h-[300px] overflow-auto no-scrollbar">
-                  {tc.arguments && (
-                    <div>
-                      <div className="text-muted-foreground/70">{t('task.toolCallArguments')}</div>
-                      <pre className="mono mt-0.5 whitespace-pre-wrap break-all text-foreground">
-                        {prettyArgs}
-                      </pre>
-                    </div>
-                  )}
-                  {resultText && (
-                    <div>
-                      <div className={cn('text-muted-foreground/70', isError && 'text-destructive/80')}>
-                        {isError ? t('task.errorResult') : t('task.result')}
-                      </div>
-                      <pre className={cn(
-                        'mono mt-0.5 whitespace-pre-wrap break-all',
-                        isError ? 'text-destructive' : 'text-foreground',
-                      )}>
-                        {resultText}
-                      </pre>
-                    </div>
-                  )}
-                  {/* MCP structuredContent：结构化输出 JSON */}
-                  {structured && (
-                    <div>
-                      <div className="text-muted-foreground/70">{t('task.structuredOutput')}</div>
-                      <pre className="mono mt-0.5 whitespace-pre-wrap break-all text-foreground">
-                        {JSON.stringify(structured, null, 2)}
-                      </pre>
-                    </div>
-                  )}
-                  {/* MCP resources：资源引用卡片（uri + mimeType + 可展开 text） */}
-                  {resources && resources.length > 0 && (
-                    <div>
-                      <div className="text-muted-foreground/70">{t('task.resourceRefs', { count: resources.length })}</div>
-                      <div className="mt-0.5 flex flex-col gap-1">
-                        {resources.map((r) => (
-                          <details key={r.uri} className="group/res rounded border border-border px-1.5 py-1">
-                            <summary className="flex cursor-pointer items-center gap-1.5 text-muted-foreground">
-                              <ChevronRight className="size-3 transition-transform group-open/res:rotate-90" />
-                              <FileText className="size-3 shrink-0" />
-                              <span className="truncate">{r.uri}</span>
-                              {r.mimeType && (
-                                <span className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[10px]">{r.mimeType}</span>
-                              )}
-                            </summary>
-                            {r.text && (
-                              <pre className="mono mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-foreground">
-                                {r.text}
-                              </pre>
-                            )}
-                          </details>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </details>
+              <ToolCallDetails
+                key={tc.id}
+                toolCall={tc}
+                result={matchedResult?.result}
+                fallbackText={indexed?.text}
+                fallbackIsError={indexed?.isError}
+                iconMap={toolIconMap}
+              />
             );
           })}
         </div>

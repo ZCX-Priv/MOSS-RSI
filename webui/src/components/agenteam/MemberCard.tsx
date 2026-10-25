@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { ExternalLink, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import type { TeamMember, TeamTask } from '../../types/api';
 
@@ -14,6 +15,8 @@ interface MemberCardProps {
   member: TeamMember;
   /** 该成员当前进行中的任务（working 时显示） */
   activeTask?: TeamTask;
+  /** 团队级唯一头像 seed（由 buildMemberAvatarSeeds 分配；缺省回退旧的 agentId/name 规则） */
+  avatarSeed?: string;
   compact?: boolean;
 }
 
@@ -23,10 +26,10 @@ const STATUS_DOT: Record<string, string> = {
   removed: 'bg-muted-foreground/40',
 };
 
-export const MemberCard = memo(function MemberCard({ member, activeTask, compact }: MemberCardProps) {
+export const MemberCard = memo(function MemberCard({ member, activeTask, avatarSeed, compact }: MemberCardProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const seed = member.agentId || member.name;
+  const seed = avatarSeed ?? fallbackAvatarSeed(member.agentId, member.name);
 
   return (
     <div

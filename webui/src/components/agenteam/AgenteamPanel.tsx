@@ -2,7 +2,7 @@
 // 专家团标签页主面板：全局团队列表 + 选中团队详情
 //（计划审批卡片 / 成员卡片 / 任务列表 / 消息流 / 汇总 / 生命周期操作）。
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -32,7 +32,10 @@ import {
 } from '@/components/ui/alert-dialog';
 import { api } from '../../api/http';
 import { useAgenteams } from '../../hooks/useAgenteams';
+import { useSubagentRuns } from '../../hooks/useSubagentRuns';
+import { useStore } from '../../store';
 import { cn } from '@/lib/utils';
+import { buildMemberAvatarSeeds, templateAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import { PlanReviewCard } from './PlanReviewCard';
 import { MemberCard } from './MemberCard';
@@ -49,13 +52,24 @@ const PHASE_STYLE: Record<TeamPhase, string> = {
   halted: 'border-muted text-muted-foreground',
 };
 
+/** 最近一次更新时间（面板列表用；仅显示时分） */
+function formatRunTime(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 export function AgenteamPanel() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { teams, selectedId, detail, messages, select, refreshList, refreshDetail } = useAgenteams();
+  const { tasks: subagentTasks, loading: subagentsLoading } = useSubagentRuns();
+  const agents = useStore((s) => s.agents);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [subagentsOpen, setSubagentsOpen] = useState(true);
 
   const act = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -94,6 +108,11 @@ export function AgenteamPanel() {
     });
 
   const activeMembers = detail?.members.filter((m) => m.status !== 'removed') ?? [];
+  // 成员头像 seed 映射：成员间唯一且避开四个模板固定头像（详见 lib/agenteam-avatars.ts）
+  const memberSeeds = useMemo(
+    () => buildMemberAvatarSeeds(activeMembers, detail?.id ?? 'team'),
+    [activeMembers, detail?.id],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -153,6 +172,69 @@ export function AgenteamPanel() {
                 </span>
               </button>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* 子代理运行记录（永久：完成后仍保留；点击打开完整任务页） */}
+      <div className="shrink-0 border-b border-border">
+        <button
+          type="button"
+          onClick={() => setSubagentsOpen((v) => !v)}
+          aria-expanded={subagentsOpen}
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-xs font-medium text-foreground"
+        >
+          <ChevronRight
+            className={cn(
+              'size-3 shrink-0 text-muted-foreground transition-transform',
+              subagentsOpen && 'rotate-90',
+            )}
+          />
+          {t('agenteam.subagents')}
+          <span className="text-muted-foreground">（{subagentTasks.length}）</span>
+          {subagentsLoading && <Loader2 className="ml-auto size-3 animate-spin text-muted-foreground" />}
+        </button>
+        {subagentsOpen && (
+          <div className="max-h-56 overflow-y-auto px-1.5 pb-1.5">
+            {subagentTasks.length === 0 ? (
+              <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                {t('agenteam.subagentsEmpty')}
+              </div>
+            ) : (
+              subagentTasks.map((task) => {
+                const template = task.title.match(/^Subagent\s*·\s*(.+)$/)?.[1]?.trim() ?? '';
+                const name = agents.find((a) => a.id === template)?.name ?? (template || task.title);
+                const seed = templateAvatarSeed(template) ?? (template || task.id);
+                return (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => navigate(`/task/${task.id}`)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/50"
+                    title={task.title}
+                  >
+                    <HumationAvatar seed={seed} size={20} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs text-foreground">{name}</div>
+                      {template && (
+                        <div className="truncate font-mono text-[10px] text-muted-foreground">
+                          {template}
+                        </div>
+                      )}
+                    </div>
+                    {task.running ? (
+                      <Loader2 className="size-3 shrink-0 animate-spin text-blue-500" />
+                    ) : (
+                      <CheckCircle2 className="size-3 shrink-0 text-emerald-500" />
+                    )}
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      {formatRunTime(task.updatedAt)}
+                    </span>
+                    <ExternalLink className="size-3 shrink-0 text-muted-foreground" />
+                  </button>
+                );
+              })
+            )}
           </div>
         )}
       </div>
@@ -265,6 +347,7 @@ export function AgenteamPanel() {
                     key={member.id}
                     member={member}
                     compact
+                    avatarSeed={memberSeeds.get(member.name)}
                     activeTask={
                       member.status === 'working'
                         ? detail.tasks.find(
@@ -286,13 +369,13 @@ export function AgenteamPanel() {
                 </span>
                 {actionBusy && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
               </div>
-              <TaskListView tasks={detail.tasks} members={detail.members} />
+              <TaskListView tasks={detail.tasks} members={detail.members} avatarSeeds={memberSeeds} />
             </section>
 
             {/* 消息流 */}
             <section>
               <span className="mb-1.5 block text-xs font-medium text-foreground">{t('agenteam.messages')}</span>
-              <MessageFeed messages={messages} members={activeMembers} />
+              <MessageFeed messages={messages} members={activeMembers} avatarSeeds={memberSeeds} />
             </section>
           </div>
         )}

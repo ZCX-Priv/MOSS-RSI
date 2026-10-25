@@ -2,7 +2,7 @@
 // 创建团队对话框：名称/目标 + 成员选择（注册表 agent，含内置模板）+
 // 权限模式 + 自动执行开关。提交 POST /api/agenteams。
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select';
 import { api } from '../../api/http';
 import { useStore } from '../../store';
+import { buildMemberAvatarSeeds, fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import type { AgentItem, AgenteamProfile, CreateAgenteamInput } from '../../types/api';
 
@@ -61,6 +62,8 @@ export function CreateTeamDialog({ open, onOpenChange, onCreated }: CreateTeamDi
   const [members, setMembers] = useState<Array<{ name: string; role?: string; agentId?: string; inlinePrompt?: string }>>([]);
   const [tasks, setTasks] = useState<CreateAgenteamInput['tasks']>([]);
   const [submitting, setSubmitting] = useState(false);
+  // 成员头像唯一分配（模板固定 seed；自定义成员避开四模板且互不重复）
+  const avatarSeeds = useMemo(() => buildMemberAvatarSeeds(members, 'draft'), [members]);
 
   // 加载 agent 注册表与团队模板
   useEffect(() => {
@@ -274,9 +277,12 @@ export function CreateTeamDialog({ open, onOpenChange, onCreated }: CreateTeamDi
             <div className="space-y-1.5">
               {members.map((member, index) => {
                 const agent = agents.find((a) => a.id === member.agentId);
+                const memberKey = member.name.trim() || `member-${index + 1}`;
+                const avatarSeed =
+                  avatarSeeds.get(memberKey) ?? fallbackAvatarSeed(member.agentId, member.name);
                 return (
                   <div key={index} className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1.5">
-                    <HumationAvatar seed={member.agentId || member.name || `m${index}`} size={28} />
+                    <HumationAvatar seed={avatarSeed} size={28} />
                     <Input
                       value={member.name}
                       onChange={(e) => updateMember(index, { name: e.target.value })}

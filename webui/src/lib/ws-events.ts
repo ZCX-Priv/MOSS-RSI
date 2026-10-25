@@ -28,6 +28,7 @@ import {
 } from './stream-buffer';
 import { diag, diagAlways } from './diag';
 import { emitInsightEvent } from './insight-bus';
+import { bindSubagentSession } from './subagent-sessions';
 import i18n from '../i18n';
 import type {
   AgentEvent,
@@ -73,6 +74,17 @@ const AGENT_TERMINAL_EVENT_TYPES = new Set([
 /** 高频流式分片类型：仅这些计入前端分片账本的 received 计数 */
 const STREAM_CHUNK_TYPES = new Set([
   'assistant-text', 'assistant-thinking', 'tool-call-delta',
+]);
+
+/**
+ * agenteam.member.event 内层 agent 事件的白名单：
+ * 子代理事件复用主 agent 的 reducer 落到 messagesBySession[子代理会话id]，
+ * 这里只放行可渲染的事件类型，避免未知类型进入 switch 的 default / 误触终端分支。
+ */
+const MEMBER_DISPLAY_EVENT_TYPES = new Set([
+  'assistant-text', 'assistant-thinking',
+  'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
+  'ask', 'ask-timeout', 'confirm-required', 'stats-updated', 'error', 'done',
 ]);
 
 /** 读取事件的 runId（agent 事件 payload 顶层） */
@@ -240,7 +252,7 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
 
 // ============================================================================
 
-export function applyWsMessage(msg: WSMessage): void {
+export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): void {
   const s = useStore.getState();
 
   // 终端类消息：元数据进 store / 高频输出走 terminal-bus，直接消费不进入下方 agent 事件流
@@ -517,7 +529,8 @@ export function applyWsMessage(msg: WSMessage): void {
         pendingRunId.delete(sessionId);
         emitSettled(sessionId, 'error');
       }
-      toast.error(localizedMessage);
+      // silent：子代理（member 事件）失败已在卡片结果中呈现，不弹全局 toast
+      if (!opts?.silent) toast.error(localizedMessage);
       break;
     }
     case 'done': {
@@ -954,9 +967,25 @@ export function applyWsMessage(msg: WSMessage): void {
         teamId?: string | null;
         memberName?: string;
         taskId?: string;
+        parentToolCallId?: string;
+        event?: AgentEvent;
       };
-      if (payload.taskId && payload.memberName) {
-        useStore.getState().bumpAgenteamEvent(payload.taskId, payload.teamId ?? null, payload.memberName);
+      if (!payload.taskId || !payload.memberName) break;
+      // 临时 subagent：按父工具调用 id 精确绑定其会话 id（取代已删除的事件计数，
+      // 同模板并发也互不串台；绑定表见 lib/subagent-sessions.ts）
+      if (payload.teamId == null && payload.parentToolCallId) {
+        bindSubagentSession(payload.parentToolCallId, payload.taskId);
+      }
+      // 实时过程：把临时 subagent 的内层 agent 事件按「子代理自己的会话 id」复用主 agent reducer，
+      // 卡片展开后即可像主 agent 一样看到思考 / 流式正文 / 工具调用状态。
+      // 注意仅限 teamId=null（临时 subagent）：队长 turn 复用主会话 id，其内部决策事件
+      // 不能注入主会话消息流，否则会污染用户当前对话。
+      const ev = payload.event;
+      if (payload.teamId == null && ev && ev.sessionId && MEMBER_DISPLAY_EVENT_TYPES.has(ev.type)) {
+        applyWsMessage(
+          { type: ev.type, sessionId: ev.sessionId, payload: ev },
+          { silent: true },
+        );
       }
       break;
     }

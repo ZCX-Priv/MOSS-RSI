@@ -1259,7 +1259,6 @@ export const zh = {
     card: {
       taskCount: '{{count}} 项任务',
       running: '运行中',
-      eventsProcessed: '已处理 {{count}} 条事件',
       starting: '正在启动…',
       report: '最终报告',
       awaitingApprovalHint: '计划待审批 · 请在右侧「专家团」面板中处理',
@@ -1270,6 +1269,8 @@ export const zh = {
       noSessionYet: '尚未开始执行',
       openFullTask: '打开完整任务页',
     },
+    subagents: '子代理',
+    subagentsEmpty: '暂无子代理记录',
   },
   plugins: {
     title: '插件库',

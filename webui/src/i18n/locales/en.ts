@@ -1258,7 +1258,6 @@ export const en = {
     card: {
       taskCount: '{{count}} tasks',
       running: 'Running',
-      eventsProcessed: '{{count}} events processed',
       starting: 'Starting…',
       report: 'Final report',
       awaitingApprovalHint: 'Plan awaiting approval · handle it in the Agenteam panel',
@@ -1269,6 +1268,8 @@ export const en = {
       noSessionYet: 'Not started yet',
       openFullTask: 'Open full task page',
     },
+    subagents: 'Subagents',
+    subagentsEmpty: 'No subagent runs yet',
   },
   plugins: {
     title: 'Plugins',

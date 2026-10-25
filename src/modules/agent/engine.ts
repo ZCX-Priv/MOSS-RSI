@@ -72,6 +72,36 @@ function extractToolPaths(toolName: string, args: unknown): string[] {
 /** ask 超时兜底上限（即使配置异常也不会让 Promise 永久悬挂） */
 const ASK_TIMEOUT_CEILING_MS = 24 * 60 * 60 * 1000; // 24h
 
+/** headless 会话（子代理/团队成员）的权限确认超时：无人应答时快速失败而非白等 5 分钟 */
+const HEADLESS_CONFIRM_TIMEOUT_MS = 30 * 1000;
+
+/** 同一轮并发执行 subagent 工具调用的上限（防止一次性开过多 LLM 流造成资源压力） */
+const MAX_CONCURRENT_SUBAGENT_RUNS = 4;
+
+/** 是否为 agent(mode=subagent) 工具调用（解析失败按非并发处理） */
+function isSubagentToolCall(tc: { name: string; arguments: string }): boolean {
+  if (tc.name !== 'agent') return false;
+  try {
+    const args = JSON.parse(tc.arguments || '{}') as { mode?: unknown };
+    return args.mode === 'subagent';
+  } catch {
+    return false;
+  }
+}
+
+/** 并发执行（上限 limit），保持每个任务的错误隔离由调用方 runOne 负责 */
+async function runWithLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor];
+      cursor += 1;
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
 /** 存在性校验：绝对路径直接 stat；相对路径基于 base 解析。非普通文件（目录/丢失/不可访问）视为不存在 */
 function fileExistsAsFile(p: string, base: string): boolean {
   try {
@@ -137,6 +167,19 @@ export class AgentEngineImpl implements AgentEngine {
     /** 「始终允许」规则建议（confirm-required 事件携带，前端卡片展示） */
     ruleSuggestion?: string;
   }>();
+
+  /**
+   * headless 会话集合（子代理 / 团队成员等无人交互的会话）：
+   * 权限确认没有前端可应答，改为短超时快速失败并返回明确原因，避免每个 L3 工具白等 5 分钟。
+   */
+  private readonly headlessSessions = new Set<string>();
+
+  /** 标记/取消 headless（子代理与团队成员由 orchestrator 在启动时标记） */
+  markSessionHeadless(sessionId: string, headless: boolean): void {
+    if (!sessionId) return;
+    if (headless) this.headlessSessions.add(sessionId);
+    else this.headlessSessions.delete(sessionId);
+  }
 
   constructor(deps: {
     services: ServiceRegistry;
@@ -898,26 +941,33 @@ export class AgentEngineImpl implements AgentEngine {
         }
       };
 
-      // `ask` 为交互阻塞型工具：同一轮内出现 ≥2 个 ask 调用时**并发执行**，
-      // 使多个提问同时挂起（前端据此合并为一张多问题卡片）；
+      // 并发语义（两组特殊工具）：
+      // - `ask`：同一轮 ≥2 个 → 并发挂起，前端合并为多问题卡片；
+      // - `agent(mode=subagent)`：同一轮 ≥2 个 → 真并发（上限 4），避免后面的子代理
+      //   排在同一轮串行队尾、用户一停止就全部 `aborted`。
       // 其余工具保持原有串行语义（依赖顺序 / abort 配对）。
       const askCalls = toolCalls.filter((tc) => tc.name === 'ask');
-      if (askCalls.length >= 2) {
-        let asksLaunched = false;
-        for (const tc of toolCalls) {
-          if (tc.name === 'ask') {
-            if (!asksLaunched) {
-              asksLaunched = true;
-              await Promise.all(askCalls.map((a) => runOne(a)));
-            }
-            continue;
+      const subagentCalls = toolCalls.filter(isSubagentToolCall);
+      const parallelAsks = askCalls.length >= 2;
+      const parallelSubagents = subagentCalls.length >= 2;
+      let asksLaunched = false;
+      let subagentsLaunched = false;
+      for (const tc of toolCalls) {
+        if (parallelAsks && tc.name === 'ask') {
+          if (!asksLaunched) {
+            asksLaunched = true;
+            await Promise.all(askCalls.map((a) => runOne(a)));
           }
-          await runOne(tc);
+          continue;
         }
-      } else {
-        for (const tc of toolCalls) {
-          await runOne(tc);
+        if (parallelSubagents && isSubagentToolCall(tc)) {
+          if (!subagentsLaunched) {
+            subagentsLaunched = true;
+            await runWithLimit(subagentCalls, MAX_CONCURRENT_SUBAGENT_RUNS, runOne);
+          }
+          continue;
         }
+        await runOne(tc);
       }
 
       // 兜底自愈：确保本轮每个 tool_call_id 都有对应 tool 消息。
@@ -1848,8 +1898,13 @@ export class AgentEngineImpl implements AgentEngine {
         const ruleSuggestion = safety.generateRuleSuggestion(name, args);
         const ok = await this.requestConfirm(ctx, name, args, ruleSuggestion);
         if (!ok) {
+          // headless 会话没有可应答的 UI：明确告知模型"不是用户拒绝，而是无人应答"，
+          // 便于它改用低风险工具或直接向父会话求援，而不是反复重试同一 L3 工具。
+          const reason = this.headlessSessions.has(ctx.sessionId)
+            ? `Tool "${name}" canceled: permission prompt unavailable in a headless subagent session (timed out)`
+            : `Tool "${name}" canceled (user declined the permission prompt)`;
           return {
-            content: [{ type: 'text', text: `Tool "${name}" canceled (user declined the permission prompt)` }],
+            content: [{ type: 'text', text: reason }],
             isError: true,
           };
         }
@@ -2040,15 +2095,20 @@ export class AgentEngineImpl implements AgentEngine {
     customQuestion?: string,
   ): Promise<boolean> {
     return new Promise<boolean>((resolve, reject) => {
-      let timeoutMs = 5 * 60 * 1000;
+      // headless 会话（子代理/团队成员）无前端可应答：短超时快速失败，
+      // 避免同一轮多个 L3 工具各白等 5 分钟把并行子代理拖死。
+      const headless = this.headlessSessions.has(ctx.sessionId);
+      let timeoutMs = headless ? HEADLESS_CONFIRM_TIMEOUT_MS : 5 * 60 * 1000;
       try {
-        const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
-        if (safety) {
-          const minutes = safety.getConfirmTimeoutMinutes();
-          timeoutMs = minutes === 0 ? 0 : Math.min(minutes * 60 * 1000, ASK_TIMEOUT_CEILING_MS);
+        if (!headless) {
+          const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
+          if (safety) {
+            const minutes = safety.getConfirmTimeoutMinutes();
+            timeoutMs = minutes === 0 ? 0 : Math.min(minutes * 60 * 1000, ASK_TIMEOUT_CEILING_MS);
+          }
         }
       } catch {
-        // config 不可用：默认 5 分钟
+        // config 不可用：保留默认超时
       }
       const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
       const timer = setTimeout(() => {

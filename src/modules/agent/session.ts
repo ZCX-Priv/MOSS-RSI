@@ -829,7 +829,10 @@ function healDanglingToolCalls(messages: AgentMessage[]): number {
           role: 'tool',
           toolCallId: tc.id,
           name: tc.name,
-          content: 'Error: result lost due to crash (auto-healed)',
+          content:
+            tc.name === 'agent'
+              ? 'Error: subagent run interrupted by app restart (result not saved); re-dispatch if still needed'
+              : 'Error: result lost due to crash (auto-healed)',
           isError: true,
           timestamp: m.timestamp ?? new Date().toISOString(),
         },

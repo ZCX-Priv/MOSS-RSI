@@ -41,6 +41,9 @@ const MAX_TASK_RETRY_ATTEMPTS = 2;
 /** subagent 隐藏分组固定 id（dir=subagent，平坦存放每次 subagent 会话） */
 const SUBAGENT_GROUP_ID = 'subagent';
 
+/** 子代理最大嵌套深度（主=0 → 子=1 → 孙=2；再深直接拒绝，防止同任务递归派发拖垮进程） */
+const MAX_SUBAGENT_DEPTH = 2;
+
 /** 创建团队输入 */
 export interface CreateTeamInput {
   name: string;
@@ -81,6 +84,12 @@ export interface SubagentRunInput {
   task: string;
   cwd: string;
   permissionMode?: PermissionMode;
+  /** 父会话中触发本次子代理的工具调用 id（前端卡片据此精确关联运行过程） */
+  parentToolCallId?: string;
+  /** 父会话 id（用于继承权限模式、计算嵌套深度） */
+  parentSessionId?: string;
+  /** 父工具调用的中断信号（停止主 run 时级联中止子代理） */
+  signal?: AbortSignal;
 }
 
 export interface SubagentRunOutput {
@@ -99,6 +108,8 @@ export class TeamOrchestrator {
   private readonly env: Environment;
   /** 进行中的成员 run：memberSessionId → AbortController（halt 用） */
   private readonly activeMemberRuns = new Map<string, AbortController>();
+  /** 会话嵌套深度：sessionId → depth（主会话 0，团队成员 1，子代理逐层 +1） */
+  private readonly sessionDepth = new Map<string, number>();
   /** 进行中的队长 run：captainSessionId → AbortController（halt 用） */
   private readonly activeCaptainRuns = new Map<string, AbortController>();
   /** 队长决策队列：teamId → 串行 Promise 链（同 session 并发 run 规避） */
@@ -444,6 +455,11 @@ export class TeamOrchestrator {
 
     // 成员侧边栏任务按需创建（幂等；内部同步）
     this.ensureMemberTask(team, member);
+    // 团队成员会话同样是 headless：权限确认无人应答 → 短超时快速失败；深度固定为 1
+    this.engine.markSessionHeadless?.(member.sessionId, true);
+    if (member.sessionId && !this.sessionDepth.has(member.sessionId)) {
+      this.sessionDepth.set(member.sessionId, 1);
+    }
 
     const now = Date.now();
     const attempt = (task.attempt ?? 0) + 1;
@@ -761,15 +777,42 @@ export class TeamOrchestrator {
     if (!input.template?.trim()) throw new Error('template required');
     if (!input.task?.trim()) throw new Error('task required');
 
+    // 嵌套深度保护：主会话 0 → 子代理 1 → 孙 2；再深拒绝。
+    // 三个"完全相同任务"的递归派发会指数级开新会话，这里是硬闸门。
+    const parentDepth = input.parentSessionId
+      ? (this.sessionDepth.get(input.parentSessionId) ?? 0)
+      : 0;
+    if (parentDepth >= MAX_SUBAGENT_DEPTH) {
+      throw new Error(
+        `子代理嵌套层级已达上限（${MAX_SUBAGENT_DEPTH} 层）：拒绝在 depth=${parentDepth} 的会话上继续派发`,
+      );
+    }
+
     const group = this.ensureSubagentGroup();
     const task = this.engine.createTask(`Subagent · ${input.template}`, group.id);
+    this.sessionDepth.set(task.id, parentDepth + 1);
 
     this.logger.info('agenteam: subagent run', {
       template: input.template,
       taskId: task.id,
+      depth: parentDepth + 1,
     });
 
     const controller = new AbortController();
+    // 父工具调用中断 → 级联中止本子代理（停止主 run 不再留下孤儿子代理）
+    const forwardAbort = () => controller.abort();
+    if (input.signal) {
+      if (input.signal.aborted) controller.abort();
+      else input.signal.addEventListener('abort', forwardAbort, { once: true });
+    }
+    // headless 标记：子代理会话无人应答权限确认 → 短超时快速失败（见 engine.requestConfirm）
+    this.engine.markSessionHeadless?.(task.id, true);
+    // 权限继承：显式入参 → 父会话模式 → auto（父 skip 时子代理也不再弹无法应答的确认）
+    const inheritedMode: PermissionMode =
+      input.permissionMode ??
+      (input.parentSessionId ? this.engine.getPermissionMode?.(input.parentSessionId) : undefined) ??
+      'auto';
+
     this.activeMemberRuns.set(task.id, controller);
     this.registerExternalRun(task.id, controller);
     try {
@@ -777,13 +820,14 @@ export class TeamOrchestrator {
         sessionId: task.id,
         agentId: input.template,
         userMessage: input.task,
-        permissionMode: input.permissionMode ?? 'auto',
+        permissionMode: inheritedMode,
         cwd: input.cwd,
         onEvent: (event: AgentEvent) => {
           void this.eventBus.broadcast('agenteam:member-event', {
             teamId: null,
             memberName: input.template,
             taskId: task.id,
+            ...(input.parentToolCallId ? { parentToolCallId: input.parentToolCallId } : {}),
             event,
           });
         },
@@ -796,6 +840,7 @@ export class TeamOrchestrator {
         result: result.finalText,
       };
     } finally {
+      if (input.signal) input.signal.removeEventListener('abort', forwardAbort);
       this.activeMemberRuns.delete(task.id);
       this.unregisterExternalRun(task.id, controller);
     }
@@ -1205,6 +1250,9 @@ export class TeamOrchestrator {
     if (messages.length === 0) return;
     this.ensureMemberTask(team, member);
     if (!member.sessionId) return;
+    // 成员会话 headless 标记 + 嵌套深度（与 dispatchMember 一致）
+    this.engine.markSessionHeadless?.(member.sessionId, true);
+    if (!this.sessionDepth.has(member.sessionId)) this.sessionDepth.set(member.sessionId, 1);
 
     // 消费未读消息
     member.pendingMessages = [];

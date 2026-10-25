@@ -4,12 +4,15 @@
 import { memo, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
+import { fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import type { TeamMessage } from '../../types/api';
 
 interface MessageFeedProps {
   messages: TeamMessage[];
   members: Array<{ name: string; agentId?: string }>;
+  /** 成员名 → 团队级唯一头像 seed */
+  avatarSeeds?: ReadonlyMap<string, string>;
 }
 
 function formatTime(ts: number): string {
@@ -20,7 +23,7 @@ function formatTime(ts: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export const MessageFeed = memo(function MessageFeed({ messages, members }: MessageFeedProps) {
+export const MessageFeed = memo(function MessageFeed({ messages, members, avatarSeeds }: MessageFeedProps) {
   const { t } = useTranslation();
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const prevCount = useRef(0);
@@ -42,7 +45,9 @@ export const MessageFeed = memo(function MessageFeed({ messages, members }: Mess
         const fromMember = members.find((m) => m.name === msg.from);
         const isCaptain = msg.from === 'captain';
         const isUser = msg.from === 'user';
-        const seed = fromMember ? fromMember.agentId || fromMember.name : msg.from;
+        const seed = fromMember
+          ? (avatarSeeds?.get(fromMember.name) ?? fallbackAvatarSeed(fromMember.agentId, fromMember.name))
+          : msg.from;
         return (
           <div key={msg.id} className="flex gap-2">
             {isUser ? (

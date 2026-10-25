@@ -223,6 +223,15 @@ export interface AgentEngine {
   /** 列出全部分组（含隐藏分组，供内部按 id/名查找；HTTP 边界另行过滤） */
   listTaskGroups(): import('./agent/task-store').TaskGroup[];
 
+  /** 会话级权限模式（子代理继承父会话模式 / 刷新恢复徽章用） */
+  getPermissionMode?(sessionId: string): PermissionMode | undefined;
+
+  /**
+   * 标记会话为 headless（子代理/团队成员等无人交互的会话）。
+   * headless 会话的权限确认不再等满默认超时，而是快速失败并给出明确文案。
+   */
+  markSessionHeadless?(sessionId: string, headless: boolean): void;
+
   /** 删除分组（agenteam 删除团队时清理其隐藏分组与成员会话用） */
   deleteTaskGroup(
     id: string,

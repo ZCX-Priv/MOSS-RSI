@@ -243,6 +243,9 @@ async function runSubagentMode(
       template,
       task,
       cwd: p.cwd || ctx.cwd,
+      parentToolCallId: ctx.toolCallId,
+      parentSessionId: ctx.sessionId,
+      signal: ctx.signal,
     });
     return textResult(
       `子代理已完成 (finishReason=${output.finishReason}, session=${output.sessionId}):\n\n${output.result}`,

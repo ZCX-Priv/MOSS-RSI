@@ -5,12 +5,15 @@ import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Circle, CircleCheck, CircleDashed, CircleX, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { fallbackAvatarSeed } from '../../lib/agenteam-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import type { TeamMember, TeamTask } from '../../types/api';
 
 interface TaskListViewProps {
   tasks: TeamTask[];
   members: TeamMember[];
+  /** 成员名 → 团队级唯一头像 seed（避免同 agentId 成员重复头像） */
+  avatarSeeds?: ReadonlyMap<string, string>;
 }
 
 function TaskStatusIcon({ status }: { status: TeamTask['status'] }) {
@@ -29,7 +32,15 @@ function TaskStatusIcon({ status }: { status: TeamTask['status'] }) {
   }
 }
 
-function TaskRow({ task, members }: { task: TeamTask; members: TeamMember[] }) {
+function TaskRow({
+  task,
+  members,
+  avatarSeeds,
+}: {
+  task: TeamTask;
+  members: TeamMember[];
+  avatarSeeds?: ReadonlyMap<string, string>;
+}) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const assignee = members.find((m) => m.name === task.assignee && m.status !== 'removed');
@@ -73,7 +84,12 @@ function TaskRow({ task, members }: { task: TeamTask; members: TeamMember[] }) {
             {task.verdict}
           </span>
         )}
-        {assignee && <HumationAvatar seed={assignee.agentId || assignee.name} size={18} />}
+        {assignee && (
+          <HumationAvatar
+            seed={avatarSeeds?.get(assignee.name) ?? fallbackAvatarSeed(assignee.agentId, assignee.name)}
+            size={18}
+          />
+        )}
       </button>
       {expanded && hasDetail && (
         <div className="space-y-1.5 border-t border-border/60 px-2 py-1.5 text-[11px] leading-relaxed">
@@ -124,7 +140,7 @@ function TaskRow({ task, members }: { task: TeamTask; members: TeamMember[] }) {
   );
 }
 
-export const TaskListView = memo(function TaskListView({ tasks, members }: TaskListViewProps) {
+export const TaskListView = memo(function TaskListView({ tasks, members, avatarSeeds }: TaskListViewProps) {
   const { t } = useTranslation();
   if (tasks.length === 0) {
     return <div className="px-2 py-3 text-center text-xs text-muted-foreground">{t('agenteam.empty')}</div>;
@@ -132,7 +148,7 @@ export const TaskListView = memo(function TaskListView({ tasks, members }: TaskL
   return (
     <div className="space-y-1">
       {tasks.map((task) => (
-        <TaskRow key={task.id} task={task} members={members} />
+        <TaskRow key={task.id} task={task} members={members} avatarSeeds={avatarSeeds} />
       ))}
     </div>
   );
