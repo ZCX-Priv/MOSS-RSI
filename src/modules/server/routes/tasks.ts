@@ -20,7 +20,7 @@ import { ErrorCode } from '../../../core/error-codes';
 
 /**
  * 任务列表实时广播（所有客户端侧边栏零刷新同步）。
- * 广播失败绝不影响 CRUD 主流程；隐藏分组（subagent / agenteam 衍生会话）始终不出现在载荷中。
+ * 广播失败绝不影响 CRUD 主流程；隐藏分组（subagent 衍生会话）始终不出现在载荷中。
  */
 function broadcastWS(services: ServiceRegistry, message: unknown): void {
   try {
@@ -153,7 +153,7 @@ function resolveEngine(services: ServiceRegistry): AgentEngineWithTasks | null {
 // 任务
 // ============================================================================
 
-/** 隐藏分组（subagent / agenteam 衍生会话）不出现在侧边栏列表；直接访问 /api/tasks/:id 仍可用 */
+/** 隐藏分组（subagent 衍生会话）不出现在侧边栏列表；直接访问 /api/tasks/:id 仍可用 */
 function hiddenGroupIds(engine: AgentEngineWithTasks): Set<string> {
   const groups = engine.listTaskGroups?.() ?? [];
   return new Set(groups.filter((g) => g.hidden === true).map((g) => g.id));

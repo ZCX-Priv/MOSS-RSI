@@ -142,6 +142,27 @@ async function initPersisted(): Promise<Record<string, unknown>> {
   }
 }
 
+/**
+ * 已废弃的「专家团」侧边栏标签清洗：过滤旧数据里的 agenteam 标签，
+ * 避免升级后出现空白面板与失配的 activeId（全部废弃时回落默认「开始」）。
+ */
+function sanitizeSidebarTabs(
+  raw: PersistedState['sidebarTabsBySession'],
+): PersistedState['sidebarTabsBySession'] {
+  if (!raw) return undefined;
+  const out: NonNullable<PersistedState['sidebarTabsBySession']> = {};
+  for (const [sessionId, state] of Object.entries(raw)) {
+    if (!state) continue;
+    const tabs = state.tabs.filter((tab) => (tab.type as string) !== 'agenteam');
+    if (tabs.length === 0) continue;
+    const activeId = tabs.some((t) => t.id === state.activeId)
+      ? state.activeId
+      : tabs[tabs.length - 1]?.id ?? null;
+    out[sessionId] = { tabs, activeId };
+  }
+  return out;
+}
+
 function buildPersistedState(data: Record<string, unknown>): PersistedState {
   return {
     workingDirectory:
@@ -194,7 +215,9 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
         : undefined,
     sidebarTabsBySession:
       data['moss-sidebar-tabs-by-session'] && typeof data['moss-sidebar-tabs-by-session'] === 'object'
-        ? (data['moss-sidebar-tabs-by-session'] as PersistedState['sidebarTabsBySession'])
+        ? sanitizeSidebarTabs(
+            data['moss-sidebar-tabs-by-session'] as PersistedState['sidebarTabsBySession'],
+          )
         : undefined,
     renderSettings: isValidRenderSettings(data['moss-render-settings'])
       ? data['moss-render-settings']

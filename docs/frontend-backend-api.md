@@ -14,7 +14,7 @@
 
 | 通道 | 用途 | 协议 |
 |---|---|---|
-| HTTP REST | 配置、Provider、会话、任务、Agent 团队、MCP、Skill/Command、自动化、文件系统、终端、浏览器/桌面、日志、上下文、规则/钩子/记忆、语音、远程访问 | `/api/*`，JSON |
+| HTTP REST | 配置、Provider、会话、任务、Agent 注册表、子代理、MCP、Skill/Command、自动化、文件系统、终端、浏览器/桌面、日志、上下文、规则/钩子/记忆、语音、远程访问 | `/api/*`，JSON |
 | WebSocket | 流式任务、ask/confirm 回复、任务/终端/语音/自动化/AI 诊断 | `/ws`，JSON 帧 |
 | MCP over HTTP | 对外暴露 MOSS 工具（`mcpServer.enabled`） | `/mcp` |
 | MCP over stdio | `moss mcp` 供 Claude Desktop / Cursor 等客户端调用 | stdio |
@@ -178,29 +178,17 @@
 | DELETE | `/api/task-groups/:id` | 是 | 删除分组（可迁移任务） |
 | GET | `/api/search` | 是 | 任务与消息搜索（query `q`） |
 
-### 2.9 Agent 与团队
+### 2.9 Agent 注册表与子代理
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| GET | `/api/agenteam` | 是 | Agent 列表与默认 Agent |
-| POST | `/api/agenteam` | 是 | 新建 Agent |
-| GET | `/api/agenteam/:id` | 是 | Agent 详情 |
-| PATCH | `/api/agenteam/:id` | 是 | 更新 Agent |
-| DELETE | `/api/agenteam/:id` | 是 | 删除 Agent |
-| PUT | `/api/agenteam/default` | 是 | 设置默认 Agent |
-| GET | `/api/agenteams` | 是 | 团队列表 |
-| GET | `/api/agenteams/:id` | 是 | 团队详情 |
-| GET | `/api/agenteams/:id/messages` | 是 | 团队消息 |
-| POST | `/api/agenteams` | 是 | 创建团队任务 |
-| POST | `/api/agenteams/:id/approve` | 是 | 审批团队计划 |
-| POST | `/api/agenteams/:id/discard` | 是 | 丢弃团队 |
-| POST | `/api/agenteams/:id/halt` | 是 | 暂停团队 |
-| POST | `/api/agenteams/:id/resume` | 是 | 恢复团队 |
-| DELETE | `/api/agenteams/:id` | 是 | 删除团队 |
-| GET | `/api/agenteam-profiles` | 是 | 团队模板列表 |
-| POST | `/api/agenteam-profiles` | 是 | 保存团队模板 |
-| DELETE | `/api/agenteam-profiles/:name` | 是 | 删除团队模板 |
-| POST | `/api/subagents/run` | 是 | 运行临时 subagent |
+| GET | `/api/agents` | 是 | Agent 列表与默认 Agent |
+| POST | `/api/agents` | 是 | 新建 Agent |
+| GET | `/api/agents/:id` | 是 | Agent 详情 |
+| PATCH | `/api/agents/:id` | 是 | 更新 Agent |
+| DELETE | `/api/agents/:id` | 是 | 删除 Agent |
+| PUT | `/api/agents/default` | 是 | 设置默认 Agent |
+| POST | `/api/subagents/run` | 是 | 运行一次性 subagent |
 
 ### 2.10 自动化
 
@@ -502,15 +490,14 @@
 | `voice.stopped` | 会话结束 |
 | `voice.error` | `{ error }` |
 
-**自动化 / Agent 团队 / MCP / 诊断 / 配置**
+**自动化 / 子代理 / MCP / 诊断 / 配置**
 
 | type | payload |
 |---|---|
 | `automation.started` | `{ automationId, runId }` |
 | `automation.event` | 运行过程事件 |
 | `automation.finished` | `{ automationId, runId, status, finalText? }` |
-| `agenteam.team.changed` | 团队状态变化 |
-| `agenteam.member.event` | 成员事件 |
+| `subagent.event` | `{ taskId, parentToolCallId?, event }` |
 | `mcp.status` | 服务器连接状态 |
 | `resources.changed` | MCP 资源列表变化 |
 | `insight.diagnose.event` | 诊断链路事件 |
@@ -677,8 +664,8 @@ export interface TaskGroup {
   expanded?: boolean;
   taskCount?: number;
   source?: 'folder' | 'manual';  // folder=按工作目录自动创建；manual=手动新建
-  dir?: string;                  // tasks/ 下相对目录（agenteam/<teamId> 嵌套布局）
-  hidden?: boolean;              // 隐藏分组（subagent / agenteam 衍生会话）
+  dir?: string;                  // tasks/ 下相对目录（支持嵌套布局）
+  hidden?: boolean;              // 隐藏分组（subagent 衍生会话）
 }
 
 export interface TodoItem {
@@ -917,7 +904,7 @@ export interface WSMessage {
 |---|---|
 | 配置 | `~/.moss/config/config.json`、`api.json` |
 | 任务 / 会话 / Todo | `~/.moss/tasks/<groupId>/`、`~/.moss/todo/<sessionId>.json` |
-| Agent / 团队 | `~/.moss/agenteam.json`、`~/.moss/agenteam/`、`~/.moss/agenteam-profiles.json` |
+| Agent 注册表 | `~/.moss/agents.json` |
 | 自动化 | `~/.moss/automations.json`、`automations-history.json` |
 | Skill / Command / 提示词 / 附件 | `~/.moss/skills/`、`commands/`、`agent/prompts/`、`agent/attachments/` |
 | 规则 / 钩子 / 记忆 | `~/.moss/{rules,hooks,memory}/`（项目级 `<cwd>/.moss/`） |

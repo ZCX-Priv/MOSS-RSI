@@ -516,12 +516,12 @@ export const zh = {
     layoutMigrated: '文件历史目录布局已统一：迁入目录 {{dirs}}，transcript 文件 {{transcripts}} 个，重写备份路径 {{rewrites}} 条',
     layoutMigrationFailed: '文件历史目录布局迁移失败：{{error}}',
   },
-  agenteam: {
-    saveFailed: '保存 agenteam.json 失败',
+  subagent: {
+    saveFailed: '保存 agents.json 失败',
     agentCreated: 'Agent 已创建: {{id}} ({{name}})',
     agentRemoved: 'Agent 已移除: {{id}}',
     defaultSet: '默认 Agent 已设置: {{id}}',
-    moduleInitialized: 'agenteam 模块已初始化',
+    moduleInitialized: 'subagent 模块已初始化',
   },
   automation: {
     schedulerStarted: '自动化调度器已启动',

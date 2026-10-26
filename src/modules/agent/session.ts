@@ -1,8 +1,8 @@
 // src/modules/agent/session.ts
 // 会话状态与历史存储（上下文视图构建/裁剪/配对修复已迁入 context 引擎）。
 // 持久化：每个 session 存为 ~/.moss/tasks/<dir>/<sessionId>.json（相对目录由
-// TaskStore 总管索引解析，engine 注入 resolveSessionDir；支持 subagent、agenteam/<teamId>
-// 等嵌套目录），启动时全量加载到内存。
+// TaskStore 总管索引解析，engine 注入 resolveSessionDir；支持 subagent 等隐藏分组目录），
+// 启动时全量加载到内存。
 
 import { t } from '../../core/i18n';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
@@ -154,7 +154,7 @@ export class SessionStore {
           if (!name.endsWith('.json') || name === 'task.json') continue;
           this.loadOneSession(name, d1, `${d1}/${name}`);
         }
-        // 二级：tasks/<d1>/<d2>/*.json（嵌套分组，如 agenteam/<teamId>）
+        // 二级：tasks/<d1>/<d2>/*.json（自定义嵌套分组）
         for (const sub of readdirSync(d1Abs, { withFileTypes: true })) {
           if (!sub.isDirectory()) continue;
           const relDir = `${d1}/${sub.name}`;

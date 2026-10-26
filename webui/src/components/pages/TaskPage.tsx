@@ -31,7 +31,6 @@ import {
   Package,
   Zap,
   Inbox,
-  Users,
   SquarePen,
   ArrowUp,
   Stethoscope,
@@ -107,10 +106,8 @@ import { ComputerPanel } from '../shared/ComputerPanel';
 import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
 import { FileBrowserPanel } from '../shared/FileBrowserPanel';
 import { FileChangesPanel } from '../shared/FileChangesPanel';
-import { AgenteamPanel } from '../agenteam/AgenteamPanel';
-import { AgenteamInlineCard, type InlineTeamPlan } from '../agenteam/AgenteamInlineCard';
-import { SubagentInlineCard } from '../agenteam/SubagentInlineCard';
-import { isAgentCall, parseAgentArgs, buildToolResultIndex, type ToolResultEntry } from '../agenteam/agent-calls';
+import { SubagentCard, type SubagentCallItem } from '../subagent/SubagentCard';
+import { isAgentCall, parseAgentArgs, buildToolResultIndex, type ToolResultEntry } from '../subagent/agent-calls';
 import { MessageErrorBoundary } from '../shared/MessageErrorBoundary';
 import { ControlHub } from '../shared/ControlHub';
 import { StatsBar } from '../shared/StatsBar';
@@ -334,7 +331,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const isSending = useStore((s) => s.sendingBySession[taskId] ?? false);
   const isStopping = useStore((s) => s.stoppingBySession[taskId] ?? false);
   const task = useStore((s) => s.tasks.find((tk) => tk.id === taskId));
-  // 隐藏会话（subagent / agenteam 衍生任务）不在侧边栏列表，store.tasks 查不到 → 直连接口兜底标题
+  // 隐藏会话（subagent 衍生任务）不在侧边栏列表，store.tasks 查不到 → 直连接口兜底标题
   const [fallbackTitle, setFallbackTitle] = useState<string | null>(null);
   const todos = useStore((s) => s.todosBySession[taskId] ?? EMPTY_TODOS);
   const pendingAsks = useStore((s) => s.pendingAsks);
@@ -546,16 +543,15 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // 下拉菜单只显示当前标签栏中未打开的类型；全部类型都已打开时禁用加号按钮
   const hasSummaryTab = sidebarTabs.some((tab) => tab.type === 'summary');
   const hasTerminalTab = sidebarTabs.some((tab) => tab.type === 'terminal');
-  const hasAgenteamTab = sidebarTabs.some((tab) => tab.type === 'agenteam');
   const hasFilesTab = sidebarTabs.some((tab) => tab.type === 'files');
   const hasChangesTab = sidebarTabs.some((tab) => tab.type === 'changes');
   const hasComputerTab = sidebarTabs.some((tab) => tab.type === 'computer');
   const allTabTypesOpen =
-    hasSummaryTab && hasTerminalTab && hasAgenteamTab && hasFilesTab && hasChangesTab && hasComputerTab;
+    hasSummaryTab && hasTerminalTab && hasFilesTab && hasChangesTab && hasComputerTab;
 
   // 「开始」面板：打开/切换到某类型标签；「开始」标签存在时原地变身，不再新开标签
   const openTabType = useCallback(
-    (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer', titleKey: string) => {
+    (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer', titleKey: string) => {
       // 已开该类型 → 直接切换
       const existing = sidebarTabs.find((tab) => tab.type === type);
       if (existing) {
@@ -585,7 +581,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     scrollTabIntoView(activeTab?.id);
   }, [activeTab?.id, sidebarTabs.length, scrollTabIntoView]);
 
-  // 隐藏会话标题兜底：store.tasks 无该任务（subagent / agenteam 衍生会话已被侧边栏过滤）时，
+  // 隐藏会话标题兜底：store.tasks 无该任务（subagent 衍生会话已被侧边栏过滤）时，
   // 直连 /api/tasks/:id 取标题；任务进入 store 后自动让位（task 存在则清空兜底）
   useEffect(() => {
     if (!taskId || task) {
@@ -1030,14 +1026,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 {t('terminal.title')}
               </DropdownMenuItem>
             )}
-            {!hasAgenteamTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'agenteam', 'agenteam.title')}
-              >
-                <Users className="size-4" />
-                {t('agenteam.title')}
-              </DropdownMenuItem>
-            )}
             {!hasFilesTab && (
               <DropdownMenuItem
                 onSelect={() => addSidebarTab(taskId, 'files', 'task.files')}
@@ -1243,7 +1231,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             />
           </div>
         )}
-        {activeTab?.type === 'agenteam' && <AgenteamPanel />}
         {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}
         {activeTab?.type === 'changes' && (
           <FileChangesPanel key={taskId} sessionId={taskId} workingDirectory={workingDirectory} />
@@ -2039,8 +2026,6 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
         <Compass className="size-3.5" />
       ) : tab.type === 'terminal' ? (
         <Terminal className="size-3.5" />
-      ) : tab.type === 'agenteam' ? (
-        <Users className="size-3.5" />
       ) : tab.type === 'files' ? (
         <Folder className="size-3.5" />
       ) : tab.type === 'changes' ? (
@@ -2093,15 +2078,15 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
   );
 }
 
-/** 「开始」标签页：面板启动器（任务摘要 / 终端 / 专家团 / 文件 / 文件变更 / Computer），点击行打开或切换到对应标签 */
+/** 「开始」标签页：面板启动器（任务摘要 / 终端 / 文件 / 文件变更 / Computer），点击行打开或切换到对应标签 */
 interface StartPanelProps {
   /** 点击某行：已开该类型标签则激活，未开则新建（title 为 i18n key） */
-  onOpen: (type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer', titleKey: string) => void;
+  onOpen: (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer', titleKey: string) => void;
 }
 function StartPanel({ onOpen }: StartPanelProps) {
   const { t } = useTranslation();
   const rows: Array<{
-    type: 'summary' | 'terminal' | 'agenteam' | 'files' | 'changes' | 'computer';
+    type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer';
     titleKey: string;
     descKey: string;
     Icon: typeof List;
@@ -2117,12 +2102,6 @@ function StartPanel({ onOpen }: StartPanelProps) {
       titleKey: 'terminal.title',
       descKey: 'start.terminalDesc',
       Icon: Terminal,
-    },
-    {
-      type: 'agenteam',
-      titleKey: 'agenteam.title',
-      descKey: 'start.agenteamDesc',
-      Icon: Users,
     },
     {
       type: 'files',
@@ -2562,46 +2541,24 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           {expanded ? t('task.todoCollapse') : t('task.messageExpand')}
         </button>
       )}
-      {/* agent 工具调用 → 按 mode 分派专属卡片（统一机器人图标 Bot）：
-          mode=subagent → Subagent 卡片（角色名 + 状态徽章 + 树形任务 + 运行中事件计数 + 可展开微缩任务流/报告）
-          mode=agenteam → 专家团卡片（团队名 + 任务数 + 进度点阵 + 阶段徽章 + 成员头像任务行，行可展开）
+      {/* agent 工具调用 → 合并为一张 Subagent 大卡片（头部 + 每行一个子代理，行可展开过程/报告）：
           结果统一从全局索引取（长耗时工具的结果消息未必紧邻本消息） */}
-      {agentCalls.map((tc) => {
-        const matched = toolResults.get(tc.id);
-        const resultText = matched?.text;
-        const args = parseAgentArgs(tc) ?? {};
-        if (args.mode === 'agenteam') {
-          const plan: InlineTeamPlan | null = args.name
-            ? {
-                name: args.name,
-                members: (args.members ?? []).map((m) => ({
-                  name: m.name ?? '',
-                  role: m.role,
-                  agentId: m.agentId,
-                })),
-                tasks: (args.tasks ?? []).map((t) => ({
-                  subject: t.subject ?? '',
-                  assignee: t.assignee,
-                })),
-              }
-            : null;
-          // 从结果文本 "团队已创建：id=<teamId> phase=..." 提取团队 id 绑定实时数据
-          const teamId = resultText?.match(/id=([A-Za-z0-9_-]+)/)?.[1] ?? null;
-          return <AgenteamInlineCard key={tc.id} plan={plan} teamId={teamId} />;
-        }
-        // 默认按 subagent 渲染（mode=subagent 或参数缺失兜底，保证不丢卡）
-        return (
-          <SubagentInlineCard
-            key={tc.id}
-            template={args.template ?? ''}
-            task={args.task ?? ''}
-            toolCallId={tc.id}
-            status={tc.status}
-            resultText={resultText}
-            isError={matched?.isError}
-          />
-        );
-      })}
+      {agentCalls.length > 0 && (
+        <SubagentCard
+          calls={agentCalls.map((tc): SubagentCallItem => {
+            const matched = toolResults.get(tc.id);
+            const args = parseAgentArgs(tc) ?? {};
+            return {
+              toolCallId: tc.id,
+              template: args.template ?? '',
+              task: args.task ?? '',
+              status: tc.status,
+              resultText: matched?.text,
+              isError: matched?.isError,
+            };
+          })}
+        />
+      )}
       {/* todo 工具调用 → 在任务流中渲染 TodoProgressCard（像其他工具一样在调用位置显示）。
           渲染条件基于消息自身快照（?? 回落到 store）：store 被清空不牵连历史卡片。 */}
       {message.toolCalls?.some((tc) => tc.name === 'todo') && (message.todoSnapshot ?? todos).length > 0 && (

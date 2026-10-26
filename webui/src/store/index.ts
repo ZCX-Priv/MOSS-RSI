@@ -703,7 +703,7 @@ export function rightPanelPresetOf(ratio: number): RightPanelPreset | 'custom' {
   return 'custom';
 }
 
-/** 默认右侧边栏「开始」标签（面板启动器：任务摘要 / 终端 / 专家团） */
+/** 默认右侧边栏「开始」标签（面板启动器：任务摘要 / 终端 / 文件等） */
 function defaultSidebarTab(): SidebarTab {
   return {
     id: 'default-start',

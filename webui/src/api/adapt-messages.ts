@@ -24,9 +24,9 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
   const list = Array.isArray(raw) ? raw : [];
   /**
    * 未能就近合并的工具结果（前一条不是 assistant）。
-   * 典型场景：用户在长耗时工具（subagent / 建队）执行中又发了消息，
+   * 典型场景：用户在长耗时工具（subagent）执行中又发了消息，
    * 结果消息的「前一条」变成 user —— 旧实现会直接丢弃它，
-   * 导致刷新后卡片拿不到报告/teamId。这里先挂起，循环结束后按 toolCallId
+   * 导致刷新后卡片拿不到报告/会话 id。这里先挂起，循环结束后按 toolCallId
    * 回填到真正发起该调用的 assistant 消息上。
    */
   const orphanToolResults: Array<{ toolCallId: string; result: ToolResult }> = [];

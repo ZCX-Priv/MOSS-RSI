@@ -87,7 +87,7 @@ export function classifyRisk(
   if (toolName === 'memory') return action === 'save' ? 'L3' : 'L0';
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
   if (toolName === 'skill') return 'L0';
-  // agent：内部委派（subagent / agenteam 编排），本身无直接文件/外部副作用 → L2。
+  // agent：内部委派（一次性子代理），本身无直接文件/外部副作用 → L2。
   // 这样 auto 模式下嵌套子代理派发不会弹"无人可应答"的确认而白等超时。
   if (toolName === 'agent') return 'L2';
   // context：会话级状态操作（压缩/历史检索），无文件或外部副作用 → L1（ask 模式放行）

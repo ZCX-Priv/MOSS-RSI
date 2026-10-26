@@ -1,91 +1,48 @@
-// src/modules/agenteam/index.ts
-// agenteam 模块入口：实现 AgentRegistry + TeamOrchestrator 编排服务。
-// 注册 agenteam.registry 与 agenteam.orchestrator 服务。
-// 持久化：注册表 ~/.moss/agenteam.json（含 1 个默认 Agent + 4 个内置模板）；
-//        团队 ~/.moss/agenteam/；团队模板 ~/.moss/agenteam-profiles.json。
+// src/modules/subagent/registry.ts
+// Agent 注册表：默认 Agent + 四个内置模板 + 用户自定义 Agent。
+// 持久化：~/.moss/agents.json（旧 ~/.moss/agenteam.json 启动时安全迁移）。
 
 import { t } from '../../core/i18n';
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import type { Module, ModuleContext, Environment, Logger } from '../../core/types';
-import { ServiceNames } from '../../core/types';
-import type { AgentEngine } from '../contracts';
-import { TeamStore } from './store';
-import { TeamProfileStore } from './profiles';
-import { TeamOrchestrator } from './orchestrator';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import type { Environment, Logger } from '../../core/types';
 import { buildTemplateAgents } from './templates';
-import { registerAgentTools } from './tools';
+import type {
+  AgentDetail,
+  AgentItem,
+  AgentRegistry,
+  AgentsStoreData,
+} from './types';
 
-// ============================================================================
-// 类型定义（与前端 webui/src/types/api.ts 对齐）
-// ============================================================================
-
-export interface AgentItem {
-  id: string;
-  name: string;
-  description?: string;
-  icon?: string;
-  builtIn: boolean;
-  default?: boolean;
-}
-
-export interface AgentDetail extends AgentItem {
-  systemPrompt?: string;
-  model?: string;
-  tools?: string[];
-  maxTurns?: number;
-  maxTokens?: number;
-}
-
-interface AgentsStoreData {
-  version: number;
-  defaultAgentId: string;
-  agents: AgentDetail[];
-}
-
-// ============================================================================
-// AgentRegistry 实现
-// ============================================================================
-
-export interface AgentRegistry {
-  list(): AgentItem[];
-  get(id: string): AgentDetail | null;
-  create(data: {
-    name: string;
-    description?: string;
-    systemPrompt?: string;
-    model?: string;
-    tools?: string[];
-    icon?: string;
-    maxTurns?: number;
-    maxTokens?: number;
-  }): AgentItem;
-  update(id: string, patch: Partial<AgentDetail>): AgentDetail | null;
-  remove(id: string): boolean;
-  getDefault(): AgentDetail;
-  setDefault(id: string): boolean;
-}
-
-class AgentRegistryImpl implements AgentRegistry {
+export class AgentRegistryImpl implements AgentRegistry {
   private readonly storePath: string;
   private readonly logger: Logger;
   private data: AgentsStoreData;
 
   constructor(env: Environment, logger: Logger) {
-    this.storePath = join(env.dataDir, 'agenteam.json');
+    this.storePath = join(env.dataDir, 'agents.json');
     this.logger = logger;
-    // 存量迁移：旧 agents.json → agenteam.json（幂等；失败不阻断启动，下次重试）
-    const legacyPath = join(env.dataDir, 'agents.json');
+    this.migrateLegacyStore(env);
+    this.data = this.load(env);
+  }
+
+  /**
+   * 一次性迁移：旧 agenteam.json → agents.json。
+   * 旧文件是上一版本的权威数据；迁移成功后删除旧文件，失败仅告警不阻断启动。
+   */
+  private migrateLegacyStore(env: Environment): void {
+    const legacyPath = join(env.dataDir, 'agenteam.json');
+    if (!existsSync(legacyPath)) return;
     try {
-      if (existsSync(legacyPath) && !existsSync(this.storePath)) {
-        renameSync(legacyPath, this.storePath);
-      }
+      mkdirSync(dirname(this.storePath), { recursive: true });
+      copyFileSync(legacyPath, this.storePath);
+      rmSync(legacyPath, { force: true });
+      this.logger.info('subagent: registry migrated from agenteam.json');
     } catch (err) {
-      logger.warn('agenteam migrate failed', {
+      this.logger.warn('subagent: registry migration failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    this.data = this.load(env);
   }
 
   private load(env: Environment): AgentsStoreData {
@@ -136,7 +93,7 @@ class AgentRegistryImpl implements AgentRegistry {
       mkdirSync(dirname(this.storePath), { recursive: true });
       writeFileSync(this.storePath, JSON.stringify(this.data, null, 2), 'utf8');
     } catch (err) {
-      this.logger.error(t('agenteam.saveFailed'), {
+      this.logger.error(t('subagent.saveFailed'), {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -184,7 +141,7 @@ class AgentRegistryImpl implements AgentRegistry {
     };
     this.data.agents.push(agent);
     this.save();
-    this.logger.info(t('agenteam.agentCreated', { id, name: data.name }));
+    this.logger.info(t('subagent.agentCreated', { id, name: data.name }));
     return {
       id: agent.id,
       name: agent.name,
@@ -217,7 +174,7 @@ class AgentRegistryImpl implements AgentRegistry {
     if (this.data.defaultAgentId === id) return false; // 默认 Agent 不允许删除
     this.data.agents.splice(idx, 1);
     this.save();
-    this.logger.info(t('agenteam.agentRemoved', { id }));
+    this.logger.info(t('subagent.agentRemoved', { id }));
     return true;
   }
 
@@ -236,57 +193,7 @@ class AgentRegistryImpl implements AgentRegistry {
     if (!exists) return false;
     this.data.defaultAgentId = id;
     this.save();
-    this.logger.info(t('agenteam.defaultSet', { id }));
+    this.logger.info(t('subagent.defaultSet', { id }));
     return true;
   }
 }
-
-// ============================================================================
-// Module 入口
-// ============================================================================
-
-class AgenteamModule implements Module {
-  private orchestrator: TeamOrchestrator | null = null;
-
-  async initialize(ctx: ModuleContext): Promise<void> {
-    const registry = new AgentRegistryImpl(ctx.env, ctx.logger);
-    ctx.services.register(ServiceNames.AGENTEAM_REGISTRY, registry, {
-      scope: 'agenteam',
-    });
-
-    // 编排服务（依赖 AgentEngine；引擎未就绪时降级——不阻断启动）
-    const engine = ctx.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
-    if (engine) {
-      const store = new TeamStore(ctx.env.dataDir, ctx.logger);
-      const profiles = new TeamProfileStore(ctx.env.dataDir, ctx.logger);
-      this.orchestrator = new TeamOrchestrator({
-        engine,
-        store,
-        profiles,
-        eventBus: ctx.eventBus,
-        logger: ctx.logger,
-        env: ctx.env,
-        services: ctx.services,
-      });
-      ctx.services.register(ServiceNames.AGENTEAM_ORCHESTRATOR, this.orchestrator, {
-        scope: 'agenteam',
-      });
-      // 单一 agent 工具注册（mode=subagent|agenteam）
-      registerAgentTools(ctx.services, this.orchestrator, ctx.logger, ctx.env);
-    } else {
-      ctx.logger.warn('agenteam: agent engine unavailable, orchestrator disabled');
-    }
-
-    ctx.logger.info(t('agenteam.moduleInitialized'), {
-      agentCount: registry.list().length,
-      defaultAgent: registry.getDefault().id,
-    });
-  }
-
-  async destroy(): Promise<void> {
-    this.orchestrator?.destroy();
-    this.orchestrator = null;
-  }
-}
-
-export default (): Module => new AgenteamModule();

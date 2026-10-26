@@ -36,7 +36,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 - **MCP 双向支持** —— 作为客户端接入任意 Model Context Protocol 外部工具服务器；同时通过 `/mcp` 端点与 `moss mcp`（stdio）向外部 Agent 暴露 MOSS 工具
 - **内置工具集** —— 19 个可配置内置工具（read / write / edit / delete / move / copy / glob / grep / terminal / todo / ask / web / skill / mcp / memory / context / automation / browser / computer）+ `use_command` 斜杠命令执行，写操作与命令执行可配置逐次确认
 - **Skills 与自定义命令** —— 以 Markdown + YAML front-matter 定义的可复用技能与斜杠命令，支持用户自定义与热重载
-- **Agent 团队** —— agenteam 注册表 + 团队编排（生命周期、DAG 调度、质量门禁、临时 subagent）
+- **子代理（Subagent）** —— `agent` 工具委派一次性子代理：内置 explorer / planner / coder / reviewer 模板、独立隐藏会话、嵌套深度保护与实时过程卡片
 - **持久终端** —— 原生 PTY 会话：人类经 WebSocket 操作，Agent 经 terminal 工具操作，二者共用同一批终端
 - **浏览器控制** —— Chrome 扩展桥接（CDP）、内置 Chrome、AI 标签页归组与页面操作
 - **桌面操作** —— 集成 cua-driver：后台窗口观察、UIA、截图与输入
@@ -80,8 +80,8 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 │ (浏览器控制) │ (版本检查)   │  (虚拟FS)    │ (持久终端)   │ (权限决策)   │ (用户规则)   │
 └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-│ Hooks 模组   │ Memory 模组  │ Voice 模组   │Context 模组  │ Agent 模组   │agenteam模组  │
-│ (生命周期)   │ (记忆引擎)   │ (语音识别)   │(上下文引擎)  │(ReAct 引擎)  │(Agent 团队)  │
+│ Hooks 模组   │ Memory 模组  │ Voice 模组   │Context 模组  │ Agent 模组   │Subagent模组  │
+│ (生命周期)   │ (记忆引擎)   │ (语音识别)   │(上下文引擎)  │(ReAct 引擎)  │ (子代理委派) │
 └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ┌──────────────┬──────────────┬──────────────┐
 │File-history  │ Daemon 模组  │Automation模组│
@@ -110,7 +110,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 | `voice` | 语音识别（本地 sherpa-onnx / 在线服务商 / WASM） | `voice.service` |
 | `context` | 上下文引擎（拼接 / 压缩 / 自愈 / 遥测 / 文件索引） | `context.engine` |
 | `agent` | ReAct 循环、会话与任务管理、事件流 | `agent.engine` |
-| `agenteam` | 自定义 Agent CRUD + 团队编排 | `agenteam.registry`、`agenteam.orchestrator` |
+| `subagent` | Agent 注册表 + 一次性子代理运行 | `agent.registry`、`subagent.runner` |
 | `file-history` | 文件历史（编辑追踪 / 快照 / 回滚） | `file.history` |
 | `daemon` | 运行时 PID 文件维护 + 优雅退出 | — |
 | `automation` | cron / once 定时任务调度 | `automation.service` |
@@ -298,7 +298,7 @@ MOSS/
 │   ├── main.ts                  # 入口：CLI 解析 + 启动 Kernel
 │   ├── cli/                     # CLI 命令实现
 │   ├── core/                    # 微内核（kernel/config/event-bus/...）
-│   ├── modules/                 # 21 个模组（agent/agenteam/automation/browser/
+│   ├── modules/                 # 21 个模组（agent/subagent/automation/browser/
 │   │                            #   computer/context/daemon/file-history/filesys/
 │   │                            #   hooks/llm/mcp/memory/remote/rules/safety/
 │   │                            #   server/terminal/tools/update/voice）

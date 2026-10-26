@@ -511,10 +511,10 @@ export const ServiceNames = {
   SKILL_REGISTRY: 'skill.registry',
   /** Command 注册表（由 tools 模块注册：~/.moss/commands/*.md 自定义斜杠命令） */
   COMMAND_REGISTRY: 'command.registry',
-  /** Agent 注册表（由 agenteam 模块注册） */
-  AGENTEAM_REGISTRY: 'agenteam.registry',
-  /** agenteam 编排服务（由 agenteam 模块注册：团队生命周期/DAG调度/质量门禁/临时subagent） */
-  AGENTEAM_ORCHESTRATOR: 'agenteam.orchestrator',
+  /** Agent 注册表（由 subagent 模块注册：默认 Agent + 内置模板 + 自定义 Agent） */
+  AGENT_REGISTRY: 'agent.registry',
+  /** 一次性子代理运行服务（由 subagent 模块注册） */
+  SUBAGENT_RUNNER: 'subagent.runner',
   /** 自动化任务服务（由 automation 模块注册） */
   AUTOMATION_SERVICE: 'automation.service',
   /** 文件历史服务（由 file-history 模块注册：Track Edit + Snapshot + undo） */

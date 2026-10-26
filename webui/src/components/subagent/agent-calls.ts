@@ -1,27 +1,20 @@
-// webui/src/components/agenteam/agent-calls.ts
-// 对话流中 agent 工具调用的统一识别与结果解析。
+// webui/src/components/subagent/agent-calls.ts
+// 对话流中 agent（一次性子代理）工具调用的统一识别与结果解析。
 //
-// 为什么要集中：卡片分派此前只靠 `tc.name === 'agent'` 单点判断，一旦工具名有偏差
-// （历史会话 / 命名空间化 / Provider 改写）就掉进通用折叠卡且没有任何兜底。
-// 另外长耗时工具（subagent / 建队）的结果消息会落在会话很后面，邻近匹配拿不到结果。
+// 卡片分派不只靠工具名：历史会话 / 命名空间化 / Provider 改写都可能改变名称，
+// 参数结构（template + task）作为兜底。长耗时工具的结果消息会落在会话很后面，
+// 必须在整条消息列表上按 toolCallId 匹配，而不是只看邻近消息。
 
 import type { TaskMessage, ToolCall } from '../../types/api';
 
 /** agent 工具参数（宽松解析，未知字段忽略） */
 export interface AgentCallArgs {
+  /** 历史会话可能带 mode；已废弃的 agenteam 模式据此排除 */
   mode?: string;
   /** subagent：模板 agent id */
   template?: string;
   /** subagent：任务描述 */
   task?: string;
-  /** agenteam create：团队名 */
-  name?: string;
-  /** agenteam create：成员 */
-  members?: Array<{ name?: string; role?: string; agentId?: string }>;
-  /** agenteam create：任务 */
-  tasks?: Array<{ subject?: string; assignee?: string }>;
-  /** agenteam：操作 */
-  action?: string;
 }
 
 /** 容错解析工具调用参数；非对象或解析失败返回 null */
@@ -37,13 +30,13 @@ export function parseAgentArgs(tc: ToolCall): AgentCallArgs | null {
 
 /**
  * 是否属于 agent 工具的调用（渲染为专属卡片）。
- * 主判据是工具名；同时用参数结构兜底，避免改名/历史会话导致掉卡。
+ * 已废弃的 agenteam 模式（历史会话）不再进入专属卡片，回落到通用工具折叠卡。
  */
 export function isAgentCall(tc: ToolCall): boolean {
-  if (tc.name === 'agent') return true;
   const args = parseAgentArgs(tc);
+  if (args?.mode === 'agenteam') return false;
+  if (tc.name === 'agent') return true;
   if (!args) return false;
-  if (args.mode === 'subagent' || args.mode === 'agenteam') return true;
   return typeof args.template === 'string' && typeof args.task === 'string';
 }
 

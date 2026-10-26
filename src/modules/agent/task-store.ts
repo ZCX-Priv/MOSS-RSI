@@ -40,9 +40,9 @@ export interface TaskGroup {
   taskCount?: number;
   /** 分组来源：folder = 按工作目录自动创建（空时自动销毁）；manual = 手动新建（允许空状态）。旧数据无该字段视为 manual */
   source?: 'folder' | 'manual';
-  /** 相对存储目录（tasks/ 下），缺省 = safeGroupId(id)。用于 agenteam 的 agenteam/<teamId> 嵌套布局 */
+  /** 相对存储目录（tasks/ 下），缺省 = safeGroupId(id)。支持自定义嵌套布局 */
   dir?: string;
-  /** 隐藏分组：其会话不出现在侧边栏列表（subagent / agenteam 衍生会话），但可经面板/卡片进入 */
+  /** 隐藏分组：其会话不出现在侧边栏列表（subagent 衍生会话），但可经卡片/任务页进入 */
   hidden?: boolean;
 }
 
@@ -74,7 +74,7 @@ function safeGroupId(id: string): string {
 
 /**
  * 相对目录清洗：按 `/`（或 `\`）分段清洗，每段仅保留 [a-zA-Z0-9_-]，
- * 丢弃空段（含 `.`/`..`），防路径穿越。用于嵌套分组目录（如 `agenteam/<teamId>`）。
+ * 丢弃空段（含 `.`/`..`），防路径穿越。用于自定义嵌套分组目录。
  */
 function safeRelDir(dir: string): string {
   return dir
@@ -156,7 +156,7 @@ export class TaskStore {
 
   /**
    * 查询 taskId 的存储相对目录（供 SessionStore 解析 session 文件路径）。
-   * 普通组 = 组目录名；嵌套组（如 agenteam/<teamId>）= group.dir。未知返回 null。
+   * 普通组 = 组目录名；嵌套组（group.dir 非空）= group.dir。未知返回 null。
    */
   getDirOf(taskId: string): string | null {
     // 索引可能在极端时序下缺失（创建/移组与首次落盘并发）→ 回落到任务实体，
@@ -448,7 +448,7 @@ export class TaskStore {
 
   /**
    * 销毁空的自动分组：source='folder'（按工作目录自动创建）或 hidden=true
-   * （subagent / agenteam 衍生分组，须"跑过才建"、无任务即消失）且无任务。
+   * （subagent 等隐藏衍生分组，须"跑过才建"、无任务即消失）且无任务。
    * 任务移出/删除后即时调用；load 时兜底清理「创建后从未有任务」的残留空组。
    * 普通手动分组（manual / 旧数据无 source）与默认分组不在清理范围。
    */
@@ -478,8 +478,8 @@ export class TaskStore {
   }
 
   /**
-   * 删除嵌套分组目录（如 `agenteam/<teamId>`）后，自内向外尝试移除变为空的父目录
-   * （如 `agenteam`）；非空/被占用即停止向上。空目录用 rmdirSync（规避 Bun on Windows
+   * 删除嵌套分组目录后，自内向外尝试移除变为空的父目录；
+   * 非空/被占用即停止向上。空目录用 rmdirSync（规避 Bun on Windows
    * 的 rmSync(recursive:false) EFAULT 先例）。
    */
   private pruneEmptyParentDirs(dir: string): void {
@@ -622,7 +622,7 @@ export class TaskStore {
 
     // 扫描分组目录中的 task.json（以磁盘目录为准，单文件损坏自动 .corrupt 留档跳过）：
     //   一级 tasks/<d1>/task.json（普通组）
-    //   二级 tasks/<d1>/<d2>/task.json（嵌套组，如 agenteam/<teamId>）
+    //   二级 tasks/<d1>/<d2>/task.json（自定义嵌套组）
     if (existsSync(this.tasksDir)) {
       for (const entry of readdirSync(this.tasksDir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
@@ -668,7 +668,7 @@ export class TaskStore {
 
   /**
    * 读取某相对目录（tasks/<relDir>）下的组任务文件。
-   * 无 task.json 视为非分组目录（如 agenteam 父目录）：跳过且不补占位分组。
+   * 无 task.json 视为非分组目录（如嵌套分组父目录）：跳过且不补占位分组。
    */
   private loadGroupDir(relDir: string): void {
     const file = join(this.tasksDir, relDir, GROUP_TASKS_FILE);

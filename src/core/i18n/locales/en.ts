@@ -518,12 +518,12 @@ export const en = {
     layoutMigrated: 'File history layout unified: dirs moved [{{dirs}}], transcripts moved {{transcripts}}, backup paths rewritten {{rewrites}}',
     layoutMigrationFailed: 'File history layout migration failed: {{error}}',
   },
-  agenteam: {
-    saveFailed: 'Failed to save agenteam.json',
+  subagent: {
+    saveFailed: 'Failed to save agents.json',
     agentCreated: 'Agent created: {{id}} ({{name}})',
     agentRemoved: 'Agent removed: {{id}}',
     defaultSet: 'Default agent set: {{id}}',
-    moduleInitialized: 'agenteam module initialized',
+    moduleInitialized: 'subagent module initialized',
   },
   automation: {
     schedulerStarted: 'Automation scheduler started',

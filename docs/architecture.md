@@ -36,8 +36,8 @@ MOSS 是一个基于 **微内核 + 模组化架构** 的 AI Agent 应用，运�
 │ (浏览器控制)   │  (版本检查)    │   (虚拟FS)     │  (持久终端)    │  (权限决策)    │  (用户规则)    │
 └────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┘
 ┌────────────────┬────────────────┬────────────────┬────────────────┬────────────────┬────────────────┐
-│  Hooks 模组    │ Memory 模组    │  Voice 模组    │ Context 模组   │  Agent 模组    │ agenteam 模组  │
-│  (生命周期)    │  (记忆引擎)    │  (语音识别)    │  (上下文引擎)  │  (ReAct 引擎)  │ (Agent 团队)   │
+│  Hooks 模组    │ Memory 模组    │  Voice 模组    │ Context 模组   │  Agent 模组    │ Subagent 模组  │
+│  (生命周期)    │  (记忆引擎)    │  (语音识别)    │  (上下文引擎)  │  (ReAct 引擎)  │ (子代理委派)   │
 └────────────────┴────────────────┴────────────────┴────────────────┴────────────────┴────────────────┘
 ┌────────────────┬────────────────┬────────────────┐
 │ File-history   │ Daemon 模组    │ Automation 模组│
@@ -89,7 +89,7 @@ MOSS/
 │   │   ├── voice/               # 语音识别（本地 / 在线 / WASM）
 │   │   ├── context/             # 上下文引擎（压缩/自愈/文件索引）
 │   │   ├── agent/               # Agent 引擎（ReAct 循环）
-│   │   ├── agenteam/            # Agent CRUD + 团队编排
+│   │   ├── subagent/            # Agent 注册表 + 一次性子代理运行
 │   │   ├── file-history/        # 文件历史（追踪/快照/回滚）
 │   │   ├── daemon/              # PID 文件维护 + 优雅退出
 │   │   └── automation/          # 自动化任务（cron/once 调度）
@@ -137,7 +137,7 @@ MOSS/
 ```
 llm → server → remote → tools → mcp → computer → browser → update → filesys →
 terminal → safety → rules → hooks → memory → voice → context → agent →
-agenteam → file-history → daemon → automation
+subagent → file-history → daemon → automation
 ```
 
 **加载流程**（`src/core/kernel.ts`）：
@@ -150,7 +150,7 @@ agenteam → file-history → daemon → automation
    - `terminal → filesys`；`safety` 无服务依赖（先于 agent）；`rules` / `hooks` / `memory` / `voice` 无服务依赖（voice 的 sherpa-onnx 异步预热，不阻塞启动）
    - `context → llm`（压缩摘要调用 LLMRouter，须先于 agent）
    - `agent → llm, tools, filesys, safety, context, rules, hooks, memory`
-   - `agenteam → agent`（编排服务复用 AgentEngine）
+   - `subagent → agent`（子代理运行复用 AgentEngine）
    - `file-history → tools, filesys`；`daemon → server`；`automation → agent, server`
 3. 按序 `initialize()`（单模块超时 30s，失败记日志并继续），反向序 `destroy()`（超时 10s）
 4. 每个模组以自身名字为 scope 注册服务，销毁时 `unregisterScope` + `offAll` 自动回收
@@ -184,8 +184,8 @@ agenteam → file-history → daemon → automation
 | `voice.service` | Voice 模组 | `VoiceService`（状态/模型安装/识别会话）|
 | `context.engine` | Context 模组 | `ContextEngine`（拼接/压缩/自愈/预算/治理/遥测）|
 | `agent.engine` | Agent 模组 | `AgentEngine`（run/resolveAsk/resolveConfirm）|
-| `agenteam.registry` | agenteam 模组 | `AgentRegistry`（list/get/create/update/delete/setDefault）|
-| `agenteam.orchestrator` | agenteam 模组 | `TeamOrchestrator`（团队生命周期/DAG 调度/质量门禁/临时 subagent）|
+| `agent.registry` | subagent 模组 | `AgentRegistry`（list/get/create/update/delete/setDefault）|
+| `subagent.runner` | subagent 模组 | `SubagentRunner`（一次性子代理运行）|
 | `file.history` | File-history 模组 | `FileHistoryService`（Track Edit + Snapshot + undo/restore）|
 | `automation.service` | Automation 模组 | `AutomationService`（list/create/update/delete/trigger/pause/resume/history）|
 | `kernel.config` | Kernel | `ConfigService`（运行时读取 config.json / api.json）|
@@ -198,7 +198,7 @@ agenteam → file-history → daemon → automation
 
 | 通道 | 用途 | 协议 |
 |---|---|---|
-| **HTTP REST** | 配置、Provider、会话、任务、Agent 团队、MCP、Skills/Commands、自动化、文件系统、终端、浏览器/桌面、日志、上下文、规则/钩子/记忆、语音、远程访问 | `/api/*`，JSON |
+| **HTTP REST** | 配置、Provider、会话、任务、Agent 注册表、子代理、MCP、Skills/Commands、自动化、文件系统、终端、浏览器/桌面、日志、上下文、规则/钩子/记忆、语音、远程访问 | `/api/*`，JSON |
 | **WebSocket** | 流式任务（assistant-text/thinking/tool-call 实时推送）、ask/confirm 回复、todo/上下文更新、任务元信息、终端、语音、自动化、AI 诊断 | `/ws`，JSON 帧 |
 | **MCP over HTTP** | 对外暴露 MOSS 工具（`mcpServer.enabled` 时） | `/mcp` |
 | **MCP over stdio** | `moss mcp`，供 Claude Desktop / Cursor 等外部客户端 | stdio |
@@ -406,9 +406,7 @@ onEvent('done', finishReason)
 | `~/.moss/tasks/<groupId>/` | 任务分组目录（task.json 为任务元信息，根索引 task-store v4） | JSON |
 | `~/.moss/tasks/<groupId>/<sessionId>.json` | 会话历史（每会话一文件） | JSON |
 | `~/.moss/todo/<sessionId>.json` | 会话级 Todo 列表 | JSON |
-| `~/.moss/agenteam.json` | 自定义 Agent 注册表（旧 `agents.json` 自动迁移） | JSON |
-| `~/.moss/agenteam/` | Agent 团队运行时数据（旧 `agent-teams/` 自动迁移） | JSON/目录 |
-| `~/.moss/agenteam-profiles.json` | 团队模板（旧 `agent-team-profiles.json` 自动迁移） | JSON |
+| `~/.moss/agents.json` | Agent 注册表（旧 `agenteam.json` 启动时自动迁移） | JSON |
 | `~/.moss/automations.json` | 自动化任务 | JSON |
 | `~/.moss/automations-history.json` | 自动化运行历史 | JSON |
 | `~/.moss/skills/` | 用户自定义 Skill（唯一运行时加载源；包内 `skills/` 首次启动播种） | .md（YAML front-matter + body） |

@@ -1,19 +1,20 @@
-// src/modules/server/routes/agenteam.ts
+// src/modules/server/routes/agents.ts
 // Agent 管理 CRUD 路由
-// GET    /api/agenteam         —— 列出所有 Agent + 默认 id
-// POST   /api/agenteam         —— 创建 Agent
-// GET    /api/agenteam/:id     —— 获取 Agent 详情
-// PATCH  /api/agenteam/:id     —— 更新 Agent
-// DELETE /api/agenteam/:id     —— 删除 Agent
-// PUT    /api/agenteam/default —— 设置默认 Agent
+// GET    /api/agents         —— 列出所有 Agent + 默认 id
+// POST   /api/agents         —— 创建 Agent
+// GET    /api/agents/:id     —— 获取 Agent 详情
+// PATCH  /api/agents/:id     —— 更新 Agent
+// DELETE /api/agents/:id     —— 删除 Agent
+// PUT    /api/agents/default —— 设置默认 Agent
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
 import type { ServiceRegistry } from '../../../core/types';
-import type { AgentRegistry, AgentDetail } from '../../agenteam';
+import { ServiceNames } from '../../../core/types';
+import type { AgentRegistry, AgentDetail } from '../../subagent/types';
 import { ErrorCode } from '../../../core/error-codes';
 
 function resolveRegistry(services: ServiceRegistry): AgentRegistry | null {
-  return services.tryResolve<AgentRegistry>('agenteam.registry');
+  return services.tryResolve<AgentRegistry>(ServiceNames.AGENT_REGISTRY);
 }
 
 export function createListAgentsHandler(services: ServiceRegistry): RouteHandler {

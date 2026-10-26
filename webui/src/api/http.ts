@@ -18,11 +18,6 @@ import type {
   ProviderBalanceResult,
   AgentItem,
   AgentDetail,
-  Agenteam,
-  AgenteamSummary,
-  AgenteamProfile,
-  CreateAgenteamInput,
-  TeamMessage,
   SubagentRunOutput,
   SkillItem,
   SkillDetail,
@@ -555,37 +550,19 @@ export const api = {
   // ==========================================================================
   // Agent 管理（见文档 3.2.3）
   // ==========================================================================
-  listAgents: () => request<{ agents: AgentItem[]; default: string }>('GET', '/api/agenteam'),
-  getAgent: (id: string) => request<AgentDetail>('GET', `/api/agenteam/${id}`),
+  listAgents: () => request<{ agents: AgentItem[]; default: string }>('GET', '/api/agents'),
+  getAgent: (id: string) => request<AgentDetail>('GET', `/api/agents/${id}`),
   createAgent: (data: { name: string; systemPrompt?: string; model?: string; tools?: string[] }) =>
-    request<AgentItem>('POST', '/api/agenteam', data),
+    request<AgentItem>('POST', '/api/agents', data),
   updateAgent: (id: string, patch: Partial<AgentDetail>) =>
-    request<AgentItem>('PATCH', `/api/agenteam/${id}`, patch),
-  deleteAgent: (id: string) => request<{ deleted: boolean }>('DELETE', `/api/agenteam/${id}`),
+    request<AgentItem>('PATCH', `/api/agents/${id}`, patch),
+  deleteAgent: (id: string) => request<{ deleted: boolean }>('DELETE', `/api/agents/${id}`),
   setDefaultAgent: (id: string) =>
-    request<{ default: string }>('PUT', '/api/agenteam/default', { id }),
+    request<{ default: string }>('PUT', '/api/agents/default', { id }),
 
   // ==========================================================================
-  // agenteam 编排（见 routes/agenteams.ts）
+  // 一次性子代理（见 routes/subagents.ts）
   // ==========================================================================
-  listAgenteams: () => request<{ teams: AgenteamSummary[] }>('GET', '/api/agenteams'),
-  getAgenteam: (id: string) => request<Agenteam>('GET', `/api/agenteams/${id}`),
-  getAgenteamMessages: (id: string, since?: number) =>
-    request<{ messages: TeamMessage[] }>(
-      'GET',
-      `/api/agenteams/${id}/messages${since !== undefined ? `?since=${since}` : ''}`,
-    ),
-  createAgenteam: (data: CreateAgenteamInput) => request<Agenteam>('POST', '/api/agenteams', data),
-  approveAgenteam: (id: string) => request<Agenteam>('POST', `/api/agenteams/${id}/approve`),
-  discardAgenteam: (id: string) => request<Agenteam>('POST', `/api/agenteams/${id}/discard`),
-  haltAgenteam: (id: string) => request<Agenteam>('POST', `/api/agenteams/${id}/halt`),
-  resumeAgenteam: (id: string) => request<Agenteam>('POST', `/api/agenteams/${id}/resume`),
-  deleteAgenteam: (id: string) => request<{ deleted: boolean }>('DELETE', `/api/agenteams/${id}`),
-  listAgenteamProfiles: () => request<{ profiles: AgenteamProfile[] }>('GET', '/api/agenteam-profiles'),
-  saveAgenteamProfile: (data: AgenteamProfile) =>
-    request<{ saved: boolean }>('POST', '/api/agenteam-profiles', data),
-  deleteAgenteamProfile: (name: string) =>
-    request<{ deleted: boolean }>('DELETE', `/api/agenteam-profiles/${encodeURIComponent(name)}`),
   runSubagent: (data: { template: string; task: string; cwd: string; permissionMode?: 'ask' | 'auto' | 'skip' }) =>
     request<SubagentRunOutput>('POST', '/api/subagents/run', data),
 

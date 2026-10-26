@@ -78,15 +78,9 @@ const HEADLESS_CONFIRM_TIMEOUT_MS = 30 * 1000;
 /** 同一轮并发执行 subagent 工具调用的上限（防止一次性开过多 LLM 流造成资源压力） */
 const MAX_CONCURRENT_SUBAGENT_RUNS = 4;
 
-/** 是否为 agent(mode=subagent) 工具调用（解析失败按非并发处理） */
+/** 是否为 agent 工具调用（一次性子代理委派） */
 function isSubagentToolCall(tc: { name: string; arguments: string }): boolean {
-  if (tc.name !== 'agent') return false;
-  try {
-    const args = JSON.parse(tc.arguments || '{}') as { mode?: unknown };
-    return args.mode === 'subagent';
-  } catch {
-    return false;
-  }
+  return tc.name === 'agent';
 }
 
 /** 并发执行（上限 limit），保持每个任务的错误隔离由调用方 runOne 负责 */
@@ -958,7 +952,7 @@ export class AgentEngineImpl implements AgentEngine {
 
       // 并发语义（两组特殊工具）：
       // - `ask`：同一轮 ≥2 个 → 并发挂起，前端合并为多问题卡片；
-      // - `agent(mode=subagent)`：同一轮 ≥2 个 → 真并发（上限 4），避免后面的子代理
+      // - `agent`（一次性子代理）：同一轮 ≥2 个 → 真并发（上限 4），避免后面的子代理
       //   排在同一轮串行队尾、用户一停止就全部 `aborted`。
       // 其余工具保持原有串行语义（依赖顺序 / abort 配对）。
       const askCalls = toolCalls.filter((tc) => tc.name === 'ask');

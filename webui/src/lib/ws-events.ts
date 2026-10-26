@@ -3,7 +3,7 @@
 //
 // 职责分层：
 // - stream-buffer：高频流式分片的批处理与 offset 续传（本模块只负责把事件投递进去）
-// - 本模块：把 WS 事件落到 store（消息 / 会话 / 列表 / 自动化 / 专家团）
+// - 本模块：把 WS 事件落到 store（消息 / 会话 / 列表 / 自动化 / 子代理）
 // - useSessionHistory：会话级编排（快照对齐、分页、尾部补齐）——通过下方注册的回调感知时机
 //
 // 关键约定（「刷新后不丢状态」的核心）：
@@ -77,11 +77,11 @@ const STREAM_CHUNK_TYPES = new Set([
 ]);
 
 /**
- * agenteam.member.event 内层 agent 事件的白名单：
+ * subagent.event 内层 agent 事件的白名单：
  * 子代理事件复用主 agent 的 reducer 落到 messagesBySession[子代理会话id]，
  * 这里只放行可渲染的事件类型，避免未知类型进入 switch 的 default / 误触终端分支。
  */
-const MEMBER_DISPLAY_EVENT_TYPES = new Set([
+const SUBAGENT_DISPLAY_EVENT_TYPES = new Set([
   'assistant-text', 'assistant-thinking',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
   'ask', 'ask-timeout', 'confirm-required', 'stats-updated', 'error', 'done',
@@ -917,7 +917,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     }
 
     // ======================================================================
-    // 自动化 / 专家团
+    // 自动化 / 子代理
     // ======================================================================
     case 'automation.started': {
       const payload = (msg.payload ?? {}) as {
@@ -963,26 +963,22 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (payload.taskId) st.setGenerating(payload.taskId, false);
       break;
     }
-    case 'agenteam.member.event': {
+    case 'subagent.event': {
       const payload = (msg.payload ?? {}) as {
-        teamId?: string | null;
-        memberName?: string;
         taskId?: string;
         parentToolCallId?: string;
         event?: AgentEvent;
       };
-      if (!payload.taskId || !payload.memberName) break;
-      // 临时 subagent：按父工具调用 id 精确绑定其会话 id（取代已删除的事件计数，
-      // 同模板并发也互不串台；绑定表见 lib/subagent-sessions.ts）
-      if (payload.teamId == null && payload.parentToolCallId) {
+      if (!payload.taskId) break;
+      // 按父工具调用 id 精确绑定子代理会话 id（同模板并发也互不串台；
+      // 绑定表见 lib/subagent-sessions.ts）
+      if (payload.parentToolCallId) {
         bindSubagentSession(payload.parentToolCallId, payload.taskId);
       }
-      // 实时过程：把临时 subagent 的内层 agent 事件按「子代理自己的会话 id」复用主 agent reducer，
+      // 实时过程：把子代理的内层 agent 事件按「子代理自己的会话 id」复用主 agent reducer，
       // 卡片展开后即可像主 agent 一样看到思考 / 流式正文 / 工具调用状态。
-      // 注意仅限 teamId=null（临时 subagent）：队长 turn 复用主会话 id，其内部决策事件
-      // 不能注入主会话消息流，否则会污染用户当前对话。
       const ev = payload.event;
-      if (payload.teamId == null && ev && ev.sessionId && MEMBER_DISPLAY_EVENT_TYPES.has(ev.type)) {
+      if (ev && ev.sessionId && SUBAGENT_DISPLAY_EVENT_TYPES.has(ev.type)) {
         applyWsMessage(
           { type: ev.type, sessionId: ev.sessionId, payload: ev },
           { silent: true },

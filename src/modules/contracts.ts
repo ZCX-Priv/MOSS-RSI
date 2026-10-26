@@ -234,7 +234,7 @@ export interface AgentEngine {
    */
   markSessionHeadless?(sessionId: string, headless: boolean): void;
 
-  /** 删除分组（agenteam 删除团队时清理其隐藏分组与成员会话用） */
+  /** 删除分组（清理隐藏分组与衍生会话用） */
   deleteTaskGroup(
     id: string,
     opts?: { moveTasksTo?: string; deleteTasks?: boolean },

@@ -29,7 +29,7 @@ import tools from '../modules/tools';
 import mcp from '../modules/mcp';
 import server from '../modules/server';
 import remote from '../modules/remote';
-import agenteam from '../modules/agenteam';
+import subagent from '../modules/subagent';
 import update from '../modules/update';
 import agent from '../modules/agent';
 import filesys from '../modules/filesys';
@@ -64,8 +64,8 @@ const MODULE_DESTROY_TIMEOUT_MS = 10_000;
  * - rules / hooks / memory → 无服务依赖（context/agent 经 tryResolve 消费，须先于二者注册）
  * - context → llm（压缩摘要调用 LLMRouter；agent 每轮请求经其流水线，须先于 agent 注册）
  * - agent → llm, tools, filesys, safety, context, rules, hooks, memory
- * - agenteam → agent（编排服务复用 AgentEngine 派发成员任务；registry 部分无依赖，
- *   但模块整体须后于 agent 注册；server 的 /api/agenteams 路由为请求时 tryResolve，不受影响）
+ * - subagent → agent（子代理运行复用 AgentEngine；registry 部分无依赖，
+ *   但模块整体须后于 agent 注册；server 的 /api/subagents/* 路由为请求时 tryResolve，不受影响）
  * - file-history → tools, filesys（终端快照回填运行时 tryResolve）
  * - daemon → server
  * - automation → agent, server
@@ -88,7 +88,7 @@ const MODULE_FACTORIES: Array<{ name: string; create: () => Module }> = [
   { name: 'voice', create: voice },
   { name: 'context', create: context },
   { name: 'agent', create: agent },
-  { name: 'agenteam', create: agenteam },
+  { name: 'subagent', create: subagent },
   { name: 'file-history', create: fileHistory },
   { name: 'daemon', create: daemon },
   { name: 'automation', create: automation },

@@ -1,11 +1,11 @@
-// webui/src/components/agenteam/AgentTaskFlow.tsx
-// 单 agent（subagent / 团队成员）的「微缩任务流」：把该 agent 自己会话的消息
+// webui/src/components/subagent/AgentTaskFlow.tsx
+// 单 agent（一次性子代理）的「微缩任务流」：把该 agent 自己会话的消息
 // 以紧凑样式内联到卡片里，并提供跳转到完整任务页的入口。
 //
 // 数据来源（双通道合并，按消息 id 去重）：
-// - 实时：store.messagesBySession[该 agent 会话 id]（agenteam.member.event 复用主 agent reducer 落库）
+// - 实时：store.messagesBySession[该 agent 会话 id]（subagent.event 复用主 agent reducer 落库）
 // - 历史：GET /api/session/:id（补齐页面刷新/早期轮次；运行中按 WS 节流增量重拉）
-// agent 的会话 id 就是它的 taskId（TeamMember.sessionId / subagent session=…）。
+// agent 的会话 id 就是它的 taskId（subagent 结果里的 session=…）。
 //
 // 只渲染 assistant 消息：过程区不展示「Agent 发给子代理的消息」（任务、环境上下文、
 // 记忆注入等 user 角色内容），避免内部上下文泄露。
@@ -31,14 +31,14 @@ interface AgentTaskFlowProps {
   sessionId: string | null;
   /** 该 agent 是否仍在运行（空态文案与自动贴底用） */
   running?: boolean;
-  /** 是否渲染内置「打开完整任务页」入口（默认 true；Subagent 卡片改为底部常驻按钮时传 false） */
+  /** 是否渲染内置「打开完整任务页」入口（默认 true） */
   showOpenButton?: boolean;
   /** 取末 N 条（默认 20） */
   limit?: number;
   className?: string;
 }
 
-/** 运行中增量刷新节流（ms）：成员事件高频，避免每个事件都打一次请求 */
+/** 运行中增量刷新节流（ms）：子代理事件高频，避免每个事件都打一次请求 */
 const RELOAD_THROTTLE_MS = 1200;
 
 /** 自动贴底判定阈值（px）：距底部小于该值视为"用户正在看最新" */
@@ -186,7 +186,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
   /** 用户是否停留在底部（决定新内容到达时是否自动贴底） */
   const stickBottomRef = useRef(true);
 
-  // 实时通道：该 agent 会话的消息由 agenteam.member.event 实时写入 store
+  // 实时通道：该 agent 会话的消息由 subagent.event 实时写入 store
   const liveMessages = useStore((s) => (sessionId ? s.messagesBySession[sessionId] : undefined));
   // 工具名 → 图标键（与主对话同源）
   const toolIconMap = useStore((s) => s.toolIconMap);
@@ -215,7 +215,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
       if (alive) setLoading(false);
     });
     const unsub = wsClient.onMessage((msg) => {
-      if (msg.type !== 'agenteam.member.event') return;
+      if (msg.type !== 'subagent.event') return;
       const payload = (msg.payload ?? {}) as { taskId?: string | null };
       if (payload.taskId !== sessionId) return;
       if (timerRef.current !== null) return;
@@ -266,7 +266,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
   if (!sessionId) {
     return (
       <div className={cn('rounded-lg border border-dashed border-border px-3 py-2 text-[11px] text-muted-foreground', className)}>
-        {running ? t('agenteam.card.starting') : t('agenteam.card.noSessionYet')}
+        {running ? t('subagent.card.starting') : t('subagent.card.noSessionYet')}
       </div>
     );
   }
@@ -274,7 +274,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
   return (
     <div className={cn('flex flex-col gap-2 rounded-lg border border-border/70 bg-muted/30 p-2', className)}>
       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-        <span>{t('agenteam.card.flowTitle')}</span>
+        <span>{t('subagent.card.flowTitle')}</span>
         {loading && <Loader2 className="size-2.5 animate-spin" />}
       </div>
 
@@ -286,10 +286,10 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
         {visible.length === 0 && !loading && (
           <div className="px-1 py-2 text-[11px] text-muted-foreground">
             {running
-              ? t('agenteam.card.starting')
+              ? t('subagent.card.starting')
               : failed
-                ? t('agenteam.card.flowLoadFailed')
-                : t('agenteam.card.flowEmpty')}
+                ? t('subagent.card.flowLoadFailed')
+                : t('subagent.card.flowEmpty')}
           </div>
         )}
         {visible.map((m) => (
@@ -310,7 +310,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
           className="flex items-center gap-1 self-start rounded-md px-1.5 py-0.5 text-[11px] text-primary-strong transition-colors hover:bg-muted"
         >
           <ExternalLink className="size-3" />
-          {t('agenteam.card.openFullTask')}
+          {t('subagent.card.openFullTask')}
         </button>
       )}
     </div>
