@@ -8,13 +8,40 @@
 //   ② created → 记 operation='create' 条目（undo = 删除该文件）
 //   ③ modified/deleted 未命中缓存 → 记无备份条目（undo 时提示不可恢复），事件照发
 
-import { readdir, stat } from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isPathInside } from '../../utils/fs';
+import { hashBuffer } from './hash';
+import { computeAddedFileDiff, computeDeletedFileDiff, computeLineDiff } from '../file-history/diff';
 import type { FileCache } from './cache';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { TerminalChangeReport, TerminalSnapshot, TerminalWatchConfig } from './types';
+
+/** 终端变更生成 diff 的字节上限（超过只登记元数据，避免构建产物拖慢命令） */
+const TERMINAL_DIFF_MAX_BYTES = 512 * 1024;
+
+/** 单次终端命令最多为多少个文件生成 diff（超出仅统计，不逐个读盘） */
+const TERMINAL_DIFF_MAX_FILES = 50;
+
+/** 终端执行前预读本会话已知文件的限制（让脚本改写的文件也能生成 diff） */
+const PRELOAD_MAX_PATHS = 200;
+const PRELOAD_MAX_FILE_BYTES = 512 * 1024;
+const PRELOAD_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+/** 读取文件并判定是否可生成文本 diff（目录/超限/二进制返回 null） */
+function readTextForDiff(absPath: string): { text: string; bytes: number } | null {
+  try {
+    const s = statSync(absPath);
+    if (!s.isFile() || s.size > TERMINAL_DIFF_MAX_BYTES) return null;
+    const buf = readFileSync(absPath);
+    if (buf.includes(0)) return null;
+    return { text: buf.toString('utf8'), bytes: s.size };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 快照遍历的固定剪枝集（拷自 tools/shared/search-core 的 ALWAYS_SKIP_DIRS + DEFAULT_IGNORES）。
@@ -93,6 +120,8 @@ export interface TerminalHistorySupport {
     terminalKind: 'created' | 'modified' | 'deleted';
     terminalBefore: Buffer | null;
   }): Promise<{ commit(after?: { hashAfter?: string; bytesAfter?: number; diff?: string }): void }>;
+  /** 本会话活跃条目涉及的路径（begin 阶段预读内容，脚本改写场景的 diff 兜底） */
+  listTrackedPaths?(sessionId: string): string[];
 }
 
 export class TerminalWatcher {
@@ -106,7 +135,11 @@ export class TerminalWatcher {
   ) {}
 
   /** 终端命令执行前快照：收集 roots 下全部文件的 stat 清单；禁用/根目录/超限返回 null */
-  async begin(cwd: string, extraRoots: readonly string[]): Promise<TerminalSnapshot | null> {
+  async begin(
+    cwd: string,
+    extraRoots: readonly string[],
+    sessionId?: string,
+  ): Promise<TerminalSnapshot | null> {
     const cfg = this.deps.getConfig();
     if (!cfg.enabled) return null;
     // 文件系统根（默认工作目录 C:\ 场景）无法做有意义的 diff，且全盘扫描代价巨大 → 直接跳过
@@ -140,8 +173,49 @@ export class TerminalWatcher {
       });
       return null;
     }
+    // 预读本会话已知文件内容：终端脚本改写这些文件时（缓存未命中）仍能生成 diff
+    const beforeContents = sessionId ? await this.preloadTrackedContents(sessionId) : undefined;
     // end 的可用预算 = totalTimeoutMs - 本次 begin 实际扫描耗时（命令执行时间不计入）
-    return { roots, entries, elapsedMs: Date.now() - startedAt };
+    return {
+      roots,
+      entries,
+      elapsedMs: Date.now() - startedAt,
+      ...(beforeContents ? { beforeContents } : {}),
+    };
+  }
+
+  /**
+   * 预读本会话已知路径的当前内容（≤512KB/文件、≤200 个、≤16MB）。
+   * 终端命令执行前调用，用于缓存未命中时的 before 内容兜底。
+   */
+  private async preloadTrackedContents(sessionId: string): Promise<Map<string, Buffer> | undefined> {
+    const history = this.resolveHistory();
+    if (!history?.listTrackedPaths) return undefined;
+    let paths: string[];
+    try {
+      paths = history.listTrackedPaths(sessionId);
+    } catch {
+      return undefined;
+    }
+    if (paths.length === 0) return undefined;
+
+    const map = new Map<string, Buffer>();
+    let totalBytes = 0;
+    for (const absPath of paths.slice(0, PRELOAD_MAX_PATHS)) {
+      if (totalBytes >= PRELOAD_MAX_TOTAL_BYTES) break;
+      try {
+        const s = await stat(absPath);
+        if (!s.isFile() || s.size > PRELOAD_MAX_FILE_BYTES) continue;
+        const buf = await readFile(absPath);
+        if (buf.includes(0)) continue; // 二进制不预读
+        if (totalBytes + buf.length > PRELOAD_MAX_TOTAL_BYTES) break;
+        map.set(absPath, buf);
+        totalBytes += buf.length;
+      } catch {
+        // 文件已被删除/不可读：跳过
+      }
+    }
+    return map.size > 0 ? map : undefined;
   }
 
   /** 终端命令执行后 diff + 缓存回填备份。返回变更报告（快照无法 diff 时返回 null） */
@@ -195,6 +269,8 @@ export class TerminalWatcher {
     // file-history 未实现 track 时整体降级为仅报告）
     const history = this.resolveHistory();
     if (history) {
+      // 单次命令的 diff 生成预算：超出后仅登记元数据（构建命令可能瞬间产生上千文件）
+      let diffBudget = TERMINAL_DIFF_MAX_FILES;
       for (const path of report.created) {
         try {
           const tracker = await history.track({
@@ -205,14 +281,24 @@ export class TerminalWatcher {
             terminalBefore: null,
             toolCallId,
           });
-          tracker.commit();
+          const after = diffBudget > 0 ? readTextForDiff(path) : null;
+          if (after) diffBudget--;
+          tracker.commit(after
+            ? {
+                bytesAfter: after.bytes,
+                hashAfter: hashBuffer(Buffer.from(after.text, 'utf8')),
+                diff: computeAddedFileDiff(after.text),
+              }
+            : {});
           report.undone++;
         } catch {
           /* 单文件失败不阻断 */
         }
       }
       for (const path of report.modified) {
-        const buf = this.deps.cache.peek(path)?.rawBuffer ?? null;
+        // 缓存未命中（AI 没读过该文件）时回退到 begin 阶段预读的内容，
+        // 修复「脚本/终端改写的文件只有修改记录、没有 diff」。
+        const buf = this.deps.cache.peek(path)?.rawBuffer ?? snap.beforeContents?.get(path) ?? null;
         try {
           const tracker = await history.track({
             sessionId,
@@ -222,14 +308,26 @@ export class TerminalWatcher {
             terminalBefore: buf,
             toolCallId,
           });
-          tracker.commit();
+          const after = diffBudget > 0 ? readTextForDiff(path) : null;
+          if (after) diffBudget--;
+          let diff: string | undefined;
+          if (buf && after && buf.length <= TERMINAL_DIFF_MAX_BYTES && !buf.includes(0)) {
+            const computed = computeLineDiff(buf.toString('utf8'), after.text);
+            diff = computed || undefined;
+          }
+          tracker.commit({
+            ...(after
+              ? { bytesAfter: after.bytes, hashAfter: hashBuffer(Buffer.from(after.text, 'utf8')) }
+              : {}),
+            ...(diff ? { diff } : {}),
+          });
           if (buf) report.undone++;
         } catch {
           /* 单文件失败不阻断 */
         }
       }
       for (const path of report.deleted) {
-        const buf = this.deps.cache.peek(path)?.rawBuffer ?? null;
+        const buf = this.deps.cache.peek(path)?.rawBuffer ?? snap.beforeContents?.get(path) ?? null;
         try {
           const tracker = await history.track({
             sessionId,
@@ -239,7 +337,15 @@ export class TerminalWatcher {
             terminalBefore: buf,
             toolCallId,
           });
-          tracker.commit();
+          let diff: string | undefined;
+          if (buf && diffBudget > 0 && buf.length <= TERMINAL_DIFF_MAX_BYTES && !buf.includes(0)) {
+            const computed = computeDeletedFileDiff(buf.toString('utf8'));
+            if (computed) {
+              diff = computed;
+              diffBudget--;
+            }
+          }
+          tracker.commit(diff ? { diff } : {});
           if (buf) report.undone++;
         } catch {
           /* 单文件失败不阻断 */

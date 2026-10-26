@@ -16,6 +16,7 @@ import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
 import { existsSync, statSync } from 'node:fs';
 import { impactHintFor } from '../shared/file-index-hint';
+import { computeAddedFileDiff } from '../../file-history/diff';
 import type { FileHistoryService, FilesysService } from '../../contracts';
 import type { ChangeTracker } from '../../file-history/types';
 import type { ToolContext, ToolResult } from '../types';
@@ -134,10 +135,14 @@ export default {
     // 8. 登记历史条目（写入 transcript）
     if (tracker) {
       try {
+        // 新建文件没有 oldContent，writeText 不计算 diff；此处按写入内容补全量新增快照，
+        // 供「文件变更」面板展示行级差异（不进入工具返回给 LLM 的文本，避免上下文浪费）。
+        const historyDiff = writeResult.diff
+          ?? (writeResult.operation === 'create' ? computeAddedFileDiff(p.content) : undefined);
         tracker.commit({
           hashAfter: writeResult.hash,
           bytesAfter: writeResult.bytes,
-          diff: writeResult.diff ?? undefined,
+          diff: historyDiff,
         });
       } catch (err) {
         ctx.logger.warn('write: commit failed', { path: absPath, error: err instanceof Error ? err.message : String(err) });

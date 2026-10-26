@@ -15,6 +15,8 @@ import type {
   TrackRequest,
   ChangeTracker,
   UndoResult,
+  NetFileChange,
+  WatchChangeRequest,
 } from './file-history/types';
 export type { FilesysService, TerminalChangeReport } from './filesys/types';
 export type { TerminalService, TerminalInfo, TerminalRunResult, InterpreterKind } from './terminal/types';
@@ -694,6 +696,18 @@ export interface FileHistoryService {
 
   /** 列出某会话的文件历史（前端 UI 用；含已回滚标记条目） */
   listHistory(sessionId: string): FileHistoryEntry[];
+
+  /**
+   * 实时文件监控登记一次外部变更：before 自动写入内容寻址备份，
+   * 与最近条目按 hash/时间窗口去重后写 transcript。
+   */
+  recordWatchChange(req: WatchChangeRequest): void;
+
+  /** 按文件聚合的净差异（「文件变更」面板主视图数据源） */
+  listNetChanges(sessionId: string): NetFileChange[];
+
+  /** 本会话活跃条目涉及的路径去重列表（终端快照预读/监控补全用） */
+  listTrackedPaths(sessionId: string): string[];
 
   /**
    * 回滚时间区间内的全部文件变更（消息撤回联动，标记制）。

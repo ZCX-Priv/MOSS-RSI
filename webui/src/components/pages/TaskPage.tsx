@@ -124,6 +124,7 @@ import {
   RIGHT_PANEL_MIN_PX,
   RIGHT_PANEL_RATIO_MIN,
   RIGHT_PANEL_RATIO_MAX,
+  SYSTEM_WORKING_DIRECTORY,
 } from '../../store';
 import { useTask } from '../../hooks/useTask';
 import { useFileIndex } from '../../hooks/useFileIndex';
@@ -228,6 +229,16 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const { t } = useTranslation();
   const { taskId = '' } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  const workingDirectory = useStore((s) => s.workingDirectory);
+
+  // 注册实时文件监控：任务打开 / 工作目录变化时绑定该目录（同一 cwd 重复注册只更新会话归属）。
+  // 外部编辑器、终端脚本、后台进程的改动都会由 watcher 记录并进入「文件变更」面板。
+  useEffect(() => {
+    if (!taskId || !workingDirectory || workingDirectory === SYSTEM_WORKING_DIRECTORY) return;
+    void api.watchFiles(workingDirectory, taskId).catch(() => {
+      // 监控注册失败不阻断页面（面板仍可展示已有历史）
+    });
+  }, [taskId, workingDirectory]);
   // 右侧面板展开态（会话级）/宽度（全局）：store 内存态而非本地 state，TaskPage 因路由
   // 切换重挂载时保持不重置；开合按会话独立（一个会话收起不影响其他会话），宽度作为
   // UI 偏好跨会话共享；taskId 为空串（空白页）时读写 '' key，建会话时随对话转移
@@ -1234,7 +1245,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         )}
         {activeTab?.type === 'agenteam' && <AgenteamPanel />}
         {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}
-        {activeTab?.type === 'changes' && <FileChangesPanel key={taskId} sessionId={taskId} />}
+        {activeTab?.type === 'changes' && (
+          <FileChangesPanel key={taskId} sessionId={taskId} workingDirectory={workingDirectory} />
+        )}
         {activeTab?.type === 'computer' && (
           <ComputerPanel key={taskId} sessionId={taskId} active />
         )}

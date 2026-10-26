@@ -10,8 +10,9 @@
 
 import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
-import { existsSync, statSync, unlinkSync, rmSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, unlinkSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { computeDeletedFileDiff } from '../../file-history/diff';
 import {
   isPathInside,
   realpathSafe,
@@ -38,6 +39,28 @@ interface DeleteParams {
 
 function getFileHistory(ctx: ToolContext): FileHistoryService | null {
   return ctx.services.tryResolve<FileHistoryService>(ServiceNames.FILE_HISTORY);
+}
+
+/** 删除 diff 读取备份的字节上限（与 write 的 diff 跳过阈值一致） */
+const MAX_DIFF_BACKUP_BYTES = 1 * 1024 * 1024;
+
+/**
+ * 为文件删除生成全量删除 diff（内容来自删除前的哈希备份）。
+ * 目录 / 无备份 / 二进制（含 NUL 字节）/ 超过上限时返回 undefined（条目仅记录元数据）。
+ */
+function buildDeletedFileDiff(tracker: ChangeTracker | null, isDir: boolean): string | undefined {
+  if (isDir || !tracker?.receipt.backupPath) return undefined;
+  const backupPath = tracker.receipt.backupPath;
+  if (!backupPath.endsWith('.bak')) return undefined;
+  try {
+    const stat = statSync(backupPath);
+    if (!stat.isFile() || stat.size > MAX_DIFF_BACKUP_BYTES) return undefined;
+    const buf = readFileSync(backupPath);
+    if (buf.includes(0)) return undefined;
+    return computeDeletedFileDiff(buf.toString('utf8'));
+  } catch {
+    return undefined;
+  }
 }
 
 interface PathResult {
@@ -304,7 +327,7 @@ async function deleteSingle(
     // 4. 登记历史（消息撤回 rollbackRange / undo 从备份恢复原位的依据）
     if (tracker?.receipt.entryId) {
       try {
-        tracker.commit();
+        tracker.commit({ diff: buildDeletedFileDiff(tracker, isDir) });
       } catch (err) {
         ctx.logger.warn('delete: commit failed', {
           path: absPath,
@@ -379,10 +402,10 @@ async function deleteSingle(
     return { absPath, success: false, message: t('tools.deleteFailed', { message: errMsg }) };
   }
 
-  // 登记历史（hashAfter='', bytesAfter=0）
+  // 登记历史（hashAfter='', bytesAfter=0；文件附全量删除 diff 供面板展示）
   if (tracker) {
     try {
-      tracker.commit();
+      tracker.commit({ diff: buildDeletedFileDiff(tracker, isDir) });
     } catch (err) {
       ctx.logger.warn('delete: commit failed', {
         path: absPath,

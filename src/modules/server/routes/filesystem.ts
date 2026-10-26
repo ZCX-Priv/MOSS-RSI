@@ -65,6 +65,34 @@ export type SuggestPathKind =
   | 'videos'
   | 'cwd';
 
+/**
+ * POST /api/filesystem/watch —— 注册任务工作目录的实时文件监控。
+ * body: { cwd: string, sessionId: string }
+ * 拒绝文件系统根（全盘监听代价巨大）；同一 cwd 重复注册只更新会话绑定。
+ */
+export function createWatchFilesHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const body = (req.body ?? {}) as { cwd?: string; sessionId?: string };
+    const cwd = typeof body.cwd === 'string' ? body.cwd.trim() : '';
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    if (!cwd || !sessionId) {
+      return { status: 400, body: { error: 'cwd and sessionId are required' } };
+    }
+    if (/^[A-Za-z]:[\\/]?$/.test(cwd) || cwd === '/' || cwd === '\\') {
+      return { status: 400, body: { error: 'refusing to watch filesystem root' } };
+    }
+    if (!isDirectorySafe(cwd)) {
+      return { status: 400, body: { error: `not a directory: ${cwd}` } };
+    }
+    const filesys = services.tryResolve<FilesysService>(ServiceNames.FILESYS);
+    if (!filesys) {
+      return { status: 503, body: { error: 'filesys service unavailable' } };
+    }
+    await filesys.watchDirectory(cwd, sessionId);
+    return { status: 200, body: { ok: true, cwd, sessionId } };
+  };
+}
+
 export function createSuggestPathsHandler(env: Environment): RouteHandler {
   return async (): Promise<HttpResponse> => {
     const paths: Array<{ path: string; label: string; kind: SuggestPathKind }> = [];

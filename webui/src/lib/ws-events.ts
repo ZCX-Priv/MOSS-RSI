@@ -828,18 +828,19 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       break;
     }
     case 'file-created': {
-      const payload = (msg.payload ?? {}) as { path?: string };
-      if (payload.path) toast.success(`已创建文件: ${payload.path}`);
+      const payload = (msg.payload ?? {}) as { path?: string; source?: string };
+      // 实时监控捕获的外部变更不弹 toast（可能非常频繁），由「文件变更」面板展示
+      if (payload.path && payload.source !== 'watch') toast.success(`已创建文件: ${payload.path}`);
       break;
     }
     case 'file-edited': {
-      const payload = (msg.payload ?? {}) as { path?: string };
-      if (payload.path) toast.success(`已编辑文件: ${payload.path}`);
+      const payload = (msg.payload ?? {}) as { path?: string; source?: string };
+      if (payload.path && payload.source !== 'watch') toast.success(`已编辑文件: ${payload.path}`);
       break;
     }
     case 'file-deleted': {
-      const payload = (msg.payload ?? {}) as { path?: string };
-      if (payload.path) toast.info(`已删除文件: ${payload.path}`);
+      const payload = (msg.payload ?? {}) as { path?: string; source?: string };
+      if (payload.path && payload.source !== 'watch') toast.info(`已删除文件: ${payload.path}`);
       break;
     }
     case 'file-moved': {

@@ -290,6 +290,8 @@ export class WsHandler {
         return this.handleTerminalResize(state, msg);
       case 'terminal.close':
         return this.handleTerminalClose(state, msg);
+      case 'terminal.interrupt':
+        return this.handleTerminalInterrupt(state, msg);
       case 'ping':
         // 前端心跳探活，回 pong 确认连接存活
         state.conn.send({ type: 'pong' });
@@ -1062,5 +1064,12 @@ export class WsHandler {
     const payload = (msg.payload ?? {}) as { terminalId?: string };
     if (!payload.terminalId) return;
     this.terminalService()?.close(payload.terminalId);
+  }
+
+  /** 停止单条命令：按 toolCallId 找到登记终端并发送 Ctrl+C */
+  private handleTerminalInterrupt(_state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { toolCallId?: string };
+    if (!payload.toolCallId) return;
+    this.terminalService()?.interruptRun(payload.toolCallId);
   }
 }

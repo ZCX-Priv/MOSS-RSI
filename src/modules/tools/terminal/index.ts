@@ -179,9 +179,16 @@ async function handleRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysSe
       : '';
 
   const startedAt = Date.now();
-  const snap = await filesys.beginTerminalSnapshot(info.cwd);
+  const snap = await filesys.beginTerminalSnapshot(info.cwd, ctx.sessionId);
   try {
-    const res = await svc.run(info.id, command, timeoutMs, ctx.signal);
+    // 登记 toolCallId → 终端：前端停止按钮可按单条命令发送 Ctrl+C
+    svc.registerRun(ctx.toolCallId, info.id);
+    let res: TerminalRunResult;
+    try {
+      res = await svc.run(info.id, command, timeoutMs, ctx.signal);
+    } finally {
+      svc.unregisterRun(ctx.toolCallId);
+    }
     const workspaceNote = await finishSnapshot(filesys, snap, ctx);
 
     const header = t('tools.terminalRunHeader', { title: info.title, status: statusLabel(res.info) });
@@ -326,8 +333,14 @@ async function handlePersistent(
     const rawTimeout = p.timeout ?? (ctx.toolConfig?.timeout as number | undefined) ?? 30_000;
     const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
 
-    const snap = await filesys.beginTerminalSnapshot(info.cwd);
-    const res = await svc.run(terminalId, command, timeoutMs, ctx.signal);
+    const snap = await filesys.beginTerminalSnapshot(info.cwd, ctx.sessionId);
+    svc.registerRun(ctx.toolCallId, terminalId);
+    let res: TerminalRunResult;
+    try {
+      res = await svc.run(terminalId, command, timeoutMs, ctx.signal);
+    } finally {
+      svc.unregisterRun(ctx.toolCallId);
+    }
     const workspaceNote = await finishSnapshot(filesys, snap, ctx);
 
     const header = t('tools.terminalSendHeader', { id: terminalId, status: statusLabel(res.info) });

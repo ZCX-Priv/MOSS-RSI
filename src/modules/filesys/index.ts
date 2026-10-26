@@ -28,6 +28,8 @@ export { hashBuffer, hashText } from './hash';
 export { resolveInRoots, normalizeRoots, SYSTEM_SCOPE, systemRoot, isMossAccessAllowed } from './roots';
 
 class FilesysModule implements Module {
+  private service: FilesysServiceImpl | null = null;
+
   async initialize(ctx: ModuleContext): Promise<void> {
     // 每次调用读最新配置（getAppConfig 为内存深拷贝，低频路径成本可忽略；
     // roots/缓存上限配置修改即生效，无需重启）
@@ -45,10 +47,17 @@ class FilesysModule implements Module {
     ctx.services.register(ServiceNames.FILESYS, service, {
       scope: 'filesys',
     });
+    this.service = service;
 
     ctx.logger.info(t('filesys.moduleInitialized'), {
       roots: service.listRoots().length,
     });
+  }
+
+  /** 模块销毁：关闭实时文件监控 watcher */
+  async destroy(): Promise<void> {
+    this.service?.dispose();
+    this.service = null;
   }
 }
 

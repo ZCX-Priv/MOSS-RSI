@@ -927,7 +927,7 @@ export interface FileHistoryEntry {
   sessionId: string;
   absPath: string;
   toolCallId: string;
-  toolName: 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell';
+  toolName: 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell' | 'watch';
   timestamp: string;
   operation: 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'terminal-change' | 'shell-change';
   hashBefore: string | null;
@@ -935,7 +935,7 @@ export interface FileHistoryEntry {
   backupPath: string | null;
   bytesBefore: number;
   bytesAfter: number;
-  /** unified diff 文本（仅 overwrite/edit 存在） */
+  /** unified diff 文本：overwrite/edit 为前后内容差异；create/delete 为全量新增/删除快照 */
   diff?: string;
   /** 是否为目录操作 */
   isDirectory?: boolean;
@@ -945,6 +945,32 @@ export interface FileHistoryEntry {
   rolledBackAt?: string;
   /** 仅 R 条目（toolName='rollback'）：指向被回滚的原始条目 id */
   rollbackOf?: string;
+}
+
+/** 净差异无法生成的原因（与后端 NetDiffReason 对齐） */
+export type NetDiffReason =
+  | 'before-unavailable'
+  | 'after-unavailable'
+  | 'binary'
+  | 'too-large'
+  | 'directory'
+  | 'moved';
+
+/**
+ * 按文件聚合的净差异（「文件变更」面板主视图数据源）。
+ * 表示「会话第一条变更前 → 当前磁盘状态」的最终差异。
+ */
+export interface NetFileChange {
+  absPath: string;
+  operation: 'create' | 'edit' | 'delete' | 'move';
+  diff?: string;
+  added: number;
+  removed: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  reason?: NetDiffReason;
+  lastTs: number;
+  entryCount: number;
 }
 
 // ============================================================================

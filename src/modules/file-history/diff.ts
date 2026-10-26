@@ -8,6 +8,47 @@
 
 const MAX_DIFF_LINES = 5000;
 
+/** 快照 diff 的字节上限（新增/删除文件全量快照；超过则不生成，避免 transcript 膨胀） */
+const MAX_SNAPSHOT_DIFF_BYTES = 1 * 1024 * 1024;
+
+/** 按行拆分并剔除末尾换行产生的空元素（避免行数多算 1；空内容返回空数组） */
+function splitSnapshotLines(content: string): string[] {
+  if (!content) return [];
+  const lines = content.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/**
+ * 新建文件的全量新增 diff（create 条目用）。
+ * 不复用 computeLineDiff('', content)：后者会把空 before 拆出一个 '-' 空行，
+ * 导致面板统计出现 "−1" 的假删除。
+ *
+ * @param content 文件内容（文本）
+ * @returns unified diff；空文件返回 ''；超过字节/行数上限返回 undefined（调用方不写 diff）
+ */
+export function computeAddedFileDiff(content: string): string | undefined {
+  if (Buffer.byteLength(content, 'utf8') > MAX_SNAPSHOT_DIFF_BYTES) return undefined;
+  const lines = splitSnapshotLines(content);
+  if (lines.length > MAX_DIFF_LINES) return undefined;
+  if (lines.length === 0) return '';
+  return `@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}\n`;
+}
+
+/**
+ * 删除文件的全量删除 diff（delete 条目用）。
+ *
+ * @param content 删除前的文件内容（文本）
+ * @returns unified diff；空文件返回 ''；超过字节/行数上限返回 undefined（调用方不写 diff）
+ */
+export function computeDeletedFileDiff(content: string): string | undefined {
+  if (Buffer.byteLength(content, 'utf8') > MAX_SNAPSHOT_DIFF_BYTES) return undefined;
+  const lines = splitSnapshotLines(content);
+  if (lines.length > MAX_DIFF_LINES) return undefined;
+  if (lines.length === 0) return '';
+  return `@@ -1,${lines.length} +0,0 @@\n${lines.map(line => `-${line}`).join('\n')}\n`;
+}
+
 /**
  * 计算两个字符串的 unified diff。
  * @param before 变更前内容

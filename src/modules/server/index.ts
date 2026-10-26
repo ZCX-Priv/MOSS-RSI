@@ -153,6 +153,7 @@ import {
   createReadFileHandler,
   createMediaHandler,
   createTextExtractHandler,
+  createWatchFilesHandler,
 } from './routes/filesystem';
 import { createListInterpretersHandler } from './routes/terminal';
 import {
@@ -491,6 +492,8 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/media', handler: createMediaHandler(this.ctx.services, config), auth: false });
     // 通用文本提取（Office/电子书等无前端渲染格式的回退）
     this.router.addRoute({ method: 'GET', pattern: '/api/filesystem/text', handler: createTextExtractHandler(this.ctx.services), auth: true });
+    // 实时文件监控：注册任务工作目录（文件变更面板的数据来源之一）
+    this.router.addRoute({ method: 'POST', pattern: '/api/filesystem/watch', handler: createWatchFilesHandler(this.ctx.services), auth: true });
 
     // filesys roots（虚拟文件系统授权目录管理）
     this.router.addRoute({ method: 'GET', pattern: '/api/filesys/roots', handler: createGetRootsHandler(this.ctx.services), auth: true });

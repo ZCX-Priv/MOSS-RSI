@@ -36,6 +36,20 @@ export interface DiffFailure {
   error?: string;
 }
 
+/** 折叠条：默认不渲染被隐藏的行，点击后临时展开 */
+export interface DiffFoldRow {
+  kind: 'fold';
+  text: string;
+  oldNo: null;
+  newNo: null;
+  /** 被折叠的原始行（展开时直接渲染） */
+  hidden: DiffRow[];
+  /** 稳定折叠 id：第一行被隐藏行在 block.rows 中的下标 */
+  foldStart: number;
+}
+
+export type DiffDisplayRow = DiffRow | DiffFoldRow;
+
 export interface DiffPreview {
   kind: 'diff';
   blocks: DiffBlock[];
@@ -94,8 +108,12 @@ export interface BuildToolPreviewParams {
   hasResult: boolean;
 }
 
-/** diff 渲染行数上限（防止超长 diff 阻塞消息流） */
-const MAX_DIFF_ROWS = 2000;
+/** diff 默认展示预算（含折叠条本身） */
+export const MAX_DIFF_DISPLAY_ROWS = 2000;
+/** diff 解析/合成安全上限（避免极端数据卡死；后端单文件 diff 上限 5000 行） */
+const MAX_DIFF_PARSE_ROWS = 20000;
+/** 每段连续上下文保留的首尾行数 */
+const CONTEXT_EDGE_ROWS = 2;
 
 /** 工具参数摘要长度上限 */
 const MAX_SUMMARY_CHARS = 80;
@@ -142,8 +160,8 @@ function takeLines(value: string, max: number): { lines: string[]; truncated: bo
   return { lines, truncated: false };
 }
 
-/** 统计总行数（仅用于截断时显示真实增行数；不分配行数组） */
-function countLines(value: string): number {
+/** 统计文本总行数（写文件统计用；不分配行数组） */
+function countTextLines(value: string): number {
   if (!value) return 0;
   let count = 1;
   for (let i = 0; i < value.length; i++) {
@@ -177,7 +195,7 @@ export function parseUnifiedDiff(diff: string, path: string, label: DiffLabel): 
   let truncated = false;
 
   for (const raw of diff.split('\n')) {
-    if (rows.length >= MAX_DIFF_ROWS) {
+    if (rows.length >= MAX_DIFF_PARSE_ROWS) {
       truncated = true;
       break;
     }
@@ -220,6 +238,131 @@ export function parseUnifiedDiff(diff: string, path: string, label: DiffLabel): 
 
   if (rows.length === 0) return null;
   return { path, label, rows, added, removed, truncated };
+}
+
+/** 按 keep 集合生成展示行；被跳过的连续行合并成一条 fold */
+function buildDisplayPlan(rows: DiffRow[], keep: Set<number>): DiffDisplayRow[] {
+  const plan: DiffDisplayRow[] = [];
+  let hidden: DiffRow[] = [];
+  let hiddenStart = -1;
+
+  const flush = (): void => {
+    if (hidden.length === 0) return;
+    plan.push({
+      kind: 'fold',
+      text: '',
+      oldNo: null,
+      newNo: null,
+      hidden,
+      foldStart: hiddenStart,
+    });
+    hidden = [];
+    hiddenStart = -1;
+  };
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    if (keep.has(i)) {
+      flush();
+      plan.push(row);
+    } else {
+      if (hidden.length === 0) hiddenStart = i;
+      hidden.push(row);
+    }
+  }
+  flush();
+  return plan;
+}
+
+/**
+ * 只保留变更行（增删行 + hunk 头）：内容放得下则全显示，放不下则头尾各保留一半，
+ * 中间用一条 fold 折叠。预算含 fold 行本身。
+ */
+function contentHeadTail(rows: DiffRow[], budget: number): DiffDisplayRow[] {
+  const content: Array<{ row: DiffRow; index: number }> = [];
+  rows.forEach((row, index) => {
+    if (row.kind !== 'context') content.push({ row, index });
+  });
+  if (content.length === 0) return [];
+
+  const headCount = Math.floor((budget - 1) / 2);
+  const tailCount = budget - 1 - headCount;
+  const head = content.slice(0, headCount);
+  const tail = content.slice(Math.max(headCount, content.length - tailCount));
+  const hiddenEntries = content.slice(headCount, Math.max(headCount, content.length - tailCount));
+
+  const plan: DiffDisplayRow[] = head.map((entry) => entry.row);
+  if (hiddenEntries.length > 0) {
+    const firstHidden = hiddenEntries[0];
+    plan.push({
+      kind: 'fold',
+      text: '',
+      oldNo: null,
+      newNo: null,
+      hidden: hiddenEntries.map((entry) => entry.row),
+      foldStart: firstHidden ? firstHidden.index : 0,
+    });
+  }
+  plan.push(...tail.map((entry) => entry.row));
+  return plan;
+}
+
+/**
+ * 超长 diff 智能折叠（默认展示 ≤ budget 行）：
+ * 1. 未超预算原样返回；
+ * 2. 变更行本身接近/超过预算 → 只保留变更行，头尾各一半，中间折叠；
+ * 3. 否则保留全部变更行 + 每段上下文首尾各 CONTEXT_EDGE_ROWS 行，长段上下文折叠；
+ * 4. 若折叠条把展示行撑超预算，退化为「只保留变更行」。
+ *
+ * 折叠条携带 hidden 原始行，视图可点击临时展开。
+ */
+export function foldDiffRows(
+  rows: DiffRow[],
+  budget = MAX_DIFF_DISPLAY_ROWS,
+): DiffDisplayRow[] {
+  const safeBudget = Math.max(4, budget);
+  if (rows.length <= safeBudget) return rows;
+
+  const contentIndexes: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i]?.kind !== 'context') contentIndexes.push(i);
+  }
+
+  // 变更行占比过高：上下文全部放弃，优先保证变更内容可见
+  if (contentIndexes.length >= safeBudget - 4) {
+    return contentHeadTail(rows, safeBudget);
+  }
+
+  const keep = new Set<number>(contentIndexes);
+
+  // 每段连续 context 保留首尾各 CONTEXT_EDGE_ROWS 行
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i]?.kind !== 'context') {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < rows.length && rows[j]?.kind === 'context') j++;
+    for (let k = i; k < Math.min(i + CONTEXT_EDGE_ROWS, j); k++) keep.add(k);
+    for (let k = Math.max(i, j - CONTEXT_EDGE_ROWS); k < j; k++) keep.add(k);
+    i = j;
+  }
+
+  // 块首/块尾也保留少量上下文，满足「保留头和尾」
+  for (let k = 0; k < Math.min(CONTEXT_EDGE_ROWS, rows.length); k++) keep.add(k);
+  for (let k = Math.max(0, rows.length - CONTEXT_EDGE_ROWS); k < rows.length; k++) keep.add(k);
+
+  let plan = buildDisplayPlan(rows, keep);
+  if (plan.length > safeBudget) {
+    // 折叠条太多：放弃上下文，只保留变更行
+    plan = buildDisplayPlan(rows, new Set(contentIndexes));
+  }
+  if (plan.length > safeBudget) {
+    return contentHeadTail(rows, safeBudget);
+  }
+  return plan;
 }
 
 /** 单次编辑的最小结构 */
@@ -285,7 +428,7 @@ export function buildSyntheticDiffFromArgs(
     let removed = 0;
     let truncated = false;
     for (const edit of target.edits) {
-      const oldLines = takeLines(edit.oldString, MAX_DIFF_ROWS - rows.length);
+      const oldLines = takeLines(edit.oldString, MAX_DIFF_PARSE_ROWS - rows.length);
       for (const line of oldLines.lines) {
         rows.push({ kind: 'del', text: line, oldNo: null, newNo: null });
         removed++;
@@ -294,7 +437,7 @@ export function buildSyntheticDiffFromArgs(
         truncated = true;
         break;
       }
-      const newLines = takeLines(edit.newString, MAX_DIFF_ROWS - rows.length);
+      const newLines = takeLines(edit.newString, MAX_DIFF_PARSE_ROWS - rows.length);
       for (const line of newLines.lines) {
         rows.push({ kind: 'add', text: line, oldNo: null, newNo: null });
         added++;
@@ -316,7 +459,7 @@ export function buildWriteCreateBlock(args: Record<string, unknown>): DiffBlock 
   const path = asString(args.path) ?? '';
   const content = typeof args.content === 'string' ? args.content : undefined;
   if (content === undefined) return null;
-  const { lines, truncated } = takeLines(content, MAX_DIFF_ROWS);
+  const { lines, truncated } = takeLines(content, MAX_DIFF_PARSE_ROWS);
   const rows: DiffRow[] = lines.map((line, index) => ({
     kind: 'add',
     text: line,
@@ -327,7 +470,7 @@ export function buildWriteCreateBlock(args: Record<string, unknown>): DiffBlock 
     path,
     label: 'new',
     rows,
-    added: truncated ? countLines(content) : lines.length,
+    added: truncated ? countTextLines(content) : lines.length,
     removed: 0,
     truncated,
   };
@@ -449,7 +592,7 @@ function buildWritePreview(
 function stripTerminalHeader(text: string, metadata: ToolResult['metadata'] | undefined): string {
   if (!text || text.startsWith('Error:') || typeof metadata?.running !== 'boolean') return text;
   const newline = text.indexOf('\n');
-  return newline === -1 ? '' : text.slice(newline + 1);
+  return newline === -1 ? '' : text.slice(newline + 1).replace(/^\n+/, '');
 }
 
 /** glob/grep：按 metadata.returned 从结果文本第 2 行起截取本页正文 */

@@ -15,8 +15,10 @@ import {
   rmSync,
   readdirSync,
   copyFileSync,
+  readFileSync,
 } from 'node:fs';
 import { dirname, join, basename, extname } from 'node:path';
+import { computeLineDiff } from '../../file-history/diff';
 import {
   isPathInside,
   realpathSafe,
@@ -29,6 +31,33 @@ import type { ToolContext, ToolResult } from '../types';
 
 /** 目录复制大小上限 */
 const MAX_DIR_BYTES = 100 * 1024 * 1024;
+
+/** 覆盖 diff 的字节上限（超过不生成，避免读入超大文件） */
+const MAX_DIFF_BYTES = 1 * 1024 * 1024;
+
+/**
+ * 覆盖复制时生成行级 diff：旧内容来自备份，新内容来自源文件。
+ * 目录 / 无备份 / 二进制（含 NUL）/ 超过上限时返回 undefined（条目仅记录元数据）。
+ */
+function buildOverwriteDiff(
+  backupPath: string | null,
+  sourcePath: string,
+  isDir: boolean,
+): string | undefined {
+  if (isDir || !backupPath || !backupPath.endsWith('.bak')) return undefined;
+  try {
+    const beforeStat = statSync(backupPath);
+    const afterStat = statSync(sourcePath);
+    if (!beforeStat.isFile() || !afterStat.isFile()) return undefined;
+    if (beforeStat.size > MAX_DIFF_BYTES || afterStat.size > MAX_DIFF_BYTES) return undefined;
+    const before = readFileSync(backupPath);
+    const after = readFileSync(sourcePath);
+    if (before.includes(0) || after.includes(0)) return undefined;
+    return computeLineDiff(before.toString('utf8'), after.toString('utf8')) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface CopyParams {
   source?: string;
@@ -199,15 +228,19 @@ async function copySingle(
   }
 
   // d. 覆盖前统一追踪已存在目标（track 变更前备份；commit 变更后登记覆盖条目）
+  // toolName='write' → operation='overwrite'（面板显示「覆盖」，undo 从备份恢复旧内容），
+  // 与 copy create 条目（undo=删除副本）语义区分。
   let destTracker: ChangeTracker | null = null;
+  let overwriteDiff: string | undefined;
   if (existsSync(finalDest) && overwrite === 'overwrite' && trackHistory && fileHistory) {
     try {
       destTracker = await fileHistory.track({
         sessionId: ctx.sessionId,
         absPath: finalDest,
         toolCallId: ctx.toolCallId,
-        toolName: 'edit',
+        toolName: 'write',
       });
+      overwriteDiff = buildOverwriteDiff(destTracker.receipt.backupPath, realSource, isDir);
     } catch {
       /* 备份失败不阻断 */
     }
@@ -230,14 +263,18 @@ async function copySingle(
   }
 
   // f. 登记：被覆盖目标条目（undo 恢复旧内容）+ 副本 create 条目（undo = 删除副本）
+  // 覆盖场景不再额外登记 copy create 条目：同一路径若同时有 overwrite 与 create 两条活跃条目，
+  // 单步 undo 会优先删除文件，而不是恢复被覆盖的旧内容。
   if (destTracker) {
     try {
-      destTracker.commit();
+      destTracker.commit({
+        bytesAfter: bytes,
+        ...(overwriteDiff ? { diff: overwriteDiff } : {}),
+      });
     } catch {
       /* 登记失败不阻断 */
     }
-  }
-  if (trackHistory && fileHistory) {
+  } else if (trackHistory && fileHistory) {
     try {
       const copyTracker = await fileHistory.track({
         sessionId: ctx.sessionId,

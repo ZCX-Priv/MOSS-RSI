@@ -13,6 +13,7 @@ import { FilesysEventBus } from './events';
 import { hashBuffer } from './hash';
 import { normalizeRoots, resolveInRoots } from './roots';
 import { TerminalWatcher } from './terminal-watch';
+import { FileWatchService } from './watcher';
 import type {
   FileChangeEvent,
   FilesysConfig,
@@ -31,6 +32,9 @@ export class FilesysServiceImpl implements FilesysService {
   private readonly cache: FileCache;
   private readonly bus: FilesysEventBus;
   private readonly watcher: TerminalWatcher;
+  private readonly fileWatch: FileWatchService;
+  /** 工具自身写入的路径 → 时间戳（实时监控据此抑制重复登记） */
+  private readonly recentInternalWrites = new Map<string, number>();
   private readonly getConfig: () => FilesysConfig;
   private readonly logger: Logger;
 
@@ -54,6 +58,12 @@ export class FilesysServiceImpl implements FilesysService {
       logger: deps.logger,
       services: deps.services,
       getConfig: () => this.getConfig().terminalWatch,
+    });
+    this.fileWatch = new FileWatchService({
+      logger: deps.logger,
+      services: deps.services,
+      emitChange: (e) => this.emitChange(e),
+      isRecentlyInternalWritten: (absPath) => this.isRecentlyInternalWritten(absPath),
     });
   }
 
@@ -214,15 +224,37 @@ export class FilesysServiceImpl implements FilesysService {
   }
 
   emitChange(event: FileChangeEvent): void {
+    // 工具自身写入：记录抑制窗口，实时监控只同步基线、不重复登记。
+    // 'watch' / 'terminal' 是监控来源，不算内部写入（否则会把自己的变更也抑制掉）。
+    const source = event.source;
+    if (
+      source === 'write' || source === 'edit' || source === 'delete'
+      || source === 'move' || source === 'copy' || source === 'internal'
+    ) {
+      const now = Date.now();
+      this.recentInternalWrites.set(event.absPath, now);
+      if (event.destPath) this.recentInternalWrites.set(event.destPath, now);
+      if (this.recentInternalWrites.size > 5000) {
+        for (const [p, ts] of this.recentInternalWrites) {
+          if (now - ts > 30_000) this.recentInternalWrites.delete(p);
+        }
+      }
+    }
     this.bus.emit(event);
+  }
+
+  /** 是否在抑制窗口内由工具自身写入（实时监控跳过重复登记） */
+  private isRecentlyInternalWritten(absPath: string, windowMs = 3000): boolean {
+    const ts = this.recentInternalWrites.get(absPath);
+    return ts !== undefined && Date.now() - ts <= windowMs;
   }
 
   listRoots(): string[] {
     return normalizeRoots(this.getConfig().roots);
   }
 
-  async beginTerminalSnapshot(cwd: string): Promise<TerminalSnapshot | null> {
-    return this.watcher.begin(cwd, this.listRoots());
+  async beginTerminalSnapshot(cwd: string, sessionId?: string): Promise<TerminalSnapshot | null> {
+    return this.watcher.begin(cwd, this.listRoots(), sessionId);
   }
 
   async endTerminalSnapshot(
@@ -249,6 +281,20 @@ export class FilesysServiceImpl implements FilesysService {
       });
       return null;
     }
+  }
+
+  async watchDirectory(cwd: string, sessionId: string): Promise<void> {
+    if (!cwd) return;
+    await this.fileWatch.watch(cwd, sessionId);
+  }
+
+  unwatchSession(sessionId: string): void {
+    this.fileWatch.unwatchSession(sessionId);
+  }
+
+  /** 模块销毁：关闭全部实时 watcher */
+  dispose(): void {
+    this.fileWatch.stopAll();
   }
 
   cacheStats(): { entries: number; bytes: number } {

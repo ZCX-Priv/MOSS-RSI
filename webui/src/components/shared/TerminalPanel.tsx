@@ -281,7 +281,8 @@ export function TerminalPanel({ sessionId, active }: TerminalPanelProps) {
       const term = new Terminal({
         convertEol: false,
         cursorBlink: true,
-        scrollback: 5000,
+        // 必须与后端 HEADLESS_SCROLLBACK（20000）对齐：长命令折行后的完整历史不被截掉
+        scrollback: 20000,
         fontSize: 12,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace',
         theme: xtermTheme(dark),

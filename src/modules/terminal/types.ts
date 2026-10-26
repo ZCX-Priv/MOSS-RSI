@@ -108,6 +108,12 @@ export interface TerminalService {
   snapshotAsync(id: string): Promise<string | undefined>;
   /** 在终端内执行一条命令并等待完成标记，返回该次输出（signal 中止 → Ctrl+C 并提前返回） */
   run(id: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<TerminalRunResult>;
+  /** 登记运行中的工具调用 → 终端 id（前端停止按钮用） */
+  registerRun(toolCallId: string, terminalId: string): void;
+  /** 注销运行登记 */
+  unregisterRun(toolCallId: string): void;
+  /** 向该 toolCall 对应的终端发送 Ctrl+C；找不到返回 false */
+  interruptRun(toolCallId: string): boolean;
   /** 把一段文本保存为该终端的完整输出文件（返回路径；失败 null） */
   saveOutput(id: string, text: string): Promise<string | null>;
   /** 清理某会话全部终端（会话删除 / 进程退出时） */

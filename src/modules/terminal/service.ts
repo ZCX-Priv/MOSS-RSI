@@ -80,8 +80,8 @@ interface SerializeAddonLike {
   serialize(opts?: { scrollback?: number }): string;
 }
 
-/** 无头镜像的 scrollback 行数（与前端 xterm 的 5000 对齐：快照序列化成本/WS 帧减半） */
-const HEADLESS_SCROLLBACK = 5_000;
+/** 无头镜像的 scrollback 行数（必须与前端 xterm 的 20000 对齐：容纳长命令折行后的完整历史） */
+const HEADLESS_SCROLLBACK = 20_000;
 
 let headlessLibsCache: { Terminal: new (opts: Record<string, unknown>) => HeadlessTerm; SerializeAddon: new () => SerializeAddonLike } | null | undefined;
 /** 惰性加载 CJS 版 headless + serialize（createRequire：Node/Bun 均可稳定解析 CJS 入口） */
@@ -311,6 +311,8 @@ export class TerminalManager implements TerminalService {
    * 也不会静默复用另一种解释器的终端（用户反馈的「让用 cmd 却跑了 powershell」）。
    */
   private readonly defaultByKind = new Map<string, Map<InterpreterKind, string>>();
+  /** 运行中的工具调用 → 终端 id（前端停止按钮按 toolCallId 精确中断单条命令） */
+  private readonly activeRuns = new Map<string, string>();
   private readonly emit: TerminalEmitter;
   private readonly logger: Logger;
   private readonly isWindows: boolean;
@@ -666,6 +668,29 @@ export class TerminalManager implements TerminalService {
       .filter((e) => !liveIds.has(e.info.id))
       .map((e) => ({ ...e.info, running: false, exitCode: null, offline: true }));
     return [...live, ...dead].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** 登记运行中的工具调用 → 终端 id（终端工具 run 期间有效） */
+  registerRun(toolCallId: string, terminalId: string): void {
+    this.activeRuns.set(toolCallId, terminalId);
+  }
+
+  /** 注销运行登记（命令结束后必须调用） */
+  unregisterRun(toolCallId: string): void {
+    this.activeRuns.delete(toolCallId);
+  }
+
+  /** 按 toolCallId 向对应终端发送 Ctrl+C；找不到登记/终端返回 false */
+  interruptRun(toolCallId: string): boolean {
+    const id = this.activeRuns.get(toolCallId);
+    if (!id) return false;
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      this.activeRuns.delete(toolCallId);
+      return false;
+    }
+    this.interrupt(rt);
+    return true;
   }
 
   /** 输出快照（等待 headless 解析追上写入后再序列化） */

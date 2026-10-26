@@ -1,72 +1,37 @@
 // components/shared/FileChangesPanel.tsx
 // 文件变更面板（右侧面板「文件变更」标签）。
-// 展示当前会话（任务）内的文件变更总览：按文件聚合 ± 行数，展开查看 unified diff。
-// 数据源 GET /api/file-history/:sessionId；仅统计「生效中」条目（排除已回滚与 R 条目）。
+// 主视图 = 按文件聚合的「净差异」（会话第一条变更前 → 当前磁盘内容），视觉对齐 VS Code/Cursor：
+//   - 顶部：目录名 + 文件数 + 总增删；
+//   - 每个文件一张卡片：图标 + 文件名 + 目录 + +N -N；
+//   - 卡片内 inline diff（双行号 / 红绿背景 / 「N 行已隐藏」折叠条）；
+//   - 卡片底部可展开逐条历史（时间线）。
+// 数据源 GET /api/file-history/:sessionId（entries + files）；实时刷新订阅文件/撤回 WS 事件。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Loader2, RotateCw, TriangleAlert } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderGit2,
+  History,
+  Loader2,
+  RotateCw,
+  TriangleAlert,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileTypeIcon } from './FileTypeIcon';
+import { DiffView } from './DiffView';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/http';
-import type { FileHistoryEntry } from '../../types/api';
+import { wsClient } from '../../api/ws';
+import { SYSTEM_WORKING_DIRECTORY } from '../../store';
+import type { FileHistoryEntry, NetDiffReason, NetFileChange, WSMessage } from '../../types/api';
 
 export interface FileChangesPanelProps {
   sessionId: string;
-}
-
-/** 单文件聚合结果 */
-interface FileChangeGroup {
-  absPath: string;
-  added: number;
-  removed: number;
-  /** 该文件全部生效中条目（按时间升序） */
-  entries: FileHistoryEntry[];
-  /** 末次变更时间戳（ms；排序用；无有效时间则 0） */
-  lastTs: number;
-}
-
-/** 解析 unified diff 统计行级增删（跳过 @@ / +++ / --- 头与空行） */
-function countDiffLines(diff: string): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split('\n')) {
-    if (!line) continue;
-    if (line.startsWith('@@') || line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) added++;
-    else if (line.startsWith('-')) removed++;
-  }
-  return { added, removed };
-}
-
-/** 按 absPath 聚合生效中条目（排除 R 条目与已回滚条目 → 当前净变更） */
-function groupChanges(entries: FileHistoryEntry[]): FileChangeGroup[] {
-  const map = new Map<string, FileChangeGroup>();
-  for (const e of entries) {
-    if (e.toolName === 'rollback' || e.rolledBackAt) continue;
-    let g = map.get(e.absPath);
-    if (!g) {
-      g = { absPath: e.absPath, added: 0, removed: 0, entries: [], lastTs: 0 };
-      map.set(e.absPath, g);
-    }
-    if (e.diff) {
-      const { added, removed } = countDiffLines(e.diff);
-      g.added += added;
-      g.removed += removed;
-    }
-    g.entries.push(e);
-    const ts = Date.parse(e.timestamp);
-    if (!Number.isNaN(ts) && ts > g.lastTs) g.lastTs = ts;
-  }
-  const groups = [...map.values()];
-  for (const g of groups) {
-    g.entries.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
-  }
-  // 末次变更时间倒序（最近的在前）
-  groups.sort((a, b) => b.lastTs - a.lastTs);
-  return groups;
+  /** 任务工作目录（顶部显示目录名；缺省显示「文件变更」） */
+  workingDirectory?: string;
 }
 
 /** 文件名（跨平台分隔符） */
@@ -75,31 +40,184 @@ function baseName(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
-/** 操作类型 → i18n key（terminal-change / 旧值 shell-change 走驼峰键） */
+/** 父目录（跨平台分隔符）；无分隔符时返回空串 */
+function dirName(p: string): string {
+  const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return idx > 0 ? p.slice(0, idx) : '';
+}
+
+/** 历史条目操作类型 → i18n key（terminal-change / shell-change → 驼峰） */
 function opKey(op: FileHistoryEntry['operation']): string {
   return `fileChanges.op.${op === 'terminal-change' || op === 'shell-change' ? 'terminalChange' : op}`;
 }
 
-/** diff 行着色 */
-function diffLineClass(line: string): string {
-  if (line.startsWith('@@')) return 'text-sky-500';
-  if (line.startsWith('+++') || line.startsWith('---')) return 'text-muted-foreground';
-  if (line.startsWith('+')) return 'text-emerald-500';
-  if (line.startsWith('-')) return 'text-destructive';
-  return 'text-foreground';
+/** 操作徽章配色 */
+function opBadgeClass(op: FileHistoryEntry['operation'] | NetFileChange['operation']): string {
+  if (op === 'create') return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
+  if (op === 'delete') return 'bg-red-500/15 text-red-600 dark:text-red-400';
+  if (op === 'move') return 'bg-sky-500/15 text-sky-600 dark:text-sky-400';
+  return 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
 }
 
-export function FileChangesPanel({ sessionId }: FileChangesPanelProps) {
+/** 无 diff 原因 → i18n key */
+function reasonKey(reason: NetDiffReason | undefined): string {
+  switch (reason) {
+    case 'before-unavailable':
+      return 'fileChanges.noDiffReason.beforeUnavailable';
+    case 'after-unavailable':
+      return 'fileChanges.noDiffReason.afterUnavailable';
+    case 'binary':
+      return 'fileChanges.noDiffReason.binary';
+    case 'too-large':
+      return 'fileChanges.noDiffReason.tooLarge';
+    case 'directory':
+      return 'fileChanges.noDiffReason.directory';
+    case 'moved':
+      return 'fileChanges.noDiffReason.moved';
+    default:
+      return 'fileChanges.noDiff';
+  }
+}
+
+interface FileChangeCardProps {
+  file: NetFileChange;
+  /** 该文件的全部生效条目（已按时间倒序） */
+  entries: FileHistoryEntry[];
+  collapsed: boolean;
+  historyOpen: boolean;
+  onToggleCollapse: () => void;
+  onToggleHistory: () => void;
+}
+
+function FileChangeCard({
+  file,
+  entries,
+  collapsed,
+  historyOpen,
+  onToggleCollapse,
+  onToggleHistory,
+}: FileChangeCardProps) {
+  const { t } = useTranslation();
+  const name = baseName(file.absPath);
+  const dir = dirName(file.absPath);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-card/50">
+      {/* 卡片头：图标 + 文件名/目录 + 操作徽章 + 统计 */}
+      <button
+        type="button"
+        title={file.absPath}
+        onClick={onToggleCollapse}
+        className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-muted/50"
+      >
+        <ChevronRight
+          className={cn(
+            'size-3.5 shrink-0 text-muted-foreground transition-transform',
+            !collapsed && 'rotate-90',
+          )}
+        />
+        <FileTypeIcon fileName={name} size={18} className="shrink-0" />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-xs font-medium text-foreground">{name}</span>
+            <span
+              className={cn(
+                'shrink-0 rounded px-1 py-px text-[10px] font-normal',
+                opBadgeClass(file.operation),
+              )}
+            >
+              {t(`fileChanges.op.${file.operation}`)}
+            </span>
+          </div>
+          {dir && (
+            <span className="truncate text-[10px] text-muted-foreground" title={dir}>
+              {dir}
+            </span>
+          )}
+        </div>
+        <span className="shrink-0 text-[11px] tabular-nums">
+          {file.added > 0 && <span className="text-emerald-500">+{file.added}</span>}
+          {file.added > 0 && file.removed > 0 && ' '}
+          {file.removed > 0 && <span className="text-destructive">-{file.removed}</span>}
+        </span>
+      </button>
+
+      {/* 卡片体：inline diff / 无法生成原因 + 历史入口 */}
+      {!collapsed && (
+        <div className="border-t border-border/60">
+          {file.diff ? (
+            <DiffView diff={file.diff} maxHeight={420} />
+          ) : (
+            <div className="px-3 py-2 text-[10px] text-muted-foreground">
+              {t(reasonKey(file.reason))}
+            </div>
+          )}
+
+          {entries.length > 0 && (
+            <div className="border-t border-border/60">
+              <button
+                type="button"
+                onClick={onToggleHistory}
+                className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted/40"
+              >
+                <History className="size-3 shrink-0" />
+                <span className="flex-1 text-left">
+                  {t('fileChanges.historyCount', { count: file.entryCount })}
+                </span>
+                <ChevronDown
+                  className={cn(
+                    'size-3 shrink-0 transition-transform',
+                    historyOpen && 'rotate-180',
+                  )}
+                />
+              </button>
+              {historyOpen && (
+                <div className="flex flex-col gap-1 px-2.5 pb-2">
+                  {entries.map((e) => (
+                    <div key={e.id} className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                      <span className={cn('shrink-0 rounded px-1 py-px', opBadgeClass(e.operation))}>
+                        {t(opKey(e.operation))}
+                      </span>
+                      {e.toolName === 'watch' && (
+                        <span className="shrink-0 text-sky-500">{t('fileChanges.op.watch')}</span>
+                      )}
+                      <span
+                        className="min-w-0 flex-1 truncate"
+                        title={e.destPath ? `${e.absPath} → ${e.destPath}` : e.absPath}
+                      >
+                        {e.destPath ? `${e.absPath} → ${e.destPath}` : e.absPath}
+                      </span>
+                      <span className="shrink-0 tabular-nums">
+                        {new Date(e.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function FileChangesPanel({ sessionId, workingDirectory }: FileChangesPanelProps) {
   const { t } = useTranslation();
   const [entries, setEntries] = useState<FileHistoryEntry[] | null>(null);
+  const [files, setFiles] = useState<NetFileChange[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** 折叠的卡片路径（默认全部展开，与参考图一致） */
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  /** 展开历史时间线的卡片路径 */
+  const [historyOpen, setHistoryOpen] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     // 空白页（无任务 id）不发请求：/api/file-history/ 无有效段，会被路由判为 404
     if (!sessionId) {
       setEntries([]);
+      setFiles([]);
       setError(null);
       setLoading(false);
       return;
@@ -109,6 +227,7 @@ export function FileChangesPanel({ sessionId }: FileChangesPanelProps) {
     try {
       const resp = await api.listFileHistory(sessionId);
       setEntries(resp.entries);
+      setFiles(resp.files ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -120,12 +239,70 @@ export function FileChangesPanel({ sessionId }: FileChangesPanelProps) {
     void load();
   }, [load]);
 
-  const groups = useMemo(() => groupChanges(entries ?? []), [entries]);
-  const totalAdded = useMemo(() => groups.reduce((sum, g) => sum + g.added, 0), [groups]);
-  const totalRemoved = useMemo(() => groups.reduce((sum, g) => sum + g.removed, 0), [groups]);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const toggle = useCallback((path: string) => {
-    setExpanded((prev) => {
+  // 实时刷新：文件变更 / 终端变更 / 消息撤回与恢复 → 250ms 防抖重新拉取
+  useEffect(() => {
+    if (!sessionId) return;
+    const schedule = (): void => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null;
+        void load();
+      }, 250);
+    };
+    const handle = (msg: WSMessage): void => {
+      if (msg.sessionId !== sessionId) return;
+      switch (msg.type) {
+        case 'file-created':
+        case 'file-edited':
+        case 'file-deleted':
+        case 'file-moved':
+        case 'terminal-changed':
+        case 'session-truncated':
+        case 'session-restored':
+          schedule();
+          break;
+        default:
+          break;
+      }
+    };
+    const unsub = wsClient.onMessage(handle);
+    // 兜底：页面重新可见时补一次（WS 断连期间可能丢事件）
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      unsub();
+      document.removeEventListener('visibilitychange', onVisible);
+      if (refreshTimer.current) {
+        clearTimeout(refreshTimer.current);
+        refreshTimer.current = null;
+      }
+    };
+  }, [sessionId, load]);
+
+  /** 文件 → 生效条目（排除 R 条目与已回滚），按时间倒序 */
+  const entriesByPath = useMemo(() => {
+    const map = new Map<string, FileHistoryEntry[]>();
+    for (const e of entries ?? []) {
+      if (e.toolName === 'rollback' || e.rolledBackAt) continue;
+      const list = map.get(e.absPath);
+      if (list) list.push(e);
+      else map.set(e.absPath, [e]);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    }
+    return map;
+  }, [entries]);
+
+  const totalAdded = useMemo(() => (files ?? []).reduce((sum, f) => sum + f.added, 0), [files]);
+  const totalRemoved = useMemo(() => (files ?? []).reduce((sum, f) => sum + f.removed, 0), [files]);
+
+  const toggleCollapse = useCallback((path: string) => {
+    setCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -133,17 +310,33 @@ export function FileChangesPanel({ sessionId }: FileChangesPanelProps) {
     });
   }, []);
 
+  const toggleHistory = useCallback((path: string) => {
+    setHistoryOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const dirLabel =
+    workingDirectory && workingDirectory !== SYSTEM_WORKING_DIRECTORY
+      ? baseName(workingDirectory)
+      : t('fileChanges.title');
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {/* 汇总头：文件数 + 总增删 + 刷新 */}
+      {/* 顶部：目录名 + 文件数 + 总增删 + 刷新 */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+        <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-xs font-medium text-foreground">
-            {t('fileChanges.changedCount', { count: groups.length })}
+          <span className="truncate text-xs font-medium text-foreground" title={workingDirectory}>
+            {dirLabel}
           </span>
-          <span className="text-[11px] tabular-nums">
-            <span className="text-emerald-500">+{totalAdded}</span>{' '}
-            <span className="text-destructive">-{totalRemoved}</span>
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {t('fileChanges.changedCount', { count: files?.length ?? 0 })}
+            <span className="ml-2 text-emerald-500">+{totalAdded}</span>
+            <span className="ml-1.5 text-destructive">-{totalRemoved}</span>
           </span>
         </div>
         <Button
@@ -168,92 +361,30 @@ export function FileChangesPanel({ sessionId }: FileChangesPanelProps) {
             <TriangleAlert className="size-5" />
             <span className="break-all text-xs">{error}</span>
           </div>
-        ) : !entries && loading ? (
+        ) : !files && loading ? (
           <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
             <span className="text-xs">{t('fileChanges.loading')}</span>
           </div>
-        ) : groups.length === 0 ? (
-          <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-            {t('fileChanges.empty')}
+        ) : (files?.length ?? 0) === 0 ? (
+          <div className="flex flex-col items-center gap-1.5 px-4 py-10 text-center text-xs text-muted-foreground">
+            <FolderGit2 className="size-6 opacity-50" />
+            <span>{t('fileChanges.empty')}</span>
+            <span className="text-[10px] opacity-80">{t('fileChanges.emptyHint')}</span>
           </div>
         ) : (
-          <div className="flex flex-col p-1.5">
-            {groups.map((g) => {
-              const open = expanded.has(g.absPath);
-              return (
-                <div key={g.absPath} className="flex flex-col">
-                  {/* 文件行：展开箭头 + 图标 + 文件名 + ± 行数 */}
-                  <button
-                    type="button"
-                    title={g.absPath}
-                    onClick={() => toggle(g.absPath)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted"
-                  >
-                    <ChevronRight
-                      className={cn(
-                        'size-3.5 shrink-0 text-muted-foreground transition-transform',
-                        open && 'rotate-90',
-                      )}
-                    />
-                    <FileTypeIcon fileName={baseName(g.absPath)} size={16} className="shrink-0" />
-                    <span className="min-w-0 flex-1 truncate text-xs text-foreground">
-                      {baseName(g.absPath)}
-                    </span>
-                    <span className="shrink-0 text-[11px] tabular-nums">
-                      {g.added > 0 && <span className="text-emerald-500">+{g.added}</span>}
-                      {g.added > 0 && g.removed > 0 && ' '}
-                      {g.removed > 0 && <span className="text-destructive">-{g.removed}</span>}
-                    </span>
-                  </button>
-                  {/* 完整路径 + 操作徽章 */}
-                  <div className="flex items-center gap-1.5 pb-1 pl-8 pr-1.5">
-                    <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={g.absPath}>
-                      {g.absPath}
-                    </span>
-                    {[...new Set(g.entries.map((e) => e.operation))].map((op) => (
-                      <span
-                        key={op}
-                        className="shrink-0 rounded bg-muted px-1 py-px text-[10px] text-muted-foreground"
-                      >
-                        {t(opKey(op))}
-                      </span>
-                    ))}
-                  </div>
-                  {/* 展开：逐条变更（操作 + 时间 + diff） */}
-                  {open && (
-                    <div className="mb-2 ml-6 flex flex-col gap-1.5">
-                      {g.entries.map((e) => (
-                        <div key={e.id} className="overflow-hidden rounded-md border border-border">
-                          <div className="flex items-center gap-1.5 border-b border-border px-2 py-1 text-[10px] text-muted-foreground">
-                            <span className="shrink-0 rounded bg-muted px-1 py-px">{t(opKey(e.operation))}</span>
-                            <span className="min-w-0 flex-1 truncate" title={e.destPath ? `${e.absPath} → ${e.destPath}` : e.absPath}>
-                              {e.destPath ? `${e.absPath} → ${e.destPath}` : e.absPath}
-                            </span>
-                            <span className="shrink-0 tabular-nums">
-                              {new Date(e.timestamp).toLocaleString()}
-                            </span>
-                          </div>
-                          {e.diff ? (
-                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-[10px] leading-relaxed">
-                              {e.diff.split('\n').map((line, i) => (
-                                <div key={i} className={diffLineClass(line)}>
-                                  {line || ' '}
-                                </div>
-                              ))}
-                            </pre>
-                          ) : (
-                            <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
-                              {t('fileChanges.noDiff')}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+          <div className="flex flex-col gap-2 p-2">
+            {files!.map((file) => (
+              <FileChangeCard
+                key={file.absPath}
+                file={file}
+                entries={entriesByPath.get(file.absPath) ?? []}
+                collapsed={collapsed.has(file.absPath)}
+                historyOpen={historyOpen.has(file.absPath)}
+                onToggleCollapse={() => toggleCollapse(file.absPath)}
+                onToggleHistory={() => toggleHistory(file.absPath)}
+              />
+            ))}
           </div>
         )}
       </ScrollArea>

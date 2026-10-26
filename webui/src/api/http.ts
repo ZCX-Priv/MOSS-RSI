@@ -41,6 +41,7 @@ import type {
   DirectoryListing,
   DriveListing,
   FileHistoryEntry,
+  NetFileChange,
   RunStats,
   LogFileInfo,
   LogQueryResult,
@@ -811,12 +812,15 @@ export const api = {
   },
   /** 驱动器枚举（文件浏览器「此电脑」视图数据源） */
   listDrives: () => request<DriveListing>('GET', '/api/filesystem/drives'),
-  /** 某会话的文件变更历史（文件变更标签页数据源） */
+  /** 某会话的文件变更（entries=逐条历史；files=按文件聚合的净差异） */
   listFileHistory: (sessionId: string) =>
-    request<{ sessionId: string; entries: FileHistoryEntry[]; count: number }>(
+    request<{ sessionId: string; entries: FileHistoryEntry[]; count: number; files: NetFileChange[] }>(
       'GET',
       `/api/file-history/${encodeURIComponent(sessionId)}`,
     ),
+  /** 注册任务工作目录的实时文件监控（同一 cwd 重复注册只更新会话绑定） */
+  watchFiles: (cwd: string, sessionId: string) =>
+    request<{ ok: boolean; cwd: string; sessionId: string }>('POST', '/api/filesystem/watch', { cwd, sessionId }),
 
   // ==========================================================================
   // 语音识别（voice：本地引擎 sherpa-onnx + 在线语音服务商）

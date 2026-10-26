@@ -24,7 +24,9 @@ export function createListFileHistoryHandler(services: ServiceRegistry): RouteHa
       return { status: 503, body: { error: 'file-history service unavailable' } };
     }
     const entries = fh.listHistory(sessionId);
-    return { status: 200, body: { sessionId, entries, count: entries.length } };
+    // files：按文件聚合的净差异（面板主视图）；entries：逐条历史（卡片底部时间线）
+    const files = fh.listNetChanges(sessionId);
+    return { status: 200, body: { sessionId, entries, count: entries.length, files } };
   };
 }
 

@@ -290,6 +290,21 @@ export class AgentEngineImpl implements AgentEngine {
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const { sessionId, userMessage, cwd, onEvent, signal } = input;
+
+    // 实时文件监控：run 期间（包括后台任务）注册工作目录，让外部/终端变更进入 file-history。
+    // 前端打开任务时也会注册，同一 cwd 仅更新会话绑定（最近活动优先）。
+    if (cwd) {
+      const filesysSvc = this.services.tryResolve<FilesysService>(ServiceNames.FILESYS);
+      if (filesysSvc) {
+        void filesysSvc.watchDirectory(cwd, sessionId).catch((err) => {
+          this.logger.warn('agent: watch directory failed', {
+            cwd,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    }
+
     const appCfg = this.config.getAppConfig();
     const cfg = appCfg.agent;
     // 思考回传（OpenAI 兼容 provider 消费；默认 false，按 DeepSeek 规范不回传 reasoning_content）

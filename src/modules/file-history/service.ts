@@ -6,8 +6,19 @@
 //   Layer 3 (Transcript)：tracker.commit() 写 JSONL，undo 读 JSONL 恢复
 
 import { randomUUID } from 'node:crypto';
-import { join, dirname } from 'node:path';
-import { existsSync, unlinkSync, statSync, rmSync, mkdirSync, renameSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import {
+  existsSync,
+  unlinkSync,
+  statSync,
+  rmSync,
+  mkdirSync,
+  renameSync,
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
+import { hashBuffer } from '../filesys/hash';
+import { computeLineDiff, computeAddedFileDiff, computeDeletedFileDiff } from './diff';
 import type { Logger, Environment } from '../../core/types';
 import type { FileHistoryService } from '../contracts';
 import type {
@@ -19,6 +30,9 @@ import type {
   UndoResult,
   FileHistoryConfig,
   FileOperation,
+  NetFileChange,
+  NetDiffReason,
+  WatchChangeRequest,
 } from './types';
 import { backupByHash, backupBufferByHash, readBackup } from './backup';
 import { ReadLedger } from './ledger';
@@ -35,6 +49,11 @@ import {
 import { atomicWriteFile } from '../../utils/fs-atomic';
 import { archiveDirectory, extractArchive } from './archive';
 import { cleanupExpiredTrash, TRASH_RETENTION_DAYS } from './trash';
+
+/** 净差异内容读取结果（null 表示路径不存在/非普通文件） */
+type NetContentResult =
+  | { kind: 'ok'; text: string; bytes: number }
+  | { kind: 'reason'; reason: NetDiffReason };
 
 /** tracker 闭包携带的登记状态：收据 + move 目标路径 */
 interface TrackerState {
@@ -349,6 +368,16 @@ export class FileHistoryServiceImpl implements FileHistoryService {
             ...(receipt.isDirectory ? { isDirectory: true } : {}),
           };
 
+    // 与实时监控/终端兜底去重：同一变更 5s 内已有相同 hashAfter 的条目 → 丢弃本次登记
+    if (this.isRecentDuplicate(sessionId, absPath, entry.hashAfter, entry.operation)) {
+      this.logger.debug('file-history: duplicate entry skipped', {
+        sessionId,
+        absPath,
+        toolName: receipt.toolName,
+      });
+      return;
+    }
+
     try {
       appendEntry(this.transcriptPath(sessionId), entry);
     } catch (err) {
@@ -436,6 +465,315 @@ export class FileHistoryServiceImpl implements FileHistoryService {
 
   listHistory(sessionId: string): FileHistoryEntry[] {
     return readEntries(this.transcriptPath(sessionId));
+  }
+
+  /** 净差异读取内容的字节上限（与 diff 生成上限一致） */
+  private static readonly NET_DIFF_MAX_BYTES = 1 * 1024 * 1024;
+
+  /**
+   * 读取文件内容用于净差异。
+   * @returns null=不存在/非普通文件；kind='reason' 时表示二进制或超限
+   */
+  private readNetContent(path: string): NetContentResult | null {
+    try {
+      const stat = statSync(path);
+      if (!stat.isFile()) return null;
+      if (stat.size > FileHistoryServiceImpl.NET_DIFF_MAX_BYTES) {
+        return { kind: 'reason', reason: 'too-large' };
+      }
+      const buf = readFileSync(path);
+      if (buf.includes(0)) return { kind: 'reason', reason: 'binary' };
+      return { kind: 'ok', text: buf.toString('utf8'), bytes: stat.size };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 从哈希备份读取初始内容（仅 .bak；目录归档/缺失返回 null） */
+  private readBackupContent(backupPath: string | null): NetContentResult | null {
+    if (!backupPath || !backupPath.endsWith('.bak')) return null;
+    return this.readNetContent(backupPath);
+  }
+
+  /** 统计 unified diff 的行级增删（跳过 hunk 头与空行） */
+  private countDiffLines(diff: string): { added: number; removed: number } {
+    let added = 0;
+    let removed = 0;
+    for (const line of diff.split('\n')) {
+      if (!line) continue;
+      if (line.startsWith('@@') || line.startsWith('+++') || line.startsWith('---')) continue;
+      if (line.startsWith('+')) added++;
+      else if (line.startsWith('-')) removed++;
+    }
+    return { added, removed };
+  }
+
+  /**
+   * 最近条目去重：同路径 + 相同 hashAfter + 时间窗口内已有活跃条目。
+   * 工具自身登记、终端兜底、实时监控三方共用，避免同一变更写多条。
+   */
+  private isRecentDuplicate(
+    sessionId: string,
+    absPath: string,
+    hashAfter: string | null,
+    operation: FileOperation,
+    windowMs = 5000,
+  ): boolean {
+    // 无 hash 的 create/edit/overwrite 无法可靠判断重复（旧调用/异常路径）：不做去重，
+    // 避免把同一文件连续两次无 hash 的登记误判为重复。delete/move 用 operation 匹配。
+    if (hashAfter === null && operation !== 'delete' && operation !== 'move') return false;
+
+    let entries: FileHistoryEntry[];
+    try {
+      entries = readEntries(this.transcriptPath(sessionId));
+    } catch {
+      return false;
+    }
+    const now = Date.now();
+    // 只需检查尾部：窗口外的老条目不可能命中
+    const start = Math.max(0, entries.length - 20);
+    for (let i = entries.length - 1; i >= start; i--) {
+      const e = entries[i];
+      if (!isActiveEntry(e)) continue;
+      if (e.absPath !== absPath) continue;
+      if (hashAfter !== null) {
+        if (e.hashAfter !== hashAfter) continue;
+      } else if (e.hashAfter !== null || e.operation !== operation) {
+        continue;
+      }
+      const ts = Date.parse(e.timestamp);
+      if (!Number.isNaN(ts) && now - ts <= windowMs) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 实时文件监控登记一次外部变更。
+   * before 非空时写入内容寻址备份（供净差异/undo），与最近条目去重后追加 transcript。
+   */
+  recordWatchChange(req: WatchChangeRequest): void {
+    if (!this.enabled || !this.config.transcriptEnabled) return;
+    const { sessionId, absPath, operation } = req;
+
+    let backupPath: string | null = null;
+    let hashBefore: string | null = null;
+    let bytesBefore = 0;
+    if (req.before) {
+      try {
+        const backup = backupBufferByHash(req.before, this.backupDir);
+        backupPath = backup.backupPath;
+        hashBefore = backup.hash;
+        bytesBefore = backup.bytes;
+      } catch (err) {
+        this.logger.warn('file-history: watch backup failed', {
+          absPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const hashAfter = req.after ? hashBuffer(req.after) : null;
+    const bytesAfter = req.after ? req.after.length : 0;
+    if (this.isRecentDuplicate(sessionId, absPath, hashAfter, operation)) return;
+
+    const entry: FileHistoryEntry = {
+      id: randomUUID(),
+      sessionId,
+      absPath,
+      toolCallId: req.toolCallId ?? '',
+      toolName: 'watch',
+      timestamp: new Date().toISOString(),
+      operation,
+      hashBefore,
+      hashAfter,
+      backupPath,
+      bytesBefore,
+      bytesAfter,
+      ...(req.diff ? { diff: req.diff } : {}),
+    };
+
+    try {
+      appendEntry(this.transcriptPath(sessionId), entry);
+    } catch (err) {
+      this.logger.warn('file-history: watch commit failed', {
+        sessionId,
+        absPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * 按文件聚合净差异：会话第一条变更前内容 → 当前磁盘内容。
+   * 同一文件无论改多少次只返回一条；净结果为空（create+delete 抵消）的文件不返回。
+   */
+  listNetChanges(sessionId: string): NetFileChange[] {
+    if (!this.enabled) return [];
+    let entries: FileHistoryEntry[];
+    try {
+      entries = readEntries(this.transcriptPath(sessionId));
+    } catch {
+      return [];
+    }
+
+    const groups = new Map<string, FileHistoryEntry[]>();
+    for (const e of entries) {
+      if (!isActiveEntry(e)) continue;
+      const list = groups.get(e.absPath);
+      if (list) list.push(e);
+      else groups.set(e.absPath, [e]);
+    }
+
+    const changes: NetFileChange[] = [];
+    for (const [absPath, group] of groups) {
+      group.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+      const first = group[0];
+      const last = group[group.length - 1];
+      const lastTs = Date.parse(last.timestamp) || 0;
+      const entryCount = group.length;
+
+      // 目录：只记录元数据，无行级差异
+      if (group.some(e => e.isDirectory)) {
+        changes.push({
+          absPath,
+          operation: first.operation === 'create' ? 'create' : last.operation === 'delete' ? 'delete' : 'edit',
+          added: 0,
+          removed: 0,
+          bytesBefore: first.bytesBefore,
+          bytesAfter: last.bytesAfter,
+          reason: 'directory',
+          lastTs,
+          entryCount,
+        });
+        continue;
+      }
+
+      // 移动：净结果是路径变化，不计算内容差异
+      if (last.operation === 'move') {
+        changes.push({
+          absPath,
+          operation: 'move',
+          added: 0,
+          removed: 0,
+          bytesBefore: first.bytesBefore,
+          bytesAfter: last.bytesAfter,
+          reason: 'moved',
+          lastTs,
+          entryCount,
+        });
+        continue;
+      }
+
+      // 初始内容：create 为空；其余从第一条的哈希备份读取
+      let initial = '';
+      let bytesBefore = 0;
+      if (first.operation !== 'create') {
+        const read = this.readBackupContent(first.backupPath);
+        if (!read || read.kind === 'reason') {
+          changes.push({
+            absPath,
+            operation: 'edit',
+            added: 0,
+            removed: 0,
+            bytesBefore: first.bytesBefore,
+            bytesAfter: last.bytesAfter,
+            reason: read && read.kind === 'reason' ? read.reason : 'before-unavailable',
+            lastTs,
+            entryCount,
+          });
+          continue;
+        }
+        initial = read.text;
+        bytesBefore = read.bytes;
+      }
+
+      // 最终内容：delete 为空；其余读当前磁盘（move 已在上方处理）
+      let final = '';
+      let bytesAfter = 0;
+      if (last.operation === 'delete') {
+        final = '';
+      } else {
+        let read = this.readNetContent(absPath);
+        if (!read && last.destPath) read = this.readNetContent(last.destPath);
+        if (!read || read.kind === 'reason') {
+          changes.push({
+            absPath,
+            operation: last.operation === 'create' ? 'create' : 'edit',
+            added: 0,
+            removed: 0,
+            bytesBefore,
+            bytesAfter: last.bytesAfter,
+            reason: read && read.kind === 'reason' ? read.reason : 'after-unavailable',
+            lastTs,
+            entryCount,
+          });
+          continue;
+        }
+        final = read.text;
+        bytesAfter = read.bytes;
+      }
+
+      // create + delete 抵消 / 内容未变 → 净无变化，不展示
+      if (initial === '' && final === '') continue;
+
+      let diff: string | undefined;
+      if (initial === '') {
+        diff = computeAddedFileDiff(final);
+      } else if (final === '') {
+        diff = computeDeletedFileDiff(initial);
+      } else {
+        diff = computeLineDiff(initial, final);
+      }
+      if (diff === '') continue; // 内容相同（仅 mtime 等元数据变化）
+
+      const operation: NetFileChange['operation'] =
+        first.operation === 'create'
+          ? 'create'
+          : last.operation === 'delete'
+            ? 'delete'
+            : 'edit';
+
+      if (diff === undefined) {
+        changes.push({
+          absPath,
+          operation,
+          added: 0,
+          removed: 0,
+          bytesBefore,
+          bytesAfter,
+          reason: 'too-large',
+          lastTs,
+          entryCount,
+        });
+        continue;
+      }
+
+      const { added, removed } = this.countDiffLines(diff);
+      changes.push({
+        absPath,
+        operation,
+        diff,
+        added,
+        removed,
+        bytesBefore,
+        bytesAfter,
+        lastTs,
+        entryCount,
+      });
+    }
+
+    return changes.sort((a, b) => b.lastTs - a.lastTs);
+  }
+
+  /** 本会话活跃条目涉及的路径去重列表（终端快照预读/监控补全用） */
+  listTrackedPaths(sessionId: string): string[] {
+    const paths = new Set<string>();
+    for (const e of this.listHistory(sessionId)) {
+      if (!isActiveEntry(e) || e.isDirectory) continue;
+      paths.add(e.absPath);
+      if (e.destPath) paths.add(e.destPath);
+    }
+    return [...paths];
   }
 
   async rollbackRange(
@@ -785,14 +1123,44 @@ export class FileHistoryServiceImpl implements FileHistoryService {
   }
 
   /**
+   * 收集所有 transcript 活跃条目引用的备份文件名（含 .bak / .tar.gz）。
+   * 供 cleanupExpiredBackups 跳过：同内容哈希去重会让旧备份被新条目复用，
+   * 不能仅凭 mtime 判定可删。
+   */
+  private collectReferencedBackupNames(): Set<string> {
+    const names = new Set<string>();
+    if (!existsSync(this.transcriptDir)) return names;
+    let files: string[];
+    try {
+      files = readdirSync(this.transcriptDir).filter(f => f.endsWith('.jsonl'));
+    } catch {
+      return names;
+    }
+    for (const file of files) {
+      try {
+        for (const entry of readEntries(join(this.transcriptDir, file))) {
+          if (!isActiveEntry(entry) || !entry.backupPath) continue;
+          names.add(basename(entry.backupPath));
+        }
+      } catch {
+        // 单个 transcript 读取失败：跳过，不影响其它文件
+      }
+    }
+    return names;
+  }
+
+  /**
    * 启动时清理过期备份（>backupRetentionDays 天）。
-   * 简单实现：遍历 backups 目录，stat mtime 超期则删除。
+   * 遍历 backups 目录，stat mtime 超期则删除；仍被活跃历史引用的备份保留。
    */
   cleanupExpiredBackups(): void {
     if (!this.enabled || this.config.backupRetentionDays <= 0) return;
     if (!existsSync(this.backupDir)) return;
 
     const cutoff = Date.now() - this.config.backupRetentionDays * 24 * 60 * 60 * 1000;
+    // 被 transcript 活跃条目引用的备份不能删：内容哈希去重会让旧 mtime 备份被后续条目复用，
+    // 仅按 mtime 清理会造成「历史仍可撤销但备份已丢失」。
+    const referenced = this.collectReferencedBackupNames();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('node:fs');
     let cleaned = 0;
@@ -800,6 +1168,7 @@ export class FileHistoryServiceImpl implements FileHistoryService {
       const entries = fs.readdirSync(this.backupDir, { withFileTypes: true });
       for (const ent of entries) {
         if (!ent.isFile()) continue;
+        if (referenced.has(ent.name)) continue;
         const full = join(this.backupDir, ent.name);
         try {
           const stat = fs.statSync(full);

@@ -141,6 +141,8 @@ export interface TerminalSnapshot {
   roots: string[];
   /** 执行前 stat 清单（path → mtime/size） */
   entries: Map<string, { mtimeMs: number; size: number }>;
+  /** 执行前预读的本会话已知文件内容（仅文本、≤上限；用于终端脚本改写的 diff 兜底） */
+  beforeContents?: Map<string, Buffer>;
   /** begin 阶段实际扫描耗时（end 可用预算 = totalTimeoutMs - 本值；命令执行时间不计入） */
   elapsedMs: number;
 }
@@ -194,11 +196,20 @@ export interface FilesysService {
   /** 当前生效的授权 roots（含归一化：绝对路径 + 必须存在） */
   listRoots(): string[];
 
-  /** 终端命令执行前快照（禁用或超限返回 null）。 */
-  beginTerminalSnapshot(cwd: string): Promise<TerminalSnapshot | null>;
+  /** 终端命令执行前快照（禁用或超限返回 null）。sessionId 用于预读本会话已知文件内容。 */
+  beginTerminalSnapshot(cwd: string, sessionId?: string): Promise<TerminalSnapshot | null>;
 
   /** 终端命令执行后 diff + 缓存回填备份 + 发 terminal-changed 事件 */
   endTerminalSnapshot(snap: TerminalSnapshot, sessionId: string, toolCallId: string): Promise<TerminalChangeReport | null>;
+
+  /**
+   * 注册任务工作目录的实时监控（前端打开任务 / agent run 时调用）。
+   * 同一 cwd 只保留一个 watcher，重复注册仅更新绑定的会话。
+   */
+  watchDirectory(cwd: string, sessionId: string): Promise<void>;
+
+  /** 任务删除时解除该会话的文件监控 */
+  unwatchSession(sessionId: string): void;
 
   /** 缓存诊断信息 */
   cacheStats(): { entries: number; bytes: number };

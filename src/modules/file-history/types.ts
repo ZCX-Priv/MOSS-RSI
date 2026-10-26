@@ -7,8 +7,8 @@
 /** 文件变更操作类型（move=移动/重命名，undo 为反向 rename；terminal-change=终端命令检测到的无备份变更；'shell-change' 为旧值兼容读取） */
 export type FileOperation = 'create' | 'overwrite' | 'edit' | 'delete' | 'move' | 'terminal-change' | 'shell-change';
 
-/** 触发变更的工具名（rollback = 消息撤回联动回滚的 redo 备份条目；terminal = 终端命令快照检测；'shell' 为旧值兼容读取） */
-export type HistoryToolName = 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell';
+/** 触发变更的工具名（rollback = 消息撤回联动回滚的 redo 备份条目；terminal = 终端命令快照检测；watch = 实时文件监控捕获的外部变更；'shell' 为旧值兼容读取） */
+export type HistoryToolName = 'write' | 'edit' | 'delete' | 'rollback' | 'move' | 'copy' | 'terminal' | 'shell' | 'watch';
 
 /**
  * 文件历史条目（JSONL 中每行一个）。
@@ -39,7 +39,7 @@ export interface FileHistoryEntry {
   bytesBefore: number;
   /** 变更后文件大小（字节，删除为 0） */
   bytesAfter: number;
-  /** unified diff 文本（仅 overwrite/edit，可选） */
+  /** unified diff 文本：overwrite/edit 为前后内容差异；create/delete 为全量新增/删除快照（可选） */
   diff?: string;
   /** 是否为目录操作（新增：true 时 backupPath 指向 .tar.gz，restoreEntry 走 extractArchive） */
   isDirectory?: boolean;
@@ -126,6 +126,63 @@ export interface UndoResult {
   remaining: number;
   /** 撤销失败的条目（含错误信息） */
   failed: Array<{ entryId: string; absPath: string; error: string }>;
+}
+
+/** 净差异无法生成的原因 */
+export type NetDiffReason =
+  | 'before-unavailable'
+  | 'after-unavailable'
+  | 'binary'
+  | 'too-large'
+  | 'directory'
+  | 'moved';
+
+/**
+ * 按文件聚合的净差异（「文件变更」面板主视图数据源）。
+ * 表示「会话第一条变更前 → 当前磁盘状态」的最终差异，同一文件多次修改只产生一条。
+ */
+export interface NetFileChange {
+  /** 文件绝对路径 */
+  absPath: string;
+  /** 净结果主导操作：create=会话内新建且仍存在；delete=最终不存在；edit=既有文件被改；move=路径变化 */
+  operation: 'create' | 'edit' | 'delete' | 'move';
+  /** unified diff（无法生成时缺省） */
+  diff?: string;
+  /** 新增行数 */
+  added: number;
+  /** 删除行数 */
+  removed: number;
+  /** 会话初始内容字节数（create 为 0） */
+  bytesBefore: number;
+  /** 当前内容字节数（delete 为 0） */
+  bytesAfter: number;
+  /** 无法生成净 diff 时的原因（二进制/超大/备份缺失等） */
+  reason?: NetDiffReason;
+  /** 该文件最后一条变更时间（ms；排序用） */
+  lastTs: number;
+  /** 该文件全部生效条目数（历史入口显示 N 次） */
+  entryCount: number;
+}
+
+/**
+ * 实时文件监控（FileWatchService）登记一次变更的请求。
+ * before 非空时由 file-history 自动写入内容寻址备份，供净差异/undo 使用。
+ */
+export interface WatchChangeRequest {
+  /** 会话 ID */
+  sessionId: string;
+  /** 文件绝对路径 */
+  absPath: string;
+  /** 变更类型 */
+  operation: 'create' | 'edit' | 'delete';
+  /** 变更前内容（create/无基线时为 null） */
+  before: Buffer | null;
+  /** 变更后内容（delete 时为 null） */
+  after: Buffer | null;
+  /** 已计算好的 unified diff（可选；调用方按体积限制决定是否生成） */
+  diff?: string;
+  /** 关联的工具调用 ID（可选） */
+  toolCallId?: string;
 }
 
 /** 文件历史服务配置（config.fileHistory） */
