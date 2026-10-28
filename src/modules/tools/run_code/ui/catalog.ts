@@ -46,24 +46,36 @@ const BUTTON_VARIANT = ['primary', 'secondary', 'ghost'] as const;
 export const UI_COMPONENTS: readonly UIComponentSpec[] = [
   {
     name: 'Box',
-    description: '布局容器：方向、间距、内边距、边框、圆角、色调',
+    description: '一维布局容器：方向、对齐、间距、内边距、边框、圆角、色调、高度',
     props: {
       direction: { kind: 'enum', values: ['row', 'col'] },
+      align: { kind: 'enum', values: ['start', 'center', 'end', 'stretch'] },
+      justify: { kind: 'enum', values: ['start', 'center', 'end', 'between'] },
       gap: { kind: 'number', min: 0, max: 8 },
       padding: { kind: 'number', min: 0, max: 8 },
       border: { kind: 'boolean' },
       radius: { kind: 'enum', values: ['sm', 'md', 'lg'] },
       tone: { kind: 'enum', values: TONE },
+      wrap: { kind: 'boolean' },
+      height: { kind: 'number', min: 8, max: 600 },
+    },
+    children: true,
+  },
+  {
+    name: 'Grid',
+    description: '严格网格：columns 列等宽，适合卡片组、多列布局与棋盘',
+    props: {
+      columns: { kind: 'number', required: true, min: 1, max: 24 },
+      gap: { kind: 'number', min: 0, max: 8 },
+      padding: { kind: 'number', min: 0, max: 8 },
     },
     children: true,
   },
   {
     name: 'Card',
-    description: '卡片容器：可带标题、内边距与色调',
+    description: '分组容器：可选标题；无卡片外框，标题作为小节标题',
     props: {
       title: { kind: 'string', maxLength: 2000 },
-      tone: { kind: 'enum', values: TONE },
-      padding: { kind: 'number', min: 0, max: 8 },
     },
     children: true,
   },
@@ -193,10 +205,13 @@ export const UI_COMPONENTS: readonly UIComponentSpec[] = [
   },
   {
     name: 'Button',
-    description: '按钮：onClick 绑定本地动作（copy/open/toggle/set）',
+    description: '按钮：value 作为点击事件值写回 state；onClick 绑定本地动作',
     props: {
       label: { kind: 'string', required: true, maxLength: 500 },
       variant: { kind: 'enum', values: BUTTON_VARIANT },
+      size: { kind: 'enum', values: ['sm', 'md', 'lg'] },
+      full: { kind: 'boolean' },
+      value: { kind: 'bindingOrValue' },
       onClick: { kind: 'bindingOrAction' },
     },
   },
@@ -253,8 +268,12 @@ export function buildUiSdkText(): string {
   const lines: string[] = [
     '### ui 构建器（Intelligent UI）',
     '',
-    '在 run_code 程序内用 `ui.*` 构建可交互界面。界面由受约束的原生组件渲染，不是 HTML/CSS/JS。',
-    '状态与交互在浏览器本地闭环：拖动滑块/输入只改 state 并重算表达式，不会调用模型。',
+    '在 run_code 程序内用 `ui.*` 构建界面规格；前端会把结果直接渲染在「代码」步骤下方的消息流里，与正文连成一体。',
+    '它不是 HTML/iframe，也不是工具卡片；交互在浏览器本地闭环（点击/输入只改 state、重算表达式），不会回调模型。',
+    '',
+    '**何时用**：仪表盘、表单、计算器、筛选器、配置器、数据浏览器、状态驱动的棋盘/小游戏。',
+    '**何时不用**：一次问答、纯文本结论、代码解释、只需 Markdown 的内容；不要为了用 UI 而用 UI。',
+    '**禁令**：不要用 `browser`、HTML、截图去模拟聊天内界面；`browser` 只用于访问/验证外部网页。',
     '',
     '```ts',
     'type UIStateValue = string | number | boolean | null;',
@@ -262,6 +281,9 @@ export function buildUiSdkText(): string {
     'type UIAction =',
     "  | { kind: 'set'; key: string }",
     "  | { kind: 'toggle'; key: string }",
+    "  | { kind: 'apply'; key: string; expr: string }",
+    "  | { kind: 'reset' }",
+    "  | { kind: 'seq'; actions: UIAction[] }",
     "  | { kind: 'copy'; text: string | UIBinding }",
     "  | { kind: 'open'; href: string | UIBinding };",
     'type UINode = { type: string; props?: Record<string, unknown>; children?: Array<UINode | string | UIBinding> };',
@@ -272,6 +294,7 @@ export function buildUiSdkText(): string {
     if (name === 'Markdown') continue;
     const spec = UI_COMPONENT_MAP.get(name);
     if (!spec) continue;
+    lines.push(`/** ${spec.description} */`);
     const props = Object.entries(spec.props)
       .map(([key, p]) => `${key}${p.required ? '' : '?'}: ${propTsType(p)}`)
       .join('; ');
@@ -283,22 +306,94 @@ export function buildUiSdkText(): string {
   }
 
   lines.push(
-    "ui.markdown(text: string): UINode;",
-    "ui.state(key: string, initial: UIStateValue): UIBinding;",
-    "ui.expr(source: string): UIBinding;",
-    "ui.set(key: string): UIBinding;",
-    "ui.toggle(key: string): UIBinding;",
-    "ui.copy(text: string | UIBinding): UIBinding;",
-    "ui.open(href: string | UIBinding): UIBinding;",
-    "ui.render(root: UINode, options?: { title?: string }): void;",
+    'ui.markdown(text: string): UINode;',
+    'ui.state(key: string, initial: UIStateValue): UIBinding;',
+    'ui.expr(source: string): UIBinding;',
+    'ui.set(key: string): UIBinding;',
+    'ui.apply(key: string, expr: string): UIBinding;',
+    'ui.reset(): UIBinding;',
+    'ui.seq(...actions: UIBinding[]): UIBinding;',
+    'ui.toggle(key: string): UIBinding;',
+    'ui.copy(text: string | UIBinding): UIBinding;',
+    'ui.open(href: string | UIBinding): UIBinding;',
+    'ui.render(root: UINode, options?: { title?: string }): void;',
     '```',
     '',
-    '规则：',
+    '**布局**',
+    '- 多列/等宽/棋盘：用 `ui.grid({ columns })`；一维排列用 `ui.box({ direction, align, justify, gap, wrap })`。',
+    '- `Box row` 只放短内容；Table/Chart/长文本让它独占一行，避免被挤压。',
+    '',
+    '**状态与交互**',
+    '- 交互状态必须用 `ui.state(key, initial)` 声明；程序里的普通变量在程序结束后不存在。',
+    '- `ui.state` 的返回值是绑定对象，只用于 props；表达式字符串里直接写 state key 名（如 `body`），不要写 JS 变量名。',
+    '- 必须调用 `ui.render(root)` 才会显示；只构建节点不 render 等于没做。',
+    '- `ui.set(key)` 写入输入组件的当前值或 Button 的 `value`；`ui.apply(key, expr)` 用表达式计算并写回。',
+    '- `ui.seq(...actions)` 顺序执行，后一步能读到前一步的写入结果；`ui.reset()` 让所有 state 回到初始值。',
+    '- 表达式只读 state 顶层键，支持 `+ - * / %`、比较、`&& || !`、三元、括号；函数：`round/floor/ceil/abs/min/max/len/number/string/contains/indexOf/lastIndexOf/slice/part/charAt`。',
+    '- 禁止属性访问/索引/赋值/循环/定时器/随机数；只支持事件驱动的回合制交互，不支持实时动画。',
+    '- 所有标量属性都可以传 UIBinding 做动态渲染（例如按状态给格子上色）。',
+    '',
+    '**示例 1：滑块试算**',
+    '```ts',
+    "const seats = ui.state('seats', 8);",
+    'ui.render(ui.box({ gap: 2 }, [',
+    "  ui.text({ tone: 'muted' }, '团队座位与单价试算'),",
+    "  ui.slider({ label: '人数', min: 1, max: 50, value: seats, onChange: ui.set('seats') }),",
+    '  ui.text({ weight: \'semibold\' }, ui.expr(\'"总价 ¥" + (seats * 29)\')),',
+    "]), { title: '座位试算' });",
+    '```',
+    '',
+    '**示例 2：回合制贪吃蛇（10×10）**',
+    '```ts',
+    'const W = 10;',
+    "const body = ui.state('body', '5,5;4,5;3,5');",
+    "const dir = ui.state('dir', 'right');",
+    "ui.state('hx', 5); ui.state('hy', 5);",
+    "ui.state('nx', 5); ui.state('ny', 5);",
+    "ui.state('hit', 0); ui.state('eat', 0);",
+    "ui.state('score', 0); ui.state('status', 0);",
+    "ui.state('fx', 7); ui.state('fy', 3);",
+    'const cells = [];',
+    'for (let y = 0; y < W; y++) {',
+    '  for (let x = 0; x < W; x++) {',
+    '    cells.push(ui.box({',
+    "      height: 26, radius: 'sm', border: true,",
+    "      tone: ui.expr(`contains(body, '${x},${y}') ? (hx == ${x} && hy == ${y} ? 'primary' : 'success') : (${x} == fx && ${y} == fy ? 'warning' : 'muted')`),",
+    '    }));',
+    '  }',
+    '}',
+    'ui.render(ui.box({ gap: 3 }, [',
+    '  ui.grid({ columns: W, gap: 1 }, cells),',
+    "  ui.box({ direction: 'row', gap: 2, justify: 'center' }, [",
+    "    ui.button({ label: '↑', value: 'up', onClick: ui.set('dir') }),",
+    "    ui.button({ label: '←', value: 'left', onClick: ui.set('dir') }),",
+    "    ui.button({ label: '↓', value: 'down', onClick: ui.set('dir') }),",
+    "    ui.button({ label: '→', value: 'right', onClick: ui.set('dir') }),",
+    '  ]),',
+    "  ui.box({ direction: 'row', gap: 2 }, [",
+    "    ui.button({ label: '前进一步', onClick: ui.seq(",
+    `      ui.apply('nx', 'status == 2 ? hx : hx + (dir == "left" ? -1 : dir == "right" ? 1 : 0)'),`,
+    `      ui.apply('ny', 'status == 2 ? hy : hy + (dir == "up" ? -1 : dir == "down" ? 1 : 0)'),`,
+    `      ui.apply('hit', 'status == 2 ? 0 : (nx < 0 || nx > 9 || ny < 0 || ny > 9 || contains(slice(body, 0, lastIndexOf(body, ";")), nx + "," + ny) ? 1 : 0)'),`,
+    `      ui.apply('eat', 'hit == 0 && nx == fx && ny == fy ? 1 : 0'),`,
+    `      ui.apply('status', 'hit == 1 ? 2 : status'),`,
+    `      ui.apply('score', 'eat == 1 ? score + 1 : score'),`,
+    `      ui.apply('body', 'hit == 1 ? body : (eat == 1 ? nx + "," + ny + ";" + body : nx + "," + ny + ";" + slice(body, 0, lastIndexOf(body, ";")))'),`,
+    `      ui.apply('hx', 'hit == 1 ? hx : nx'),`,
+    `      ui.apply('hy', 'hit == 1 ? hy : ny'),`,
+    `      ui.apply('fx', 'eat == 1 ? (score * 3 + 1) % 10 : fx'),`,
+    `      ui.apply('fy', 'eat == 1 ? (score * 7 + 3) % 10 : fy')`,
+    '    ) }),',
+    "    ui.button({ label: '重新开始', variant: 'secondary', onClick: ui.reset() }),",
+    '  ]),',
+    "  ui.text({ tone: 'muted' }, ui.expr('\"得分 \" + score + (status == 2 ? \" · 撞到自己了\" : \"\")')),",
+    "]), { title: '贪吃蛇' });",
+    '```',
+    '',
+    '**规则**',
     '- state key 只能是 `[A-Za-z_][A-Za-z0-9_]{0,63}`；禁止 `__proto__`/`prototype`/`constructor`。',
-    '- 表达式只支持 `+ - * / %`、比较、`&& || !`、三元、括号与函数 `round/floor/ceil/min/max/abs/len/number/string`；只能读取 state 顶层键，禁止属性访问/索引/赋值。',
-    '- `ui.set(key)` 把输入组件的当前值写入 state；`ui.toggle(key)` 翻转布尔；`ui.copy(...)`/`ui.open(...)` 本地执行。',
     '- `Image.src` 只允许 `/api/filesystem/media?...` 本机媒体地址；不支持外链与 data URL。',
-    '- 界面渲染失败会回退到文本结果，并附诊断；不要让整段程序只依赖 UI。',
+    '- 界面渲染失败会回退到文本结果并附诊断；不要让整段程序只依赖 UI。',
   );
   return lines.join('\n');
 }
@@ -306,13 +401,15 @@ export function buildUiSdkText(): string {
 function propTsType(p: UIPropSpec): string {
   switch (p.kind) {
     case 'string':
-      return 'string';
+      return 'string | UIBinding';
     case 'number':
-      return 'number';
+      return 'number | UIBinding';
     case 'boolean':
-      return 'boolean';
-    case 'enum':
-      return (p.values ?? []).map((v) => `'${v}'`).join(' | ') || 'string';
+      return 'boolean | UIBinding';
+    case 'enum': {
+      const union = (p.values ?? []).map((v) => `'${v}'`).join(' | ') || 'string';
+      return `${union} | UIBinding`;
+    }
     case 'columns':
       return 'Array<{ key: string; label: string; align?: \'left\' | \'center\' | \'right\' }>';
     case 'rows':

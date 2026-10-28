@@ -2,6 +2,10 @@
 // Intelligent UI 组件目录（与后端 catalog.ts 同名集合）。
 // 所有组件使用现有 shadcn/radix 与 React；不引入任意 HTML/CSS/JS。
 // 组件只通过 ctx 读状态/解析绑定/触发本地动作；不访问模型或网络。
+//
+// 布局约定：
+//   - Grid 负责严格多列；Box row 只负责一维排列，宽组件让它独占一行。
+//   - 所有标量属性都先经 ctx 解析绑定，再做运行时兜底（枚举/数字/布尔）。
 
 import { lazy } from 'react';
 import type { ReactNode } from 'react';
@@ -9,7 +13,6 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -22,6 +25,8 @@ import type { GenUIPropValue, GenUIStateValue } from './types';
 
 /** 图表懒加载（首屏不引入 echarts） */
 const GenUIChart = lazy(() => import('./components/Chart'));
+
+const TONES = ['default', 'muted', 'primary', 'success', 'warning', 'danger', 'info'] as const;
 
 const TONE_BADGE: Record<string, string> = {
   success: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
@@ -43,6 +48,17 @@ const TONE_TEXT: Record<string, string> = {
   default: 'text-foreground',
 };
 
+/** Box 的表面色（棋盘格子/分组底色；保持低饱和，避免卡片感） */
+const TONE_SURFACE: Record<string, string> = {
+  default: '',
+  muted: 'bg-muted/50',
+  primary: 'bg-blue-500/10',
+  success: 'bg-emerald-500/15',
+  warning: 'bg-amber-500/15',
+  danger: 'bg-red-500/15',
+  info: 'bg-sky-500/10',
+};
+
 const CALL_OUT: Record<string, string> = {
   info: 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300',
   success: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
@@ -50,12 +66,98 @@ const CALL_OUT: Record<string, string> = {
   danger: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
 };
 
-function toneOf(node: GenUIComponentProps['node']): string {
-  return node.props?.tone as string;
+const ALIGN_CLASS: Record<string, string> = {
+  start: 'items-start',
+  center: 'items-center',
+  end: 'items-end',
+  stretch: 'items-stretch',
+};
+
+const JUSTIFY_CLASS: Record<string, string> = {
+  start: 'justify-start',
+  center: 'justify-center',
+  end: 'justify-end',
+  between: 'justify-between',
+};
+
+const RADIUS_CLASS: Record<string, string> = {
+  sm: 'rounded-md',
+  md: 'rounded-lg',
+  lg: 'rounded-xl',
+};
+
+/** 解析枚举属性：绑定结果不在白名单时回落到默认值 */
+function resolveEnum<T extends string>(
+  node: GenUIComponentProps['node'],
+  ctx: GenUIComponentProps['ctx'],
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const value = ctx.resolveText(node.props?.[key]);
+  return (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
+/** 解析数字属性；缺省返回 fallback */
+function resolveNumberProp(
+  node: GenUIComponentProps['node'],
+  ctx: GenUIComponentProps['ctx'],
+  key: string,
+  fallback = 0,
+): number {
+  const raw = node.props?.[key];
+  if (raw === undefined) return fallback;
+  const value = ctx.resolveToNumber(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** 解析布尔属性；缺省返回 fallback */
+function resolveBoolProp(
+  node: GenUIComponentProps['node'],
+  ctx: GenUIComponentProps['ctx'],
+  key: string,
+  fallback: boolean,
+): boolean {
+  const raw = node.props?.[key];
+  if (raw === undefined) return fallback;
+  return ctx.resolveToBoolean(raw);
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+function toneOf(node: GenUIComponentProps['node'], ctx: GenUIComponentProps['ctx']): string {
+  return resolveEnum(node, ctx, 'tone', TONES, 'default');
+}
+
+function alignClass(align?: string): string {
+  return align === 'center' ? 'text-center' : align === 'right' ? 'text-right' : 'text-left';
+}
+
+/** Button 的点击事件值：绑定解析失败或非标量时回落到 null */
+function resolveEventValue(
+  value: GenUIPropValue | undefined,
+  ctx: GenUIComponentProps['ctx'],
+): GenUIStateValue {
+  if (value === undefined) return null;
+  const resolved = ctx.resolve(value);
+  return resolved === null || typeof resolved === 'string' || typeof resolved === 'number' || typeof resolved === 'boolean'
+    ? resolved
+    : null;
 }
 
 /** 通用文本容器：把 children 拍平成字符串（含绑定求值 + 内联 Badge/Text 子节点） */
-function TextContent({ node, ctx, children }: { node: GenUIComponentProps['node']; ctx: GenUIComponentProps['ctx']; children?: ReactNode }) {
+function TextContent({
+  node,
+  ctx,
+  children,
+}: {
+  node: GenUIComponentProps['node'];
+  ctx: GenUIComponentProps['ctx'];
+  children?: ReactNode;
+}) {
   if (children) return <>{children}</>;
   return <>{renderTextChildren(node.children ?? [], ctx)}</>;
 }
@@ -83,23 +185,37 @@ type GenUINodeChildren = GenUIComponentProps['node']['children'];
 const COMPONENTS: Record<string, GenUIComponent> = {
   Box({ node, ctx, renderChildren }) {
     const props = node.props ?? {};
-    const direction = props.direction === 'row' ? 'row' : 'col';
-    const gap = typeof props.gap === 'number' ? props.gap : 0;
-    const padding = typeof props.padding === 'number' ? props.padding : 0;
-    const base = cn(
-      'flex',
-      direction === 'row' ? 'items-center' : 'flex-col',
+    const direction = resolveEnum(node, ctx, 'direction', ['row', 'col'] as const, 'col');
+    const align = resolveEnum(
+      node,
+      ctx,
+      'align',
+      ['start', 'center', 'end', 'stretch'] as const,
+      direction === 'row' ? 'center' : 'stretch',
     );
-    const style: React.CSSProperties = {
-      gap: gap * 4,
-      padding: padding * 4,
-    };
+    const justify = resolveEnum(node, ctx, 'justify', ['start', 'center', 'end', 'between'] as const, 'start');
+    const wrap = resolveBoolProp(node, ctx, 'wrap', true);
+    const border = resolveBoolProp(node, ctx, 'border', false);
+    const tone = toneOf(node, ctx);
+    const radius = props.radius === undefined ? '' : resolveEnum(node, ctx, 'radius', ['sm', 'md', 'lg'] as const, 'md');
+    const gap = clampNumber(resolveNumberProp(node, ctx, 'gap'), 0, 8);
+    const padding = clampNumber(resolveNumberProp(node, ctx, 'padding'), 0, 8);
+    const height =
+      props.height === undefined ? undefined : clampNumber(resolveNumberProp(node, ctx, 'height'), 8, 600);
+    const style: React.CSSProperties = { gap: gap * 4, padding: padding * 4 };
+    if (height !== undefined) style.height = height;
+
     return (
       <div
         className={cn(
-          base,
-          props.border && 'rounded-lg border border-border',
-          direction === 'row' && 'flex-wrap',
+          'flex min-w-0',
+          direction === 'row' ? 'flex-row [&>*]:shrink-0 [&>*]:max-w-full' : 'flex-col [&>*]:min-w-0',
+          direction === 'row' && wrap && 'flex-wrap',
+          ALIGN_CLASS[align],
+          JUSTIFY_CLASS[justify],
+          border && 'border border-border/70',
+          radius ? RADIUS_CLASS[radius] : '',
+          TONE_SURFACE[tone] ?? '',
         )}
         style={style}
       >
@@ -108,45 +224,47 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     );
   },
 
-  Card({ node, ctx, renderChildren }) {
-    const props = node.props ?? {};
-    const title = ctx.resolveText(props.title);
+  Grid({ node, ctx, renderChildren }) {
+    const columns = clampNumber(resolveNumberProp(node, ctx, 'columns', 1), 1, 24);
+    const gap = clampNumber(resolveNumberProp(node, ctx, 'gap'), 0, 8);
+    const padding = clampNumber(resolveNumberProp(node, ctx, 'padding'), 0, 8);
     return (
-      <Card className={cn('overflow-hidden', props.tone === 'muted' && 'bg-muted/40')}>
-        {title && (
-          <CardHeader className="px-4 py-3">
-            <CardTitle className="text-sm font-medium">{title}</CardTitle>
-          </CardHeader>
-        )}
-        <CardContent className={cn('px-4', title ? 'pb-4' : 'py-4')}>
-          {renderChildren(node.children)}
-        </CardContent>
-      </Card>
+      <div
+        className="grid min-w-0 [&>*]:min-w-0"
+        style={{
+          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+          gap: gap * 4,
+          padding: padding * 4,
+        }}
+      >
+        {renderChildren(node.children)}
+      </div>
+    );
+  },
+
+  Card({ node, ctx, renderChildren }) {
+    const title = ctx.resolveText(node.props?.title);
+    return (
+      <section className="flex min-w-0 flex-col gap-2">
+        {title ? <div className="text-sm font-medium text-foreground">{title}</div> : null}
+        <div className="flex min-w-0 flex-col gap-2">{renderChildren(node.children)}</div>
+      </section>
     );
   },
 
   Divider() {
-    return <div className="h-px w-full bg-border" />;
+    return <div className="my-0.5 h-px w-full shrink-0 bg-border" />;
   },
 
   Title({ node, ctx, renderChildren }) {
-    const props = node.props ?? {};
-    const size =
-      props.size === 'xl'
-        ? 'text-2xl'
-        : props.size === 'lg'
-          ? 'text-xl'
-          : props.size === 'md'
-            ? 'text-lg'
-            : 'text-base';
-    const weight =
-      props.weight === 'semibold'
-        ? 'font-semibold'
-        : props.weight === 'medium'
-          ? 'font-medium'
-          : 'font-bold';
+    const size = resolveEnum(node, ctx, 'size', ['sm', 'md', 'lg', 'xl'] as const, 'md');
+    const weight = resolveEnum(node, ctx, 'weight', ['normal', 'medium', 'semibold'] as const, 'semibold');
+    const sizeClass =
+      size === 'xl' ? 'text-2xl' : size === 'lg' ? 'text-xl' : size === 'md' ? 'text-lg' : 'text-sm';
+    const weightClass =
+      weight === 'normal' ? 'font-normal' : weight === 'medium' ? 'font-medium' : 'font-semibold';
     return (
-      <h3 className={cn(size, weight, 'leading-snug', TONE_TEXT[toneOf(node)] ?? '')}>
+      <h3 className={cn(sizeClass, weightClass, 'break-words leading-snug', TONE_TEXT[toneOf(node, ctx)] ?? '')}>
         <TextContent node={node} ctx={ctx} children={renderChildren(node.children)} />
       </h3>
     );
@@ -154,29 +272,25 @@ const COMPONENTS: Record<string, GenUIComponent> = {
 
   Text({ node, ctx, renderChildren }) {
     const props = node.props ?? {};
-    const size =
-      props.size === 'lg'
-        ? 'text-[15px]'
-        : props.size === 'sm'
-          ? 'text-xs'
-          : 'text-sm';
-    const weight =
-      props.weight === 'semibold'
-        ? 'font-semibold'
-        : props.weight === 'medium'
-          ? 'font-medium'
-          : undefined;
+    const size = resolveEnum(node, ctx, 'size', ['sm', 'md', 'lg', 'xl'] as const, 'md');
+    const sizeClass = size === 'xl' ? 'text-base' : size === 'lg' ? 'text-[15px]' : size === 'sm' ? 'text-xs' : 'text-sm';
+    const weightValue =
+      props.weight === undefined
+        ? undefined
+        : resolveEnum(node, ctx, 'weight', ['normal', 'medium', 'semibold'] as const, 'normal');
+    const weightClass =
+      weightValue === 'semibold' ? 'font-semibold' : weightValue === 'medium' ? 'font-medium' : weightValue === 'normal' ? 'font-normal' : '';
     return (
-      <p className={cn(size, weight, TONE_TEXT[toneOf(node)] ?? '', 'leading-relaxed')}>
+      <p className={cn(sizeClass, weightClass, TONE_TEXT[toneOf(node, ctx)] ?? '', 'break-words leading-relaxed')}>
         <TextContent node={node} ctx={ctx} children={renderChildren(node.children)} />
       </p>
     );
   },
 
-  Markdown({ node, ctx, renderChildren }) {
+  Markdown({ node, ctx }) {
     const text = ctx.resolveText(node.children ?? []);
     return (
-      <div className="text-sm text-foreground">
+      <div className="min-w-0 text-sm text-foreground">
         <MarkdownRenderer text={text} variant="compact" />
       </div>
     );
@@ -184,7 +298,7 @@ const COMPONENTS: Record<string, GenUIComponent> = {
 
   Badge({ node, ctx, renderChildren }) {
     return (
-      <Badge variant="outline" className={cn('font-normal', TONE_BADGE[toneOf(node)] ?? '')}>
+      <Badge variant="outline" className={cn('font-normal', TONE_BADGE[toneOf(node, ctx)] ?? '')}>
         <TextContent node={node} ctx={ctx} children={renderChildren(node.children)} />
       </Badge>
     );
@@ -192,16 +306,27 @@ const COMPONENTS: Record<string, GenUIComponent> = {
 
   Table({ node, ctx }) {
     const props = node.props ?? {};
-    const columns = asArray(props.columns) as unknown as Array<{ key: string; label: string; align?: string }>;
-    const rows = asArray(props.rows) as unknown as GenUIPropValue[][];
+    const columns = asArray(props.columns) as unknown as Array<{
+      key: string;
+      label: string;
+      align?: string;
+    }> | null;
+    const rows = asArray(props.rows) as unknown as GenUIPropValue[][] | null;
+    const striped = resolveBoolProp(node, ctx, 'striped', false);
     if (!columns || columns.length === 0) return null;
     return (
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-sm">
+      <div className="w-full min-w-0 overflow-x-auto">
+        <table className="w-full min-w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-border">
               {columns.map((col) => (
-                <th key={col.key} className="px-2 py-1.5 text-left align-middle text-xs font-medium text-muted-foreground">
+                <th
+                  key={col.key}
+                  className={cn(
+                    'px-2 py-1.5 align-middle text-xs font-medium text-muted-foreground',
+                    alignClass(col.align),
+                  )}
+                >
                   {col.label}
                 </th>
               ))}
@@ -209,9 +334,18 @@ const COMPONENTS: Record<string, GenUIComponent> = {
           </thead>
           <tbody>
             {(rows ?? []).map((row, index) => (
-              <tr key={index} className={cn('border-b border-border/60 last:border-0', props.striped && index % 2 === 1 && 'bg-muted/40')}>
+              <tr
+                key={index}
+                className={cn(
+                  'border-b border-border/60 last:border-0',
+                  striped && index % 2 === 1 && 'bg-muted/40',
+                )}
+              >
                 {columns.map((col, colIndex) => (
-                  <td key={col.key} className="px-2 py-1.5 align-middle">
+                  <td
+                    key={col.key}
+                    className={cn('break-words px-2 py-1.5 align-middle', alignClass(col.align))}
+                  >
                     {ctx.resolveText(row[colIndex])}
                   </td>
                 ))}
@@ -225,36 +359,39 @@ const COMPONENTS: Record<string, GenUIComponent> = {
 
   Chart({ node, ctx }) {
     const props = node.props ?? {};
-    const kind = props.kind as 'bar' | 'line' | 'pie';
-    const data = (props.data as GenUIPropValue[]) ?? [];
-    const height = typeof props.height === 'number' ? props.height : 260;
+    const kind = resolveEnum(node, ctx, 'kind', ['bar', 'line', 'pie'] as const, 'bar');
+    const data = asArray(props.data) ?? [];
+    const height = clampNumber(resolveNumberProp(node, ctx, 'height', 260), 120, 600);
     const chartData = data.map((datum) => {
       const d = datum as unknown as { label?: unknown; value?: unknown };
       return {
         label: ctx.resolveText(d.label),
-        value: typeof d.value === 'number' ? d.value : 0,
+        value: typeof d.value === 'number' ? d.value : ctx.resolveToNumber(d.value),
       };
     });
     return (
-      <GenUIChart
-        kind={kind}
-        data={chartData}
-        height={height}
-        tone={toneOf(node)}
-        title={ctx.resolveText(props.title) || undefined}
-      />
+      <div className="w-full min-w-0">
+        <GenUIChart
+          kind={kind}
+          data={chartData}
+          height={height}
+          tone={toneOf(node, ctx)}
+          title={ctx.resolveText(props.title) || undefined}
+        />
+      </div>
     );
   },
 
   KeyValue({ node, ctx }) {
-    const props = node.props ?? {};
-    const items = (asArray(props.items) ?? []) as unknown as Array<{ label: string; value: unknown }>;
+    const items = (asArray(node.props?.items) ?? []) as unknown as Array<{ label: string; value: unknown }>;
     return (
-      <div className="divide-y divide-border/70 rounded-lg border border-border">
+      <div className="flex min-w-0 flex-col divide-y divide-border/60">
         {items.map((item, index) => (
-          <div key={index} className="flex items-center justify-between gap-3 px-3 py-1.5">
-            <span className="text-xs text-muted-foreground">{ctx.resolveText(item.label)}</span>
-            <span className="text-sm font-medium tabular-nums text-foreground">{ctx.resolveText(item.value)}</span>
+          <div key={index} className="flex min-w-0 items-start justify-between gap-3 py-1.5">
+            <span className="shrink-0 text-xs text-muted-foreground">{ctx.resolveText(item.label)}</span>
+            <span className="min-w-0 break-words text-right text-sm font-medium tabular-nums text-foreground">
+              {ctx.resolveText(item.value)}
+            </span>
           </div>
         ))}
       </div>
@@ -263,44 +400,41 @@ const COMPONENTS: Record<string, GenUIComponent> = {
 
   Progress({ node, ctx }) {
     const props = node.props ?? {};
-    const max = typeof props.max === 'number' && props.max > 0 ? props.max : 100;
-    const value = typeof props.value === 'number' ? props.value : ctx.resolveToNumber(props.value);
-    const clamped = Math.max(0, Math.min(max, value));
+    const max = Math.max(1, resolveNumberProp(node, ctx, 'max', 100));
+    const value = clampNumber(ctx.resolveToNumber(props.value), 0, max);
+    const label = ctx.resolveText(props.label);
     return (
-      <div className="flex flex-col gap-1">
-        {ctx.resolveText(props.label) ? (
+      <div className="flex min-w-0 flex-col gap-1">
+        {label ? (
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>{ctx.resolveText(props.label)}</span>
-            <span className="tabular-nums">{Math.round((clamped / max) * 100)}%</span>
+            <span className="min-w-0 truncate">{label}</span>
+            <span className="shrink-0 tabular-nums">{Math.round((value / max) * 100)}%</span>
           </div>
         ) : null}
-        <Progress value={(clamped / Math.max(1, max)) * 100} />
+        <Progress value={(value / max) * 100} />
       </div>
     );
   },
 
   Slider({ node, ctx }) {
     const props = node.props ?? {};
-    const min = typeof props.min === 'number' ? props.min : 0;
-    const max = typeof props.max === 'number' ? props.max : 100;
-    const step = typeof props.step === 'number' ? props.step : 1;
-    const value = ctx.resolveToNumber(props.value);
+    const min = resolveNumberProp(node, ctx, 'min', 0);
+    const maxRaw = resolveNumberProp(node, ctx, 'max', 100);
+    const max = maxRaw > min ? maxRaw : min + 1;
+    const stepRaw = resolveNumberProp(node, ctx, 'step', 1);
+    const step = stepRaw > 0 ? stepRaw : 1;
+    const value = clampNumber(ctx.resolveToNumber(props.value), min, max);
     const onChange = ctx.action(props.onChange);
+    const label = ctx.resolveText(props.label);
     return (
-      <div className="flex flex-col gap-1.5">
-        {ctx.resolveText(props.label) ? (
+      <div className="flex min-w-0 flex-col gap-1.5">
+        {label ? (
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>{ctx.resolveText(props.label)}</span>
-            <span className="tabular-nums text-foreground">{value}</span>
+            <span className="min-w-0 truncate">{label}</span>
+            <span className="shrink-0 tabular-nums text-foreground">{value}</span>
           </div>
         ) : null}
-        <Slider
-          min={min}
-          max={max}
-          step={step}
-          value={[Number.isFinite(value) ? value : min]}
-          onValueChange={(v) => onChange?.(v[0])}
-        />
+        <Slider min={min} max={max} step={step} value={[value]} onValueChange={(v) => onChange?.(v[0])} />
       </div>
     );
   },
@@ -309,16 +443,15 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const props = node.props ?? {};
     const value = ctx.resolveToNumber(props.value);
     const onChange = ctx.action(props.onChange);
+    const label = ctx.resolveText(props.label);
     return (
-      <label className="flex flex-col gap-1">
-        {ctx.resolveText(props.label) ? (
-          <span className="text-xs text-muted-foreground">{ctx.resolveText(props.label)}</span>
-        ) : null}
+      <label className="flex min-w-0 flex-col gap-1">
+        {label ? <span className="text-xs text-muted-foreground">{label}</span> : null}
         <Input
           type="number"
-          min={typeof props.min === 'number' ? props.min : undefined}
-          max={typeof props.max === 'number' ? props.max : undefined}
-          step={typeof props.step === 'number' ? props.step : 1}
+          min={props.min === undefined ? undefined : resolveNumberProp(node, ctx, 'min')}
+          max={props.max === undefined ? undefined : resolveNumberProp(node, ctx, 'max')}
+          step={props.step === undefined ? 1 : resolveNumberProp(node, ctx, 'step', 1)}
           value={Number.isFinite(value) ? value : ''}
           onChange={(e) => {
             const next = Number(e.target.value);
@@ -333,11 +466,10 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const props = node.props ?? {};
     const value = ctx.resolveText(props.value);
     const onChange = ctx.action(props.onChange);
+    const label = ctx.resolveText(props.label);
     return (
-      <label className="flex flex-col gap-1">
-        {ctx.resolveText(props.label) ? (
-          <span className="text-xs text-muted-foreground">{ctx.resolveText(props.label)}</span>
-        ) : null}
+      <label className="flex min-w-0 flex-col gap-1">
+        {label ? <span className="text-xs text-muted-foreground">{label}</span> : null}
         <Input
           placeholder={ctx.resolveText(props.placeholder) || undefined}
           value={value}
@@ -353,11 +485,10 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const options = (asArray(props.options) ?? []) as unknown as Array<{ value: string; label: string }>;
     const value = ctx.resolveText(props.value);
     const onChange = ctx.action(props.onChange);
+    const label = ctx.resolveText(props.label);
     return (
-      <label className="flex flex-col gap-1">
-        {ctx.resolveText(props.label) ? (
-          <span className="text-xs text-muted-foreground">{ctx.resolveText(props.label)}</span>
-        ) : null}
+      <label className="flex min-w-0 flex-col gap-1">
+        {label ? <span className="text-xs text-muted-foreground">{label}</span> : null}
         <Select value={value || undefined} onValueChange={(v) => onChange?.(v)}>
           <SelectTrigger className="w-full">
             <SelectValue placeholder={t('task.runCode.selectPlaceholder')} />
@@ -378,13 +509,10 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const props = node.props ?? {};
     const checked = ctx.resolveToBoolean(props.checked);
     const onChange = ctx.action(props.onChange);
+    const label = ctx.resolveText(props.label);
     return (
-      <div className="flex items-center justify-between gap-3">
-        {ctx.resolveText(props.label) ? (
-          <span className="text-sm text-foreground">{ctx.resolveText(props.label)}</span>
-        ) : (
-          <span />
-        )}
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        {label ? <span className="min-w-0 text-sm text-foreground">{label}</span> : <span />}
         <Switch checked={checked} onCheckedChange={(v) => onChange?.(v)} />
       </div>
     );
@@ -394,14 +522,17 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const props = node.props ?? {};
     const label = ctx.resolveText(props.label);
     const onClick = ctx.action(props.onClick);
-    const variant =
-      props.variant === 'secondary'
-        ? 'secondary'
-        : props.variant === 'ghost'
-          ? 'ghost'
-          : 'default';
+    const variant = resolveEnum(node, ctx, 'variant', ['primary', 'secondary', 'ghost'] as const, 'primary');
+    const size = resolveEnum(node, ctx, 'size', ['sm', 'md', 'lg'] as const, 'md');
+    const full = resolveBoolProp(node, ctx, 'full', false);
+    const value = resolveEventValue(props.value, ctx);
     return (
-      <Button variant={variant} onClick={() => onClick?.(null)}>
+      <Button
+        variant={variant === 'secondary' ? 'secondary' : variant === 'ghost' ? 'ghost' : 'default'}
+        size={size === 'sm' ? 'sm' : size === 'lg' ? 'lg' : 'default'}
+        className={cn(full && 'w-full')}
+        onClick={() => onClick?.(value)}
+      >
         {label}
       </Button>
     );
@@ -418,10 +549,10 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const onChange = ctx.action(props.onChange);
     if (items.length === 0) return null;
     return (
-      <Tabs value={value} onValueChange={(v) => onChange?.(v)} className="w-full">
-        <TabsList className="w-full justify-start">
+      <Tabs value={value} onValueChange={(v) => onChange?.(v)} className="w-full min-w-0">
+        <TabsList className="w-full justify-start overflow-x-auto">
           {items.map((item) => (
-            <TabsTrigger key={item.value} value={item.value}>
+            <TabsTrigger key={item.value} value={item.value} className="shrink-0">
               {item.label}
             </TabsTrigger>
           ))}
@@ -429,7 +560,7 @@ const COMPONENTS: Record<string, GenUIComponent> = {
         {items.map((item) => {
           const contentNode = item.content as unknown as GenUIPropValue;
           return (
-            <TabsContent key={item.value} value={item.value} className="mt-2">
+            <TabsContent key={item.value} value={item.value} className="mt-2 min-w-0">
               {renderNodeFromRaw(contentNode, ctx, renderChildren)}
             </TabsContent>
           );
@@ -441,41 +572,38 @@ const COMPONENTS: Record<string, GenUIComponent> = {
   Image({ node, ctx }) {
     const props = node.props ?? {};
     const src = ctx.resolveText(props.src);
-    const height = typeof props.height === 'number' ? props.height : undefined;
+    const height = props.height === undefined ? undefined : clampNumber(resolveNumberProp(node, ctx, 'height'), 40, 800);
     if (!src || !isSafeImageSrc(src)) return null;
     return (
       <img
         src={src}
         alt={ctx.resolveText(props.alt) || ''}
-        style={height ? { height, width: 'auto' } : { maxHeight: 420, width: 'auto' }}
-        className="rounded-lg object-contain"
+        style={{ ...(height ? { height } : { maxHeight: 420 }), maxWidth: '100%', width: 'auto' }}
+        className="rounded-md object-contain"
       />
     );
   },
 
   Callout({ node, ctx, renderChildren }) {
     const props = node.props ?? {};
-    const tone = (toneOf(node) as string) || 'info';
+    const tone = resolveEnum(node, ctx, 'tone', ['info', 'success', 'warning', 'danger'] as const, 'info');
+    const title = ctx.resolveText(props.title);
     return (
-      <div className={cn('rounded-lg border px-3 py-2', CALL_OUT[tone] ?? CALL_OUT.info)}>
-        {ctx.resolveText(props.title) ? (
-          <div className="mb-1 text-sm font-medium">{ctx.resolveText(props.title)}</div>
-        ) : null}
-        <div className="text-sm">{renderChildren(node.children)}</div>
+      <div className={cn('min-w-0 rounded-lg border px-3 py-2', CALL_OUT[tone] ?? CALL_OUT.info)}>
+        {title ? <div className="mb-1 text-sm font-medium">{title}</div> : null}
+        <div className="min-w-0 text-sm">{renderChildren(node.children)}</div>
       </div>
     );
   },
 
   EmptyState({ node, ctx }) {
     const props = node.props ?? {};
+    const title = ctx.resolveText(props.title);
+    const text = ctx.resolveText(props.text);
     return (
-      <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border py-8 text-center">
-        {ctx.resolveText(props.title) ? (
-          <span className="text-sm font-medium text-foreground">{ctx.resolveText(props.title)}</span>
-        ) : null}
-        {ctx.resolveText(props.text) ? (
-          <span className="text-xs text-muted-foreground">{ctx.resolveText(props.text)}</span>
-        ) : null}
+      <div className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border py-8 text-center">
+        {title ? <span className="text-sm font-medium text-foreground">{title}</span> : null}
+        {text ? <span className="text-xs text-muted-foreground">{text}</span> : null}
       </div>
     );
   },

@@ -7,6 +7,7 @@ import {
   asBinding,
   isSafeExprSource,
   isValidStateKey,
+  UI_ACTION_LIMITS,
   UI_LIMITS,
   type UIAction,
   type UIBinding,
@@ -28,6 +29,9 @@ export interface UiCore {
   expr(source: string): UIBinding;
   set(key: string): UIBinding;
   toggle(key: string): UIBinding;
+  apply(key: string, expr: string): UIBinding;
+  reset(): UIBinding;
+  seq(...actions: UIBinding[]): UIBinding;
   copy(text: string | UIBinding): UIBinding;
   open(href: string | UIBinding): UIBinding;
   render(root: UINode, options?: { title?: string }): void;
@@ -36,6 +40,7 @@ export interface UiCore {
 
 export interface UiNamespace extends UiCore {
   box: UiComponentFactory;
+  grid: UiComponentFactory;
   card: UiComponentFactory;
   divider: UiComponentFactory;
   title: UiComponentFactory;
@@ -219,6 +224,43 @@ export function createUiBuilder(): UiBuilder {
       return { $action: action };
     },
 
+    apply(key: string, expr: string): UIBinding {
+      if (!assertKey(key, `action.apply.${String(key)}`)) {
+        return { $action: { kind: 'seq', actions: [] } };
+      }
+      if (typeof expr !== 'string') {
+        record('invalid_expr', `action.apply.${key}`, 'warning', 'expected string');
+        return { $action: { kind: 'seq', actions: [] } };
+      }
+      const check = isSafeExprSource(expr);
+      if (!check.ok) {
+        record('invalid_expr', `action.apply.${key}`, 'warning', check.reason);
+        return { $action: { kind: 'seq', actions: [] } };
+      }
+      return { $action: { kind: 'apply', key, expr } };
+    },
+
+    reset(): UIBinding {
+      return { $action: { kind: 'reset' } };
+    },
+
+    seq(...actions: UIBinding[]): UIBinding {
+      const list: UIAction[] = [];
+      for (const input of actions) {
+        const binding = asBinding(input);
+        if (!binding || !('$action' in binding)) {
+          record('invalid_action', 'action.seq', 'warning', 'seq expects ui.* action bindings');
+          continue;
+        }
+        list.push(binding.$action);
+        if (list.length >= UI_ACTION_LIMITS.maxSeqActions) {
+          record('too_many_actions', 'action.seq', 'warning', `> ${UI_ACTION_LIMITS.maxSeqActions}`);
+          break;
+        }
+      }
+      return { $action: { kind: 'seq', actions: list } };
+    },
+
     copy(text: string | UIBinding): UIBinding {
       if (typeof text === 'string' && text.length > 10_000) {
         record('text_too_long', 'action.copy.text', 'warning', '> 10000 chars');
@@ -252,6 +294,7 @@ export function createUiBuilder(): UiBuilder {
   const ui: UiNamespace = {
     ...core,
     box: factory('Box'),
+    grid: factory('Grid'),
     card: factory('Card'),
     divider: factory('Divider'),
     title: factory('Title'),

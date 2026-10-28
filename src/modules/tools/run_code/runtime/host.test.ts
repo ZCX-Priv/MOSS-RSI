@@ -3,6 +3,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { ToolResult } from '../../types';
+import { validateUISpec } from '../ui/validate';
 import { runCodeProgram } from './host';
 
 const LIMITS = {
@@ -68,6 +69,36 @@ describe('run_code runtime host', () => {
     expect(result.error).toBeUndefined();
     expect(result.hasUi).toBe(true);
     expect(result.ui).toBeTruthy();
+  });
+
+  test('injects Grid and local computation actions into the child namespace', async () => {
+    const result = await runCodeProgram({
+      program: [
+        "const status = ui.state('status', 0);",
+        'const cells = [];',
+        'for (let i = 0; i < 12; i++) {',
+        "  cells.push(ui.box({ height: 20, tone: ui.expr(`status == ${i % 2} ? 'success' : 'muted'`) }));",
+        '}',
+        'ui.render(ui.grid({ columns: 4, gap: 1 }, [',
+        '  ...cells,',
+        "  ui.button({ label: 'next', onClick: ui.seq(ui.apply('status', 'status + 1'), ui.reset()) }),",
+        ']));',
+        "return 'ok';",
+      ].join('\n'),
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.hasUi).toBe(true);
+    const validation = validateUISpec(result.ui);
+    expect(validation.fatal).toBe(false);
+    expect(validation.spec?.root.type).toBe('Grid');
+    expect(validation.diagnostics.filter((d) => d.severity === 'error').length).toBe(0);
   });
 
   test('reports a timeout instead of hanging', async () => {

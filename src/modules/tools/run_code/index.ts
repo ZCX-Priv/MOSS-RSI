@@ -37,6 +37,8 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: UISpec;
   uiDiagnostics?: UIDiagnostic[];
+  /** 返回值预览（裁剪后的文本，供结果区展示；完整值仍在工具结果正文里） */
+  valuePreview?: string;
   durationMs: number;
   truncated?: boolean;
 }
@@ -158,6 +160,10 @@ export default {
     });
 
     // ---- metadata ----
+    const valuePreview =
+      !hostFailed && hostResult.value !== undefined
+        ? truncateToBytes(formatValue(hostResult.value), 2000)
+        : undefined;
     const metadata = capMetadata({
       version: 1,
       kind,
@@ -168,6 +174,7 @@ export default {
       ...(hostResult.callsTruncated ? { callsTruncated: true } : {}),
       ...(uiSpec ? { uiSpec } : {}),
       ...(uiDiagnostics.length > 0 ? { uiDiagnostics } : {}),
+      ...(valuePreview ? { valuePreview } : {}),
       durationMs: hostResult.durationMs,
       ...(hostResult.truncated ? { truncated: true } : {}),
     });

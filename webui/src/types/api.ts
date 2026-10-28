@@ -34,6 +34,8 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];
+  /** 返回值预览（裁剪后的文本，供结果区展示） */
+  valuePreview?: string;
   durationMs: number;
   truncated?: boolean;
 }

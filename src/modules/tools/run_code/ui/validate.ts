@@ -330,6 +330,15 @@ function sanitizeProp(
   }
 }
 
+/** 允许 $state/$expr 绑定的属性类型：所有标量属性 + 输入组件的值 */
+const BINDABLE_KINDS: ReadonlySet<UIPropSpec['kind']> = new Set([
+  'bindingOrValue',
+  'string',
+  'number',
+  'boolean',
+  'enum',
+]);
+
 function sanitizeBinding(
   binding: UIBinding,
   spec: UIPropSpec,
@@ -338,7 +347,7 @@ function sanitizeBinding(
   state: Record<string, UIStateValue>,
 ): UIBinding | undefined {
   if ('$state' in binding) {
-    if (spec.kind !== 'bindingOrValue') {
+    if (!BINDABLE_KINDS.has(spec.kind)) {
       diag(ctx, 'invalid_binding', path, 'warning', 'state binding not allowed for this prop');
       return undefined;
     }
@@ -353,7 +362,7 @@ function sanitizeBinding(
   }
 
   if ('$expr' in binding) {
-    if (spec.kind !== 'bindingOrValue') {
+    if (!BINDABLE_KINDS.has(spec.kind)) {
       diag(ctx, 'invalid_binding', path, 'warning', 'expression binding not allowed for this prop');
       return undefined;
     }

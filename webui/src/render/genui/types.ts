@@ -7,6 +7,9 @@ export type GenUIStateValue = string | number | boolean | null;
 export type GenUIAction =
   | { kind: 'set'; key: string }
   | { kind: 'toggle'; key: string }
+  | { kind: 'apply'; key: string; expr: string }
+  | { kind: 'reset' }
+  | { kind: 'seq'; actions: GenUIAction[] }
   | { kind: 'copy'; text: string | GenUIBinding }
   | { kind: 'open'; href: string | GenUIBinding };
 
@@ -47,6 +50,9 @@ export const GENUI_LIMITS = {
   maxTextChars: 20_000,
   maxSpecBytes: 262_144,
   maxExprChars: 512,
+  /** 动作序列：单个 seq 的动作数与嵌套深度 */
+  maxSeqActions: 32,
+  maxActionDepth: 4,
 } as const;
 
 /** 绑定判定：只认三种精确形状，避免把业务对象误判为绑定 */
@@ -70,10 +76,22 @@ export function asGenUIBinding(value: unknown): GenUIBinding | null {
   return null;
 }
 
-export function isGenUIAction(value: unknown): value is GenUIAction {
+export function isGenUIAction(value: unknown, depth = 0): value is GenUIAction {
+  if (depth > GENUI_LIMITS.maxActionDepth) return false;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const a = value as Record<string, unknown>;
   if (a.kind === 'set' || a.kind === 'toggle') return typeof a.key === 'string';
+  if (a.kind === 'apply') {
+    return typeof a.key === 'string' && typeof a.expr === 'string' && a.expr.length > 0;
+  }
+  if (a.kind === 'reset') return true;
+  if (a.kind === 'seq') {
+    return (
+      Array.isArray(a.actions) &&
+      a.actions.length <= GENUI_LIMITS.maxSeqActions &&
+      a.actions.every((child) => isGenUIAction(child, depth + 1))
+    );
+  }
   if (a.kind === 'copy') return typeof a.text === 'string' || asGenUIBinding(a.text) !== null;
   if (a.kind === 'open') return typeof a.href === 'string' || asGenUIBinding(a.href) !== null;
   return false;

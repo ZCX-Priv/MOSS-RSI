@@ -495,7 +495,10 @@ function evalBinary(
   }
 }
 
-const FUNCTIONS: Record<string, (...args: GenUIStateValue[]) => GenUIStateValue> = {
+const FUNCTIONS: Record<
+  string,
+  (...args: Array<GenUIStateValue | undefined>) => GenUIStateValue
+> = {
   round: (v) => Math.round(toNumber(v)),
   floor: (v) => Math.floor(toNumber(v)),
   ceil: (v) => Math.ceil(toNumber(v)),
@@ -511,7 +514,36 @@ const FUNCTIONS: Record<string, (...args: GenUIStateValue[]) => GenUIStateValue>
   len: (v) => scalarToString(v).length,
   number: (v) => toNumber(v),
   string: (v) => scalarToString(v),
+  contains: (haystack, needle) => scalarToString(haystack).includes(scalarToString(needle)),
+  indexOf: (haystack, needle) => scalarToString(haystack).indexOf(scalarToString(needle)),
+  lastIndexOf: (haystack, needle) => scalarToString(haystack).lastIndexOf(scalarToString(needle)),
+  slice: (value, start, end) => {
+    const text = scalarToString(value);
+    const length = text.length;
+    const from = clampIndex(toNumber(start), length);
+    const to = end === undefined || end === null ? length : clampIndex(toNumber(end), length);
+    return text.slice(from, Math.max(from, to));
+  },
+  part: (value, separator, index) => {
+    const text = scalarToString(value);
+    const sep = scalarToString(separator);
+    if (sep === '') return '';
+    const parts = text.split(sep);
+    const position = Math.trunc(toNumber(index));
+    return position >= 0 && position < parts.length ? (parts[position] ?? '') : '';
+  },
+  charAt: (value, index) => {
+    const text = scalarToString(value);
+    const position = Math.trunc(toNumber(index));
+    return position >= 0 && position < text.length ? text.charAt(position) : '';
+  },
 };
+
+/** 索引夹取到 [0, length]；非有限数按 0 处理 */
+function clampIndex(value: number, length: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(length, Math.trunc(value)));
+}
 
 function evalCall(
   node: Extract<ExprNode, { kind: 'call' }>,

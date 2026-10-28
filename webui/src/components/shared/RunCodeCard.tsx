@@ -1,22 +1,14 @@
 // webui/src/components/shared/RunCodeCard.tsx
-// run_code 专属工具卡片：程序 / 日志 / 工具调用 / 界面 四个页签。
-// 程序源码来自 toolCall.arguments（流式期间容错提取），UI 规格来自 result.metadata.codeRun。
-// 历史回放：metadata 随 tool 消息持久化，刷新后 RunCodeCard 仍能还原界面与调用记录。
+// run_code 步骤呈现：一行「# 代码 · 说明」折叠行 + 常显的执行结果。
+// - 代码默认收起；失败时自动展开源码。
+// - 结果区不再使用卡片/页签/固定高度：嵌套调用一行一条，日志收进 details，
+//   Intelligent UI 直接渲染在消息流里（与正文连成一体）。
+// - 程序源码来自 toolCall.arguments（流式期间容错提取），UI 规格来自 result.metadata.codeRun。
+// - 历史回放：metadata 随 tool 消息持久化，刷新后仍能还原界面与调用记录。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  Check,
-  ChevronRight,
-  CircleAlert,
-  Code2,
-  Loader2,
-  ListChecks,
-  Monitor,
-  ScrollText,
-  SquareCode,
-  X,
-} from 'lucide-react';
+import { Check, ChevronRight, CircleAlert, Hash, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { resolveToolIcon } from '@/lib/tool-icons';
 import { CodeBlock, GenUIRenderer } from '../../render';
@@ -29,8 +21,6 @@ interface RunCodeCardProps {
   fallbackIsError?: boolean;
   iconMap: Record<string, string>;
 }
-
-type TabKey = 'ui' | 'code' | 'logs' | 'calls';
 
 interface ParsedArgs {
   code?: string;
@@ -48,152 +38,121 @@ export const RunCodeCard = memo(function RunCodeCard({
   const { t } = useTranslation();
   const parsed = useMemo(() => parseRunCodeArgs(toolCall.arguments), [toolCall.arguments]);
   const meta = result?.metadata?.codeRun;
-  const [expanded, setExpanded] = useState(true);
-  const [tab, setTab] = useState<TabKey>('code');
-  const userSelectedTab = useRef(false);
-
-  // 结果到达后默认切到「界面」（用户手动选过页签则不打扰）
-  useEffect(() => {
-    if (meta?.uiSpec && !userSelectedTab.current) setTab('ui');
-  }, [meta?.uiSpec]);
-
   const status = toolCall.status ?? 'done';
   const isError = result?.isError === true || (status === 'done' && fallbackIsError === true);
-  const description = parsed.description || meta?.description || t('task.runCode.title');
-  const Icon = resolveToolIcon('run_code', iconMap) ?? SquareCode;
+  const bodyText = useMemo(() => resultText(result, fallbackText), [result, fallbackText]);
+  const errorSummary = isError ? firstErrorLine(bodyText) : '';
+  const description = parsed.description || meta?.description || errorSummary || t('task.runCode.title');
+  const hasCode = typeof parsed.code === 'string' && parsed.code.trim().length > 0;
 
-  const selectTab = (next: TabKey) => {
-    userSelectedTab.current = true;
-    setTab(next);
-  };
+  // 代码默认收起（结果常显）；失败时自动展开，便于定位。
+  const [codeOpen, setCodeOpen] = useState(false);
+  useEffect(() => {
+    if (isError && hasCode) setCodeOpen(true);
+  }, [isError, hasCode]);
 
-  const tabs: Array<{ key: TabKey; label: string; icon: typeof Code2; show: boolean }> = [
-    { key: 'ui', label: t('task.runCode.tabUi'), icon: Monitor, show: !!meta?.uiSpec },
-    { key: 'code', label: t('task.runCode.tabCode'), icon: Code2, show: true },
-    { key: 'logs', label: t('task.runCode.tabLogs'), icon: ScrollText, show: true },
-    { key: 'calls', label: t('task.runCode.tabCalls'), icon: ListChecks, show: true },
-  ];
+  const running = status === 'generating' || status === 'executing';
+  const calls = meta?.calls ?? [];
+  const logs = meta?.logs ?? [];
+  const diagnostics = meta?.uiDiagnostics ?? [];
+  const valuePreview = meta?.valuePreview;
+  const uiSpec = meta?.uiSpec;
+  // 有界面时以界面为主，不再重复展示「返回值 ok」这类状态串
+  const showValuePreview = !!valuePreview && !uiSpec;
+  const hasCompactRows = calls.length > 0 || logs.length > 0 || showValuePreview || diagnostics.length > 0;
+  const showCompactRows = !running && hasCompactRows;
+  const kindLabel =
+    meta?.kind === 'ui'
+      ? t('task.runCode.kindUi')
+      : meta?.kind === 'hybrid'
+        ? t('task.runCode.kindHybrid')
+        : meta?.kind === 'text'
+          ? t('task.runCode.kindText')
+          : '';
 
   return (
-    <div
-      className={cn(
-        'overflow-hidden rounded-lg border bg-card shadow-sm',
-        isError ? 'border-destructive/50' : 'border-border',
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/30"
-        aria-expanded={expanded}
-      >
-        <Icon className={cn('size-4 shrink-0', isError ? 'text-destructive' : 'text-primary-strong')} />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <div className="flex items-center gap-2">
-            <span className="shrink-0 text-xs font-medium text-foreground">{t('task.runCode.cardTitle')}</span>
-            <span className="min-w-0 truncate text-xs text-muted-foreground">{description}</span>
-          </div>
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <StatusText status={status} isError={isError} />
-            {meta?.durationMs != null && (
-              <>
-                <span>·</span>
-                <span className="tabular-nums">{meta.durationMs}ms</span>
-              </>
+    <div className="flex min-w-0 flex-col gap-1">
+      {/* 折叠行：点击只控制程序源码显隐，结果区始终在下方 */}
+      <div className="flex min-w-0 items-center gap-1.5 text-xs">
+        <button
+          type="button"
+          onClick={() => {
+            if (hasCode) setCodeOpen((value) => !value);
+          }}
+          aria-expanded={hasCode ? codeOpen : undefined}
+          aria-label={codeOpen ? t('task.runCode.collapseCode') : t('task.runCode.expandCode')}
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors',
+            hasCode ? 'cursor-pointer hover:bg-muted/40' : 'cursor-default',
+            isError ? 'text-destructive' : 'text-muted-foreground',
+          )}
+        >
+          <ChevronRight
+            className={cn(
+              'size-3.5 shrink-0 transition-transform',
+              codeOpen && 'rotate-90',
+              !hasCode && 'opacity-40',
             )}
-            {meta?.kind && (
-              <>
-                <span>·</span>
-                <span>
-                  {meta.kind === 'ui'
-                    ? t('task.runCode.kindUi')
-                    : meta.kind === 'hybrid'
-                      ? t('task.runCode.kindHybrid')
-                      : t('task.runCode.kindText')}
-                </span>
-              </>
-            )}
-            {meta?.truncated && (
-              <>
-                <span>·</span>
-                <span className="text-amber-600 dark:text-amber-400">{t('task.runCode.truncated')}</span>
-              </>
-            )}
-          </div>
-        </div>
-        <ChevronRight
-          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-90')}
+          />
+          <Hash className={cn('size-3.5 shrink-0', isError ? 'text-destructive' : 'text-primary-strong')} />
+          <span className={cn('shrink-0 font-medium', isError ? 'text-destructive' : 'text-foreground/80')}>
+            {t('task.runCode.code')}
+          </span>
+          <span className="shrink-0 text-muted-foreground/50">·</span>
+          <span className="min-w-0 truncate">{description}</span>
+        </button>
+        <RunStatusText
+          status={status}
+          isError={isError}
+          durationMs={meta?.durationMs}
+          kindLabel={kindLabel}
+          truncated={meta?.truncated === true}
         />
-      </button>
+      </div>
 
-      {expanded && (
-        <div className="border-t border-border/70">
-          {(status === 'generating' || status === 'executing') && (
-            <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              <span>{status === 'generating' ? t('task.runCode.generating') : t('task.runCode.running')}</span>
+      {codeOpen && parsed.code && (
+        <CodeBlock code={parsed.code} lang="ts" closed={!parsed.partial} variant="inline" />
+      )}
+
+      {showCompactRows && (
+        <div className="ml-[7px] flex min-w-0 flex-col gap-1.5 border-l border-border/50 pl-3">
+          {calls.length > 0 && (
+            <div className="flex min-w-0 flex-col gap-0.5">
+              {calls.map((call) => (
+                <CallRow key={call.id} call={call} iconMap={iconMap} />
+              ))}
+              {meta?.callsTruncated && (
+                <div className="text-[11px] text-muted-foreground">{t('task.runCode.callsTruncated')}</div>
+              )}
             </div>
           )}
-
-          <div className="flex flex-wrap items-center gap-1 border-b border-border/60 px-2 py-1.5">
-            {tabs.filter((item) => item.show).map((item) => {
-              const TabIcon = item.icon;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => selectTab(item.key)}
-                  className={cn(
-                    'inline-flex h-6 items-center gap-1 rounded-full px-2.5 text-[11px] transition-colors',
-                    tab === item.key
-                      ? 'bg-background text-foreground shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  <TabIcon className="size-3" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="max-h-[520px] overflow-auto">
-            {tab === 'ui' && meta?.uiSpec && <GenUIRenderer spec={meta.uiSpec} className="p-3" />}
-            {tab === 'code' && (
-              <div className="p-0">
-                {parsed.code ? (
-                  <CodeBlock code={parsed.code} lang="ts" closed={!parsed.partial} />
-                ) : (
-                  <div className="px-3 py-3 text-xs text-muted-foreground">{t('task.runCode.noCode')}</div>
-                )}
-              </div>
-            )}
-            {tab === 'logs' && <LogsPanel logs={meta?.logs ?? []} emptyText={t('task.runCode.noLogs')} />}
-            {tab === 'calls' && (
-              <CallsPanel
-                calls={meta?.calls ?? []}
-                truncated={meta?.callsTruncated === true}
-                emptyText={t('task.runCode.noCalls')}
-              />
-            )}
-          </div>
-
-          {isError && (
-            <div className="flex items-start gap-2 border-t border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-              <span className="min-w-0 whitespace-pre-wrap break-words">
-                {resultText(result, fallbackText) || t('task.runCode.failed')}
-              </span>
+          {logs.length > 0 && (
+            <details className="group/logs">
+              <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+                <ChevronRight className="size-3 shrink-0 transition-transform group-open/logs:rotate-90" />
+                {t('task.runCode.logsCount', { count: logs.length })}
+              </summary>
+              <pre className="mt-1 max-h-[240px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+                {logs.join('\n')}
+              </pre>
+            </details>
+          )}
+          {showValuePreview && (
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="text-[11px] text-muted-foreground/70">{t('task.runCode.resultValue')}</div>
+              <pre className="max-h-[240px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+                {valuePreview}
+              </pre>
             </div>
           )}
-
-          {meta?.uiDiagnostics && meta.uiDiagnostics.length > 0 && (
-            <details className="border-t border-border/60 px-3 py-2">
-              <summary className="cursor-pointer text-[11px] text-amber-600 dark:text-amber-400">
-                {t('task.runCode.diagnostics', { count: meta.uiDiagnostics.length })}
+          {diagnostics.length > 0 && (
+            <details className="group/diag">
+              <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                <ChevronRight className="size-3 shrink-0 transition-transform group-open/diag:rotate-90" />
+                {t('task.runCode.diagnostics', { count: diagnostics.length })}
               </summary>
               <ul className="mt-1 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
-                {meta.uiDiagnostics.slice(0, 20).map((d, index) => (
+                {diagnostics.slice(0, 20).map((d, index) => (
                   <li key={index} className="break-words">
                     <span className="font-mono">{d.code}</span> @ {d.path}
                     {d.detail ? ` — ${d.detail}` : ''}
@@ -204,15 +163,44 @@ export const RunCodeCard = memo(function RunCodeCard({
           )}
         </div>
       )}
+
+      {isError && (
+        <div className="ml-[7px] flex min-w-0 items-start gap-1.5 border-l border-destructive/40 pl-3 text-[11px] text-destructive">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <pre className="max-h-[240px] min-w-0 overflow-auto whitespace-pre-wrap break-words font-sans leading-relaxed">
+            {bodyText || t('task.runCode.failed')}
+          </pre>
+        </div>
+      )}
+
+      {/* Intelligent UI：直接渲染在消息流里，不包卡片、不加内边距 */}
+      {uiSpec && (
+        <div className="mt-0.5 min-w-0">
+          <GenUIRenderer spec={uiSpec} />
+        </div>
+      )}
     </div>
   );
 });
 
-function StatusText({ status, isError }: { status: NonNullable<ToolCall['status']>; isError: boolean }) {
+/** 右上角状态：生成/执行/失败/完成（含耗时、输出类型、截断标记） */
+function RunStatusText({
+  status,
+  isError,
+  durationMs,
+  kindLabel,
+  truncated,
+}: {
+  status: NonNullable<ToolCall['status']>;
+  isError: boolean;
+  durationMs?: number;
+  kindLabel: string;
+  truncated: boolean;
+}) {
   const { t } = useTranslation();
   if (status === 'generating') {
     return (
-      <span className="inline-flex items-center gap-1">
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         {t('task.runCode.generating')}
       </span>
@@ -220,7 +208,7 @@ function StatusText({ status, isError }: { status: NonNullable<ToolCall['status'
   }
   if (status === 'executing') {
     return (
-      <span className="inline-flex items-center gap-1">
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         {t('task.runCode.running')}
       </span>
@@ -228,81 +216,77 @@ function StatusText({ status, isError }: { status: NonNullable<ToolCall['status'
   }
   if (isError) {
     return (
-      <span className="inline-flex items-center gap-1 text-destructive">
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-destructive">
         <X className="size-3" />
         {t('task.runCode.failed')}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-      <Check className="size-3" />
+    <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+      <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
       {t('task.runCode.completed')}
+      {durationMs != null && (
+        <>
+          <span>·</span>
+          <span className="tabular-nums">{durationMs}ms</span>
+        </>
+      )}
+      {kindLabel && (
+        <>
+          <span>·</span>
+          <span>{kindLabel}</span>
+        </>
+      )}
+      {truncated && (
+        <span className="text-amber-600 dark:text-amber-400">{t('task.runCode.truncated')}</span>
+      )}
     </span>
   );
 }
 
-function LogsPanel({ logs, emptyText }: { logs: string[]; emptyText: string }) {
-  if (logs.length === 0) {
-    return <div className="px-3 py-3 text-xs text-muted-foreground">{emptyText}</div>;
-  }
-  return (
-    <pre className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
-      {logs.join('\n')}
-    </pre>
-  );
-}
-
-function CallsPanel({
-  calls,
-  truncated,
-  emptyText,
-}: {
-  calls: CodeRunCall[];
-  truncated: boolean;
-  emptyText: string;
-}) {
+/** 单条嵌套工具调用：一行折叠，点开看参数/结果/错误 */
+function CallRow({ call, iconMap }: { call: CodeRunCall; iconMap: Record<string, string> }) {
   const { t } = useTranslation();
-  if (calls.length === 0) {
-    return <div className="px-3 py-3 text-xs text-muted-foreground">{emptyText}</div>;
-  }
+  const Icon = resolveToolIcon(call.name, iconMap);
   return (
-    <div className="flex flex-col divide-y divide-border/60">
-      {calls.map((call) => (
-        <details key={call.id} className="group px-3 py-1.5">
-          <summary className="flex cursor-pointer items-center gap-2 text-xs">
-            {call.ok ? (
-              <Check className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            ) : (
-              <X className="size-3 shrink-0 text-destructive" />
-            )}
-            <span className="font-mono text-foreground">{call.name}</span>
-            <span className="min-w-0 flex-1 truncate text-muted-foreground">{call.argsPreview}</span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">{call.durationMs}ms</span>
-            <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
-          </summary>
-          <div className="mt-1 flex flex-col gap-1 pl-5 text-[11px] text-muted-foreground">
-            <div className="break-words">
-              <span className="text-foreground/70">{t('task.runCode.callArgs')}: </span>
-              <span className="font-mono">{call.argsPreview}</span>
-            </div>
-            <div className="break-words">
-              <span className="text-foreground/70">{t('task.runCode.callResult')}: </span>
-              <span className="font-mono">{call.resultPreview || '—'}</span>
-            </div>
-            {call.error && (
-              <div className="break-words text-destructive">
-                <span>{t('task.runCode.callError')}: </span>
-                <span className="font-mono">{call.error}</span>
-              </div>
-            )}
+    <details className="group/call">
+      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+        <ChevronRight className="size-3 shrink-0 transition-transform group-open/call:rotate-90" />
+        {call.ok ? (
+          <Icon className="size-3 shrink-0" />
+        ) : (
+          <CircleAlert className="size-3 shrink-0 text-destructive" />
+        )}
+        <span className="shrink-0">{t('task.runCode.toolCall')}</span>
+        <span className="shrink-0 text-muted-foreground/50">·</span>
+        <span className="shrink-0 font-mono text-foreground/80">{call.name}</span>
+        {call.argsPreview && (
+          <span className="min-w-0 truncate text-muted-foreground/70">{call.argsPreview}</span>
+        )}
+        <span className="ml-auto shrink-0 tabular-nums">{call.durationMs}ms</span>
+      </summary>
+      <div className="mt-1 flex min-w-0 flex-col gap-1 pl-5 text-[11px] text-muted-foreground">
+        {call.argsPreview && (
+          <div className="break-words">
+            <span className="text-foreground/60">{t('task.runCode.callArgs')}: </span>
+            <span className="font-mono">{call.argsPreview}</span>
           </div>
-        </details>
-      ))}
-      {truncated && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">{t('task.runCode.callsTruncated')}</div>
-      )}
-    </div>
+        )}
+        {call.resultPreview && (
+          <div className="break-words">
+            <span className="text-foreground/60">{t('task.runCode.callResult')}: </span>
+            <span className="font-mono">{call.resultPreview}</span>
+          </div>
+        )}
+        {call.error && (
+          <div className="break-words text-destructive">
+            <span>{t('task.runCode.callError')}: </span>
+            <span className="font-mono">{call.error}</span>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -313,6 +297,18 @@ function resultText(result: ToolResult | undefined, fallback?: string): string {
     .map((c) => (c.type === 'text' ? c.text : ''))
     .join('\n');
   return text || fallback || '';
+}
+
+/** 失败摘要：优先取 [run_code] 首行之后的错误消息，否则取第一行 */
+function firstErrorLine(text: string): string {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return '';
+  const first = lines[0];
+  const message = first.startsWith('[run_code]') ? (lines[1] ?? '') : first;
+  return message.slice(0, 160);
 }
 
 // ============================================================================

@@ -39,6 +39,15 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
       '本次请求只暴露 `run_code`。所有工具都必须通过程序内的 `await tools.<name>(args)` 调用；直接调用不存在的原生工具会失败。',
     );
     parts.push(buildToolsSdk(tools));
+    parts.push(
+      '',
+      '最小示例（工具名与参数以下方 SDK 声明为准）：',
+      '```ts',
+      "const a = await tools.read({ path: 'a.txt' });",
+      "const b = await tools.read({ path: 'b.txt' });",
+      'return { a: String(a).slice(0, 200), b: String(b).slice(0, 200) };',
+      '```',
+    );
   } else {
     parts.push('## 代码模式');
     parts.push(
@@ -67,6 +76,10 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
 
   if (input.uiEnabled) {
     parts.push('', buildUiSdkText());
+    parts.push(
+      '',
+      '界面会直接渲染在「代码」步骤下方；最终正文用一两句话说明即可，不要复述界面里的内容。',
+    );
   } else {
     parts.push('', '### ui 构建器', '本次会话关闭了 Intelligent UI（`ui` 命名空间不可用）。');
   }

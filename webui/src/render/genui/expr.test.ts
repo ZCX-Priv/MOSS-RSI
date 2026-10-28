@@ -21,6 +21,57 @@ describe('genui expression evaluator', () => {
     expect(evaluateExpr("len('abc')", {})).toBe(3);
   });
 
+  test('supports string helpers for local computation', () => {
+    expect(evaluateExpr("contains('1,2;3,4', '3,4')", {})).toBe(true);
+    expect(evaluateExpr("indexOf('a;b;c', ';')", {})).toBe(1);
+    expect(evaluateExpr("lastIndexOf('a;b;c', ';')", {})).toBe(3);
+    expect(evaluateExpr("slice('abcdef', 1, 4)", {})).toBe('bcd');
+    expect(evaluateExpr("part('a,2;b,3', ';', 1)", {})).toBe('b,3');
+    expect(evaluateExpr("charAt('abc', 1)", {})).toBe('b');
+  });
+
+  test('supports a turn-based snake step sequence', () => {
+    let state: Record<string, string | number | boolean | null> = {
+      body: '5,5;4,5;3,5',
+      dir: 'right',
+      hx: 5,
+      hy: 5,
+      nx: 5,
+      ny: 5,
+      hit: 0,
+      eat: 0,
+      status: 0,
+      score: 0,
+      fx: 7,
+      fy: 3,
+    };
+    const steps: Array<[string, string]> = [
+      ['nx', 'status == 2 ? hx : hx + (dir == "left" ? -1 : dir == "right" ? 1 : 0)'],
+      ['ny', 'status == 2 ? hy : hy + (dir == "up" ? -1 : dir == "down" ? 1 : 0)'],
+      [
+        'hit',
+        'status == 2 ? 0 : (nx < 0 || nx > 9 || ny < 0 || ny > 9 || contains(slice(body, 0, lastIndexOf(body, ";")), nx + "," + ny) ? 1 : 0)',
+      ],
+      ['eat', 'hit == 0 && nx == fx && ny == fy ? 1 : 0'],
+      ['status', 'hit == 1 ? 2 : status'],
+      ['score', 'eat == 1 ? score + 1 : score'],
+      [
+        'body',
+        'hit == 1 ? body : (eat == 1 ? nx + "," + ny + ";" + body : nx + "," + ny + ";" + slice(body, 0, lastIndexOf(body, ";")))',
+      ],
+      ['hx', 'hit == 1 ? hx : nx'],
+      ['hy', 'hit == 1 ? hy : ny'],
+    ];
+
+    for (const [key, expression] of steps) {
+      state = { ...state, [key]: evaluateExpr(expression, state) };
+    }
+
+    expect(state.hx).toBe(6);
+    expect(state.hy).toBe(5);
+    expect(state.body).toBe('6,5;5,5;4,5');
+  });
+
   test('short-circuits logical operators', () => {
     const errors: string[] = [];
     expect(evaluateExpr('true || missing', {}, (m) => errors.push(m))).toBe(true);

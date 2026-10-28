@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { getCachedHighlight, highlightCode } from './shiki';
 import { MermaidDiagram } from '../diagram/MermaidDiagram';
 import { SmilesDiagram } from '../chem/SmilesDiagram';
@@ -17,9 +18,11 @@ export interface CodeBlockProps {
   lang: string;
   /** 所在块是否闭合（流式） */
   closed: boolean;
+  /** default = Markdown 代码块；inline = 工具步骤内的紧凑代码（无外框） */
+  variant?: 'default' | 'inline';
 }
 
-export function CodeBlock({ code, lang, closed }: CodeBlockProps) {
+export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlockProps) {
   const settings = useRenderSettings();
   const normalizedLang = lang.trim().toLowerCase();
   // 高亮结果连同「来源 code/lang」一起存：块内容变化（同 key 复用组件）时旧结果自动失效，
@@ -66,8 +69,18 @@ export function CodeBlock({ code, lang, closed }: CodeBlockProps) {
   };
 
   return (
-    <div className="code-block group/code relative my-3 overflow-hidden rounded-md border border-border bg-muted/40">
-      <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
+    <div
+      className={cn(
+        'code-block group/code relative overflow-hidden rounded-md bg-muted/40',
+        variant === 'inline' ? 'my-1' : 'my-3 border border-border',
+      )}
+    >
+      <div
+        className={cn(
+          'flex items-center justify-between px-3 py-1.5',
+          variant === 'inline' ? 'border-b border-border/50' : 'border-b border-border/60',
+        )}
+      >
         <span className="font-mono text-[11px] text-muted-foreground">{normalizedLang || 'text'}</span>
         <button
           type="button"
@@ -80,12 +93,20 @@ export function CodeBlock({ code, lang, closed }: CodeBlockProps) {
       </div>
       {html !== null ? (
         <div
-          className="shiki-wrap overflow-x-auto p-3 text-[13px] leading-relaxed"
+          className={cn(
+            'shiki-wrap p-3 leading-relaxed',
+            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'overflow-x-auto text-[13px]',
+          )}
           // Shiki 输出为受控 HTML（只含 span 着色节点）
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className="overflow-x-auto p-3 font-mono text-[13px] leading-relaxed text-foreground">
+        <pre
+          className={cn(
+            'p-3 font-mono leading-relaxed text-foreground',
+            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'overflow-x-auto text-[13px]',
+          )}
+        >
           <code>{code}</code>
           {!closed && (
             <span className="code-cursor ml-0.5 inline-block h-4 w-[2px] translate-y-[3px] animate-pulse bg-primary-strong" />

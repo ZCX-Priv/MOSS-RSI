@@ -9,10 +9,17 @@
 /** JSON 可表示的状态值（UI 状态只允许标量，避免复杂对象污染） */
 export type UIStateValue = string | number | boolean | null;
 
-/** 事件动作：本地闭环，不调用模型 */
+/**
+ * 事件动作：本地闭环，不调用模型。
+ * apply/seq/reset 提供受限的本地状态计算（无循环/定时器/随机数），
+ * 用于回合制棋盘、逐步试算等需要「一次点击推进多步状态」的场景。
+ */
 export type UIAction =
   | { kind: 'set'; key: string }
   | { kind: 'toggle'; key: string }
+  | { kind: 'apply'; key: string; expr: string }
+  | { kind: 'reset' }
+  | { kind: 'seq'; actions: UIAction[] }
   | { kind: 'copy'; text: string | UIBinding }
   | { kind: 'open'; href: string | UIBinding };
 
@@ -68,8 +75,8 @@ export const UI_LIMITS = {
   maxSpecBytes: 262_144,
   /** 单条表达式字符数 */
   maxExprChars: 512,
-  /** 一个节点的子节点数 */
-  maxChildren: 200,
+  /** 一个节点的子节点数（与 maxNodes 同量级；允许 20×20 棋盘） */
+  maxChildren: 500,
   /** 表格列数 / 行数 */
   maxTableColumns: 12,
   maxTableRows: 200,
@@ -112,13 +119,33 @@ export function asBinding(value: unknown): UIBinding | null {
   return null;
 }
 
-/** 判断是否为合法 UIAction */
-export function isUIAction(value: unknown): value is UIAction {
+/** 动作序列上限（校验器与前端执行器共享语义） */
+export const UI_ACTION_LIMITS = {
+  /** 单个 seq 的动作数 */
+  maxSeqActions: 32,
+  /** seq 嵌套深度 */
+  maxDepth: 4,
+} as const;
+
+/** 判断是否为合法 UIAction（递归校验 seq；depth 防止恶意深嵌套） */
+export function isUIAction(value: unknown, depth = 0): value is UIAction {
+  if (depth > UI_ACTION_LIMITS.maxDepth) return false;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const a = value as Record<string, unknown>;
   const kind = a.kind;
   if (kind === 'set' || kind === 'toggle') {
     return typeof a.key === 'string' && isValidStateKey(a.key);
+  }
+  if (kind === 'apply') {
+    if (typeof a.key !== 'string' || !isValidStateKey(a.key)) return false;
+    if (typeof a.expr !== 'string') return false;
+    return isSafeExprSource(a.expr).ok;
+  }
+  if (kind === 'reset') return true;
+  if (kind === 'seq') {
+    // 空 seq 是合法 no-op（构建器在参数非法时用它兜底）
+    if (!Array.isArray(a.actions) || a.actions.length > UI_ACTION_LIMITS.maxSeqActions) return false;
+    return a.actions.every((child) => isUIAction(child, depth + 1));
   }
   if (kind === 'copy') {
     return typeof a.text === 'string' || asBinding(a.text) !== null;
@@ -136,13 +163,15 @@ export function isSafeExprSource(source: string): { ok: true } | { ok: false; re
     return { ok: false, reason: `expression exceeds ${UI_LIMITS.maxExprChars} chars` };
   }
   // 先剥离字符串字面量与数字字面量，避免其中合法的 . [ ] 被误判；
-  // 剩余字符里出现属性穿透、索引、对象/数组字面量、赋值、语句分隔即拒绝。
+  // 再剥离比较运算符（== != <= >=），最后剩余字符里出现属性穿透、索引、
+  // 对象/数组字面量、赋值、语句分隔即拒绝。
   const withoutStrings = source.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, '""');
   const withoutNumbers = withoutStrings.replace(/(?:\d+(?:\.\d*)?|\.\d+)/g, '0');
-  if (/[.[\]{};=]/.test(withoutNumbers)) {
+  const withoutComparisons = withoutNumbers.replace(/==|!=|<=|>=/g, ' ');
+  if (/[.[\]{};=]/.test(withoutComparisons)) {
     return { ok: false, reason: 'property access, indexing, literals, assignment and statements are not allowed' };
   }
-  if (/`/.test(withoutNumbers)) return { ok: false, reason: 'template literals are not allowed' };
+  if (/`/.test(withoutComparisons)) return { ok: false, reason: 'template literals are not allowed' };
   if (/(^|[^A-Za-z0-9_$])(eval|Function|constructor|prototype|__proto__)([^A-Za-z0-9_$]|$)/.test(source)) {
     return { ok: false, reason: 'forbidden identifier' };
   }
