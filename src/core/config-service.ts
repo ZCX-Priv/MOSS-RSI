@@ -320,6 +320,28 @@ const contextSchema = z.object({
     .default(8 * 1024 * 1024),
 });
 
+/**
+ * 代码模式（PTC + Intelligent UI）配置。
+ * - enabled=false：完全不暴露 run_code，行为与旧版一致。
+ * - presentation='standard'：wire 暴露全部原生工具 + run_code（模型可自由选择直接调用或写程序）。
+ * - presentation='ptc'：wire 只暴露 run_code，其余工具通过程序内 tools.* 调用。
+ * - uiEnabled：是否允许程序内使用 ui.* 构建交互界面。
+ * requireConfirmation 不在本段：统一走 tools.run_code 工具配置（与 terminal 等一致）。
+ */
+const codeModeSchema = z.object({
+  enabled: z.boolean().default(true),
+  presentation: z.enum(['standard', 'ptc']).default('standard'),
+  uiEnabled: z.boolean().default(true),
+  /** 单次程序执行预算（毫秒，含嵌套工具与审批等待） */
+  timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
+  /** 程序源码长度上限 */
+  maxCodeChars: z.number().int().min(1_000).max(200_000).default(20_000),
+  /** 返回值 + 日志序列化后的字节上限 */
+  maxOutputBytes: z.number().int().min(1_024).max(1_048_576).default(262_144),
+  /** 嵌套工具调用并发上限（只读工具可重叠，写工具独占） */
+  maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
+});
+
 const appConfigSchema = z.object({
   version: z.number().int().positive(),
   server: z.object({
@@ -347,6 +369,16 @@ const appConfigSchema = z.object({
     // 存量 config.json 无此字段不会校验失败；上下限防止极端值把弱网半开连接挂死。
     llmStreamIdleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
     workingDirectory: z.string(),
+    // 代码模式（PTC + Intelligent UI）：缺段时用默认值自愈，旧 config.json 不受影响
+    codeMode: codeModeSchema.default({
+      enabled: true,
+      presentation: 'standard',
+      uiEnabled: true,
+      timeoutMs: 120_000,
+      maxCodeChars: 20_000,
+      maxOutputBytes: 262_144,
+      maxParallelSubCalls: 10,
+    }),
   }),
   // tools schema 从 manifest 自动构建（单一真相源），新增工具无需手动改此文件
   tools: buildToolsSchema(),
@@ -436,6 +468,15 @@ export function defaultAppConfig(): AppConfig {
       // 15 分钟：长程任务/推理型模型长思考的空闲容忍度
       llmStreamIdleTimeoutMs: 900_000,
       workingDirectory: '',
+      codeMode: {
+        enabled: true,
+        presentation: 'standard',
+        uiEnabled: true,
+        timeoutMs: 120_000,
+        maxCodeChars: 20_000,
+        maxOutputBytes: 262_144,
+        maxParallelSubCalls: 10,
+      },
     },
     // tools 默认值从 manifest 自动构建（单一真相源）
     tools: buildToolsDefaults() as AppConfig['tools'],

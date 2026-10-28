@@ -1,0 +1,43 @@
+{
+  "name": "run_code",
+  "description": "在独立 Bun 子进程中执行一段 TypeScript 异步函数体。用 await tools.<name>(args) 调用工具；用 ui.* 构建可交互界面（Intelligent UI）。只有 return 的值与 console.log 的文本会回到上下文，中间结果留在程序里。适合多步工具调用、循环、条件分支、并发与结果后处理。",
+  "description_en": "Execute a TypeScript async function body in an isolated Bun subprocess. Call tools with await tools.<name>(args); build interactive UI with ui.* (Intelligent UI). Only the returned value and console.log text re-enter context; intermediate results stay inside the program. Best for multi-step tool calls, loops, branches, concurrency and post-processing.",
+  "icon": "square-code",
+  "annotations": {
+    "destructiveHint": true,
+    "requireConfirmation": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string",
+        "description": "TypeScript 异步函数体（不含外层 async 包裹）。支持顶层 await 与 return；类型注解会被剥离。"
+      },
+      "description": {
+        "type": "string",
+        "description": "程序用途的简短说明，用于卡片标题与日志"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 600000,
+        "description": "可选执行预算（毫秒）。缺省用 config.agent.codeMode.timeoutMs；包含嵌套工具与审批等待。"
+      }
+    },
+    "required": ["code", "description"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true,
+      "requireConfirmation": true
+    },
+    "schema": {
+      "requireConfirmation": {
+        "type": "boolean",
+        "description": "执行程序前是否要求用户确认（与 terminal 同级风险）"
+      }
+    }
+  }
+}

@@ -488,6 +488,12 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       });
       break;
     }
+    case 'confirm-cancel': {
+      const event = (msg.payload ?? {}) as { toolCallId?: string };
+      const sid = msg.sessionId ?? sessionId;
+      if (event.toolCallId && sid) useStore.getState().removePendingConfirm(sid, event.toolCallId);
+      break;
+    }
     case 'stats-updated': {
       if (!sessionId) return;
       const event = (msg.payload ?? {}) as { stats?: RunStats };

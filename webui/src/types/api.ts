@@ -6,7 +6,37 @@
 // 基础类型（从旧前端 webui/src/types/index.ts 迁移）
 // ============================================================================
 
+import type { GenUIDiagnostic, GenUISpec } from '../render/genui/types';
+
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
+
+/** run_code 单次嵌套工具调用记录（metadata.codeRun.calls） */
+export interface CodeRunCall {
+  id: string;
+  name: string;
+  argsPreview: string;
+  resultPreview: string;
+  durationMs: number;
+  ok: boolean;
+  error?: string;
+}
+
+/** run_code 结果 metadata（持久化在 tool 消息里，供 RunCodeCard + 历史回放） */
+export interface CodeRunMetadata {
+  version: 1;
+  /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
+  kind: 'text' | 'ui' | 'hybrid';
+  /** 本次请求的呈现档位 */
+  presentation: 'standard' | 'ptc';
+  description: string;
+  logs: string[];
+  calls: CodeRunCall[];
+  callsTruncated?: boolean;
+  uiSpec?: GenUISpec;
+  uiDiagnostics?: GenUIDiagnostic[];
+  durationMs: number;
+  truncated?: boolean;
+}
 
 export interface ToolCall {
   id: string;
@@ -63,6 +93,8 @@ export interface ToolResult {
     structuredContent?: Record<string, unknown>;
     /** MCP resource 引用（uri/mimeType/text 完整数据） */
     resources?: Array<{ uri: string; mimeType?: string; text?: string }>;
+    /** 代码模式（run_code）结果：程序/日志/嵌套调用/Intelligent UI 规格 */
+    codeRun?: CodeRunMetadata;
   };
 }
 
@@ -293,6 +325,24 @@ export interface Session {
 // 配置类型（与后端 src/core/types.ts 对齐）
 // ============================================================================
 
+/** config.agent.codeMode 段（PTC + Intelligent UI） */
+export interface CodeModeConfig {
+  /** 总开关：关闭后完全不暴露 run_code */
+  enabled: boolean;
+  /** standard=原生工具+run_code；ptc=只暴露 run_code */
+  presentation: 'standard' | 'ptc';
+  /** 是否允许程序内使用 ui.* 构建交互界面 */
+  uiEnabled: boolean;
+  /** 单次程序执行预算（毫秒） */
+  timeoutMs: number;
+  /** 程序源码长度上限 */
+  maxCodeChars: number;
+  /** 返回值 + 日志字节上限 */
+  maxOutputBytes: number;
+  /** 嵌套工具调用并发上限 */
+  maxParallelSubCalls: number;
+}
+
 export interface AppConfig {
   version: number;
   server: { host: string; port: number; autoPort: boolean; locale?: string };
@@ -300,7 +350,13 @@ export interface AppConfig {
   /** 日志系统配置（级别 / 保留天数 / 单文件大小上限） */
   logs: LogsConfig;
   update: { autoCheck: boolean; channel: 'stable' | 'beta'; checkIntervalHours: number };
-  agent: { defaultModel: string; maxTokens: number; maxTurns: number; workingDirectory: string };
+  agent: {
+    defaultModel: string;
+    maxTokens: number;
+    maxTurns: number;
+    workingDirectory: string;
+    codeMode: CodeModeConfig;
+  };
   tools: Record<string, { enabled: boolean; requireConfirmation?: boolean; timeout?: number }>;
   mcpServers: Record<string, unknown>;
   /** 对外 MCP Server 暴露配置（/mcp 端点；可选，旧 config 无此段时视为关闭） */

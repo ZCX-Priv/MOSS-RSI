@@ -22,7 +22,7 @@ import type {
 } from '../types';
 import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSessionImagePaths } from '../compiler';
 import type { OptimizedImage, ImageOptimizer } from '../compiler';
-import type { RulesSectionInput } from '../compiler/system-prompt';
+import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
 import { MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from '../compiler/view-builder';
 import { ensureProjectContext } from '../file-index/project-context';
 import { compactSession, resolveSummaryModel } from '../compressor';
@@ -78,6 +78,8 @@ export interface PrepareRequestInput {
   modelDisplayName: string;
   /** 上下文窗口 token（调用方从模型配置解析） */
   windowTokens: number;
+  /** 动态系统提示附加段（代码模式 SDK 等；由 agent 引擎每轮生成） */
+  promptExtras?: PromptExtraSection[] | null;
 }
 
 /** 解析 skill prompt（SkillRegistry 运行时解析；禁用/缺失返回 null） */
@@ -265,6 +267,7 @@ export async function prepareRequest(
     deps.env,
     skillPrompt,
     rulesSection,
+    input.promptExtras ?? null,
   );
 
   const resolveSkill = (name: string): string | null =>

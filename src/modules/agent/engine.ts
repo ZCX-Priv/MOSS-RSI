@@ -36,6 +36,8 @@ import type { AskOutcome, AskPayload, AskQuestion, ToolResult } from '../tools/t
 import type { SkillRegistry } from '../tools/shared/skill-registry';
 import { readSessionTodoStore, getSessionTodoPath } from '../tools/todo/shared/store';
 import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } from '../context/compiler';
+import type { PromptExtraSection } from '../context/compiler';
+import { buildCodeModePromptExtras } from '../tools/run_code/sdk';
 import { DEFAULT_TOOL_PRUNING_CONFIG } from '../context/types';
 import type { RulesEngineServiceImpl } from '../rules/service';
 import type { HooksEngineServiceImpl } from '../hooks/service';
@@ -167,6 +169,9 @@ export class AgentEngineImpl implements AgentEngine {
    * 权限确认没有前端可应答，改为短超时快速失败并返回明确原因，避免每个 L3 工具白等 5 分钟。
    */
   private readonly headlessSessions = new Set<string>();
+
+  /** 代码模式嵌套调用的本地序号（仅用于生成稳定、可读的嵌套 toolCallId） */
+  private nestedCodeCallSeq = 0;
 
   /** 标记/取消 headless（子代理与团队成员由 orchestrator 在启动时标记） */
   markSessionHeadless(sessionId: string, headless: boolean): void {
@@ -552,7 +557,41 @@ export class AgentEngineImpl implements AgentEngine {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    const tools = buildTools(toolRegistry, mcpTools);
+    // 代码模式 wire 呈现：
+    //   standard = 原生工具 + run_code；ptc = 仅 run_code；关闭 = 排除 run_code。
+    const codeMode = cfg.codeMode;
+    const wireOptions = codeMode.enabled
+      ? codeMode.presentation === 'ptc'
+        ? { includeOnly: new Set(['run_code']) }
+        : {}
+      : { exclude: new Set(['run_code']) };
+    const tools = buildTools(toolRegistry, mcpTools, wireOptions);
+
+    // 系统提示 SDK 附加段：工具/配置不变时字节稳定（前缀缓存友好）。
+    const promptExtras: PromptExtraSection[] = [];
+    if (codeMode.enabled) {
+      const sdkTools = [
+        ...(toolRegistry?.listSchemas() ?? [])
+          .filter((t) => t.name !== 'run_code')
+          .map((t) => ({
+            name: t.name,
+            description: t.description,
+            inputSchema: t.inputSchema,
+            annotations: t.annotations,
+          })),
+        ...mcpTools.map((t) => ({
+          name: `mcp__${t.server}__${t.name}`,
+          description: `[MCP:${t.server}] ${t.description ?? t.name}`,
+          inputSchema: t.inputSchema,
+        })),
+      ];
+      const section = buildCodeModePromptExtras({
+        presentation: codeMode.presentation,
+        uiEnabled: codeMode.uiEnabled,
+        tools: sdkTools,
+      });
+      if (section) promptExtras.push(section);
+    }
 
     // ReAct 循环（maxTurns=0 表示不限制 → Infinity；while 条件与触顶判断天然兼容）
     let turn = 0;
@@ -614,6 +653,7 @@ export class AgentEngineImpl implements AgentEngine {
             cwd,
             model,
             modelDisplayName,
+            ...(promptExtras.length > 0 ? { promptExtras } : {}),
           });
           messages = prepared.messages;
           if (prepared.degradedReason) {
@@ -627,10 +667,10 @@ export class AgentEngineImpl implements AgentEngine {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
           });
-          messages = this.buildFallbackMessages(session, cwd, model, modelDisplayName);
+          messages = this.buildFallbackMessages(session, cwd, model, modelDisplayName, promptExtras);
         }
       } else {
-        messages = this.buildFallbackMessages(session, cwd, model, modelDisplayName);
+        messages = this.buildFallbackMessages(session, cwd, model, modelDisplayName, promptExtras);
       }
 
       // 最后一轮收尾提醒：有限轮数模式下，本轮是最后一个允许的轮次时注入 user 提醒
@@ -1991,6 +2031,7 @@ export class AgentEngineImpl implements AgentEngine {
                 if (pending) {
                   if (pending.timer) clearTimeout(pending.timer);
                   this.pendingAsks.delete(pendingKey);
+                  ctx.onEvent({ type: 'ask-timeout', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
                   reject(new Error('aborted'));
                 }
               },
@@ -2006,6 +2047,20 @@ export class AgentEngineImpl implements AgentEngine {
         });
       },
       confirm: (question: string) => this.requestConfirm(ctx, name, args, undefined, question),
+      invokeTool: (nestedName, nestedArgs, opts) =>
+        this.invokeToolFromCode(
+          nestedName,
+          nestedArgs,
+          {
+            sessionId: ctx.sessionId,
+            cwd: ctx.cwd,
+            parentToolCallId: ctx.toolCallId,
+            onEvent: ctx.onEvent,
+            signal: opts?.signal ?? ctx.signal,
+            permissionMode: ctx.permissionMode,
+          },
+          opts?.callId,
+        ),
       permissionDecision,
     });
 
@@ -2016,6 +2071,146 @@ export class AgentEngineImpl implements AgentEngine {
       sessionId: ctx.sessionId,
       result,
     });
+
+    return result;
+  }
+
+  /**
+   * 代码模式嵌套调用（run_code 子进程 → 宿主）。
+   *
+   * 与 native executeToolCall 的差异：
+   *   - 不写 tool 消息、不发 tool-call-start/end（中间结果不回上下文）；
+   *   - 仍完整走 safety（executeBuiltinTool/executeMcpTool 内部）、Pre/PostToolUse 钩子、
+   *     文件访问规则登记与 todo/context 副作用；
+   *   - 嵌套 ask/confirm 事件使用嵌套 toolCallId，前端现有 pending 卡片可直接应答；
+   *   - 禁止递归 run_code（同一解释器内不能再开 run_code）。
+   */
+  private async invokeToolFromCode(
+    name: string,
+    args: unknown,
+    ctx: {
+      sessionId: string;
+      cwd: string;
+      parentToolCallId: string;
+      onEvent: (event: AgentEvent) => void;
+      signal?: AbortSignal;
+      permissionMode: PermissionMode;
+    },
+    requestedCallId?: string,
+  ): Promise<ToolResult> {
+    if (name === 'run_code') {
+      return {
+        content: [{ type: 'text', text: 'Error: nested run_code is forbidden (recursion depth is fixed at 1)' }],
+        isError: true,
+      };
+    }
+
+    const toolCallId = requestedCallId
+      ? `ptc_${requestedCallId}`
+      : `ptc_${Date.now().toString(36)}_${++this.nestedCodeCallSeq}`;
+
+    const hooksEngine = this.services.tryResolve<HooksEngineServiceImpl>(ServiceNames.HOOKS_ENGINE);
+    if (hooksEngine) {
+      try {
+        const pre = await hooksEngine.dispatch('PreToolUse', {
+          sessionId: ctx.sessionId,
+          cwd: ctx.cwd,
+          toolName: name,
+          toolInput: args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : {},
+        });
+        if (pre.decision === 'deny') {
+          return {
+            content: [{ type: 'text', text: `Blocked by hook: ${pre.reason ?? 'tool call denied'}` }],
+            isError: true,
+          };
+        }
+      } catch (err) {
+        this.logger.warn('agent: nested PreToolUse hook failed (fail-open)', {
+          sessionId: ctx.sessionId,
+          toolName: name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const nestedCtx = {
+      sessionId: ctx.sessionId,
+      cwd: ctx.cwd,
+      toolCallId,
+      // 只把交互事件转发给上层；嵌套工具进度/生命周期事件不进主消息流。
+      onEvent: (event: AgentEvent): void => {
+        if (
+          event.type === 'ask' ||
+          event.type === 'ask-timeout' ||
+          event.type === 'confirm-required' ||
+          event.type === 'confirm-cancel'
+        ) {
+          ctx.onEvent(event);
+        }
+      },
+      signal: ctx.signal,
+      permissionMode: ctx.permissionMode,
+    };
+
+    const mcpMatch = name.match(/^mcp__([^_]+)__(.+)$/);
+    let result: ToolResult;
+    try {
+      if (mcpMatch) {
+        result = await this.executeMcpTool(mcpMatch[1], mcpMatch[2], args, nestedCtx);
+      } else {
+        const registry = this.services.tryResolve<ToolRegistry>(ServiceNames.TOOL_REGISTRY);
+        if (!registry?.get(name)) {
+          return { content: [{ type: 'text', text: `Error: tool "${name}" not found` }], isError: true };
+        }
+        result = await this.executeBuiltinTool(name, args, nestedCtx);
+      }
+    } catch (err) {
+      result = {
+        content: [{ type: 'text', text: `Error executing tool "${name}": ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+
+    // PostToolUse：通知型 fire-and-forget
+    if (hooksEngine) {
+      void hooksEngine
+        .dispatch('PostToolUse', {
+          sessionId: ctx.sessionId,
+          cwd: ctx.cwd,
+          toolName: name,
+          toolInput: args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : {},
+        })
+        .catch((err: unknown) => {
+          this.logger.warn('agent: nested PostToolUse hook failed (fail-open)', {
+            sessionId: ctx.sessionId,
+            toolName: name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
+
+    // 规则引擎：文件访问登记（与主路径同口径）
+    if (FILE_ACCESS_TOOLS.has(name)) {
+      try {
+        const rulesEngine = this.services.tryResolve<RulesEngineServiceImpl>(ServiceNames.RULES_ENGINE);
+        if (rulesEngine) {
+          const paths = extractToolPaths(name, args);
+          const session = this.sessions.get(ctx.sessionId);
+          if (paths.length > 0 && session && rulesEngine.recordFileAccess(session, paths, ctx.cwd)) {
+            this.sessions.persistSession(session);
+          }
+        }
+      } catch (err) {
+        this.logger.warn('agent: nested rules recordFileAccess failed', {
+          sessionId: ctx.sessionId,
+          toolName: name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // 副作用：嵌套 todo 快照挂到外层 run_code 的 toolCallId；read/grep/glob 更新 contextFiles。
+    this.notifyToolSideEffects(name, args, ctx.sessionId, ctx.parentToolCallId);
 
     return result;
   }
@@ -2141,6 +2336,7 @@ export class AgentEngineImpl implements AgentEngine {
             if (this.pendingConfirms.has(pendingKey)) {
               clearTimeout(timer);
               this.pendingConfirms.delete(pendingKey);
+              ctx.onEvent({ type: 'confirm-cancel', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
               reject(new Error('aborted'));
             }
           },
@@ -2220,11 +2416,12 @@ export class AgentEngineImpl implements AgentEngine {
     cwd: string,
     model: string,
     modelDisplayName: string,
+    promptExtras?: PromptExtraSection[] | null,
   ): UnifiedMessage[] {
     const skillName =
       session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
     const skillPrompt = skillName ? this.resolveSkillPrompt(skillName) : null;
-    const systemContent = buildStaticSystemPrompt(this.env, skillPrompt);
+    const systemContent = buildStaticSystemPrompt(this.env, skillPrompt, null, promptExtras ?? null);
     const view = buildRequestView(session, systemContent, {
       toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
       resolveSkillPrompt: name => this.resolveSkillPrompt(name),

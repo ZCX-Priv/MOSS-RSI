@@ -1,6 +1,6 @@
 {
   "name": "@solo-thinker/moss",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MOSS - 微内核 + 模块化架构的 AI Agent 应用",
   "type": "module",
   "bin": {

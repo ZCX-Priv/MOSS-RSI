@@ -31,7 +31,7 @@ import { DEFAULT_CONTEXT_CONFIG, TELEMETRY_BUFFER_SIZE as BUFFER_SIZE } from '..
 import { TokenCalibrator } from '../budgeter/calibration';
 import { estimateTextTokens, messagesChars, parseContextWindow } from '../budgeter/estimator';
 import { buildStaticSystemPrompt, buildRequestView, getSystemSections, ImageOptimizer } from '../compiler';
-import type { RulesSectionInput } from '../compiler/system-prompt';
+import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
 import { ensureEnvProbed } from '../compiler/env-probe';
 import { buildRulesSection } from '../../rules/inject';
 import type { RulesEngineServiceImpl } from '../../rules/service';
@@ -80,6 +80,8 @@ export interface PrepareRequestOptions {
   modelDisplayName: string;
   /** 上下文窗口 token；缺省从模型配置 contextWindow 解析 */
   windowTokens?: number;
+  /** 动态系统提示附加段（代码模式 SDK；由 agent 引擎按当前工具集生成） */
+  promptExtras?: PromptExtraSection[] | null;
 }
 
 export class ContextEngineServiceImpl {
@@ -207,6 +209,7 @@ export class ContextEngineServiceImpl {
       model: opts.model,
       modelDisplayName: opts.modelDisplayName,
       windowTokens,
+      promptExtras: opts.promptExtras ?? null,
     });
 
     // 图片「只发一次」：缓存本轮内联发送的图片消息引用（等待调用方确认/丢弃）
@@ -223,6 +226,7 @@ export class ContextEngineServiceImpl {
       skillName,
       name => this.resolveSkillPrompt(name),
       this.buildRulesSectionForTelemetry(opts.cwd),
+      opts.promptExtras ?? null,
     );
     const sentChars = messagesChars(
       prepared.messages.map(m => ({

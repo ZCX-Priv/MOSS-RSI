@@ -7,6 +7,7 @@ export {
   getSystemSections,
   invalidateSystemPromptCache,
 } from './system-prompt';
+export type { PromptExtraSection, RulesSectionInput } from './system-prompt';
 export {
   buildEnvContextMessage,
   ensureEnvContext,

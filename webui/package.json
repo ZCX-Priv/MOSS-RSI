@@ -45,6 +45,7 @@
     "cronstrue": "^3.24.0",
     "docx-preview": "^0.4.0",
     "dxf-render": "^1.7.1",
+    "echarts": "^6.1.0",
     "epubjs": "^0.3.93",
     "flv.js": "^1.6.2",
     "fontkit": "^2.0.4",

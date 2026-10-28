@@ -115,6 +115,7 @@ import { CompactionCard } from '../shared/CompactionCard';
 import { MaxTurnsNoticeCard } from '../shared/MaxTurnsNoticeCard';
 import { OutputLimitNoticeCard } from '../shared/OutputLimitNoticeCard';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
+import { RunCodeCard } from '../shared/RunCodeCard';
 import {
   useStore,
   DEFAULT_SIDEBAR_TABS,
@@ -2454,12 +2455,18 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
     );
   }
 
-  // 工具调用分流：agent 调用走专属卡片，其余走通用折叠卡（todo/ask 另有专属渲染）
+  // 工具调用分流：agent 调用走专属卡片，run_code 走程序/界面卡，其余走通用折叠卡（todo/ask 另有专属渲染）
   const agentCalls = message.toolCalls?.filter((tc) => isAgentCall(tc)) ?? [];
+  const runCodeCalls = message.toolCalls?.filter((tc) => tc.name === 'run_code') ?? [];
   const otherCalls =
     message.toolCalls?.filter(
-      (tc) => tc.name !== 'todo' && tc.name !== 'ask' && !isAgentCall(tc),
+      (tc) => tc.name !== 'todo' && tc.name !== 'ask' && tc.name !== 'run_code' && !isAgentCall(tc),
     ) ?? [];
+  // todo 卡片：原生 todo 调用或 run_code 嵌套 todo（快照挂在外层消息上）
+  const todoSnapshot = message.todoSnapshot ?? todos;
+  const showTodoCard =
+    todoSnapshot.length > 0 &&
+    (message.todoSnapshot !== undefined || (message.toolCalls?.some((tc) => tc.name === 'todo') ?? false));
 
   // 模型请求失败「系统错误卡片」：实时（WS error）与历史恢复（system-error 消息）同构渲染。
   // 顶部固定标题 + 右侧「错误诊断」按钮；底部操作栏（复制 + 重新生成）仅在回复结尾出现，且不含 Harness 诊断。
@@ -2559,11 +2566,9 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           })}
         />
       )}
-      {/* todo 工具调用 → 在任务流中渲染 TodoProgressCard（像其他工具一样在调用位置显示）。
+      {/* todo 工具调用（含 run_code 嵌套 todo）→ 在任务流中渲染 TodoProgressCard。
           渲染条件基于消息自身快照（?? 回落到 store）：store 被清空不牵连历史卡片。 */}
-      {message.toolCalls?.some((tc) => tc.name === 'todo') && (message.todoSnapshot ?? todos).length > 0 && (
-        <TodoProgressCard todos={message.todoSnapshot ?? todos} variant="inline" />
-      )}
+      {showTodoCard && <TodoProgressCard todos={todoSnapshot} variant="inline" />}
       {/* ask 工具调用 → 渲染为可折叠问答卡片（默认折叠；仅已完成、有结果时渲染；进行中的由底部 AskPromptCard 处理） */}
       {message.toolCalls?.filter((tc) => tc.name === 'ask').map((tc) => {
         const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
@@ -2687,7 +2692,26 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           </details>
         );
       })}
-      {/* 非 todo/ask/agent 工具调用（可折叠：展开显示参数与结果）。
+      {/* run_code 专属卡片：程序 / 日志 / 工具调用 / 界面 */}
+      {runCodeCalls.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {runCodeCalls.map((tc) => {
+            const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
+            const indexed = toolResults.get(tc.id);
+            return (
+              <RunCodeCard
+                key={tc.id}
+                toolCall={tc}
+                result={matchedResult?.result}
+                fallbackText={indexed?.text}
+                fallbackIsError={indexed?.isError}
+                iconMap={toolIconMap}
+              />
+            );
+          })}
+        </div>
+      )}
+      {/* 非 todo/ask/agent/run_code 工具调用（可折叠：展开显示参数与结果）。
           agent 工具已由上方专属卡片渲染。 */}
       {otherCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">

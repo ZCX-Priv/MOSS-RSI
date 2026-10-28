@@ -23,6 +23,7 @@ import { useStore } from '../../store';
 import { stripInjectBlock } from '../../lib/inject-block';
 import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-preview';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
+import { RunCodeCard } from '../shared/RunCodeCard';
 import { buildToolResultIndex, type ToolResultEntry } from './agent-calls';
 import type { TaskMessage } from '../../types/api';
 
@@ -160,6 +161,18 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
       {message.toolCalls?.map((tc) => {
         const matched = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         const indexed = toolResultIndex.get(tc.id);
+        if (tc.name === 'run_code') {
+          return (
+            <RunCodeCard
+              key={tc.id}
+              toolCall={tc}
+              result={matched?.result}
+              fallbackText={indexed?.text}
+              fallbackIsError={indexed?.isError}
+              iconMap={iconMap}
+            />
+          );
+        }
         return (
           <ToolCallDetails
             key={tc.id}

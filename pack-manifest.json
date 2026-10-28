@@ -1,0 +1,821 @@
+﻿[
+  {
+    "id": "@solo-thinker/moss@1.2.0",
+    "name": "@solo-thinker/moss",
+    "version": "1.2.0",
+    "size": 4858303,
+    "unpackedSize": 28775720,
+    "shasum": "44a47343963c09bb5753c6f7411463be961e2112",
+    "integrity": "sha512-7qi75XOoRwZ+qaCxuZLrr3VS/G+V5h2vZCBLhUMU4LeyHM8ZbTVPQf3i8i6poSTBc1mVj5XoB4PzVlx78B+7Eg==",
+    "filename": "solo-thinker-moss-1.2.0.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1069,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 20873,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/compact/compaction.md",
+        "size": 1459,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/context/pressure.md",
+        "size": 487,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/file-index/sag-extract.md",
+        "size": 615,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/heal/tool-error.md",
+        "size": 377,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/insight/cause.md",
+        "size": 510,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/insight/harness.md",
+        "size": 528,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/insight/resource.md",
+        "size": 311,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/main/identity.md",
+        "size": 1510,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/main/system.md",
+        "size": 26673,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/mcp/task-summary.md",
+        "size": 344,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/memory/distill-retry.md",
+        "size": 86,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/memory/distill.md",
+        "size": 1126,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/subagent/templates/coder.md",
+        "size": 937,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/subagent/templates/explorer.md",
+        "size": 896,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/subagent/templates/planner.md",
+        "size": 689,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/subagent/templates/reviewer.md",
+        "size": 922,
+        "mode": 420
+      },
+      {
+        "path": "agent/prompts/subagent/usage-zh.md",
+        "size": 807,
+        "mode": 420
+      },
+      {
+        "path": "bin/moss.js",
+        "size": 2892,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/background.js",
+        "size": 18329,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/icons/icon16.png",
+        "size": 971,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/icons/icon32.png",
+        "size": 3054,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/icons/icon48.png",
+        "size": 6267,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/icons/icon128.png",
+        "size": 37310,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/manifest.json",
+        "size": 987,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/offscreen.html",
+        "size": 301,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/offscreen.js",
+        "size": 10761,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/popup.css",
+        "size": 2080,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/popup.html",
+        "size": 1545,
+        "mode": 420
+      },
+      {
+        "path": "browser-extension/popup.js",
+        "size": 2362,
+        "mode": 420
+      },
+      {
+        "path": "config/api.json",
+        "size": 38,
+        "mode": 420
+      },
+      {
+        "path": "config/config.json",
+        "size": 2553,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/compact/compaction.md",
+        "size": 1459,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/context/pressure.md",
+        "size": 487,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/file-index/sag-extract.md",
+        "size": 615,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/heal/tool-error.md",
+        "size": 377,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/insight/cause.md",
+        "size": 510,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/insight/harness.md",
+        "size": 528,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/insight/resource.md",
+        "size": 311,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/main/identity.md",
+        "size": 1510,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/main/system.md",
+        "size": 26673,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/mcp/task-summary.md",
+        "size": 344,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/memory/distill-retry.md",
+        "size": 86,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/memory/distill.md",
+        "size": 1126,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/subagent/templates/coder.md",
+        "size": 937,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/subagent/templates/explorer.md",
+        "size": 896,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/subagent/templates/planner.md",
+        "size": 689,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/subagent/templates/reviewer.md",
+        "size": 922,
+        "mode": 420
+      },
+      {
+        "path": "dist/agent/prompts/subagent/usage-zh.md",
+        "size": 807,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/background.js",
+        "size": 18329,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/icons/icon16.png",
+        "size": 971,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/icons/icon32.png",
+        "size": 3054,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/icons/icon48.png",
+        "size": 6267,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/icons/icon128.png",
+        "size": 37310,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/manifest.json",
+        "size": 987,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/offscreen.html",
+        "size": 301,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/offscreen.js",
+        "size": 10761,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/popup.css",
+        "size": 2080,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/popup.html",
+        "size": 1545,
+        "mode": 420
+      },
+      {
+        "path": "dist/browser-extension/popup.js",
+        "size": 2362,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/ask/index.ts",
+        "size": 8549,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/ask/tool.json",
+        "size": 8570,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/automation/index.ts",
+        "size": 7080,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/automation/tool.json",
+        "size": 6669,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/browser/index.ts",
+        "size": 19379,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/browser/tool.json",
+        "size": 13049,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/computer/actions.ts",
+        "size": 15442,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/computer/index.ts",
+        "size": 7594,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/computer/tool.json",
+        "size": 16835,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/context/index.ts",
+        "size": 4454,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/context/tool.json",
+        "size": 3074,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/copy/index.ts",
+        "size": 12483,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/copy/tool.json",
+        "size": 3089,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/delete/index.ts",
+        "size": 15532,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/delete/tool.json",
+        "size": 4009,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/edit/index.ts",
+        "size": 22554,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/edit/tool.json",
+        "size": 6923,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/glob/index.ts",
+        "size": 10749,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/glob/tool.json",
+        "size": 4949,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/grep/index.ts",
+        "size": 17331,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/grep/tool.json",
+        "size": 7413,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/index.ts",
+        "size": 16123,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/loader.ts",
+        "size": 8232,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/manifest.ts",
+        "size": 7902,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/mcp/index.ts",
+        "size": 5299,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/mcp/tool.json",
+        "size": 1798,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/memory/index.ts",
+        "size": 5435,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/memory/tool.json",
+        "size": 3690,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/move/index.ts",
+        "size": 11736,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/move/tool.json",
+        "size": 3461,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/ebook.ts",
+        "size": 6176,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/image.ts",
+        "size": 1282,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/notebook.ts",
+        "size": 2808,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/office-markdown.ts",
+        "size": 10923,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/office.ts",
+        "size": 15542,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/ole.ts",
+        "size": 11957,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/pdf.ts",
+        "size": 2960,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/text.ts",
+        "size": 7871,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/handlers/video.ts",
+        "size": 16929,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/index.ts",
+        "size": 8905,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/shared/analysis-dir.ts",
+        "size": 4471,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/shared/detector.ts",
+        "size": 2915,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/shared/minified.ts",
+        "size": 1869,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/shared/streaming.ts",
+        "size": 1576,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/read/tool.json",
+        "size": 4060,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/registry.ts",
+        "size": 7160,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/shared/agent-seed.ts",
+        "size": 8200,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/shared/file-index-hint.ts",
+        "size": 1598,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/shared/frontmatter.ts",
+        "size": 2139,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/shared/search-core.ts",
+        "size": 11960,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/shared/skill-registry.ts",
+        "size": 26075,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/skill/index.ts",
+        "size": 4496,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/skill/tool.json",
+        "size": 1737,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/sort.ts",
+        "size": 1514,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/terminal/index.ts",
+        "size": 16584,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/terminal/tool.json",
+        "size": 6219,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/todo/index.ts",
+        "size": 9093,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/todo/shared/store.ts",
+        "size": 3149,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/todo/tool.json",
+        "size": 6437,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/types.ts",
+        "size": 7034,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/use_command/registry.ts",
+        "size": 12199,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/fetcher.ts",
+        "size": 19295,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/html-extract.ts",
+        "size": 8075,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/index.ts",
+        "size": 13220,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/local-engines.ts",
+        "size": 18159,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/providers.ts",
+        "size": 15269,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/web/tool.json",
+        "size": 4846,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/write/handlers/text.ts",
+        "size": 4057,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/write/index.ts",
+        "size": 7411,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/write/shared/diff-guard.ts",
+        "size": 1789,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/write/shared/streaming.ts",
+        "size": 6397,
+        "mode": 420
+      },
+      {
+        "path": "dist/modules/tools/write/tool.json",
+        "size": 2022,
+        "mode": 420
+      },
+      {
+        "path": "dist/server.js",
+        "size": 12746261,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/bash/tree-sitter-bash.wasm",
+        "size": 1359986,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/c/tree-sitter-c.wasm",
+        "size": 626238,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/cpp/tree-sitter-cpp.wasm",
+        "size": 3455448,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/css/tree-sitter-css.wasm",
+        "size": 129004,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/go/tree-sitter-go.wasm",
+        "size": 217568,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/html/tree-sitter-html.wasm",
+        "size": 18888,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/java/tree-sitter-java.wasm",
+        "size": 419402,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/javascript/tree-sitter-javascript.wasm",
+        "size": 412971,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/json/tree-sitter-json.wasm",
+        "size": 6148,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/lua/tree-sitter-lua.wasm",
+        "size": 49488,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/markdown/tree-sitter-markdown.wasm",
+        "size": 380670,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/php/tree-sitter-php.wasm",
+        "size": 1060608,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/python/tree-sitter-python.wasm",
+        "size": 457855,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/ruby/tree-sitter-ruby.wasm",
+        "size": 2121041,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/rust/tree-sitter-rust.wasm",
+        "size": 1112779,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/toml/tree-sitter-toml.wasm",
+        "size": 25016,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/tsx/tree-sitter-tsx.wasm",
+        "size": 1460548,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/typescript/tree-sitter-typescript.wasm",
+        "size": 1428068,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/tree-sitter-wasm/out/yaml/tree-sitter-yaml.wasm",
+        "size": 192396,
+        "mode": 420
+      },
+      {
+        "path": "dist/vendor/web-tree-sitter.wasm",
+        "size": 201535,
+        "mode": 420
+      },
+      {
+        "path": "mcps/.gitkeep",
+        "size": 0,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 2391,
+        "mode": 420
+      },
+      {
+        "path": "skills/.gitkeep",
+        "size": 0,
+        "mode": 420
+      },
+      {
+        "path": "skills/code-review/SKILL.md",
+        "size": 1034,
+        "mode": 420
+      },
+      {
+        "path": "skills/explain/SKILL.md",
+        "size": 537,
+        "mode": 420
+      },
+      {
+        "path": "skills/plan/SKILL.md",
+        "size": 1792,
+        "mode": 420
+      },
+      {
+        "path": "skills/skill-creator/SKILL.md",
+        "size": 10354,
+        "mode": 420
+      }
+    ],
+    "entryCount": 161,
+    "bundled": []
+  }
+]

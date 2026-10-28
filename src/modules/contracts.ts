@@ -433,6 +433,7 @@ export type AgentEvent =
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string }
+  | { type: 'confirm-cancel'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; icon?: string; message?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string; providerError?: string; messageId?: string }

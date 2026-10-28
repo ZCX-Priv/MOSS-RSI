@@ -7,6 +7,20 @@
 export { MarkdownRenderer } from './markdown/MarkdownRenderer';
 export type { MarkdownRendererProps } from './markdown/MarkdownRenderer';
 
+// 代码块（RunCodeCard 的程序页签复用）
+export { CodeBlock } from './code/CodeBlock';
+
+// Intelligent UI（run_code 生成的交互界面）
+export { GenUIRenderer } from './genui/GenUIRenderer';
+export type {
+  GenUISpec,
+  GenUIDiagnostic,
+  GenUINode,
+  GenUIBinding,
+  GenUIAction,
+  GenUIStateValue,
+} from './genui/types';
+
 // 文件预览
 export { FilePreviewCard } from './file/FilePreviewCard';
 export { FilePreviewDialog } from './file/FilePreviewDialog';

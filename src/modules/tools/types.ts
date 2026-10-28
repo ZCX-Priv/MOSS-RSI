@@ -146,6 +146,16 @@ export interface ToolContext {
   toolConfig?: Record<string, unknown>;
   /** safety 模块已放行标记：agent 链路决策 allow 或 ask 用户同意后置 'allowed'，registry 据此跳过内部 requireConfirmation（非 agent 链路仍走兜底确认） */
   permissionDecision?: 'allowed';
+  /**
+   * 代码模式嵌套调用通道（仅 AgentEngine 注入）。
+   * 由 run_code 子进程控制帧触发，复用完整 safety / hooks / registry 管线；
+   * 嵌套调用的中间结果不回写会话上下文，只返回给程序。
+   */
+  invokeTool?: (
+    name: string,
+    args: unknown,
+    opts?: { callId?: string; signal?: AbortSignal },
+  ) => Promise<ToolResult>;
 }
 
 export type ToolEvent =

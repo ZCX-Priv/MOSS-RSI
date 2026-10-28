@@ -24,6 +24,16 @@ export interface RulesSectionInput {
   text: string | null;
 }
 
+/**
+ * 动态附加段（代码模式 SDK 等）。
+ * 不进入 mtime 缓存，由调用方保证字节稳定（工具/配置不变 → 每次请求完全一致）。
+ */
+export interface PromptExtraSection {
+  id: string;
+  title: string;
+  content: string;
+}
+
 /** 基本设定候选文件名（不含 .md），按拼接优先级排序；每个位置取第一个存在的文件 */
 const BASE_PROMPT_CANDIDATES: ReadonlyArray<ReadonlyArray<string>> = [
   ['system', 'soul'],
@@ -175,6 +185,7 @@ export function buildStaticSystemPrompt(
   env: Environment,
   skillPrompt?: string | null,
   rulesSection?: RulesSectionInput | null,
+  extras?: PromptExtraSection[] | null,
 ): string {
   seedBuiltinAgentPrompts(env);
   const userDir = join(env.dataDir, 'agent', 'prompts', 'main');
@@ -188,11 +199,16 @@ export function buildStaticSystemPrompt(
   ) {
     loadSystemPromptSegments(env, rulesSection);
   }
-  const joined = promptCache?.joined ?? '';
-  if (skillPrompt) {
-    return `${joined}\n\n---\n\n${skillPrompt}`;
+  const parts = [promptCache?.joined ?? ''];
+  if (skillPrompt) parts.push(skillPrompt);
+  if (extras) {
+    for (const extra of extras) {
+      if (extra && typeof extra.content === 'string' && extra.content.trim() !== '') {
+        parts.push(extra.content);
+      }
+    }
   }
-  return joined;
+  return parts.filter((part) => part.trim() !== '').join('\n\n---\n\n');
 }
 
 /**
@@ -206,6 +222,7 @@ export function getSystemSections(
   skillName?: string,
   resolveSkillPrompt?: (name: string) => string | null,
   rulesSection?: RulesSectionInput | null,
+  extras?: PromptExtraSection[] | null,
 ): SystemSection[] {
   const segments = loadSystemPromptSegments(env, rulesSection);
   if (skillName && resolveSkillPrompt) {
@@ -217,6 +234,18 @@ export function getSystemSections(
         tokens: 0,
         content: `# Active Skill: ${skillName}\n\n${skillPrompt}`,
         defaultOpen: true,
+      });
+    }
+  }
+  if (extras) {
+    for (const extra of extras) {
+      if (!extra || typeof extra.content !== 'string' || extra.content.trim() === '') continue;
+      segments.push({
+        id: extra.id,
+        title: extra.title,
+        tokens: 0,
+        content: extra.content,
+        defaultOpen: false,
       });
     }
   }

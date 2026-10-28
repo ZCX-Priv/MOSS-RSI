@@ -75,7 +75,7 @@ import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
 import { api } from '../../api/http';
 import { TOOL_ICON_MAP } from '../../lib/tool-icons';
 import { SKILL_ICON_CHOICES, resolveSkillIcon } from '../../lib/skill-icons';
-import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, FileIndexConfig, ToolItem, AgentDetail } from '../../types/api';
+import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, FileIndexConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
 import { ToolEditDialog } from './settings/ToolEditDialog';
 import { CreateAgentDialog } from '../settings/CreateAgentDialog';
 import {
@@ -2027,6 +2027,11 @@ export function ToolsSettings() {
   const [editingTool, setEditingTool] = useState<ToolItem | null>(null);
   const { appConfig, updateAppConfig } = useConfig();
   const [maxTurnsDraft, setMaxTurnsDraft] = useState('');
+  // 代码模式（PTC + Intelligent UI）草稿
+  const [codeTimeoutDraft, setCodeTimeoutDraft] = useState('');
+  const [codeMaxCharsDraft, setCodeMaxCharsDraft] = useState('');
+  const [codeMaxOutputDraft, setCodeMaxOutputDraft] = useState('');
+  const [codeMaxParallelDraft, setCodeMaxParallelDraft] = useState('');
 
   /** 编辑对话框保存：写配置成功后 toast 并关闭 */
   const handleSaveToolConfig = async (name: string, config: Record<string, unknown>) => {
@@ -2038,11 +2043,36 @@ export function ToolsSettings() {
   const agentCfg = appConfig?.agent;
   const maxTurns = agentCfg?.maxTurns ?? 0;
   const unlimited = maxTurns === 0;
+  const codeMode: CodeModeConfig = agentCfg?.codeMode ?? {
+    enabled: true,
+    presentation: 'standard',
+    uiEnabled: true,
+    timeoutMs: 120_000,
+    maxCodeChars: 20_000,
+    maxOutputBytes: 262_144,
+    maxParallelSubCalls: 10,
+  };
 
   // config 外部变更（含 WS 热更新）时回填输入框草稿
   useEffect(() => {
     setMaxTurnsDraft(maxTurns === 0 ? '' : String(maxTurns));
   }, [maxTurns]);
+
+  useEffect(() => {
+    setCodeTimeoutDraft(String(Math.round(codeMode.timeoutMs / 1000)));
+    setCodeMaxCharsDraft(String(codeMode.maxCodeChars));
+    setCodeMaxOutputDraft(String(Math.round(codeMode.maxOutputBytes / 1024)));
+    setCodeMaxParallelDraft(String(codeMode.maxParallelSubCalls));
+  }, [codeMode.timeoutMs, codeMode.maxCodeChars, codeMode.maxOutputBytes, codeMode.maxParallelSubCalls]);
+
+  const patchCodeMode = async (patch: Partial<CodeModeConfig>) => {
+    if (!agentCfg) return;
+    try {
+      await updateAppConfig({ agent: { ...agentCfg, codeMode: { ...codeMode, ...patch } } });
+    } catch {
+      // toast 已在 useConfig 内处理
+    }
+  };
 
   const patchMaxTurns = async (v: number) => {
     if (!agentCfg || v === maxTurns) return;
@@ -2069,6 +2099,26 @@ export function ToolsSettings() {
     const clamped = Math.max(200, Math.min(100000, n));
     setMaxTurnsDraft(String(clamped));
     void patchMaxTurns(clamped);
+  };
+
+  /** 数字输入提交：clamp 到范围内；非法回退当前值 */
+  const commitCodeNumber = (
+    draft: string,
+    current: number,
+    min: number,
+    max: number,
+    apply: (n: number) => Promise<void>,
+    resetDraft: (value: number) => void,
+  ): void => {
+    const raw = draft.trim();
+    if (raw === '') {
+      resetDraft(current);
+      return;
+    }
+    const n = Math.round(Number(raw));
+    const clamped = Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : current;
+    resetDraft(clamped);
+    if (clamped !== current) void apply(clamped);
   };
 
   const q = query.trim().toLowerCase();
@@ -2139,6 +2189,178 @@ export function ToolsSettings() {
             <div className="py-3 text-xs text-muted-foreground">{t('settings.tools.maxTurnsMinHint')}</div>
           )}
         </div>
+      </div>
+
+      {/* 代码模式（PTC + Intelligent UI）：呈现方式与执行预算 */}
+      <div className="flex flex-col gap-3">
+        <div className="text-sm font-medium text-foreground">{t('settings.tools.codeModeTitle')}</div>
+        <div className="flex flex-col divide-y divide-border rounded-lg border border-border px-3">
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeEnabled')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeEnabledDesc')}</span>
+            </div>
+            <Switch
+              checked={codeMode.enabled}
+              onCheckedChange={(v) => void patchCodeMode({ enabled: v })}
+              aria-label={t('settings.tools.codeModeEnabled')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModePresentation')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModePresentationDesc')}</span>
+            </div>
+            <Select
+              value={codeMode.presentation}
+              onValueChange={(v) => void patchCodeMode({ presentation: v as CodeModeConfig['presentation'] })}
+              disabled={!codeMode.enabled}
+            >
+              <SelectTrigger className="h-8 w-44 shrink-0" aria-label={t('settings.tools.codeModePresentation')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="standard">{t('settings.tools.codeModeStandard')}</SelectItem>
+                <SelectItem value="ptc">{t('settings.tools.codeModePtc')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeUiEnabled')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeUiEnabledDesc')}</span>
+            </div>
+            <Switch
+              checked={codeMode.uiEnabled}
+              disabled={!codeMode.enabled}
+              onCheckedChange={(v) => void patchCodeMode({ uiEnabled: v })}
+              aria-label={t('settings.tools.codeModeUiEnabled')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeTimeout')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeTimeoutDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={600}
+              value={codeTimeoutDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeTimeoutDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeTimeoutDraft,
+                  Math.round(codeMode.timeoutMs / 1000),
+                  1,
+                  600,
+                  (n) => patchCodeMode({ timeoutMs: n * 1000 }),
+                  (n) => setCodeTimeoutDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-24 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeTimeout')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxChars')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxCharsDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1000}
+              max={200000}
+              value={codeMaxCharsDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeMaxCharsDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeMaxCharsDraft,
+                  codeMode.maxCodeChars,
+                  1000,
+                  200000,
+                  (n) => patchCodeMode({ maxCodeChars: n }),
+                  (n) => setCodeMaxCharsDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-28 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeMaxChars')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxOutput')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxOutputDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={1024}
+              value={codeMaxOutputDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeMaxOutputDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeMaxOutputDraft,
+                  Math.round(codeMode.maxOutputBytes / 1024),
+                  1,
+                  1024,
+                  (n) => patchCodeMode({ maxOutputBytes: n * 1024 }),
+                  (n) => setCodeMaxOutputDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-24 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeMaxOutput')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxParallel')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxParallelDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={32}
+              value={codeMaxParallelDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeMaxParallelDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeMaxParallelDraft,
+                  codeMode.maxParallelSubCalls,
+                  1,
+                  32,
+                  (n) => patchCodeMode({ maxParallelSubCalls: n }),
+                  (n) => setCodeMaxParallelDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-20 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeMaxParallel')}
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">{t('settings.tools.codeModeHint')}</p>
       </div>
 
       {/* 工具列表：小标题 + 卡片列表 */}
