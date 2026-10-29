@@ -2,8 +2,11 @@
 // Browser 模块契约：浏览器实例 / AI 标签页 / CDP 页面操作 / 内置 Chrome / 扩展桥接。
 // 由 browser 模块实现并注册到 ServiceNames.BROWSER；browser 工具与 /api/browser/* 共用。
 
-/** 实例来源：builtin=MOSS 启动的内置 Chrome，external=用户浏览器里的扩展 */
-export type BrowserInstanceKind = 'builtin' | 'external';
+/** 实例来源：builtin=MOSS 启动的内置 Chrome，external=用户浏览器里的扩展，cdp=外部 CDP 直连 */
+export type BrowserInstanceKind = 'builtin' | 'external' | 'cdp';
+
+/** 浏览器控制模式：内置 Chrome / 浏览器扩展 / 外部 CDP 直连 */
+export type BrowserMode = 'builtin' | 'extension' | 'cdp';
 
 /** 浏览器目标选择：auto / builtin / external / 具体实例 id */
 export type BrowserTarget = string;
@@ -11,6 +14,10 @@ export type BrowserTarget = string;
 /** 工具运行时可配置参数（config.tools.browser） */
 export interface BrowserToolConfig {
   enabled: boolean;
+  /** 默认控制模式（browser 工具未显式指定 target 时使用） */
+  mode: BrowserMode;
+  /** CDP 模式默认端点（http(s)://host:port、host:port、纯端口或 ws://） */
+  cdpEndpoint: string;
   timeoutMs: number;
   bridgePort: number;
   bridgeToken: string;
@@ -96,11 +103,29 @@ export interface BrowserTabInfo {
   createdAt: number;
 }
 
+/** 外部 CDP 直连状态（浏览器级 WS） */
+export interface BrowserCdpStatus {
+  connected: boolean;
+  /** 配置/本次使用的端点 */
+  endpoint: string;
+  /** 实际连接的浏览器级 WebSocket 地址 */
+  resolvedUrl: string | null;
+  /** Browser.getVersion 的 product（如 Chrome/145.0.0.0） */
+  product: string | null;
+  version: string | null;
+  /** 最近一次已知的 page target 数量 */
+  targetCount: number;
+  error: string | null;
+}
+
 /** /api/browser/status 与工具 status 的共享状态 */
 export interface BrowserStatus {
+  /** 当前默认控制模式（tools.browser.mode） */
+  mode: BrowserMode;
   bridge: BrowserBridgeStatus;
   instances: BrowserInstanceInfo[];
   builtin: BrowserBuiltinStatus;
+  cdp: BrowserCdpStatus;
   extension: BrowserExtensionStatus;
   cft: BrowserCftStatus;
   installer: BrowserInstallerStatus;
@@ -121,6 +146,8 @@ export interface BrowserOpenOptions {
   target?: BrowserTarget;
   url?: string;
   timeoutMs?: number;
+  /** 临时 CDP 端点；传入时本次及后续调用使用该端点（覆盖目标为 cdp） */
+  cdpEndpoint?: string;
 }
 
 /** 导航参数 */
@@ -310,6 +337,10 @@ export interface BrowserService {
   destroy(): Promise<void>;
 
   getStatus(): BrowserStatus;
+  /** 连接外部 CDP 端点（不传时使用配置的 cdpEndpoint） */
+  connectCdp(endpoint?: string): Promise<BrowserCdpStatus>;
+  /** 断开外部 CDP 连接（同时清理该连接的 AI 标签页） */
+  disconnectCdp(): Promise<void>;
   /** 播种扩展并返回目录绝对路径 */
   ensureExtension(): Promise<BrowserExtensionStatus>;
   /** 在资源管理器中打开扩展目录 */

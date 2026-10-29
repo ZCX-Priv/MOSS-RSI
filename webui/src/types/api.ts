@@ -1668,10 +1668,13 @@ export interface BrowserInstallerStatus {
   browsers: BrowserInstallerBrowser[];
 }
 
+/** 浏览器控制模式：内置 / 插件（扩展）/ 外部 CDP */
+export type BrowserMode = 'builtin' | 'extension' | 'cdp';
+
 export interface BrowserTabInfo {
   tab: string;
   instanceId: string;
-  instanceKind: 'builtin' | 'external';
+  instanceKind: 'builtin' | 'external' | 'cdp';
   browserName: string;
   browserVersion: string;
   nativeTabId: number;
@@ -1683,10 +1686,24 @@ export interface BrowserTabInfo {
   createdAt: number;
 }
 
+/** 外部 CDP 直连状态 */
+export interface BrowserCdpStatus {
+  connected: boolean;
+  endpoint: string;
+  resolvedUrl: string | null;
+  product: string | null;
+  version: string | null;
+  targetCount: number;
+  error: string | null;
+}
+
 export interface BrowserStatus {
+  /** 当前默认控制模式（tools.browser.mode） */
+  mode: BrowserMode;
   bridge: BrowserBridgeStatus;
   instances: BrowserInstanceInfo[];
   builtin: BrowserBuiltinStatus;
+  cdp: BrowserCdpStatus;
   extension: BrowserExtensionStatus;
   cft: BrowserCftStatus;
   installer: BrowserInstallerStatus;

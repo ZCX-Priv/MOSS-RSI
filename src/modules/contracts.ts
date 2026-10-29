@@ -32,6 +32,8 @@ export type {
 export type {
   BrowserService,
   BrowserStatus,
+  BrowserMode,
+  BrowserCdpStatus,
   BrowserInstanceInfo,
   BrowserTabInfo,
   BrowserBuiltinStatus,

@@ -349,6 +349,11 @@ export const api = {
     request<{ ok: boolean; path: string }>('POST', '/api/browser/extension/open'),
   controlBrowserBuiltin: (action: 'launch' | 'close') =>
     request<BrowserStatus>('POST', '/api/browser/builtin', { action }),
+  controlBrowserCdp: (action: 'connect' | 'disconnect', endpoint?: string) =>
+    request<BrowserStatus>('POST', '/api/browser/cdp', {
+      action,
+      ...(endpoint ? { endpoint } : {}),
+    }),
   downloadChromeForTesting: () =>
     request<BrowserStatus>('POST', '/api/browser/chrome-for-testing', { action: 'download' }),
   runBrowserInstaller: () =>

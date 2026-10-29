@@ -14,6 +14,7 @@ export type SettingsSection =
   | 'tools'
   | 'safety'
   | 'browser'
+  | 'computer'
   | 'remote'
   | 'logs'
   | 'index'

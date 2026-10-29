@@ -58,6 +58,7 @@ import {
   createBrowserStatusHandler,
   createBrowserOpenExtensionHandler,
   createBrowserBuiltinHandler,
+  createBrowserCdpHandler,
   createBrowserChromeForTestingHandler,
   createBrowserInstallHandler,
 } from './routes/browser';
@@ -448,6 +449,7 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/browser/status', handler: createBrowserStatusHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/browser/extension/open', handler: createBrowserOpenExtensionHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/browser/builtin', handler: createBrowserBuiltinHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/browser/cdp', handler: createBrowserCdpHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/browser/chrome-for-testing', handler: createBrowserChromeForTestingHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/browser/install', handler: createBrowserInstallHandler(services), auth: true });
     // # 文件提及菜单：工作目录递归文件名搜索

@@ -1,7 +1,8 @@
 // src/modules/server/routes/browser.ts
-// GET  /api/browser/status                  - 桥接/实例/内置 Chrome/扩展/CfT/AI 标签页
+// GET  /api/browser/status                  - 模式/桥接/实例/内置 Chrome/CDP/扩展/CfT/AI 标签页
 // POST /api/browser/extension/open          - 打开扩展目录（引导用户加载已解压扩展）
 // POST /api/browser/builtin                 - {action:'launch'|'close'} 启停内置 Chrome
+// POST /api/browser/cdp                     - {action:'connect'|'disconnect', endpoint?} 外部 CDP 直连
 // POST /api/browser/chrome-for-testing      - {action:'download'} 后台下载 Chrome for Testing
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
@@ -51,6 +52,40 @@ export function createBrowserBuiltinHandler(services: ServiceRegistry): RouteHan
       return { status: 200, body: service.getStatus() };
     }
     return { status: 400, body: { error: 'action must be launch or close' } };
+  };
+}
+
+/** POST /api/browser/cdp */
+export function createBrowserCdpHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const service = resolveBrowser(services);
+    if (!service) return { status: 503, body: { error: 'browser service unavailable' } };
+    const body = req.body;
+    const action =
+      body && typeof body === 'object' && typeof (body as { action?: unknown }).action === 'string'
+        ? (body as { action: string }).action
+        : '';
+    const endpoint =
+      body && typeof body === 'object' && typeof (body as { endpoint?: unknown }).endpoint === 'string'
+        ? (body as { endpoint: string }).endpoint.trim()
+        : '';
+
+    try {
+      if (action === 'connect') {
+        await service.connectCdp(endpoint || undefined);
+        return { status: 200, body: service.getStatus() };
+      }
+      if (action === 'disconnect') {
+        await service.disconnectCdp();
+        return { status: 200, body: service.getStatus() };
+      }
+      return { status: 400, body: { error: 'action must be connect or disconnect' } };
+    } catch (err) {
+      return {
+        status: 502,
+        body: { error: err instanceof Error ? err.message : String(err) },
+      };
+    }
   };
 }
 

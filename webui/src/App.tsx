@@ -38,6 +38,11 @@ import {
   MemorySettingsSection,
   RemoteSettingsSection,
   BrowserSettingsSection,
+  BrowserModeRedirect,
+  BrowserBuiltinSection,
+  BrowserExtensionSection,
+  BrowserCdpSection,
+  ComputerSettingsSection,
 } from './components/pages/SettingsPage';
 import { SearchModal } from './components/overlays/SearchModal';
 import { BrowserInstallConfirmDialog } from './components/overlays/BrowserInstallConfirmDialog';
@@ -271,7 +276,15 @@ export default function App() {
               </Route>
               <Route path="tools" element={<ToolsSettings />} />
               <Route path="safety" element={<SafetySettings />} />
-              <Route path="browser" element={<BrowserSettingsSection />} />
+              {/* 浏览器：Tab 容器（内置 / 插件 / CDP 三模式，路由驱动） */}
+              <Route path="browser" element={<BrowserSettingsSection />}>
+                <Route index element={<BrowserModeRedirect />} />
+                <Route path="builtin" element={<BrowserBuiltinSection />} />
+                <Route path="extension" element={<BrowserExtensionSection />} />
+                <Route path="cdp" element={<BrowserCdpSection />} />
+                <Route path="*" element={<Navigate to="/settings/browser/extension" replace />} />
+              </Route>
+              <Route path="computer" element={<ComputerSettingsSection />} />
               <Route path="remote" element={<RemoteSettingsSection />} />
               <Route path="logs" element={<LogsSettings />} />
               <Route path="about" element={<AboutSettings />} />

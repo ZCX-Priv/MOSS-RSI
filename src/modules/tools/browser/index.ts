@@ -46,7 +46,15 @@ function requireString(params: Record<string, unknown>, key: string): string {
 }
 
 function formatKind(kind: BrowserTabInfo['instanceKind']): string {
-  return kind === 'builtin' ? t('browserTool.kindBuiltin') : t('browserTool.kindExternal');
+  if (kind === 'builtin') return t('browserTool.kindBuiltin');
+  if (kind === 'cdp') return t('browserTool.kindCdp');
+  return t('browserTool.kindExternal');
+}
+
+function formatMode(mode: BrowserStatus['mode']): string {
+  if (mode === 'builtin') return t('browserTool.modeBuiltin');
+  if (mode === 'cdp') return t('browserTool.modeCdp');
+  return t('browserTool.modeExtension');
 }
 
 function formatTabLine(tab: BrowserTabInfo): string {
@@ -104,6 +112,26 @@ function sleep(ms: number): Promise<void> {
 function formatStatus(status: BrowserStatus): string {
   const lines: string[] = [];
   lines.push(t('browserTool.statusTitle'));
+  lines.push(t('browserTool.modeLine', { mode: formatMode(status.mode) }));
+
+  const cdp = status.cdp;
+  if (cdp.connected) {
+    lines.push(
+      t('browserTool.cdpConnectedLine', {
+        url: cdp.resolvedUrl ?? cdp.endpoint,
+        product: cdp.product ?? '-',
+        targets: cdp.targetCount,
+      }),
+    );
+  } else {
+    lines.push(
+      t('browserTool.cdpDisconnectedLine', {
+        endpoint: cdp.endpoint,
+        error: cdp.error ? ` · ${cdp.error}` : '',
+      }),
+    );
+  }
+
   if (status.bridge.running) {
     lines.push(
       t('browserTool.bridgeRunning', {
@@ -200,9 +228,15 @@ export default {
 
     const tab = pickString(params, 'tab');
     const browser = pickString(params, 'browser');
+    const cdpEndpoint = pickString(params, 'cdp_endpoint');
     const timeoutMs = pickNumber(params, 'timeout_ms');
 
     try {
+      // CDP 按次端点：先连接，再执行本次动作（后续调用沿用该连接）
+      if (cdpEndpoint && (action === 'open' || action === 'status' || action === 'tabs')) {
+        await service.connectCdp(cdpEndpoint);
+      }
+
       switch (action) {
         case 'status':
           return textResult(formatStatus(service.getStatus()));
@@ -222,7 +256,8 @@ export default {
 
         case 'open': {
           const info = await service.openTab({
-            ...(browser ? { target: browser } : {}),
+            target: cdpEndpoint ? 'cdp' : browser,
+            ...(cdpEndpoint ? { cdpEndpoint } : {}),
             ...(pickString(params, 'url') ? { url: pickString(params, 'url') } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           });
@@ -239,7 +274,7 @@ export default {
 
         case 'tabs': {
           const all = pickBoolean(params, 'all') === true;
-          const tabs = await service.listTabs(all, browser);
+          const tabs = await service.listTabs(all, cdpEndpoint ? 'cdp' : browser);
           if (tabs.length === 0) {
             return textResult(all ? t('browserTool.nativeTabsEmpty') : t('browserTool.tabsNone'));
           }

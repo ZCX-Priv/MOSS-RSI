@@ -97,8 +97,14 @@ export { HooksSettingsSection } from './settings/HooksSettingsSection';
 export { MemorySettingsSection } from './settings/MemorySettingsSection';
 // 远程控制设置分区（App.tsx 从本模块导入）
 export { RemoteSettingsSection } from './settings/RemoteSettingsSection';
-// 浏览器设置分区（App.tsx 从本模块导入）
+// 浏览器设置分区（App.tsx 从本模块导入）：容器 + 三模式子页
 export { BrowserSettingsSection } from './settings/BrowserSettingsSection';
+export { BrowserModeRedirect } from './settings/BrowserSettingsSection';
+export { BrowserBuiltinSection } from './settings/BrowserBuiltinSection';
+export { BrowserExtensionSection } from './settings/BrowserExtensionSection';
+export { BrowserCdpSection } from './settings/BrowserCdpSection';
+// 电脑控制设置分区（cua-driver 状态与 computer 工具参数）
+export { ComputerSettingsSection } from './settings/ComputerSettingsSection';
 
 export interface NavItem {
   id: SettingsSection;
@@ -115,6 +121,7 @@ export const settingsNavItems: NavItem[] = [
   { id: 'tools', labelKey: 'settings.nav.tools', Icon: Wrench },
   { id: 'safety', labelKey: 'settings.nav.safety', Icon: ShieldCheck },
   { id: 'browser', labelKey: 'settings.nav.browser', Icon: AppWindow },
+  { id: 'computer', labelKey: 'settings.nav.computer', Icon: Monitor },
   { id: 'remote', labelKey: 'settings.nav.remote', Icon: Smartphone },
   { id: 'logs', labelKey: 'settings.nav.logs', Icon: ScrollText },
   { id: 'commands', labelKey: 'settings.nav.commands', Icon: Terminal },
@@ -157,6 +164,12 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.tools.maxTurnsLabel', descriptionKey: 'settings.tools.maxTurnsDesc', section: 'tools' },
   { labelKey: 'settings.nav.safety', section: 'safety' },
   { labelKey: 'settings.nav.browser', section: 'browser' },
+  { labelKey: 'settings.browser.modeTabs.builtin', descriptionKey: 'settings.browser.modeTabs.builtinDesc', section: 'browser' },
+  { labelKey: 'settings.browser.modeTabs.extension', descriptionKey: 'settings.browser.modeTabs.extensionDesc', section: 'browser' },
+  { labelKey: 'settings.browser.modeTabs.cdp', descriptionKey: 'settings.browser.modeTabs.cdpDesc', section: 'browser' },
+  { labelKey: 'settings.nav.computer', section: 'computer' },
+  { labelKey: 'settings.computer.statusTitle', descriptionKey: 'settings.computer.statusDesc', section: 'computer' },
+  { labelKey: 'settings.computer.paramsTitle', descriptionKey: 'settings.computer.paramsDesc', section: 'computer' },
   { labelKey: 'settings.nav.remote', section: 'remote' },
   { labelKey: 'settings.remote.title', descriptionKey: 'settings.remote.desc', section: 'remote' },
   { labelKey: 'settings.remote.lan.title', descriptionKey: 'settings.remote.lan.desc', section: 'remote' },

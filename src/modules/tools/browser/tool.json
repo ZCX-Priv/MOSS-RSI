@@ -1,7 +1,7 @@
 {
   "name": "browser",
-  "description": "浏览器操作工具（CDP + MOSS 浏览器扩展）：可操作加载了 MOSS 扩展的任意 Chromium 浏览器（Chrome/Edge/Brave 等），也可启动 MOSS 内置 Chrome。MOSS 启动时不会打开或打扰浏览器；扩展仅在用户在「设置 → 浏览器」点击安装（或调用 action='setup'）时安装，并保留现有登录态。首次 action='open' 会新建独立的 MOSS 浏览器窗口：窗口在后台打开、不抢当前窗口焦点，标签仍自动归入「MOSS」标签组；后续 open 复用该窗口。绝不接管用户已有标签页。推荐循环：先 action='status' 查看桥接/实例与安装状态；页面操作前先 action='snapshot' 获取带 ref=eN 的可交互元素树，再用 click/type/press_key/select/hover/scroll/drag 按 ref 操作，页面变化后重新 snapshot；drag 用于滑块/地图/画布等按住拖拽；screenshot 返回截图；tabs 列出 AI 标签页；evaluate 可执行页面 JS（受配置限制）。",
-  "description_en": "Browser automation tool (CDP + MOSS browser extension): drives any Chromium browser with the MOSS extension installed (Chrome/Edge/Brave etc.), or launches MOSS built-in Chrome. Startup never opens or disturbs browsers; the extension is installed only when the user clicks install in Settings → Browser (or calls action='setup'), preserving existing logins. The first action='open' creates a dedicated MOSS browser window in the background (without stealing focus from the current window); tabs are still grouped under the \"MOSS\" tab group, and later opens reuse that window. It never takes over existing user tabs. Recommended loop: action='status' to inspect bridge/instances and installer state; before page actions call action='snapshot' to get the accessible element tree with ref=eN, then click/type/press_key/select/hover/scroll/drag by ref, and re-snapshot after page changes. drag performs press-move-release gestures for sliders/maps/canvases. screenshot returns an image; tabs lists AI tabs; evaluate runs page JS (subject to config).",
+  "description": "浏览器操作工具（CDP + MOSS 浏览器扩展）：可操作加载了 MOSS 扩展的任意 Chromium 浏览器（Chrome/Edge/Brave 等），也可启动 MOSS 内置 Chrome。MOSS 启动时不会打开或打扰浏览器；扩展仅在用户在「设置 → 浏览器」点击安装（或调用 action='setup'）时安装，并保留现有登录态。首次 action='open' 会新建独立的 MOSS 浏览器窗口：窗口在后台打开、不抢当前窗口焦点，标签仍自动归入「MOSS」标签组；后续 open 复用该窗口。绝不接管用户已有标签页。推荐循环：先 action='status' 查看桥接/实例与安装状态；页面操作前先 action='snapshot' 获取带 ref=eN 的可交互元素树，再用 click/type/press_key/select/hover/scroll/drag 按 ref 操作，页面变化后重新 snapshot；drag 用于滑块/地图/画布等按住拖拽；screenshot 返回截图；tabs 列出 AI 标签页；evaluate 可执行页面 JS（受配置限制）。支持三种控制模式（设置→浏览器切换）：内置 Chrome / 浏览器扩展 / 外部 CDP 直连；CDP 模式可连接任意以 --remote-debugging-port 启动的 Chromium 浏览器或 Electron 应用（按次用 cdp_endpoint 指定端点）。",
+  "description_en": "Browser automation tool (CDP + MOSS browser extension): drives any Chromium browser with the MOSS extension installed (Chrome/Edge/Brave etc.), or launches MOSS built-in Chrome. Startup never opens or disturbs browsers; the extension is installed only when the user clicks install in Settings → Browser (or calls action='setup'), preserving existing logins. The first action='open' creates a dedicated MOSS browser window in the background (without stealing focus from the current window); tabs are still grouped under the \"MOSS\" tab group, and later opens reuse that window. It never takes over existing user tabs. Recommended loop: action='status' to inspect bridge/instances and installer state; before page actions call action='snapshot' to get the accessible element tree with ref=eN, then click/type/press_key/select/hover/scroll/drag by ref, and re-snapshot after page changes. drag performs press-move-release gestures for sliders/maps/canvases. screenshot returns an image; tabs lists AI tabs; evaluate runs page JS (subject to config). Three control modes (Settings → Browser): built-in Chrome / browser extension / external CDP. CDP mode can attach to any Chromium browser or Electron app started with --remote-debugging-port (use cdp_endpoint per call).",
   "icon": "app-window",
   "annotations": {
     "readOnlyHint": false,
@@ -43,8 +43,13 @@
       },
       "browser": {
         "type": "string",
-        "description": "浏览器实例选择：auto（缺省）/ builtin / external（或 extension）/ status 返回的实例 id",
-        "description_en": "Browser instance: auto (default) / builtin / external (or extension) / an instance id from status."
+        "description": "浏览器实例选择：缺省按设置的模式（builtin/extension/cdp）；也可显式 auto / builtin / external（或 extension）/ cdp / status 返回的实例 id",
+        "description_en": "Browser instance: defaults to the configured mode (builtin/extension/cdp); can be auto / builtin / external (or extension) / cdp / an instance id from status."
+      },
+      "cdp_endpoint": {
+        "type": "string",
+        "description": "CDP 模式端点（http://host:port、host:port、纯端口或 ws://）；传入后本次及后续调用使用该端点，可连接任意以 --remote-debugging-port 启动的 Chromium 浏览器或 Electron 应用",
+        "description_en": "CDP endpoint (http://host:port, host:port, bare port, or ws://); once passed, this and later calls use it. Connects to any Chromium browser or Electron app started with --remote-debugging-port."
       },
       "url": {
         "type": "string",
@@ -254,6 +259,8 @@
     "defaults": {
       "enabled": true,
       "requireConfirmation": false,
+      "mode": "extension",
+      "cdpEndpoint": "http://127.0.0.1:9222",
       "timeoutMs": 30000,
       "bridgePort": 7799,
       "bridgeToken": "",
@@ -267,6 +274,12 @@
       "allowEvaluate": true
     },
     "schema": {
+      "mode": {
+        "type": "string"
+      },
+      "cdpEndpoint": {
+        "type": "string"
+      },
       "timeoutMs": {
         "type": "integer",
         "min": 5000,

@@ -11,6 +11,7 @@ import type { ConfigService, Environment, Logger } from '../../core/types';
 import type { ComputerService } from '../contracts';
 import { BrowserBridgeServer, type BridgeEventPayload } from './bridge';
 import { BuiltinChromeManager } from './builtin';
+import { CdpBrowserManager } from './cdp-attach';
 import { BrowserExtensionInstaller } from './installer';
 import { CdpConnection } from './cdp';
 import {
@@ -45,6 +46,7 @@ import {
   type BrowserDirs,
 } from './paths';
 import type {
+  BrowserCdpStatus,
   BrowserCftStatus,
   BrowserClickOptions,
   BrowserConsoleResult,
@@ -55,6 +57,7 @@ import type {
   BrowserInstanceInfo,
   BrowserInstanceKind,
   BrowserInstallerStatus,
+  BrowserMode,
   BrowserNavigateOptions,
   BrowserOpenOptions,
   BrowserPageInfo,
@@ -73,8 +76,16 @@ import type {
   NativeTabInfo,
 } from './types';
 
+const BROWSER_MODES: ReadonlySet<BrowserMode> = new Set<BrowserMode>([
+  'builtin',
+  'extension',
+  'cdp',
+]);
+
 const DEFAULT_CONFIG: BrowserToolConfig = {
   enabled: true,
+  mode: 'extension',
+  cdpEndpoint: 'http://127.0.0.1:9222',
   timeoutMs: 30_000,
   bridgePort: 7799,
   bridgeToken: '',
@@ -170,6 +181,12 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+function modeValue(value: unknown, fallback: BrowserMode): BrowserMode {
+  return typeof value === 'string' && BROWSER_MODES.has(value as BrowserMode)
+    ? (value as BrowserMode)
+    : fallback;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -189,6 +206,7 @@ export class BrowserServiceImpl implements BrowserService {
   private readonly dirs: BrowserDirs;
   private readonly bridge: BrowserBridgeServer;
   private readonly builtin: BuiltinChromeManager;
+  private readonly cdp: CdpBrowserManager;
   private readonly installer: BrowserExtensionInstaller;
 
   private extensionStatus: BrowserExtensionStatus;
@@ -235,6 +253,11 @@ export class BrowserServiceImpl implements BrowserService {
       },
     });
 
+    this.cdp = new CdpBrowserManager({
+      logger: this.logger,
+      getDefaultEndpoint: () => this.getToolConfig().cdpEndpoint,
+    });
+
     this.installer = new BrowserExtensionInstaller({
       env: this.env,
       logger: this.logger,
@@ -264,6 +287,7 @@ export class BrowserServiceImpl implements BrowserService {
     }
     this.tabs.clear();
     await this.builtin.close();
+    await this.cdp.disconnect();
     this.bridge.stop();
   }
 
@@ -278,6 +302,9 @@ export class BrowserServiceImpl implements BrowserService {
       const color = stringValue(raw.tabGroupColor, DEFAULT_CONFIG.tabGroupColor);
       return {
         enabled: booleanValue(raw.enabled, DEFAULT_CONFIG.enabled),
+        mode: modeValue(raw.mode, DEFAULT_CONFIG.mode),
+        cdpEndpoint:
+          stringValue(raw.cdpEndpoint, DEFAULT_CONFIG.cdpEndpoint).trim() || DEFAULT_CONFIG.cdpEndpoint,
         timeoutMs: numberValue(raw.timeoutMs, DEFAULT_CONFIG.timeoutMs, 5000, 300_000),
         bridgePort: numberValue(raw.bridgePort, DEFAULT_CONFIG.bridgePort, 1024, 65535),
         bridgeToken: stringValue(raw.bridgeToken, DEFAULT_CONFIG.bridgeToken).trim(),
@@ -321,6 +348,7 @@ export class BrowserServiceImpl implements BrowserService {
       error: this.cftError,
     };
     return {
+      mode: cfg.mode,
       bridge: {
         running: this.bridge.running,
         port: this.bridge.port,
@@ -333,6 +361,7 @@ export class BrowserServiceImpl implements BrowserService {
         ...builtinStatus,
         error: builtinStatus.error ?? this.builtinError,
       },
+      cdp: this.cdp.getStatus(),
       extension: this.extensionStatus,
       cft,
       installer: this.installer.getStatus(),
@@ -471,6 +500,16 @@ export class BrowserServiceImpl implements BrowserService {
     this.syncBuiltinInstance();
   }
 
+  async connectCdp(endpoint?: string): Promise<BrowserCdpStatus> {
+    return this.cdp.connect(endpoint);
+  }
+
+  async disconnectCdp(): Promise<void> {
+    await this.cdp.disconnect();
+    // 连接已断开：该通路创建的 AI 标签页不再可用
+    this.removeTabsOfInstance('cdp');
+  }
+
   async startChromeForTestingDownload(): Promise<void> {
     if (this.cftDownloading) return;
     this.cftDownloading = true;
@@ -530,12 +569,32 @@ export class BrowserServiceImpl implements BrowserService {
     };
   }
 
+  /** 确保外部 CDP 已连接（未连接时按端点懒连接） */
+  private async ensureCdp(endpoint?: string): Promise<BrowserCdpStatus> {
+    if (this.cdp.isConnected()) return this.cdp.getStatus();
+    return this.cdp.connect(endpoint?.trim() || this.getToolConfig().cdpEndpoint);
+  }
+
   private async resolveTarget(target?: BrowserTarget): Promise<ResolvedTarget> {
     this.syncBuiltinInstance();
-    const wanted = (target ?? 'auto').trim() || 'auto';
+    const cfg = this.getToolConfig();
+    // 未显式指定 target 时使用配置的默认模式（默认插件）
+    const wanted = (target ?? cfg.mode).trim() || cfg.mode;
     const instances = this.listEffectiveInstances();
     const wantBuiltin = wanted === 'builtin';
     const wantExternal = wanted === 'external' || wanted === 'extension';
+
+    if (wanted === 'cdp') {
+      const status = await this.ensureCdp(cfg.cdpEndpoint);
+      return {
+        key: 'cdp',
+        kind: 'cdp',
+        bridgeId: null,
+        browserName: status.product ?? 'CDP',
+        browserVersion: status.version ?? '',
+        lastTabKey: this.lastTabFor('cdp'),
+      };
+    }
 
     if (wantBuiltin) {
       if (!this.builtin.isRunning()) {
@@ -944,7 +1003,9 @@ export class BrowserServiceImpl implements BrowserService {
 
   async openTab(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
     const cfg = this.getToolConfig();
-    const resolved = await this.resolveTarget(options.target);
+    const cdpEndpoint = options.cdpEndpoint?.trim();
+    if (cdpEndpoint) await this.ensureCdp(cdpEndpoint);
+    const resolved = await this.resolveTarget(cdpEndpoint ? 'cdp' : options.target);
     const timeout = Math.max(options.timeoutMs ?? cfg.timeoutMs, 30_000);
     const bridgePort = this.bridge.port;
     const marker = bridgePort
@@ -979,6 +1040,15 @@ export class BrowserServiceImpl implements BrowserService {
           const createdTarget = now.find((item) => !existingTargetIds.includes(item.targetId));
           if (createdTarget) targetId = createdTarget.targetId;
         }
+      }
+    } else if (resolved.kind === 'cdp') {
+      // 外部 CDP：优先新建标签页；Electron 等不支持 Target.createTarget 时附着已有页面
+      targetId = await this.cdp.createPageTarget(marker).catch(() => undefined);
+      if (!targetId) {
+        const pages = await this.cdp.listPageTargets();
+        const pick = pages.find((page) => !page.url.startsWith('devtools://')) ?? pages[0];
+        if (!pick) throw new Error(t('browser.cdpNoTarget'));
+        targetId = pick.targetId;
       }
     } else {
       targetId = await this.builtin.createPageTarget(marker);
@@ -1117,7 +1187,9 @@ export class BrowserServiceImpl implements BrowserService {
 
   async focusTab(tab?: string): Promise<BrowserTabInfo> {
     const record = this.requireTab(tab);
-    if (record.instanceId !== 'builtin' && record.nativeTabId >= 0) {
+    if (record.kind === 'cdp') {
+      if (record.targetId) await this.cdp.activate(record.targetId);
+    } else if (record.instanceId !== 'builtin' && record.nativeTabId >= 0) {
       try {
         await this.bridge.send(record.instanceId, 'tabs.activate', { tabId: record.nativeTabId }, 10_000);
       } catch {
@@ -1137,7 +1209,9 @@ export class BrowserServiceImpl implements BrowserService {
     const record = this.requireTab(tab);
     await this.detachRecord(record);
     try {
-      if (record.instanceId !== 'builtin' && record.nativeTabId >= 0) {
+      if (record.kind === 'cdp') {
+        if (record.targetId) await this.cdp.closeTarget(record.targetId);
+      } else if (record.instanceId !== 'builtin' && record.nativeTabId >= 0) {
         await this.bridge.send(record.instanceId, 'tabs.close', { tabId: record.nativeTabId }, 10_000);
       } else if (record.targetId) {
         const cdp = this.builtin.getCdp();
@@ -1164,7 +1238,9 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   private async detachRecord(record: TabRecord): Promise<void> {
-    if (record.kind === 'builtin' || record.instanceId === 'builtin') {
+    if (record.kind === 'cdp') {
+      if (record.sessionId) await this.cdp.detach(record.sessionId);
+    } else if (record.kind === 'builtin' || record.instanceId === 'builtin') {
       if (record.sessionId) await this.builtin.detach(record.sessionId);
     } else if (record.nativeTabId >= 0) {
       try {
@@ -1192,6 +1268,33 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   private async createTabSession(record: TabRecord): Promise<CdpSession> {
+    if (record.kind === 'cdp') {
+      const connection = this.cdp.getCdp();
+      if (!connection || connection.isClosed) throw new Error(t('browser.cdpNotConnected'));
+      if (!record.targetId) throw new Error(t('browser.targetNotFound', { tab: record.key }));
+      const sessionId = await this.cdp.attach(record.targetId);
+      record.sessionId = sessionId;
+      record.sessionDead = false;
+      const session = new RelaySession(
+        (method, params) => {
+          const conn = this.cdp.getCdp();
+          if (!conn) throw new Error(t('browser.cdpNotConnected'));
+          return conn.send(method, params, sessionId);
+        },
+        (handler) => {
+          const conn = this.cdp.getCdp();
+          if (!conn) return () => {};
+          return conn.onEvent((method, params, eventSessionId) => {
+            if (eventSessionId === sessionId) handler(method, params);
+          });
+        },
+      );
+      await enablePageDomains(session);
+      record.session = session;
+      record.console.attach(session);
+      return session;
+    }
+
     if (record.kind === 'builtin' || record.instanceId === 'builtin') {
       const cdp = this.builtin.getCdp();
       if (!cdp) throw new Error(t('browser.builtinNotRunning'));
