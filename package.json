@@ -21,7 +21,7 @@
     "postinstall": "node scripts/install-webui.mjs",
     "build": "node scripts/build.mjs",
     "build:ui": "cd webui && npm run build",
-    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external nativefiledialog-for-bun --external sherpa-onnx-node --external sharp",
+    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external nativefiledialog-for-bun --external sherpa-onnx-node --external sharp --external @wecom/aibot-node-sdk --external @tencent-connect/qqbot-nodejs",
     "start": "bun src/main.ts start --foreground",
     "start:daemon": "bun src/main.ts start",
     "stop": "bun src/main.ts stop",
@@ -37,6 +37,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@tencent-connect/qqbot-nodejs": "1.0.5",
+    "@wecom/aibot-node-sdk": "1.0.7",
     "@puppeteer/browsers": "^3.2.6",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",

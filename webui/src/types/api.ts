@@ -744,6 +744,102 @@ export interface RemoteToggleResult {
   hostname?: string;
 }
 
+// ============================================================================
+// IM 连接（/api/im/*）
+// ============================================================================
+
+/** 支持的 IM 渠道 */
+export type ImChannelId =
+  | 'wechat-ilink'
+  | 'wecom-aibot'
+  | 'qq-official'
+  | 'qq-onebot';
+
+/** 渠道表单字段（后端下发，前端通用渲染） */
+export interface ImFormField {
+  key: string;
+  label: string;
+  type: 'text' | 'password' | 'number' | 'select';
+  required: boolean;
+  placeholder?: string;
+  options?: Array<{ value: string; label: string }>;
+  defaultValue?: string;
+}
+
+/** 渠道描述符 */
+export interface ImChannelDescriptor {
+  id: ImChannelId;
+  label: string;
+  guide: string;
+  fields: ImFormField[];
+  capabilities: { markdown: boolean; group: boolean; qrLogin: boolean; qrOnly?: boolean };
+}
+
+export interface ImBotOptions {
+  cwd: string;
+  permissionMode: 'unset' | 'auto' | 'skip' | 'ask';
+  groupTrigger: 'mention' | 'all';
+  agentId?: string;
+}
+
+export interface ImBindingUser {
+  id: string;
+  name: string;
+  boundAt: string;
+}
+
+/** 机器人状态快照（不含凭据） */
+export interface ImBotStatus {
+  botId: string;
+  channel: ImChannelId;
+  name: string;
+  enabled: boolean;
+  state: 'connected' | 'connecting' | 'offline' | 'error';
+  platformIdMasked: string;
+  hasCredentials: boolean;
+  lastError: string | null;
+  lastMessageAt: string | null;
+  stats: { received: number; replied: number };
+  options: ImBotOptions;
+  pairingCode: string;
+  boundUsers: ImBindingUser[];
+  /** 非密文字段回显（AppId / 端口等；不含 secret） */
+  credentialPreview: Record<string, string>;
+  extra?: Record<string, string>;
+}
+
+export interface ImStatus {
+  bots: ImBotStatus[];
+  totals: { configured: number; connected: number };
+}
+
+export interface ImChannelsResponse {
+  channels: ImChannelDescriptor[];
+}
+
+/** 新增/编辑机器人请求体 */
+export interface ImSaveBotInput {
+  botId?: string;
+  channel: ImChannelId;
+  name?: string;
+  credentials: Record<string, string>;
+  options?: Partial<ImBotOptions>;
+  enabled?: boolean;
+}
+
+/** 微信扫码登录 */
+export interface ImWechatQrStart {
+  loginId: string;
+  /** iLink 返回的是登录链接（liteapp.weixin.qq.com/...），前端需编码成二维码图片 */
+  qrUrl: string;
+}
+
+export interface ImWechatQrState {
+  status: string;
+  message?: string;
+  bot?: ImBotStatus;
+}
+
 /** 压缩历史记录（session.compactions 元素 / GET /api/context/:id/compactions） */
 export interface CompactionRecord {
   id: string;
@@ -1255,6 +1351,36 @@ export interface SkillItem {
   dir?: string;
 }
 
+/** SkillHub 技能市场列表项（GET /api/skills/market） */
+export interface MarketSkillItem {
+  /** SkillHub 展示名（可为中文） */
+  name: string;
+  slug: string;
+  /** @owner/slug（安装时提交给后端） */
+  canonicalName: string;
+  /** 安装后的本地技能名（后端规范化，用于匹配已安装状态） */
+  installName: string;
+  /** 技能身份指纹（slug + 描述哈希）：用于市场列表去重 */
+  dedupeKey: string;
+  description: string;
+  iconUrl?: string | null;
+  category: string;
+  subCategory?: string;
+  downloads: number;
+  stars: number;
+  version: string;
+  homepage?: string;
+  verified: boolean;
+  source?: string;
+}
+
+/** SkillHub 场景分类（GET /api/skills/market/categories） */
+export interface MarketCategoryItem {
+  key: string;
+  name: string;
+  nameEn: string;
+}
+
 export interface SkillDetail extends SkillItem {
   prompt: string;
   sourceFile?: string;
@@ -1362,6 +1488,19 @@ export interface RunStats {
 }
 
 export type AgentEvent =
+  /** 用户消息已持久化（引擎统一发出；外部 run 靠它实时同步到已订阅该会话的客户端） */
+  | {
+      type: 'user-message';
+      sessionId: string;
+      content: string;
+      /** 用户消息持久化时间（与历史副本一致，用于消息排序） */
+      timestamp: string;
+      /** 附件绝对路径（与 task.stream 的 attachments 语义对齐） */
+      attachments?: string[];
+      /** 用户消息稳定身份（与历史副本同 id，尾部补齐时原位归并） */
+      clientMessageId: string;
+      runId?: string;
+    }
   | { type: 'assistant-text'; sessionId: string; text: string; runId?: string }
   | { type: 'assistant-thinking'; sessionId: string; text: string; runId?: string }
   | { type: 'tool-call-start'; sessionId: string; toolName: string; toolCallId: string; args: unknown; runId?: string }
@@ -1717,4 +1856,54 @@ export interface BrowserStatus {
     allowEvaluate: boolean;
     timeoutMs: number;
   };
+}
+
+// ============================================================================
+// 数据迁移（/api/migration/*）
+// ============================================================================
+
+/** 外部 Agent 数据源 id */
+export type MigrationSourceId = 'claude-code' | 'codex';
+
+/** 数据源探测结果（GET /api/migration/sources） */
+export interface MigrationSource {
+  id: MigrationSourceId;
+  label: string;
+  rootDir: string;
+  available: boolean;
+  sessionCount: number;
+}
+
+/** 可导入的外部会话（GET /api/migration/external-sessions） */
+export interface ExternalSessionMeta {
+  sourceId: string;
+  title: string;
+  cwd?: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+/** 导入结果（外部导入与备份恢复共用） */
+export interface MigrationImportResult {
+  imported: number;
+  sessions: Array<{ title: string; groupName: string; messageCount: number }>;
+  skipped: Array<{ name: string; reason: 'exists' | 'imported-before' | 'empty' | 'invalid' }>;
+  warnings: string[];
+}
+
+/** 备份包元信息 */
+export interface BackupManifest {
+  formatVersion: number;
+  createdAt: string;
+  platform: string;
+  counts: Record<string, number>;
+}
+
+/** 备份包检查结果（POST /api/migration/backup/inspect） */
+export interface BackupInspection {
+  manifest: BackupManifest;
+  counts: Record<string, number>;
+  encrypted: boolean;
+  sessions: number;
 }

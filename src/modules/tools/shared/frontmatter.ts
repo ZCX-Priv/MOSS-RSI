@@ -21,7 +21,7 @@ export function splitFrontMatter(
   const fmText = fmMatch[1];
   const body = fmMatch[2] ?? '';
   const fm: ParsedFrontMatter = {};
-  const lines = fmText.split('\n');
+  const lines = fmText.split(/\r?\n/);
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];

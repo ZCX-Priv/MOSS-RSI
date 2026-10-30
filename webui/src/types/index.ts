@@ -16,12 +16,14 @@ export type SettingsSection =
   | 'browser'
   | 'computer'
   | 'remote'
+  | 'im'
   | 'logs'
   | 'index'
   | 'commands'
   | 'rules'
   | 'memory'
   | 'hooks'
+  | 'migration'
   | 'about';
 
 // 统一 schema：TaskItem / TaskGroup 从 api.ts re-export

@@ -33,10 +33,15 @@ export function getTodoDir(env: Environment): string {
   return join(env.dataDir, 'todo');
 }
 
+/** 按数据目录拼会话 todo 路径（IM 等无 Environment 的调用方复用同一清洗规则）。 */
+export function getSessionTodoPathFromDir(dataDir: string, sessionId: string): string {
+  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+  return join(dataDir, 'todo', `${safe}.json`);
+}
+
 /** 某会话的 todo 文件路径（~/.moss/todo/<sessionId>.json）。sessionId 做路径安全清洗。 */
 export function getSessionTodoPath(env: Environment, sessionId: string): string {
-  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
-  return join(getTodoDir(env), `${safe}.json`);
+  return getSessionTodoPathFromDir(env.dataDir, sessionId);
 }
 
 /**

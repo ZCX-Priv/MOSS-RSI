@@ -1,16 +1,13 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Plus, RefreshCw, Search } from 'lucide-react';
+import { Plus, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
 import type { OverlayType } from './types';
 import { Sidebar } from './components/layout/Sidebar';
 import { TaskPage } from './components/pages/TaskPage';
 import { SystemMonitorPage } from './components/pages/SystemMonitorPage';
-import {
-  PluginMarketPage,
-  SkillsTab,
-  McpTab,
-} from './components/pages/PluginMarketPage';
+import { PluginMarketPage } from './components/pages/PluginMarketPage';
+import { SkillMarketPage } from './components/pages/SkillMarketPage';
 import {
   AutomationPage,
   ConfiguredTab,
@@ -37,12 +34,14 @@ import {
   HooksSettingsSection,
   MemorySettingsSection,
   RemoteSettingsSection,
+  ImSettingsSection,
   BrowserSettingsSection,
   BrowserModeRedirect,
   BrowserBuiltinSection,
   BrowserExtensionSection,
   BrowserCdpSection,
   ComputerSettingsSection,
+  MigrationSettingsSection,
 } from './components/pages/SettingsPage';
 import { SearchModal } from './components/overlays/SearchModal';
 import { BrowserInstallConfirmDialog } from './components/overlays/BrowserInstallConfirmDialog';
@@ -79,6 +78,7 @@ export default function App() {
 
   const [overlay, setOverlay] = useState<OverlayType>(null);
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const { t } = useTranslation();
   const openAutomationForm = useStore((s) => s.openAutomationForm);
   // 外观设置：从 store 读取，变化时同步到 DOM（CSS 变量 / data 属性）
@@ -90,8 +90,9 @@ export default function App() {
   const isTaskRoute = pathname === '/' || pathname.startsWith('/task');
   // 移动端 header 标题与右侧 button（仅非 TaskPage 路由）
   const isPluginsRoute = pathname.startsWith('/plugins');
+  const isPluginsMarketRoute = pathname === '/plugins';
   const isPluginsMcpRoute = pathname === '/plugins/mcp';
-  const isPluginsSkillsRoute = pathname === '/plugins' || pathname === '/plugins/skills';
+  const isPluginsSkillsRoute = pathname === '/plugins/skills';
   const isAutomationRoute = pathname.startsWith('/automation');
   const isSettingsRoute = pathname.startsWith('/settings');
   const isProviderRoute = pathname.startsWith('/settings/provider');
@@ -137,6 +138,18 @@ export default function App() {
                 {mobileTitle}
               </h1>
               <div className="flex justify-end">
+                {/* 插件库主页：移动端管理入口（桌面按钮在页面标题区） */}
+                {isPluginsMarketRoute && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title={t('plugins.manage')}
+                    aria-label={t('plugins.manage')}
+                    onClick={() => navigate('/plugins/skills')}
+                  >
+                    <SlidersHorizontal />
+                  </Button>
+                )}
                 {isAutomationRoute && (
                   <Button
                     variant="ghost"
@@ -236,13 +249,12 @@ export default function App() {
             <Route path="/task/:taskId?" element={<TaskPage />} />
             {/* 资源管理器（系统总量 + MOSS 自身占用；桌面/移动自适应） */}
             <Route path="/system-monitor" element={<SystemMonitorPage />} />
-            <Route path="/plugins" element={<PluginMarketPage />}>
-              <Route index element={<Navigate to="skills" replace />} />
-              <Route path="skills" element={<SkillsTab />} />
-              <Route path="mcp" element={<McpTab />} />
-              {/* 绝对路径：splat 内相对 to 会以完整 pathname 为基准，导致 URL 无限追加 */}
-              <Route path="*" element={<Navigate to="/plugins/skills" replace />} />
-            </Route>
+            {/* 插件库：主页为 SkillHub 技能市场，管理页为技能/MCP 管理 */}
+            <Route path="/plugins" element={<SkillMarketPage />} />
+            <Route path="/plugins/skills" element={<PluginMarketPage />} />
+            <Route path="/plugins/mcp" element={<PluginMarketPage />} />
+            {/* 未匹配的插件路径回主页（绝对路径：splat 内相对 to 会以完整 pathname 为基准） */}
+            <Route path="/plugins/*" element={<Navigate to="/plugins" replace />} />
             <Route path="/automation" element={<AutomationPage />}>
               <Route index element={<Navigate to="configured" replace />} />
               <Route path="configured" element={<ConfiguredTab />} />
@@ -286,7 +298,11 @@ export default function App() {
               </Route>
               <Route path="computer" element={<ComputerSettingsSection />} />
               <Route path="remote" element={<RemoteSettingsSection />} />
+              {/* IM 连接：渠道机器人管理 + 配对码 + 微信扫码 */}
+              <Route path="im" element={<ImSettingsSection />} />
               <Route path="logs" element={<LogsSettings />} />
+              {/* 数据迁移：外部 Agent 会话导入 / MOSS 备份导出与恢复 */}
+              <Route path="migration" element={<MigrationSettingsSection />} />
               <Route path="about" element={<AboutSettings />} />
               <Route path="commands" element={<CommandsSettings />} />
               <Route path="hooks" element={<HooksSettingsSection />} />

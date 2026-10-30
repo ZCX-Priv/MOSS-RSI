@@ -68,10 +68,7 @@ export function BrowserSettingsSection() {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex flex-col gap-1 px-6 py-4">
-        <h1 className="flex items-center gap-2 text-xl font-semibold text-foreground">
-          <AppWindow className="size-5 shrink-0" />
-          {t('settings.browser.title')}
-        </h1>
+        <h1 className="text-xl font-semibold text-foreground">{t('settings.browser.title')}</h1>
         <p className="text-sm text-muted-foreground">{t('settings.browser.subtitle')}</p>
         {savedMode && (
           <p className="text-xs text-muted-foreground">

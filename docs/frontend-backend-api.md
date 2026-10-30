@@ -431,6 +431,7 @@
 
 | type | payload |
 |---|---|
+| `user-message` | `{ content, clientMessageId, timestamp, attachments?, runId? }` |
 | `assistant-text` | `{ text }` |
 | `assistant-thinking` | `{ text }` |
 | `tool-call-start` | `{ toolName, toolCallId, args }` |

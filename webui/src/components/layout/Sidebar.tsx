@@ -595,7 +595,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
               const label = t(item.labelKey);
               const isActive =
                 (item.action === 'new-task' && pathname === '/') ||
-                (`/${item.page}` === pathname && !item.action);
+                ((`/${item.page}` === pathname || pathname.startsWith(`/${item.page}/`)) && !item.action);
               return (
                 <SidebarMenuItem key={item.labelKey}>
                   <SidebarMenuButton

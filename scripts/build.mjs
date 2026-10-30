@@ -97,6 +97,9 @@ function buildBackend() {
     '--external', 'nativefiledialog-for-bun',
     '--external', 'sherpa-onnx-node',
     '--external', 'sharp',
+    // IM SDK：均为 CJS/含动态 require，打包进单文件会破坏其运行时解析，运行时从 node_modules 加载
+    '--external', '@wecom/aibot-node-sdk',
+    '--external', '@tencent-connect/qqbot-nodejs',
   ]);
   if (!existsSync(BACKEND_OUT)) {
     error(`Backend build output not found: ${BACKEND_OUT}`);

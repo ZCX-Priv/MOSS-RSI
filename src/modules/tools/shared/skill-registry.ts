@@ -55,6 +55,11 @@ export interface SkillRegistry {
   /** 启用状态（实时读 config.skills[name].enabled，缺省 true） */
   isEnabled(name: string): boolean;
   /**
+   * 重新扫描用户技能目录；返回本次新增/变化的技能名。
+   * 供安装等外部写入后立即生效（不依赖 fs.watch 的 300ms 防抖）。
+   */
+  rescan(): string[];
+  /**
    * 替换某个来源文件对应的 skill（热重载用）。
    * 若新 skill 的 name 与已注册的同名 skill 冲突但 sourceFile 不同，则返回 conflict（旧优先）。
    */
@@ -122,6 +127,17 @@ class SkillRegistryImpl implements SkillRegistry {
   /** 注入启用状态读取器（createSkillRegistry 中设置） */
   setEnabledReader(reader: (name: string) => boolean): void {
     this.configReader = reader;
+  }
+
+  /** 重扫实现（createSkillRegistry 中注入，持有用户目录与广播通道） */
+  private rescanFn: (() => string[]) | null = null;
+
+  setRescanFn(fn: () => string[]): void {
+    this.rescanFn = fn;
+  }
+
+  rescan(): string[] {
+    return this.rescanFn ? this.rescanFn() : [];
   }
 
   reloadBySourceFile(sourceFile: string, skill: Skill): SkillReloadResult {
@@ -452,6 +468,15 @@ export function createSkillRegistry(
   // 同步加载（仅从用户目录）
   loadSkillsFromDirSync(reg, userDir, logger);
 
+  // 安装等外部写入后可显式重扫：立即注册并广播 resources:changed（不依赖 watch 防抖）
+  reg.setRescanFn(() => {
+    const names = loadSkillsFromDirSync(reg, userDir, logger);
+    for (const name of names) {
+      void eventBus.broadcast('resources:changed', { kind: 'skill', name });
+    }
+    return names;
+  });
+
   // 启动热重载监听（异步，不阻塞初始化）
   startWatch(reg, userDir, logger, eventBus).catch(err => {
     logger.debug(t('tools.skillWatchFailed'), {
@@ -462,13 +487,14 @@ export function createSkillRegistry(
   return reg;
 }
 
-/** 同步从目录加载：目录式（<name>/SKILL.md）优先，兼容单文件 .md */
-function loadSkillsFromDirSync(reg: SkillRegistry, dir: string, logger: Logger): void {
+/** 同步从目录加载：目录式（<name>/SKILL.md）优先，兼容单文件 .md；返回本次新增/变化的技能名 */
+function loadSkillsFromDirSync(reg: SkillRegistry, dir: string, logger: Logger): string[] {
+  const changed: string[] = [];
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return;
+    return changed;
   }
   for (const entry of entries) {
     const full = join(dir, entry);
@@ -484,12 +510,16 @@ function loadSkillsFromDirSync(reg: SkillRegistry, dir: string, logger: Logger):
         const skillMd = join(full, 'SKILL.md');
         if (fileExists(skillMd)) {
           const skill = parseSkillFile(skillMd, full);
-          if (skill) reg.reloadBySourceFile(skillMd, skill);
+          if (skill && reg.reloadBySourceFile(skillMd, skill) === 'reloaded') {
+            changed.push(skill.name);
+          }
         }
       } else if (st.isFile() && entry.endsWith('.md')) {
         // 兼容单文件 skill
         const skill = parseSkillFile(full, undefined);
-        if (skill) reg.reloadBySourceFile(full, skill);
+        if (skill && reg.reloadBySourceFile(full, skill) === 'reloaded') {
+          changed.push(skill.name);
+        }
       }
     } catch (err) {
       logger.warn(t('tools.loadSkillFailed', { file: full }), {
@@ -497,6 +527,7 @@ function loadSkillsFromDirSync(reg: SkillRegistry, dir: string, logger: Logger):
       });
     }
   }
+  return changed;
 }
 
 /**

@@ -547,6 +547,8 @@ export const ServiceNames = {
   LOGGER: 'kernel.logger',
   /** 远程访问服务（由 remote 模块注册：隧道生命周期/状态快照） */
   REMOTE_SERVICE: 'remote.service',
+  /** IM 连接服务（由 im 模块注册：机器人状态快照 / 渠道描述符） */
+  IM_SERVICE: 'im.service',
   /**
    * MCP 对外派发的任务注册表（由 mcp 模块注册）：
    * 外部 Agent 经 /mcp 或 `moss mcp` 派发的异步任务状态（进度/轨迹/结果）。
@@ -558,4 +560,6 @@ export const ServiceNames = {
   COMPUTER: 'computer.service',
   /** 浏览器控制服务（由 browser 模块注册：扩展桥接 / 内置 Chrome / AI 标签页 / CDP 页面操作） */
   BROWSER: 'browser.service',
+  /** 数据迁移服务（由 migration 模块注册：外部 Agent 会话导入 / MOSS 备份导出与恢复） */
+  MIGRATION: 'migration.service',
 } as const;

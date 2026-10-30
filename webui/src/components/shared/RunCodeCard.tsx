@@ -94,7 +94,7 @@ export const RunCodeCard = memo(function RunCodeCard({
               !hasCode && 'opacity-40',
             )}
           />
-          <Hash className={cn('size-3.5 shrink-0', isError ? 'text-destructive' : 'text-primary-strong')} />
+          <Hash className="size-3.5 shrink-0" />
           <span className={cn('shrink-0 font-medium', isError ? 'text-destructive' : 'text-foreground/80')}>
             {t('task.runCode.code')}
           </span>
@@ -115,7 +115,7 @@ export const RunCodeCard = memo(function RunCodeCard({
       )}
 
       {showCompactRows && (
-        <div className="ml-[7px] flex min-w-0 flex-col gap-1.5 border-l border-border/50 pl-3">
+        <div className="flex min-w-0 flex-col gap-1.5 pl-1">
           {calls.length > 0 && (
             <div className="flex min-w-0 flex-col gap-0.5">
               {calls.map((call) => (
@@ -165,7 +165,7 @@ export const RunCodeCard = memo(function RunCodeCard({
       )}
 
       {isError && (
-        <div className="ml-[7px] flex min-w-0 items-start gap-1.5 border-l border-destructive/40 pl-3 text-[11px] text-destructive">
+        <div className="flex min-w-0 items-start gap-1.5 pl-1 text-[11px] text-destructive">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
           <pre className="max-h-[240px] min-w-0 overflow-auto whitespace-pre-wrap break-words font-sans leading-relaxed">
             {bodyText || t('task.runCode.failed')}
@@ -251,40 +251,51 @@ function CallRow({ call, iconMap }: { call: CodeRunCall; iconMap: Record<string,
   const Icon = resolveToolIcon(call.name, iconMap);
   return (
     <details className="group/call">
-      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
-        <ChevronRight className="size-3 shrink-0 transition-transform group-open/call:rotate-90" />
+      {/* 折叠行与常规工具调用（ToolCallDetails）同构：箭头 + 状态/工具图标 + 工具名 + 入参摘要 + 耗时 */}
+      <summary className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40">
+        <ChevronRight className="size-3.5 shrink-0 transition-transform group-open/call:rotate-90" />
         {call.ok ? (
-          <Icon className="size-3 shrink-0" />
+          <Icon className="size-3.5 shrink-0" />
         ) : (
-          <CircleAlert className="size-3 shrink-0 text-destructive" />
+          <CircleAlert className="size-3.5 shrink-0 text-destructive" />
         )}
-        <span className="shrink-0">{t('task.runCode.toolCall')}</span>
-        <span className="shrink-0 text-muted-foreground/50">·</span>
-        <span className="shrink-0 font-mono text-foreground/80">{call.name}</span>
+        <span className="max-w-[45%] shrink-0 truncate text-foreground/80" title={call.name}>
+          {call.name}
+        </span>
         {call.argsPreview && (
-          <span className="min-w-0 truncate text-muted-foreground/70">{call.argsPreview}</span>
+          <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={call.argsPreview}>
+            {call.argsPreview}
+          </span>
         )}
-        <span className="ml-auto shrink-0 tabular-nums">{call.durationMs}ms</span>
+        <span className="ml-auto shrink-0 text-[11px] tabular-nums">{call.durationMs}ms</span>
       </summary>
-      <div className="mt-1 flex min-w-0 flex-col gap-1 pl-5 text-[11px] text-muted-foreground">
-        {call.argsPreview && (
-          <div className="break-words">
-            <span className="text-foreground/60">{t('task.runCode.callArgs')}: </span>
-            <span className="font-mono">{call.argsPreview}</span>
+      {/* 展开区：常规工具调用的卡片容器（参数 / 结果 / 错误三段） */}
+      <div className="mt-1 ml-5 flex min-w-0 flex-col">
+        <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <div className="mx-2.5 my-1 flex max-h-[300px] flex-col gap-2 overflow-auto no-scrollbar bg-muted/20 p-2 text-xs">
+            {call.argsPreview && (
+              <div>
+                <div className="text-muted-foreground/70">{t('task.toolCallArguments')}</div>
+                <pre className="mono mt-0.5 whitespace-pre-wrap break-all text-foreground">{call.argsPreview}</pre>
+              </div>
+            )}
+            {call.resultPreview && (
+              <div>
+                <div className="text-muted-foreground/70">{t('task.result')}</div>
+                <pre className="mono mt-0.5 whitespace-pre-wrap break-all text-foreground">{call.resultPreview}</pre>
+              </div>
+            )}
+            {call.error && (
+              <div>
+                <div className="text-destructive/80">{t('task.errorResult')}</div>
+                <pre className="mono mt-0.5 whitespace-pre-wrap break-all text-destructive">{call.error}</pre>
+              </div>
+            )}
+            {!call.argsPreview && !call.resultPreview && !call.error && (
+              <div className="text-muted-foreground">{t('task.toolCard.emptyResult')}</div>
+            )}
           </div>
-        )}
-        {call.resultPreview && (
-          <div className="break-words">
-            <span className="text-foreground/60">{t('task.runCode.callResult')}: </span>
-            <span className="font-mono">{call.resultPreview}</span>
-          </div>
-        )}
-        {call.error && (
-          <div className="break-words text-destructive">
-            <span>{t('task.runCode.callError')}: </span>
-            <span className="font-mono">{call.error}</span>
-          </div>
-        )}
+        </div>
       </div>
     </details>
   );

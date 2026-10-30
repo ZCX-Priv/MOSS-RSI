@@ -33,7 +33,9 @@ export function systemRoot(): string {
  * 模型按 ref 用 read 读取全文）。内容即当前用户自己的命令输出，不构成提权。
  * computer：cua-driver 截图（Agent/面板看到的屏幕内容）与安装脚本；供 read 与前端预览访问。
  */
-const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills', 'analysis', 'terminal-output', 'computer'];
+// im/inbound：IM 入站附件（用户自己发送的图片/文件），agent 需要 read/terminal 读取；
+// 仅放行 inbound 子目录，im/bots.json 等凭据文件仍被 .moss 硬规则屏蔽。
+const MOSS_ALLOWED_SUBDIRS = ['agent', 'mcps', 'skills', 'analysis', 'terminal-output', 'computer', 'im/inbound'];
 
 /** 路径归一化比较键：统一分隔符 + 小写（Windows 大小写不敏感） */
 function pathKey(p: string): string {

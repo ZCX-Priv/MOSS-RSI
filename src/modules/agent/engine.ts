@@ -525,8 +525,26 @@ export class AgentEngineImpl implements AgentEngine {
     // （finish_reason=length）。详见 .trae/documents/修复MOSS生成中途截断的严重bug.md
     const maxOutputTokens = resolveRequestMaxTokens(apiCfg, model, cfg.maxTokens);
     const session = this.sessions.getOrCreate(sessionId);
-    // clientMessageId 随消息持久化：前端本地乐观副本与历史副本据此同身份去重
-    this.sessions.addUserMessage(session, userMessage, input.attachments, input.clientMessageId);
+    // clientMessageId 随消息持久化：前端本地乐观副本与历史副本据此同身份去重。
+    // IM / MCP / 自动化等外部 run 没有前端参与、不会传该字段 → 由引擎生成稳定身份，
+    // 保证「实时 user-message 事件」与「刷新后的历史副本」按 id 原位归并（不重复渲染）。
+    const userClientMessageId =
+      input.clientMessageId && input.clientMessageId.trim()
+        ? input.clientMessageId
+        : `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.sessions.addUserMessage(session, userMessage, input.attachments, userClientMessageId);
+    // 用户消息实时通道：与 assistant 事件同一条 onEvent 链路（WebUI / IM / MCP / 自动化共用）。
+    // 必须在 addUserMessage 之后发出：时间戳与持久化副本一致；钩子 deny 在上方提前返回、不会误发。
+    const persistedUserMessage = session.messages[session.messages.length - 1];
+    emit({
+      type: 'user-message',
+      sessionId,
+      content: userMessage,
+      timestamp: persistedUserMessage?.timestamp ?? new Date().toISOString(),
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
+      clientMessageId: userClientMessageId,
+      ...(input.runId ? { runId: input.runId } : {}),
+    });
     // messageId 由会话级单调序号生成（`<sessionId>#<msgSeq>`，每 turn 消耗一个，持久化在
     // session.msgSeq）—— 严格递增且不受 messages.length 波动（压缩折叠 / 撤回恢复 /
     // healDanglingToolCalls 都会中部 splice 使 length 回落，用 length 派生 id 会与历史已落盘的
@@ -1468,6 +1486,37 @@ export class AgentEngineImpl implements AgentEngine {
     // 立即搬回正确目录——不再等下一次进程重启才自愈。
     this.sessions.relocate(task.id);
     return task;
+  }
+
+  /**
+   * 批量导入会话（数据迁移：外部 Agent 转换结果 / MOSS 备份恢复）。
+   * 已存在同 id 会话一律跳过（合并策略：不覆盖目标机现有数据）。
+   * 写入路径：任务记录 → 会话内存 → 立即落盘（与 getOrCreate 的防抖刷盘不同，
+   * 导入是低频操作，同步落盘保证导入完成后刷新页面即可见）。
+   */
+  importSessions(items: Array<{ id: string; title: string; groupId: string; session: Session }>): {
+    imported: number;
+    skipped: string[];
+  } {
+    let imported = 0;
+    const skipped: string[] = [];
+    for (const item of items) {
+      if (this.sessions.get(item.id)) {
+        skipped.push(item.id);
+        continue;
+      }
+      this.tasks.createTask(item.title, item.groupId, item.id);
+      const session = this.sessions.getOrCreate(item.id);
+      session.messages = item.session.messages;
+      session.createdAt = item.session.createdAt;
+      session.updatedAt = item.session.updatedAt;
+      session.totalTokens = item.session.totalTokens;
+      session.contextFiles = item.session.contextFiles;
+      if (item.session.lastCwd) session.lastCwd = item.session.lastCwd;
+      this.sessions.persistSession(session);
+      imported++;
+    }
+    return { imported, skipped };
   }
 
   updateTask(id: string, patch: { title?: string; groupId?: string }): TaskItem | null {

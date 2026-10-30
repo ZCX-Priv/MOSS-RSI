@@ -12,7 +12,7 @@ import {
   Server, Copy, FileUp, Terminal,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useLocation, Outlet, useOutletContext } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -35,12 +35,6 @@ import { api } from '../../api/http';
 import { copyText } from '../../lib/clipboard';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import type { McpServer } from '../../types/api';
-
-// Outlet context 类型：搜索框 query 与 setQuery 共享给子组件
-interface PluginOutletContext {
-  query: string;
-  setQuery: (v: string) => void;
-}
 
 /** skill.icon（Lucide kebab-case 名）→ 图标组件；未命中回退 WandSparkles */
 const SKILL_ICON_MAP: Record<string, typeof WandSparkles> = {
@@ -152,9 +146,9 @@ export function PluginMarketPage() {
         </div>
       </Tabs>
 
-      {/* 子路由内容 */}
+      {/* 管理内容（技能 / MCP） */}
       <div className="flex-1 overflow-auto">
-        <Outlet context={{ query, setQuery } satisfies PluginOutletContext} />
+        {tab === 'skills' ? <SkillsTab query={query} /> : <McpTab query={query} />}
       </div>
 
       {/* 添加技能弹窗（新建 / 导入 zip；桌面 header 与移动端全局 header 按钮共用） */}
@@ -164,9 +158,8 @@ export function PluginMarketPage() {
 }
 
 /* ===== 技能 tab（icon + files + 启停） ===== */
-export function SkillsTab() {
+export function SkillsTab({ query }: { query: string }) {
   const { t } = useTranslation();
-  const { query } = useOutletContext<PluginOutletContext>();
   const { skills, toggleSkill } = useSkills();
 
   const q = query.trim().toLowerCase();
@@ -204,7 +197,7 @@ export function SkillsTab() {
                 </div>
                 <p className="truncate text-xs text-muted-foreground">{skill.description}</p>
                 <p className="truncate text-[11px] text-muted-foreground/70">
-                  {t('plugins.skillUsage')}: /skill:{skill.name}
+                  {t('plugins.skillUsage')}: /{skill.name}
                 </p>
               </div>
               <Switch
@@ -703,9 +696,8 @@ function MossServerCard() {
   );
 }
 
-export function McpTab() {
+export function McpTab({ query }: { query: string }) {
   const { t } = useTranslation();
-  const { query } = useOutletContext<PluginOutletContext>();
   const { servers, tools, reload, connect, disconnect, remove, setEnabled } = useMcp();
 
   const [addOpen, setAddOpen] = useState(false);

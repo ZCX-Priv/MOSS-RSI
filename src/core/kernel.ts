@@ -32,6 +32,7 @@ import remote from '../modules/remote';
 import subagent from '../modules/subagent';
 import update from '../modules/update';
 import agent from '../modules/agent';
+import im from '../modules/im';
 import filesys from '../modules/filesys';
 import terminal from '../modules/terminal';
 import computer from '../modules/computer';
@@ -45,6 +46,7 @@ import rules from '../modules/rules';
 import hooks from '../modules/hooks';
 import memory from '../modules/memory';
 import voice from '../modules/voice';
+import migration from '../modules/migration';
 
 const MODULE_INIT_TIMEOUT_MS = 30_000;
 const MODULE_DESTROY_TIMEOUT_MS = 10_000;
@@ -89,9 +91,13 @@ const MODULE_FACTORIES: Array<{ name: string; create: () => Module }> = [
   { name: 'context', create: context },
   { name: 'agent', create: agent },
   { name: 'subagent', create: subagent },
+  // im → server / agent（路由注册在初始化时完成；消息到达时 tryResolve agent 执行）
+  { name: 'im', create: im },
   { name: 'file-history', create: fileHistory },
   { name: 'daemon', create: daemon },
   { name: 'automation', create: automation },
+  // migration → agent（会话热写入经 tryResolve 运行时解析，故须排在 agent 之后）
+  { name: 'migration', create: migration },
 ];
 
 type ModuleState = 'loaded' | 'initializing' | 'active' | 'destroying' | 'shutdown' | 'error';

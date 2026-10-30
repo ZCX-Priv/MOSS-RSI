@@ -93,6 +93,7 @@ import { stripMentionTokens } from '../shared/mention-data';
 import { MessageAttachmentCards } from '../shared/AttachmentCards';
 import { FileTypeIcon } from '../shared/FileTypeIcon';
 import { ScrollToBottomButton } from '../shared/ScrollToBottomButton';
+import { ConversationNodeRail, type ConversationNodeItem } from '../shared/ConversationNodeRail';
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
 import { VirtualList, type VirtualListApi } from '../../lib/virtual-list/VirtualList';
 import { useSessionHistory } from '../../hooks/useSessionHistory';
@@ -486,6 +487,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // ===== 滚动控制（自建虚拟列表：followOutput 仅在「已在底部」时跟随）=====
   const listApiRef = useRef<VirtualListApi | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+  /** 滚动容器 DOM 的 state 副本：供对话节点导航（当前节点判定 / 跳转）使用 */
+  const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   /** 跟随态快照（供发送时读取最新值，不触发重渲染） */
   const atBottomRef = useRef(true);
   /** 预览加载中 */
@@ -744,8 +747,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // 空状态：发送消息后创建任务并跳转；任务态：直接发送到当前 session
   const handleSend = useCallback(
     async (text: string, attachments?: string[]) => {
-      // 仅跟随态才自动滚底：用户上滑看历史时发送消息，视图停留在原位不被拉回底部
-      if (atBottomRef.current) scrollToBottom('auto');
+      // 发送后总是回到最新消息（上滑读历史时也回底，刻度列随滚动回到最新节点）：
+      // 已在底部用瞬时定位（无视觉跳动），否则平滑（超远距离由 scrollToBottom 内部降级为瞬时）
+      scrollToBottom(atBottomRef.current ? 'auto' : 'smooth');
       if (taskId) {
         sendMessage(text, { taskId, attachments });
       } else {
@@ -1260,6 +1264,29 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const { replyEndIds, lastReplyEndId } = useMemo(() => computeReplyEnds(messages), [messages]);
 
   /**
+   * 对话节点：每条用户提问（跳过压缩/触顶这类系统卡片）= 一个节点（含其后的整段回复）。
+   * label 取正文首段（附件块已剥离），供右侧刻度条的悬浮提示使用。
+   */
+  const conversationNodes = useMemo<ConversationNodeItem[]>(() => {
+    const nodes: ConversationNodeItem[] = [];
+    for (const msg of messages) {
+      if (msg.role !== 'user') continue;
+      if (msg.compaction || msg.maxTurnsNotice || msg.outputLimitNotice) continue;
+      // 与气泡渲染同一口径：先剥尾部命令注入块，再剥附件块
+      const body = stripAttachmentBlock(stripInjectBlock(msg.content)).replace(/\s+/g, ' ').trim();
+      nodes.push({
+        id: msg.id,
+        label: body
+          ? body.length > 120
+            ? `${body.slice(0, 119)}…`
+            : body
+          : t('task.nodeAttachmentOnly'),
+      });
+    }
+    return nodes;
+  }, [messages, t]);
+
+  /**
    * 消息条目渲染（稳定引用）：避免 TaskPage 任意状态变化都让虚拟列表整片重渲。
    * inViewport（精确视口内）→ deferContent=false：可见项首帧直接渲染终态（完整 Markdown/思考），
    * 不再先出「纯文本占位」再升级；overscan 区条目仍走占位→渐进水合（升级发生在视口外，不可见）。
@@ -1376,6 +1403,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {/* 文件索引构建进度（构建期间显示，全就绪时隐藏） */}
         <FileIndexProgressBar />
 
+        {/* 消息区行：左 = 对话列（最大宽度居中），右 = 刻度列（md+ 恒占位）。
+            刻度列与桌面端 header 的「展开/收起侧栏」按钮同一竖列，且预留 56px 空槽，
+            保证刻度与消息内容之间始终有间距、不遮挡正文。 */}
+        <div className="flex min-h-0 flex-1">
         {/* 对话列：固定最大宽度（CHAT_MAX_WIDTH_PX）+ 水平居中；可用宽度不足时由 w-full 自动收缩。
             header 与文件索引进度条保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
         <div
@@ -1402,9 +1433,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               sessionKey={taskId}
               // 稳定 key：分页 prepend 后同一消息的 key 不变（不会整列表重挂载）
               itemKey={(m) => m.id}
-              // 滚动容器句柄：startReached 需据 scrollTop 判定「是否真的在顶部」
+              // 滚动容器句柄：startReached 需据 scrollTop 判定「是否真的在顶部」；
+              // 同步一份 state 给对话节点导航（滚动监听 / 当前节点判定）
               registerScroller={(el) => {
                 scrollerElRef.current = el;
+                setScrollerEl(el);
               }}
               onStartReached={handleStartReached}
               initialBottom
@@ -1829,6 +1862,18 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           />
           {/* 运行指标栏（轮/步/耗时累计 + 引擎实时 token/命中） */}
           <StatsBar stats={runStats} contextStats={contextStats} />
+        </div>
+        </div>
+        {/* 右侧刻度列：固定 56px 空槽（md+ 才占位），与 header 的侧栏开关同一竖列；
+            刻度列内 right-4 + 28px 刻度按钮 ⇒ 与 size-7、px-4 的 header 按钮中心逐像素对齐 */}
+        <div className="relative hidden w-14 shrink-0 md:block">
+          {/* 对话节点导航：右侧细刻度，当前节点蓝色高亮；悬停弹详情卡片，点击平滑跳到对应提问 */}
+          <ConversationNodeRail
+            scroller={scrollerEl}
+            nodes={conversationNodes}
+            getOffset={(id) => listApiRef.current?.getItemOffset(id) ?? null}
+            onJump={(id) => listApiRef.current?.scrollToKey(id, 'smooth')}
+          />
         </div>
         </div>
       </div>

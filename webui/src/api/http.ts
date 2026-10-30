@@ -21,6 +21,8 @@ import type {
   SubagentRunOutput,
   SkillItem,
   SkillDetail,
+  MarketSkillItem,
+  MarketCategoryItem,
   CommandItem,
   CommandUpsertBody,
   ToolItem,
@@ -61,6 +63,12 @@ import type {
   RemoteStatus,
   RemotePasswords,
   RemoteToggleResult,
+  ImStatus,
+  ImChannelsResponse,
+  ImSaveBotInput,
+  ImBotStatus,
+  ImWechatQrStart,
+  ImWechatQrState,
   HistoryPageMeta,
   SessionState,
   VoiceStatus,
@@ -69,6 +77,11 @@ import type {
   ComputerStatus,
   ComputerWindowInfo,
   BrowserStatus,
+  MigrationSource,
+  MigrationSourceId,
+  ExternalSessionMeta,
+  MigrationImportResult,
+  BackupInspection,
 } from '../types/api';
 import i18n from '../i18n';
 
@@ -390,6 +403,52 @@ export const api = {
   },
 
   // ==========================================================================
+  // 数据迁移（/api/migration/*）：外部 Agent 会话导入 + MOSS 备份导出/恢复
+  // ==========================================================================
+  migration: {
+    listSources: () => request<{ sources: MigrationSource[] }>('GET', '/api/migration/sources'),
+    listExternal: (source: MigrationSourceId) =>
+      request<{ sessions: ExternalSessionMeta[] }>(
+        'GET',
+        `/api/migration/external-sessions?source=${encodeURIComponent(source)}`,
+      ),
+    importExternal: (source: MigrationSourceId, sourceIds: string[]) =>
+      request<MigrationImportResult>('POST', '/api/migration/import-external', { source, sourceIds }),
+    defaultBackupPath: () => request<{ path: string }>('GET', '/api/migration/backup/default-path'),
+    exportBackup: (payload: { targetPath: string; password: string; includeSecrets: boolean }) =>
+      request<{ path: string; bytes: number; counts: Record<string, number> }>(
+        'POST',
+        '/api/migration/backup/export',
+        payload,
+      ),
+    inspectBackup: (payload: { path: string; password?: string }) =>
+      request<BackupInspection>('POST', '/api/migration/backup/inspect', payload),
+    importBackup: (payload: { path: string; password?: string; dryRun?: boolean }) =>
+      request<MigrationImportResult>('POST', '/api/migration/backup/import', payload),
+    /** 下载备份副本：必须带 Authorization 直接拉二进制（不能走 <a href>） */
+    downloadBackup: async (path: string): Promise<Blob> => {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const resp = await fetch(
+        `${BASE_URL}/api/migration/backup/download?path=${encodeURIComponent(path)}`,
+        { headers, cache: 'no-store' },
+      );
+      if (!resp.ok) {
+        let message = `HTTP ${resp.status}`;
+        try {
+          const body = (await resp.json()) as { error?: string };
+          if (body?.error) message = body.error;
+        } catch {
+          // 非 JSON 错误体
+        }
+        throw new Error(message);
+      }
+      return resp.blob();
+    },
+  },
+
+  // ==========================================================================
   // 任务 + 分组（见文档 3.2.1）
   // ==========================================================================
   /** 任务列表页元数据（?limit 分页时附带） */
@@ -575,6 +634,27 @@ export const api = {
   // Skills（见文档 3.2.5）
   // ==========================================================================
   listSkills: () => request<{ skills: SkillItem[] }>('GET', '/api/skills'),
+  /** SkillHub 技能市场列表（后端代理并按键内容指纹去重；exclude 用于跨页去重） */
+  marketSkills: (params: {
+    page?: number;
+    pageSize?: number;
+    keyword?: string;
+    category?: string;
+    exclude?: string[];
+  }) =>
+    request<{ skills: MarketSkillItem[]; total: number }>(
+      'POST',
+      '/api/skills/market/query',
+      params,
+    ),
+  /** SkillHub 场景分类（后端代理 /api/v1/categories） */
+  marketCategories: () =>
+    request<{ categories: MarketCategoryItem[] }>('GET', '/api/skills/market/categories'),
+  /** 安装 SkillHub 技能：后端下载 zip 写入本地技能目录并启用 */
+  installMarketSkill: (canonicalName: string) =>
+    request<{ name: string; installed: boolean }>('POST', '/api/skills/market/install', {
+      canonicalName,
+    }),
   getSkill: (name: string) => request<{ skill: SkillDetail }>('GET', `/api/skills/${name}`),
   updateSkill: (name: string, patch: { enabled: boolean }) =>
     request<{ name: string; enabled: boolean }>('PATCH', `/api/skills/${encodeURIComponent(name)}`, patch),
@@ -682,6 +762,27 @@ export const api = {
   stopRemoteTunnel: () => request<{ stopped: boolean }>('POST', '/api/remote/tunnel/stop'),
   setRemoteTunnelPassword: (action: 'refresh' | 'custom', value?: string) =>
     request<{ pin?: string }>('POST', '/api/remote/tunnel/password', { action, value }),
+
+  // ==========================================================================
+  // IM 连接（/api/im/*）
+  // ==========================================================================
+  getImChannels: () => request<ImChannelsResponse>('GET', '/api/im/channels'),
+  getImStatus: () => request<ImStatus>('GET', '/api/im/status'),
+  saveImBot: (input: ImSaveBotInput) => request<ImBotStatus>('POST', '/api/im/bots', input),
+  deleteImBot: (botId: string) => request<{ removed: boolean }>('DELETE', `/api/im/bots/${botId}`),
+  enableImBot: (botId: string) => request<ImBotStatus>('POST', `/api/im/bots/${botId}/enable`),
+  disableImBot: (botId: string) => request<ImBotStatus>('POST', `/api/im/bots/${botId}/disable`),
+  reconnectImBot: (botId: string) => request<ImBotStatus>('POST', `/api/im/bots/${botId}/reconnect`),
+  testImBot: (botId: string) => request<{ sent: boolean }>('POST', `/api/im/bots/${botId}/test`),
+  rotateImPairing: (botId: string) => request<ImBotStatus>('POST', `/api/im/bots/${botId}/pairing`),
+  unbindImUser: (botId: string, userId: string) =>
+    request<ImBotStatus>('POST', `/api/im/bots/${botId}/unbind`, { userId }),
+  startWechatLogin: () => request<ImWechatQrStart>('POST', '/api/im/wechat/qr/start'),
+  pollWechatLogin: (loginId: string) => request<ImWechatQrState>('GET', `/api/im/wechat/qr/${loginId}`),
+  verifyWechatLogin: (loginId: string, code: string) =>
+    request<{ saved: boolean }>('POST', `/api/im/wechat/qr/${loginId}/verify`, { code }),
+  cancelWechatLogin: (loginId: string) =>
+    request<{ cancelled: boolean }>('POST', `/api/im/wechat/qr/${loginId}/cancel`),
 
   // ==========================================================================
   // 自动化任务（见文档 3.2.7）

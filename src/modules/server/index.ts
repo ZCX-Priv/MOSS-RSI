@@ -40,6 +40,11 @@ import {
   createImportSkillHandler,
 } from './routes/skills';
 import {
+  createMarketSkillsHandler,
+  createMarketCategoriesHandler,
+  createInstallMarketSkillHandler,
+} from './routes/skill-market';
+import {
   createListCommandsHandler,
   createCreateCommandHandler,
   createUpdateCommandHandler,
@@ -192,6 +197,16 @@ import {
   createVoiceWasmDataHandler,
 } from './routes/voice-wasm';
 import { McpExpose } from '../mcp/expose';
+import {
+  createMigrationSourcesHandler,
+  createExternalSessionsHandler,
+  createImportExternalHandler,
+  createBackupDefaultPathHandler,
+  createBackupExportHandler,
+  createBackupInspectHandler,
+  createBackupImportHandler,
+  createBackupDownloadHandler,
+} from './routes/migration';
 import type { AgentEvent } from '../contracts';
 
 interface BunServer {
@@ -322,6 +337,16 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/api-config', handler: createGetApiConfigHandler(config), auth: true });
     this.router.addRoute({ method: 'PUT', pattern: '/api/api-config', handler: createUpdateApiConfigHandler(config), auth: true });
 
+    // 数据迁移（外部 Agent 会话导入 / MOSS 备份导出与恢复）
+    this.router.addRoute({ method: 'GET', pattern: '/api/migration/sources', handler: createMigrationSourcesHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/migration/external-sessions', handler: createExternalSessionsHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/migration/import-external', handler: createImportExternalHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/migration/backup/default-path', handler: createBackupDefaultPathHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/migration/backup/export', handler: createBackupExportHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/migration/backup/inspect', handler: createBackupInspectHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/migration/backup/import', handler: createBackupImportHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/migration/backup/download', handler: createBackupDownloadHandler(services), auth: true });
+
     this.router.addRoute({ method: 'GET', pattern: '/api/session', handler: createListSessionsHandler(services), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/session/:id', handler: createDeleteSessionHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id', handler: createSessionHistoryHandler(services), auth: true });
@@ -348,6 +373,10 @@ class ServerModule implements Module {
 
     // skills
     this.router.addRoute({ method: 'GET', pattern: '/api/skills', handler: createListSkillsHandler(services), auth: true });
+    // SkillHub 技能市场（静态路由必须先于 /api/skills/:name 注册，否则 market 会被当作技能名）
+    this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/query', handler: createMarketSkillsHandler(), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/skills/market/categories', handler: createMarketCategoriesHandler(), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/install', handler: createInstallMarketSkillHandler(services, config, env), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/skills/:name', handler: createGetSkillHandler(services), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/skills/:name', handler: createUpdateSkillHandler(services, config), auth: true });
     // skills 新建 / zip 导入（前端解包后批量写文件；目录 watch 热重载自动生效）

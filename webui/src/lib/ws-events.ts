@@ -296,6 +296,39 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     // ======================================================================
     // Agent 事件流（payload 为完整 AgentEvent）
     // ======================================================================
+    case 'user-message': {
+      // 先冲刷上一轮残余流式文本，保证用户消息按时间顺序出现
+      flushPending();
+      const sid = msg.sessionId ?? sessionId;
+      if (!sid) break;
+      const event = (msg.payload ?? {}) as {
+        content?: string;
+        timestamp?: string;
+        attachments?: string[];
+        clientMessageId?: string;
+      };
+      const content = event.content ?? '';
+      if (!content.trim()) break;
+      const clientMessageId = event.clientMessageId;
+      // 稳定身份：优先 clientMessageId（与历史副本同 id）；缺失时退化为时间戳 id
+      const id = clientMessageId ?? `user_${event.timestamp ?? Date.now()}`;
+      const st = useStore.getState();
+      const list = st.messagesBySession[sid] ?? [];
+      // 幂等：WebUI 自己发送时本地乐观副本已在 store；多标签页 / 重复投递同样安全
+      const exists = list.some(
+        (m) => m.id === id || (clientMessageId !== undefined && m.clientMessageId === clientMessageId),
+      );
+      if (exists) break;
+      st.addMessage(sid, {
+        id,
+        ...(clientMessageId ? { clientMessageId } : {}),
+        role: 'user',
+        content,
+        ...(event.attachments && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
+        timestamp: event.timestamp ?? new Date().toISOString(),
+      });
+      break;
+    }
     case 'assistant-text': {
       if (!sessionId) return;
       const event = msg.payload as Extract<AgentEvent, { type: 'assistant-text' }> & {

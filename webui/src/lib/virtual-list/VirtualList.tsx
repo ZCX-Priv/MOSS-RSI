@@ -78,6 +78,16 @@ export interface VirtualListApi {
   anchorPrepend: () => PrependAnchor;
   /** 滚动到底部 */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
+  /**
+   * 条目顶部相对「滚动内容顶部」的偏移（未实测条目用估算值）。
+   * 供宿主导航（对话节点：当前节点判定）；key 不存在返回 null。
+   */
+  getItemOffset: (key: string) => number | null;
+  /**
+   * 滚动到指定条目顶部（对话节点跳转）。
+   * 主动跳转会退出贴底跟随（流式增长不把视口拽回底部）；平滑滚动超远距离降级为瞬时。
+   */
+  scrollToKey: (key: string, behavior?: ScrollBehavior) => void;
 }
 
 export interface VirtualListProps<T> {
@@ -188,6 +198,26 @@ export function VirtualList<T>({
   const rafLayoutRef = useRef<number | null>(null);
   const rafScrollRef = useRef<number | null>(null);
 
+  /**
+   * 以几何为准校准「在底部」与贴底意图，并在变化时回调宿主。
+   * 为什么需要：atBottom 原先只在 scroll 事件里派生，而程序化贴底（selfScrollTopRef 记录的
+   * 自身滚动）会被 handleScroll 判为 self-initiated 并跳过改写 —— 残留的 false 在回复完成后
+   * （操作栏出现 / 「响应中」页脚收起等高度变化）没有任何时机被纠正，表现为「明明已在底部，
+   * 返回底部按钮仍显示」。任何布局落定时机调用本函数即可让几何重新成为权威。
+   */
+  const syncAtBottom = useCallback(() => {
+    const sc = scrollerRef.current;
+    if (!sc) return;
+    const dist = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+    // 真贴底（严阈值）→ 恢复贴底跟随（内容缩短被浏览器钳制 scrollTop 也能自愈）
+    if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
+    const ab = stickyRef.current ? true : dist <= thresholdRef.current;
+    if (ab !== atBottomRef.current) {
+      atBottomRef.current = ab;
+      bottomCbRef.current?.(ab);
+    }
+  }, []);
+
   // ===== 核心：布局计算（前缀和 + 可视区间 + 跟随） =====
   const runLayout = useCallback(() => {
     if (rafLayoutRef.current !== null) {
@@ -241,13 +271,16 @@ export function VirtualList<T>({
             // scrollTop 会被浏览器钳制到 scrollHeight - clientHeight，预期值必须同口径
             selfScrollTopRef.current = Math.max(0, s.scrollHeight - s.clientHeight);
             s.scrollTop = s.scrollHeight;
+            // 贴底后的 scroll 事件会被识别为「自身滚动」而跳过 atBottom 改写：
+            // 这里直接以几何校准，避免残留 false 让「返回底部」按钮一直显示
+            syncAtBottom();
           }
         });
       }
     } else {
       setLayoutSeq((v) => v + 1);
     }
-  }, []);
+  }, [syncAtBottom]);
 
   const scheduleLayout = useCallback(() => {
     if (rafLayoutRef.current !== null) return;
@@ -276,14 +309,10 @@ export function VirtualList<T>({
     selfScrollTopRef.current = null;
     lastScrollTopRef.current = sc.scrollTop;
     const dist = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
-    const ab = dist <= thresholdRef.current;
-    if (ab !== atBottomRef.current) {
-      atBottomRef.current = ab;
-      bottomCbRef.current?.(ab);
-    }
+    // 远端不平滑落点 = 用户已离开底部：显式脱跟；随后统一交给 syncAtBottom 派生 atBottom
     if (dist > thresholdRef.current) stickyRef.current = false;
-    if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
-  }, []);
+    syncAtBottom();
+  }, [syncAtBottom]);
 
   /** 开启程序滚动窗口期（仅平滑滚动需要）：scrollend 优先关闭，兜底超时保证一定关闭 */
   const openProgrammatic = useCallback(() => {
@@ -443,7 +472,10 @@ export function VirtualList<T>({
       selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
       sc.scrollTop = sc.scrollHeight;
     }
-  }, [range, visibleRange, layoutSeq]);
+    // ④ 贴底态校准：布局/高度变化（流式增长、回复结束的操作栏出现、页脚收起）后以几何为准，
+    // 纠正被 self-initiated 跳过而残留的 atBottom=false（「已在底部仍显示返回底部」的根因）
+    syncAtBottom();
+  }, [range, visibleRange, layoutSeq, syncAtBottom]);
 
   // ===== 会话切换重置（组件不重挂的参数变化场景） =====
   useEffect(() => {
@@ -555,7 +587,31 @@ export function VirtualList<T>({
     scheduleLayout();
   }, [scheduleLayout]);
 
-  // ===== API（锚定 / 滚底） =====
+  // ===== API（锚定 / 滚底 / 按条目跳转） =====
+  /** 按 key 查条目下标（items 通常几十到几百条，线性查找足够；找不到返回 -1） */
+  const indexOfKey = useCallback((key: string): number => {
+    const cur = itemsRef.current;
+    const keyFn = itemKeyRef.current;
+    for (let i = 0; i < cur.length; i++) {
+      if (keyFn(cur[i]) === key) return i;
+    }
+    return -1;
+  }, []);
+
+  /** 读取条目顶部偏移；前缀和落后于数据时强制重排一次（跳转/判定要求几何最新） */
+  const itemOffset = useCallback(
+    (key: string): number | null => {
+      const index = indexOfKey(key);
+      if (index < 0) return null;
+      if (prefixRef.current.length <= index) {
+        dirtyRef.current = true;
+        runLayout();
+      }
+      return prefixRef.current[index] ?? null;
+    },
+    [indexOfKey, runLayout],
+  );
+
   const api = useMemo<VirtualListApi>(() => ({
     anchorPrepend: () => {
       const h0 = scrollerRef.current?.scrollHeight ?? 0;
@@ -607,7 +663,32 @@ export function VirtualList<T>({
       }
       sc.scrollTo({ top: sc.scrollHeight, behavior: effective });
     },
-  }), [scheduleLayout, openProgrammatic]);
+    getItemOffset: (key: string) => itemOffset(key),
+    scrollToKey: (key: string, behavior: ScrollBehavior = 'auto') => {
+      const sc = scrollerRef.current;
+      if (!sc) return;
+      const offset = itemOffset(key);
+      if (offset === null) return;
+      const dist = Math.abs(offset - sc.scrollTop);
+      // 与「返回底部」同一降级策略：超远距离平滑耗时会拖很久，改为瞬时定位
+      const effective: ScrollBehavior =
+        behavior === 'smooth' && dist > INSTANT_SCROLL_DISTANCE_PX ? 'auto' : behavior;
+      // 主动跳转 = 退出贴底跟随：流式输出继续增长时不再把视口拽回底部
+      stickyRef.current = false;
+      // 跳转后通常不在底部 → 立即告知宿主，让「返回底部」按钮出现
+      if (atBottomRef.current) {
+        atBottomRef.current = false;
+        bottomCbRef.current?.(false);
+      }
+      if (effective === 'smooth') {
+        selfScrollTopRef.current = null;
+        openProgrammatic();
+      } else {
+        selfScrollTopRef.current = Math.min(offset, Math.max(0, sc.scrollHeight - sc.clientHeight));
+      }
+      sc.scrollTo({ top: offset, behavior: effective });
+    },
+  }), [scheduleLayout, openProgrammatic, itemOffset]);
 
   useEffect(() => {
     if (!apiRef) return;

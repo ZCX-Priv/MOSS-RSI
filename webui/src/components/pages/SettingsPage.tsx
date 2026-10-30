@@ -20,7 +20,8 @@ import {
   Monitor,
   Plus,
   Book,
-  ExternalLink,
+  ArrowUpRight,
+  Bug,
   Terminal,
   Layers,
   Trash2,
@@ -36,6 +37,8 @@ import {
   X,
   Smartphone,
   AppWindow,
+  DatabaseBackup,
+  MessageSquare,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -73,6 +76,7 @@ import { useReducedMotion } from '../../hooks/useAnimationClass';
 import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset } from '../../store';
 import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
 import { api } from '../../api/http';
+import { BrandIcon } from '../../lib/brand-icons';
 import { TOOL_ICON_MAP } from '../../lib/tool-icons';
 import { SKILL_ICON_CHOICES, resolveSkillIcon } from '../../lib/skill-icons';
 import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, FileIndexConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
@@ -97,6 +101,8 @@ export { HooksSettingsSection } from './settings/HooksSettingsSection';
 export { MemorySettingsSection } from './settings/MemorySettingsSection';
 // 远程控制设置分区（App.tsx 从本模块导入）
 export { RemoteSettingsSection } from './settings/RemoteSettingsSection';
+// IM 连接设置分区（App.tsx 从本模块导入）
+export { ImSettingsSection } from './settings/ImSettingsSection';
 // 浏览器设置分区（App.tsx 从本模块导入）：容器 + 三模式子页
 export { BrowserSettingsSection } from './settings/BrowserSettingsSection';
 export { BrowserModeRedirect } from './settings/BrowserSettingsSection';
@@ -105,6 +111,8 @@ export { BrowserExtensionSection } from './settings/BrowserExtensionSection';
 export { BrowserCdpSection } from './settings/BrowserCdpSection';
 // 电脑控制设置分区（cua-driver 状态与 computer 工具参数）
 export { ComputerSettingsSection } from './settings/ComputerSettingsSection';
+// 数据迁移设置分区（外部 Agent 会话导入 / MOSS 备份导出与恢复）
+export { MigrationSettingsSection } from './settings/MigrationSettingsSection';
 
 export interface NavItem {
   id: SettingsSection;
@@ -123,9 +131,11 @@ export const settingsNavItems: NavItem[] = [
   { id: 'browser', labelKey: 'settings.nav.browser', Icon: AppWindow },
   { id: 'computer', labelKey: 'settings.nav.computer', Icon: Monitor },
   { id: 'remote', labelKey: 'settings.nav.remote', Icon: Smartphone },
+  { id: 'im', labelKey: 'settings.nav.im', Icon: MessageSquare },
   { id: 'logs', labelKey: 'settings.nav.logs', Icon: ScrollText },
   { id: 'commands', labelKey: 'settings.nav.commands', Icon: Terminal },
   { id: 'hooks', labelKey: 'settings.nav.hooks', Icon: Webhook },
+  { id: 'migration', labelKey: 'settings.nav.migration', Icon: DatabaseBackup },
   { id: 'about', labelKey: 'settings.nav.about', Icon: Info },
 ];
 
@@ -174,6 +184,9 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.remote.title', descriptionKey: 'settings.remote.desc', section: 'remote' },
   { labelKey: 'settings.remote.lan.title', descriptionKey: 'settings.remote.lan.desc', section: 'remote' },
   { labelKey: 'settings.remote.tunnel.title', descriptionKey: 'settings.remote.tunnel.desc', section: 'remote' },
+  { labelKey: 'settings.nav.im', section: 'im' },
+  { labelKey: 'settings.im.subtitle', descriptionKey: 'settings.im.intro', section: 'im' },
+  { labelKey: 'settings.im.pairingTitle', descriptionKey: 'settings.im.pairingDesc', section: 'im' },
   { labelKey: 'settings.nav.logs', section: 'logs' },
   { labelKey: 'settings.safety.defaultMode', descriptionKey: 'settings.safety.defaultModeDesc', section: 'safety' },
   { labelKey: 'settings.safety.confirmTimeout', descriptionKey: 'settings.safety.confirmTimeoutDesc', section: 'safety' },
@@ -185,6 +198,10 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.placeholder.rulesTitle', descriptionKey: 'settings.placeholder.rulesDesc', section: 'rules' },
   { labelKey: 'settings.placeholder.memoryTitle', descriptionKey: 'settings.placeholder.memoryDesc', section: 'memory' },
   { labelKey: 'settings.placeholder.hooksTitle', descriptionKey: 'settings.placeholder.hooksDesc', section: 'hooks' },
+  { labelKey: 'settings.nav.migration', section: 'migration' },
+  { labelKey: 'settings.migration.tabs.external', descriptionKey: 'settings.migration.sourcesDesc', section: 'migration' },
+  { labelKey: 'settings.migration.exportTitle', descriptionKey: 'settings.migration.backupDesc', section: 'migration' },
+  { labelKey: 'settings.migration.importTitle', descriptionKey: 'settings.migration.mergeNotice', section: 'migration' },
   { labelKey: 'settings.nav.about', section: 'about' },
 
   // 通用设置详细项
@@ -1990,8 +2007,79 @@ export function AgentSettings() {
 }
 
 /* ===== 关于页面 ===== */
+/** MOSS 源码仓库（文档与 Issue 均挂在同一仓库下，避免虚构官网地址） */
+const MOSS_REPO_URL = 'https://github.com/ZCX-Priv/MOSS-OS';
+
+/** 关于页链接卡：品牌/线性图标 + 标题 + 说明 + 外链箭头 */
+function AboutLinkCard({
+  icon,
+  title,
+  desc,
+  href,
+}: {
+  icon: ReactNode;
+  title: string;
+  desc: string;
+  href: string;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="group flex items-start gap-3 rounded-xl border border-border bg-card p-3 transition-colors hover:border-primary/40 hover:bg-muted/40"
+    >
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+        {icon}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="text-sm font-medium text-foreground">{title}</span>
+        <span className="text-xs text-muted-foreground">{desc}</span>
+      </span>
+      <ArrowUpRight className="mt-1 size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-primary-strong" />
+    </a>
+  );
+}
+
+/** 构建信息行（左标签 / 右等宽值） */
+function AboutInfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-3">
+      <span className="shrink-0 text-sm text-muted-foreground">{label}</span>
+      <span className="min-w-0 truncate font-mono text-xs text-foreground/90">{value}</span>
+    </div>
+  );
+}
+
 export function AboutSettings() {
   const { t } = useTranslation();
+  // 版本信息来自 /api/version（version / channel / buildDate=运行时）；
+  // 拉取失败静默降级为占位符，不在设置页弹错误（后端未启动也能正常浏览关于页）
+  const [versionInfo, setVersionInfo] = useState<{
+    version: string;
+    channel: string;
+    buildDate?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getVersion()
+      .then((info) => {
+        if (!cancelled) setVersionInfo(info);
+      })
+      .catch(() => {
+        // 静默降级：构建信息区显示 —
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const versionText = versionInfo ? `v${versionInfo.version}` : '—';
+  const channelText = versionInfo?.channel ?? '—';
+  const runtimeText = versionInfo?.buildDate ?? '—';
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <div className="flex flex-col gap-1">
@@ -1999,31 +2087,73 @@ export function AboutSettings() {
         <p className="text-sm text-muted-foreground">{t('settings.about.subtitle')}</p>
       </div>
 
-      <div className="flex flex-col items-center gap-2 py-6">
-        <div className="size-16 overflow-hidden rounded-2xl">
-          <img src="/MOSS.png" alt="MOSS" className="size-full object-cover" />
+      {/* 品牌 Hero：MOSS logo + 品牌名 + 定位语 + 版本/通道徽标。
+          背景为深蓝光晕 + 极淡电路网格，呼应 MOSS 图标的电路板语言。 */}
+      <div className="relative overflow-hidden rounded-2xl border border-border bg-card">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_120%_at_50%_-15%,rgba(37,99,235,0.20),transparent_62%)] dark:bg-[radial-gradient(120%_120%_at_50%_-15%,rgba(37,99,235,0.32),transparent_62%)]"
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(var(--border)_1px,transparent_1px),linear-gradient(90deg,var(--border)_1px,transparent_1px)] [background-size:28px_28px]"
+        />
+        <div className="relative flex flex-col items-center gap-3 px-6 py-10">
+          <img
+            src="/MOSS.png"
+            alt="MOSS"
+            width={80}
+            height={80}
+            draggable={false}
+            className="size-20 rounded-2xl object-cover shadow-lg ring-1 ring-border"
+          />
+          <div className="flex flex-col items-center gap-1">
+            <div className="-mr-[0.3em] text-2xl font-semibold tracking-[0.3em] text-foreground">
+              MOSS
+            </div>
+            <p className="text-sm text-muted-foreground">{t('settings.about.tagline')}</p>
+          </div>
+          <div className="mt-1 flex items-center gap-2">
+            <Badge variant="secondary" className="font-normal">
+              {versionText}
+            </Badge>
+            <Badge variant="outline" className="font-normal uppercase">
+              {channelText}
+            </Badge>
+          </div>
         </div>
       </div>
 
       <div className="flex flex-col gap-3">
         <div className="text-sm font-medium text-foreground">{t('settings.about.relatedLinks')}</div>
-        <div className="flex flex-col gap-1">
-          <Button
-            variant="outline"
-            className="justify-start gap-2"
-            onClick={() => window.open('https://github.com/ZCX-Priv/MOSS-OS', '_blank')}
-          >
-            <svg viewBox="0 0 16 16" className="size-4" fill="currentColor" aria-hidden="true">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-            </svg>
-            <span className="flex-1 text-left">GitHub</span>
-            <ExternalLink className="size-3.5 text-muted-foreground" />
-          </Button>
-          <Button variant="outline" className="justify-start gap-2">
-            <Book className="size-4" />
-            <span className="flex-1 text-left">{t('settings.about.docs')}</span>
-            <ExternalLink className="size-3.5 text-muted-foreground" />
-          </Button>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <AboutLinkCard
+            icon={<BrandIcon name="github" size={18} />}
+            title={t('settings.about.repoTitle')}
+            desc={t('settings.about.repoDesc')}
+            href={MOSS_REPO_URL}
+          />
+          <AboutLinkCard
+            icon={<Book className="size-4" />}
+            title={t('settings.about.docs')}
+            desc={t('settings.about.docsDesc')}
+            href={`${MOSS_REPO_URL}#readme`}
+          />
+          <AboutLinkCard
+            icon={<Bug className="size-4" />}
+            title={t('settings.about.issuesTitle')}
+            desc={t('settings.about.issuesDesc')}
+            href={`${MOSS_REPO_URL}/issues`}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <div className="text-sm font-medium text-foreground">{t('settings.about.buildInfo')}</div>
+        <div className="flex flex-col divide-y divide-border rounded-xl border border-border bg-card px-4">
+          <AboutInfoRow label={t('settings.about.versionLabel')} value={versionText} />
+          <AboutInfoRow label={t('settings.about.channelLabel')} value={channelText} />
+          <AboutInfoRow label={t('settings.about.runtimeLabel')} value={runtimeText} />
         </div>
       </div>
 

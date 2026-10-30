@@ -426,6 +426,23 @@ export interface StreamChunkMeta {
 }
 
 export type AgentEvent =
+  /**
+   * 用户消息已持久化（引擎统一发出，覆盖 WebUI / IM / MCP / 自动化等全部入口）。
+   * 外部 run 没有前端乐观副本，必须靠该事件把用户消息实时同步到已订阅该会话的客户端；
+   * clientMessageId 与历史副本同身份，尾部补齐时按 id 原位归并，不会重复渲染。
+   */
+  | {
+    type: 'user-message';
+    sessionId: string;
+    content: string;
+    /** 用户消息持久化时间（与 session.messages 中的副本一致，前端据此排序） */
+    timestamp: string;
+    /** 附件绝对路径（与 task.stream 的 attachments 语义对齐） */
+    attachments?: string[];
+    /** 用户消息的稳定身份（随消息持久化、历史接口原样返回） */
+    clientMessageId: string;
+    runId?: string;
+  }
   | ({ type: 'assistant-text'; sessionId: string; text: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'assistant-thinking'; sessionId: string; text: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'tool-call-start'; sessionId: string; toolName: string; toolCallId: string; args: unknown; runId?: string } & StreamChunkMeta)
