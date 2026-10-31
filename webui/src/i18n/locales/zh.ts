@@ -1280,6 +1280,7 @@ export const zh = {
       kindUi: '交互界面',
       kindHybrid: '界面 + 工具',
       kindText: '文本结果',
+      uiBelow: '交互界面已渲染在卡片下方',
       chartEmpty: '暂无图表数据',
       selectPlaceholder: '选择…',
     },
@@ -1395,6 +1396,7 @@ export const zh = {
       diffTruncated: '变更内容过长，已截断显示（可切换源码查看完整参数）',
       diffFolded: '{{count}} 行已隐藏',
       diffFoldCollapse: '收起隐藏内容',
+      openLink: '打开链接',
     },
   },
   start: {

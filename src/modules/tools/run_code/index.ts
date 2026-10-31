@@ -295,10 +295,16 @@ function capMetadata(meta: CodeRunMetadata): CodeRunMetadata {
     meta = {
       ...meta,
       calls: meta.calls.slice(0, 20).map((c) => ({
-        ...c,
+        id: c.id,
+        name: c.name,
         argsPreview: truncateToBytes(c.argsPreview, 120),
         resultPreview: truncateToBytes(c.resultPreview, 120),
+        durationMs: c.durationMs,
+        ok: c.ok,
         ...(c.error ? { error: truncateToBytes(c.error, 200) } : {}),
+        // 富数据同步裁剪；resultMetadata 直接丢弃（超大 diff 等不再撑爆 transcript）
+        ...(c.argumentsJson ? { argumentsJson: truncateToBytes(c.argumentsJson, 2048) } : {}),
+        ...(c.resultText ? { resultText: truncateToBytes(c.resultText, 2048) } : {}),
       })),
       callsTruncated: true,
     };

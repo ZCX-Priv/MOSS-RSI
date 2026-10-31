@@ -2,11 +2,12 @@
 // 工具调用卡片（主对话与子代理执行过程共用，保证图标/交互/样式一致）。
 //
 // 标题行：状态/工具图标 + 工具名 + 入参摘要 + diff 增删统计 + 状态文案 + 展开箭头。
-// 展开区：预览/源码胶囊导航 + 复制源码；preview 走美化视图（edit/write 为 diff），
-//         source 保留原始参数 JSON / 结果 / MCP structuredContent / resources。
+// 展开区：预览/源码胶囊导航 + 复制源码；preview 走美化视图（edit/write 为 diff，
+//         web search 为编号结果列表），source 保留原始参数 JSON / 结果 / MCP structuredContent / resources。
+// run_code 通过 previewOverride / sourceOverride / titleOverride / trailing 复用同一张卡片。
 // 默认折叠；底部居中箭头可收起。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Check,
@@ -17,6 +18,7 @@ import {
   Copy,
   Eye,
   FileText,
+  Globe,
   Loader2,
   Square,
 } from 'lucide-react';
@@ -33,6 +35,7 @@ import {
   type DiffBlock,
   type DiffPreview,
   type DiffRow,
+  type SearchResultsPreviewData,
   type ToolPreview,
 } from '../../lib/tool-preview';
 import { sanitizeTerminalOutput } from '../../lib/terminal-output';
@@ -48,6 +51,18 @@ interface ToolCallDetailsProps {
   fallbackIsError?: boolean;
   /** 工具名 → 图标白名单键（store.toolIconMap） */
   iconMap: Record<string, string>;
+  /** 覆盖默认预览内容（run_code 等有专属结果形态的工具使用） */
+  previewOverride?: ReactNode;
+  /** 覆盖默认源码内容（run_code 展示程序源码而非参数 JSON） */
+  sourceOverride?: ReactNode;
+  /** 覆盖复制文本（run_code 复制程序源码） */
+  copyTextOverride?: string;
+  /** 头部标题覆盖（run_code 显示「代码」而非 run_code） */
+  titleOverride?: string;
+  /** 头部右侧附加信息（run_code 的状态文案），仅展示不拦截点击 */
+  trailing?: ReactNode;
+  /** 头部行类名覆盖（PTC 用更小的左内边距形成中间层级） */
+  headerClassName?: string;
 }
 
 type CardMode = 'preview' | 'source';
@@ -254,6 +269,81 @@ function DiffPreviewView({ preview }: { preview: DiffPreview }) {
   );
 }
 
+/** 站点图标：优先站点自身 favicon，失败/非法 URL 回退地球图标 */
+function SiteFavicon({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false);
+  const src = useMemo(() => {
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/.test(parsed.protocol)) return '';
+      return `https://${parsed.hostname}/favicon.ico`;
+    } catch {
+      return '';
+    }
+  }, [url]);
+
+  if (!src || failed) return <Globe className="size-4 shrink-0 text-muted-foreground" />;
+  return (
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+      className="size-4 shrink-0 rounded-[3px] object-contain"
+    />
+  );
+}
+
+/** web 搜索结果：序号 + 站点图标 + 标题 + 灰色摘要，点击整行打开链接 */
+function SearchResultsView({ preview }: { preview: SearchResultsPreviewData }) {
+  const { t } = useTranslation();
+  const open = (url: string) => {
+    if (!/^https?:\/\//i.test(url)) {
+      toast.error(t('task.runCode.openBlocked'));
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <div className="overflow-hidden">
+      <div className="max-h-[300px] overflow-auto no-scrollbar py-0.5">
+        {preview.items.map((item, index) => {
+          const summary = item.snippet || item.contentExcerpt || '';
+          return (
+            <button
+              key={`${item.url}-${index}`}
+              type="button"
+              onClick={() => open(item.url)}
+              title={t('task.toolCard.openLink')}
+              aria-label={t('task.toolCard.openLink')}
+              className="grid w-full grid-cols-[1.25rem_1rem_minmax(0,1fr)] items-start gap-x-2 px-2.5 py-1.5 text-left transition-colors hover:bg-muted/40"
+            >
+              <span className="flex h-5 items-center justify-end font-mono text-[11px] tabular-nums text-muted-foreground/50">
+                {preview.offset + index + 1}
+              </span>
+              <span className="flex h-5 items-center">
+                <SiteFavicon url={item.url} />
+              </span>
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate text-[13px] leading-5 text-muted-foreground">
+                  {item.title || item.url}
+                </span>
+                {summary && (
+                  <span className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground/70">
+                    {summary}
+                  </span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** 预览档主体：按工具类型渲染美化视图 */
 function PreviewBody({
   preview,
@@ -268,6 +358,10 @@ function PreviewBody({
 
   if (preview.kind === 'diff') {
     return <DiffPreviewView preview={preview} />;
+  }
+
+  if (preview.kind === 'searchResults') {
+    return <SearchResultsView preview={preview} />;
   }
 
   if (preview.kind === 'terminal') {
@@ -358,7 +452,7 @@ function PreviewBody({
   }
 
   return (
-    <div className="mx-2.5 my-1 rounded-md border border-dashed border-border bg-muted/20 px-3 py-3 text-center text-[11px] text-muted-foreground">
+    <div className="px-3 py-3 text-center text-[11px] text-muted-foreground">
       {preview.reason === 'pending' ? t('task.toolCard.pending') : t('task.toolCard.emptyResult')}
     </div>
   );
@@ -458,6 +552,12 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   fallbackText,
   fallbackIsError,
   iconMap,
+  previewOverride,
+  sourceOverride,
+  copyTextOverride,
+  titleOverride,
+  trailing,
+  headerClassName,
 }: ToolCallDetailsProps) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -551,13 +651,14 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   const ToolIcon = resolveToolIcon(toolCall.name, iconMap);
 
   const sourceText = useMemo(() => {
+    if (copyTextOverride) return copyTextOverride;
     const parts: string[] = [];
     if (prettyArgs) parts.push(prettyArgs);
     if (displayResultText) parts.push(displayResultText);
     const structured = result?.metadata?.structuredContent;
     if (structured) parts.push(JSON.stringify(structured, null, 2));
     return parts.join('\n\n');
-  }, [prettyArgs, displayResultText, result?.metadata?.structuredContent]);
+  }, [copyTextOverride, prettyArgs, displayResultText, result?.metadata?.structuredContent]);
 
   const toggle = () => setExpanded((value) => !value);
 
@@ -600,7 +701,10 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         type="button"
         aria-expanded={expanded}
         onClick={toggle}
-        className="flex w-full cursor-pointer items-center gap-1.5 px-2 py-0.5 text-left text-xs text-muted-foreground"
+        className={cn(
+          'flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-xs text-muted-foreground',
+          headerClassName ?? 'px-2',
+        )}
       >
         <ChevronRight
           className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')}
@@ -613,7 +717,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
           <ToolIcon className="size-3.5 shrink-0" />
         )}
         <span className="max-w-[45%] shrink-0 truncate" title={toolCall.name}>
-          {toolCall.name}
+          {titleOverride ?? toolCall.name}
         </span>
         {summary && (
           <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={summary}>
@@ -631,6 +735,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
             )}
           </span>
         )}
+        {trailing && <span className="ml-auto shrink-0 pl-2">{trailing}</span>}
       </button>
 
       {expanded && (
@@ -679,17 +784,19 @@ export const ToolCallDetails = memo(function ToolCallDetails({
             )}
           >
             <div className="pb-1.5">
-              {mode === 'preview' ? (
-                <PreviewBody preview={preview} hasResult={hasResult} isError={isError} />
-              ) : (
-                <SourceBody
-                  toolCall={toolCall}
-                  prettyArgs={prettyArgs}
-                  result={result}
-                  resultText={displayResultText}
-                  isError={isError}
-                />
-              )}
+              {mode === 'preview'
+                ? (previewOverride ?? (
+                    <PreviewBody preview={preview} hasResult={hasResult} isError={isError} />
+                  ))
+                : (sourceOverride ?? (
+                    <SourceBody
+                      toolCall={toolCall}
+                      prettyArgs={prettyArgs}
+                      result={result}
+                      resultText={displayResultText}
+                      isError={isError}
+                    />
+                  ))}
             </div>
           </div>
         </div>

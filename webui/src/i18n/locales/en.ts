@@ -1279,6 +1279,7 @@ export const en = {
       kindUi: 'Interactive UI',
       kindHybrid: 'UI + tools',
       kindText: 'Text result',
+      uiBelow: 'Interactive UI rendered below the card',
       chartEmpty: 'No chart data',
       selectPlaceholder: 'Select…',
     },
@@ -1394,6 +1395,7 @@ export const en = {
       diffTruncated: 'Diff truncated (switch to Source for full arguments)',
       diffFolded: '{{count}} lines hidden',
       diffFoldCollapse: 'Collapse hidden lines',
+      openLink: 'Open link',
     },
   },
   start: {

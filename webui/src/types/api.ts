@@ -10,6 +10,20 @@ import type { GenUIDiagnostic, GenUISpec } from '../render/genui/types';
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/** web 搜索条目（metadata.items，字段与后端 SearchItem 对齐） */
+export interface WebSearchItem {
+  title: string;
+  url: string;
+  snippet: string;
+  source?: string;
+  publishedAt?: string;
+  /** 命中该条目的全部引擎 */
+  engines: string[];
+  /** 正文摘录（default provider 增强成功时存在） */
+  contentExcerpt?: string;
+  contentQuality?: 'high' | 'low';
+}
+
 /** run_code 单次嵌套工具调用记录（metadata.codeRun.calls） */
 export interface CodeRunCall {
   id: string;
@@ -19,6 +33,12 @@ export interface CodeRunCall {
   durationMs: number;
   ok: boolean;
   error?: string;
+  /** 完整入参 JSON（后端 ≤16KB）；缺失时回退 argsPreview */
+  argumentsJson?: string;
+  /** 结果正文（后端 ≤32KB）；缺失时回退 resultPreview / error */
+  resultText?: string;
+  /** 结果 metadata（diff / terminal / 搜索条目等富预览依据） */
+  resultMetadata?: ToolResultMetadata;
 }
 
 /** run_code 结果 metadata（持久化在 tool 消息里，供 RunCodeCard + 历史回放） */
@@ -54,50 +74,65 @@ export interface ToolResult {
   >;
   isError?: boolean;
   /** 工具元数据（后端 terminal 等工具运行时返回，含 command/cwd/exitCode 等） */
-  metadata?: {
-    command?: string;
-    cwd?: string;
-    exitCode?: number;
-    stdoutLength?: number;
-    stderrLength?: number;
-    truncated?: boolean;
-    timedOut?: boolean;
-    /** terminal：是否仍在运行 / 终端 id（工具卡预览用） */
-    running?: boolean;
-    terminalId?: string;
-    /** 文件类工具（read/edit/write）的绝对路径与大小 */
+  metadata?: ToolResultMetadata;
+}
+
+/** 工具结果元数据（ToolResult 与 run_code 嵌套调用记录共用） */
+export interface ToolResultMetadata {
+  command?: string;
+  cwd?: string;
+  exitCode?: number;
+  stdoutLength?: number;
+  stderrLength?: number;
+  truncated?: boolean;
+  timedOut?: boolean;
+  /** terminal：是否仍在运行 / 终端 id（工具卡预览用） */
+  running?: boolean;
+  terminalId?: string;
+  /** 文件类工具（read/edit/write）的绝对路径与大小 */
+  path?: string;
+  sizeBytes?: number;
+  /** edit/write：unified diff、操作类型、dryRun、替换次数 */
+  diff?: string;
+  operation?: 'create' | 'overwrite';
+  dryRun?: boolean;
+  replacements?: number;
+  /** edit 多文件批量：逐文件结果（diff 供前端渲染多文件 diff 视图） */
+  files?: Array<{
     path?: string;
-    sizeBytes?: number;
-    /** edit/write：unified diff、操作类型、dryRun、替换次数 */
+    ok?: boolean;
     diff?: string;
-    operation?: 'create' | 'overwrite';
-    dryRun?: boolean;
+    error?: string;
     replacements?: number;
-    /** edit 多文件批量：逐文件结果（diff 供前端渲染多文件 diff 视图） */
-    files?: Array<{
-      path?: string;
-      ok?: boolean;
-      diff?: string;
-      error?: string;
-      replacements?: number;
-      dryRun?: boolean;
-    }>;
-    /** glob/grep：本页返回条数与匹配总数（预览按 returned 截取正文） */
-    returned?: number;
-    totalMatches?: number;
-    outputMode?: string;
-    pattern?: string;
-    root?: string;
-    /** MCP 工具来源（mcp__server__tool） */
-    server?: string;
-    tool?: string;
-    /** MCP structuredContent（结构化输出，JSON 直显） */
-    structuredContent?: Record<string, unknown>;
-    /** MCP resource 引用（uri/mimeType/text 完整数据） */
-    resources?: Array<{ uri: string; mimeType?: string; text?: string }>;
-    /** 代码模式（run_code）结果：程序/日志/嵌套调用/Intelligent UI 规格 */
-    codeRun?: CodeRunMetadata;
-  };
+    dryRun?: boolean;
+  }>;
+  /** glob/grep：本页返回条数与匹配总数（预览按 returned 截取正文） */
+  returned?: number;
+  totalMatches?: number;
+  outputMode?: string;
+  pattern?: string;
+  root?: string;
+  /** web：search / fetch 模式 */
+  mode?: 'search' | 'fetch';
+  searchId?: string;
+  query?: string;
+  provider?: string;
+  offset?: number;
+  pageSize?: number;
+  totalAvailable?: number;
+  /** web search：结构化结果列表（工具卡预览渲染编号列表） */
+  items?: WebSearchItem[];
+  elapsedMs?: number;
+  warnings?: string[];
+  /** MCP 工具来源（mcp__server__tool） */
+  server?: string;
+  tool?: string;
+  /** MCP structuredContent（结构化输出，JSON 直显） */
+  structuredContent?: Record<string, unknown>;
+  /** MCP resource 引用（uri/mimeType/text 完整数据） */
+  resources?: Array<{ uri: string; mimeType?: string; text?: string }>;
+  /** 代码模式（run_code）结果：程序/日志/嵌套调用/Intelligent UI 规格 */
+  codeRun?: CodeRunMetadata;
 }
 
 /** 右侧边栏标签页类型 */

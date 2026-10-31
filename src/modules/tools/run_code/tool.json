@@ -2,7 +2,7 @@
   "name": "run_code",
   "description": "在独立 Bun 子进程中执行一段 TypeScript 异步函数体（PTC）。用 await tools.<name>(args) 调用工具；用 ui.* 构建 Intelligent UI，界面会直接渲染在「代码」步骤下方的消息流里。只有 return 的值与 console.log 的文本会回到上下文，中间结果留在程序里。多步工具调用、循环、条件分支、并发、结果后处理，或需要聊天内可交互界面时优先使用；聊天内界面不要用 browser/HTML 代替。",
   "description_en": "Execute a TypeScript async function body in an isolated Bun subprocess (PTC). Call tools with await tools.<name>(args); build Intelligent UI with ui.* and it renders inline under the code step in the message flow. Only the returned value and console.log text re-enter context; intermediate results stay inside the program. Prefer it for multi-step tool calls, loops, branches, concurrency, post-processing, or interactive in-chat UI. Do not use browser/HTML to fake in-chat UI.",
-  "icon": "square-code",
+  "icon": "code",
   "annotations": {
     "destructiveHint": true,
     "requireConfirmation": true

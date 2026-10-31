@@ -1,9 +1,9 @@
 // webui/src/lib/tool-preview.ts
 // 工具调用卡片「预览」数据构建（纯函数，无 React 依赖）。
-// 把不同工具的结果归一为可渲染的预览形态：diff / terminal / fileList / read / text / empty。
+// 把不同工具的结果归一为可渲染的预览形态：diff / terminal / fileList / read / text / searchResults / empty。
 // diff 优先取后端 metadata.diff（含上下文与行号），旧会话/缺失时退回结果文本或参数合成。
 
-import type { ToolResult } from '../types/api';
+import type { ToolResult, WebSearchItem } from '../types/api';
 
 /** diff 文件头操作标签：修改 / 新建 / dryRun 预览 */
 export type DiffLabel = 'modified' | 'new' | 'preview';
@@ -85,6 +85,17 @@ export interface TextPreviewData {
   isError: boolean;
 }
 
+/** web search 预览：编号列表（序号 + 站点图标 + 标题 + 灰色摘要） */
+export interface SearchResultsPreviewData {
+  kind: 'searchResults';
+  query?: string;
+  /** 结果池起始下标（编号从 offset+1 开始） */
+  offset: number;
+  items: WebSearchItem[];
+  totalAvailable?: number;
+  elapsedMs?: number;
+}
+
 export interface EmptyPreviewData {
   kind: 'empty';
   reason: 'pending' | 'noResult';
@@ -96,6 +107,7 @@ export type ToolPreview =
   | FileListPreviewData
   | ReadPreviewData
   | TextPreviewData
+  | SearchResultsPreviewData
   | EmptyPreviewData;
 
 export interface BuildToolPreviewParams {
@@ -609,7 +621,7 @@ function extractSearchBody(text: string, metadata: ToolResult['metadata'] | unde
 /** 工具参数一行摘要（命令 / 路径 / 模式等） */
 export function summarizeToolCall(args: Record<string, unknown> | null): string {
   if (!args) return '';
-  const keys = ['command', 'path', 'pattern', 'glob', 'query', 'url', 'name', 'task'];
+  const keys = ['command', 'path', 'pattern', 'glob', 'query', 'url', 'name', 'task', 'description'];
   for (const key of keys) {
     const value = asString(args[key]);
     if (value === undefined) continue;
@@ -642,6 +654,18 @@ export function buildToolPreview({
 }: BuildToolPreviewParams): ToolPreview {
   const text = resultText ?? '';
   const command = args ? asString(args.command) : undefined;
+
+  // web search：结构化结果渲染为编号列表（标题 + 灰色摘要）
+  if (toolName === 'web' && metadata?.mode === 'search' && metadata.items && metadata.items.length > 0) {
+    return {
+      kind: 'searchResults',
+      query: metadata.query,
+      offset: metadata.offset ?? 0,
+      items: metadata.items,
+      totalAvailable: metadata.totalAvailable,
+      elapsedMs: metadata.elapsedMs,
+    };
+  }
 
   // terminal：命令执行中/完成都显示 `$ 命令` + 输出
   if (toolName === 'terminal' && command !== undefined) {
