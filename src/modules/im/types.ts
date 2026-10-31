@@ -7,9 +7,7 @@ import type { Logger } from '../../core/types';
 /** 支持的 IM 渠道（与前端 webui/src/types/api.ts 保持一致） */
 export type ImChannelId =
   | 'wechat-ilink'
-  | 'wecom-aibot'
-  | 'qq-official'
-  | 'qq-onebot';
+  | 'qq-official';
 
 /** 通用表单字段（设置页按此渲染，避免每个渠道写一套表单组件） */
 export interface ImFormField {
@@ -39,8 +37,6 @@ export interface ImChannelDescriptor {
     group: boolean;
     /** 是否支持扫码接入 */
     qrLogin: boolean;
-    /** 仅支持扫码接入（无可编辑凭据字段） */
-    qrOnly?: boolean;
   };
   /** 校验凭据并返回平台身份（新增/编辑保存前调用） */
   verify(credentials: Record<string, string>): Promise<ImVerifiedIdentity>;
@@ -51,7 +47,7 @@ export interface ImVerifiedIdentity {
   platformId: string;
   /** 展示名（优先平台返回的机器人名） */
   name: string;
-  /** 附加信息（如 OneBot 端口） */
+  /** 附加信息（如平台连接地址） */
   extra?: Record<string, string>;
 }
 
@@ -78,6 +74,8 @@ export interface ImBotOptions {
   permissionMode: 'unset' | 'auto' | 'skip' | 'ask';
   /** 群聊触发：mention=仅 @机器人；all=群内全部消息 */
   groupTrigger: 'mention' | 'all';
+  /** 过程播报：把工具调用逐条推送为 IM 消息（默认开启） */
+  progress: boolean;
   /** 指定 agent 配置；空 = 默认 agent */
   agentId?: string;
 }
@@ -142,7 +140,7 @@ export interface ImRuntimeStatus {
   lastMessageAt: string | null;
   received: number;
   replied: number;
-  /** OneBot 等需要展示连接地址的渠道 */
+  /** 需要展示连接地址的渠道 */
   extra?: Record<string, string>;
 }
 
@@ -161,6 +159,8 @@ export interface ImChannelAdapter {
   start(): Promise<void>;
   stop(): Promise<void>;
   sendText(target: ImReplyTarget, text: string): Promise<void>;
+  /** 切换「正在输入」状态；不支持的渠道/会话直接 no-op */
+  setTyping?(target: ImReplyTarget, active: boolean): Promise<void>;
 }
 
 /** 前端状态快照（不含凭据） */

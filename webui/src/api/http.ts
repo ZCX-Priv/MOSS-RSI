@@ -67,8 +67,8 @@ import type {
   ImChannelsResponse,
   ImSaveBotInput,
   ImBotStatus,
-  ImWechatQrStart,
-  ImWechatQrState,
+  ImProvisioningSnapshot,
+  ImChannelId,
   HistoryPageMeta,
   SessionState,
   VoiceStatus,
@@ -777,12 +777,21 @@ export const api = {
   rotateImPairing: (botId: string) => request<ImBotStatus>('POST', `/api/im/bots/${botId}/pairing`),
   unbindImUser: (botId: string, userId: string) =>
     request<ImBotStatus>('POST', `/api/im/bots/${botId}/unbind`, { userId }),
-  startWechatLogin: () => request<ImWechatQrStart>('POST', '/api/im/wechat/qr/start'),
-  pollWechatLogin: (loginId: string) => request<ImWechatQrState>('GET', `/api/im/wechat/qr/${loginId}`),
-  verifyWechatLogin: (loginId: string, code: string) =>
-    request<{ saved: boolean }>('POST', `/api/im/wechat/qr/${loginId}/verify`, { code }),
-  cancelWechatLogin: (loginId: string) =>
-    request<{ cancelled: boolean }>('POST', `/api/im/wechat/qr/${loginId}/cancel`),
+  startImProvisioning: (channel: ImChannelId) =>
+    request<ImProvisioningSnapshot>('POST', `/api/im/provisioning/${channel}/start`),
+  getImProvisioning: (loginId: string) =>
+    request<ImProvisioningSnapshot>('GET', `/api/im/provisioning/${encodeURIComponent(loginId)}`),
+  verifyImProvisioning: (loginId: string, code: string) =>
+    request<ImProvisioningSnapshot>(
+      'POST',
+      `/api/im/provisioning/${encodeURIComponent(loginId)}/verify`,
+      { code },
+    ),
+  cancelImProvisioning: (loginId: string) =>
+    request<ImProvisioningSnapshot>(
+      'POST',
+      `/api/im/provisioning/${encodeURIComponent(loginId)}/cancel`,
+    ),
 
   // ==========================================================================
   // 自动化任务（见文档 3.2.7）

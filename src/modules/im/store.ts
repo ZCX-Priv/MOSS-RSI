@@ -17,18 +17,18 @@ interface ImBotsDocument {
 
 const EMPTY_DOCUMENT: ImBotsDocument = { version: 1, bots: [] };
 
-/** 默认机器人选项：操作范围本机、权限首次询问 */
+/** 默认机器人选项：操作范围本机、权限首次询问、过程播报开启 */
 export function defaultBotOptions(): ImBotOptions {
-  return { cwd: SYSTEM_SCOPE, permissionMode: 'unset', groupTrigger: 'mention' };
+  return { cwd: SYSTEM_SCOPE, permissionMode: 'unset', groupTrigger: 'mention', progress: true };
 }
 
 /** 渠道合法性判断（避免外部传入未知渠道） */
 export function isImChannelId(value: string): value is ImChannelId {
-  return ['wechat-ilink', 'wecom-aibot', 'qq-official', 'qq-onebot'].includes(value);
+  return ['wechat-ilink', 'qq-official'].includes(value);
 }
 
 /** 已下线渠道（启动时从 bots.json 清理） */
-const RETIRED_CHANNELS = new Set(['feishu', 'dingtalk']);
+const RETIRED_CHANNELS = new Set(['feishu', 'dingtalk', 'wecom-aibot', 'qq-onebot']);
 
 /** 安全读取原始条目的 channel 字段 */
 function channelOf(value: unknown): string {
@@ -47,6 +47,8 @@ export function normalizeOptions(value: unknown): ImBotOptions {
     cwd: typeof source.cwd === 'string' && source.cwd.trim() ? source.cwd.trim() : SYSTEM_SCOPE,
     permissionMode: mode === 'auto' || mode === 'skip' || mode === 'ask' ? mode : 'unset',
     groupTrigger: trigger === 'all' ? 'all' : 'mention',
+    // 旧 bots.json 没有该字段：默认开启，仅显式 false 才关闭
+    progress: typeof source.progress === 'boolean' ? source.progress : true,
     ...(agentId ? { agentId } : {}),
   };
 }
@@ -77,11 +79,6 @@ function normalizeBot(value: unknown): StoredImBot | null {
     for (const [key, raw] of Object.entries(source.credentials as Record<string, unknown>)) {
       if (typeof raw === 'string') credentials[key] = raw;
     }
-  }
-  // 旧版 OneBot 只存了 port：迁移为 reverse-ws + listenPort
-  if (channel === 'qq-onebot') {
-    if (!credentials.mode) credentials.mode = 'reverse-ws';
-    if (!credentials.listenPort && credentials.port) credentials.listenPort = credentials.port;
   }
   return {
     botId,
@@ -117,13 +114,13 @@ export class ImBotStore {
       const raw = JSON.parse(await readFile(this.path, 'utf8')) as unknown;
       const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
       const list = Array.isArray(source.bots) ? source.bots : [];
-      // 已下线渠道（飞书/钉钉）在启动时清理并写回文件
+      // 已下线渠道（飞书/钉钉/企微/OneBot）在启动时清理并写回文件
       const retired = list.filter(item => RETIRED_CHANNELS.has(channelOf(item)));
       const remaining = retired.length > 0 ? list.filter(item => !RETIRED_CHANNELS.has(channelOf(item))) : list;
       const bots = remaining.map(normalizeBot).filter((bot): bot is StoredImBot => bot !== null);
       this.document = { version: 1, bots };
       if (retired.length > 0) {
-        this.logger.info('im: 已移除飞书/钉钉机器人配置', { removed: retired.length, file: this.path });
+        this.logger.info('im: 已移除下线渠道的机器人配置', { removed: retired.length, file: this.path });
         await this.write(this.document);
       }
       if (bots.length !== remaining.length) {

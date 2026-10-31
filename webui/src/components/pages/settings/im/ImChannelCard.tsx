@@ -18,6 +18,7 @@ interface Props {
   onAdd: (channel: ImChannelDescriptor, mode: 'qr' | 'manual') => void;
   onToggle: (bot: ImBotStatus, enabled: boolean) => void;
   onTest: (bot: ImBotStatus) => void;
+  onReauth: (bot: ImBotStatus) => void;
   onReconnect: (bot: ImBotStatus) => void;
   onEdit: (bot: ImBotStatus) => void;
   onBinding: (bot: ImBotStatus) => void;
@@ -31,6 +32,7 @@ export function ImChannelCard({
   onAdd,
   onToggle,
   onTest,
+  onReauth,
   onReconnect,
   onEdit,
   onBinding,
@@ -72,11 +74,11 @@ export function ImChannelCard({
               busy={busyId === bot.botId}
               onToggle={onToggle}
               onTest={onTest}
+              onReauth={onReauth}
               onReconnect={onReconnect}
               onEdit={onEdit}
               onBinding={onBinding}
               onDelete={onDelete}
-              editable={!channel.capabilities.qrOnly}
             />
           ))}
         </div>
@@ -89,17 +91,15 @@ export function ImChannelCard({
             {t('settings.im.qrAdd')}
           </Button>
         ) : null}
-        {!channel.capabilities.qrOnly ? (
-          <Button
-            variant={channel.capabilities.qrLogin ? 'ghost' : 'outline'}
-            size="sm"
-            className="w-fit gap-1.5"
-            onClick={() => onAdd(channel, 'manual')}
-          >
-            <Plus className="size-3.5" />
-            {channel.capabilities.qrLogin ? t('settings.im.manualAdd') : t('settings.im.addBot')}
-          </Button>
-        ) : null}
+        <Button
+          variant={channel.capabilities.qrLogin ? 'ghost' : 'outline'}
+          size="sm"
+          className="w-fit gap-1.5"
+          onClick={() => onAdd(channel, 'manual')}
+        >
+          <Plus className="size-3.5" />
+          {channel.capabilities.qrLogin ? t('settings.im.manualAdd') : t('settings.im.addBot')}
+        </Button>
       </div>
     </Card>
   );

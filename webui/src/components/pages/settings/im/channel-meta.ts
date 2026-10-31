@@ -4,11 +4,9 @@
 import type { BrandIconName } from '@/lib/brand-icons';
 import type { ImChannelId } from '@/types/api';
 
-/** 渠道 → 品牌图标（企业微信/QQ/微信，见 lib/brand-icons） */
+/** 渠道 → 品牌图标（QQ/微信，见 lib/brand-icons） */
 export const CHANNEL_BRAND: Record<ImChannelId, BrandIconName> = {
-  'wecom-aibot': 'wecom',
   'qq-official': 'qq',
-  'qq-onebot': 'qq',
   'wechat-ilink': 'wechat',
 };
 

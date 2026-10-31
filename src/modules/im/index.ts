@@ -6,8 +6,8 @@ import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { ServerInstance } from '../server/types';
-import { WechatLoginManager } from './adapters/wechat-ilink';
 import { ImController } from './controller';
+import { ImProvisioningManager } from './provisioning';
 import { createImRoutes } from './routes';
 import { ImStateStore } from './state';
 import { ImBotStore } from './store';
@@ -22,6 +22,7 @@ export interface ImService {
 class ImModule implements Module {
   private ctx!: ModuleContext;
   private controller: ImController | null = null;
+  private provisioning: ImProvisioningManager | null = null;
 
   async initialize(ctx: ModuleContext): Promise<void> {
     this.ctx = ctx;
@@ -41,10 +42,16 @@ class ImModule implements Module {
     });
     this.controller = controller;
 
+    const provisioning = new ImProvisioningManager({
+      controller,
+      store,
+      logger: ctx.logger,
+    });
+    this.provisioning = provisioning;
+
     // 路由注册（server 未就绪时跳过，避免把 IM 模块拖入错误状态）
     if (server) {
-      const wechatLogin = new WechatLoginManager();
-      for (const route of createImRoutes(controller, wechatLogin)) {
+      for (const route of createImRoutes(controller, provisioning)) {
         server.addRoute(route);
       }
     } else {
@@ -71,6 +78,8 @@ class ImModule implements Module {
   }
 
   async destroy(): Promise<void> {
+    await this.provisioning?.close();
+    this.provisioning = null;
     await this.controller?.dispose();
     this.controller = null;
     this.ctx.logger.info(t('im.moduleStopped'));

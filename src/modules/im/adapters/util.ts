@@ -11,7 +11,7 @@ export function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** 平台 ID 取值：OneBot 等协议的数字 ID 也要转成字符串 */
+/** 平台 ID 取值：数字 ID 也要转成字符串 */
 export function idText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
@@ -24,7 +24,18 @@ export function num(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** 带超时的 fetch（返回 JSON；非 2xx 抛错并附响应文本前 200 字） */
+/** 非 2xx 响应：保留状态码，供适配器区分凭据失效（401/403）与一般错误 */
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, text: string) {
+    super(`HTTP ${status}: ${text.slice(0, 200)}`);
+    this.name = 'HttpError';
+    this.status = status;
+  }
+}
+
+/** 带超时的 fetch（返回 JSON；非 2xx 抛 HttpError 并附响应文本前 200 字） */
 export async function fetchJson(
   url: string,
   init: RequestInit,
@@ -40,7 +51,7 @@ export async function fetchJson(
     const response = await fetch(url, { ...init, signal: controller.signal });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+      throw new HttpError(response.status, text);
     }
     return text ? (JSON.parse(text) as unknown) : null;
   } finally {

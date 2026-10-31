@@ -593,7 +593,7 @@ export const en = {
       permissionMenu:
         'First use: choose the execution permission for MOSS (reply with a number):\n1. Auto approve (recommended) — low-risk actions run automatically, high-risk actions still need confirmation\n2. Full access — run every action directly (use with caution)\n3. Ask every time — every write action needs your confirmation',
       permissionInvalid: 'Reply 1 / 2 / 3 to choose a permission mode.',
-      permissionSaved: 'Permission set: {{label}}. Starting the task…',
+      permissionSaved: 'Permission set: {{label}}.',
       permissionLabel: { auto: 'Auto approve', skip: 'Full access', ask: 'Ask every time' },
       askHead: '❓ Question {{index}}/{{total}}: {{question}}',
       askTextHint: 'Reply with your answer.',

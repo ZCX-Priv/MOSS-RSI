@@ -1,5 +1,5 @@
 // src/modules/im/im.test.ts
-// IM 模块核心链路单测：文本处理、状态存储、网关准入/命令/执行、OneBot 反向 WS 收发。
+// IM 模块核心链路单测：文本处理、状态存储、网关准入/命令/执行。
 // 使用假的 agent engine 与 server，不依赖真实模型与网络。
 
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -12,14 +12,16 @@ import type { AgentEngine, AgentEvent } from '../contracts';
 import type { ServerInstance } from '../server/types';
 import { getSessionTodoPathFromDir, writeSessionTodoStore } from '../tools/todo/shared/store';
 import type { AskOutcome, AskQuestion } from '../tools/types';
-import { createAdapter, descriptor } from './adapters/onebot';
+import { descriptor as qqDescriptor, isQqAuthorizationError } from './adapters/qq-official';
 import { descriptor as wechatDescriptor } from './adapters/wechat-ilink';
+import { ImController } from './controller';
 import { ImGateway } from './gateway';
+import { deriveBotId } from './identity';
 import { parseChoice, renderTodoList, todoSignature } from './interaction';
 import { prepareOutbound, splitText, toPlainText } from './render';
 import { ImStateStore } from './state';
 import { ImBotStore } from './store';
-import type { ImInboundMessage, ImReplyTarget, ImRuntimeStatus, StoredImBot } from './types';
+import type { ImInboundMessage, ImReplyTarget, StoredImBot } from './types';
 
 const tempRoots: string[] = [];
 
@@ -239,14 +241,14 @@ async function makeBot(): Promise<{ store: ImBotStore; state: ImStateStore; bot:
   await store.load();
   await state.load();
   const bot = await store.save({
-    botId: 'ob_test',
-    channel: 'qq-onebot',
+    botId: 'qq_test',
+    channel: 'qq-official',
     name: '测试机器人',
-    platformId: 'onebot:16199',
-    credentials: { port: '16199', accessToken: '' },
+    platformId: '10001',
+    credentials: { appId: '10001', appSecret: 'secret' },
     enabled: true,
     pairingCode: '123456',
-    options: { cwd: '', permissionMode: 'auto', groupTrigger: 'mention' },
+    options: { cwd: '', permissionMode: 'auto', groupTrigger: 'mention', progress: true },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
@@ -255,8 +257,8 @@ async function makeBot(): Promise<{ store: ImBotStore; state: ImStateStore; bot:
 
 function inbound(overrides: Partial<ImInboundMessage> = {}): ImInboundMessage {
   return {
-    botId: 'ob_test',
-    channel: 'qq-onebot',
+    botId: 'qq_test',
+    channel: 'qq-official',
     messageId: `m-${Math.random()}`,
     conversationKey: 'direct:10001',
     kind: 'direct',
@@ -265,7 +267,7 @@ function inbound(overrides: Partial<ImInboundMessage> = {}): ImInboundMessage {
     segments: [{ type: 'text', text: '你好' }],
     text: '你好',
     addressed: true,
-    replyTarget: { channel: 'qq-onebot', kind: 'direct', userId: '10001' },
+    replyTarget: { channel: 'qq-official', kind: 'direct', targetId: '10001' },
     receivedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -326,6 +328,7 @@ describe('gateway', () => {
     const agent = new FakeAgent();
     const server = fakeServer();
     const replies: Array<{ target: ImReplyTarget; text: string }> = [];
+    const typing: boolean[] = [];
     const gateway = new ImGateway({
       logger: fakeLogger(),
       services: fakeRegistry(agent, { workingDirectory: '' }),
@@ -336,6 +339,9 @@ describe('gateway', () => {
       channelLabel: () => 'QQ用户模式',
       sendText: async (_bot, target, text) => {
         replies.push({ target, text });
+      },
+      setTyping: async (_bot, _target, active) => {
+        typing.push(active);
       },
       getBot: botId => (botId === bot.botId ? bot : null),
       updateBotOptions: async () => undefined,
@@ -350,10 +356,12 @@ describe('gateway', () => {
     expect(state.isBound(bot.botId, '10001')).toBe(true);
     expect(replies[1]?.text).toContain('绑定成功');
 
+    const typingBeforeTask = typing.length;
     gateway.handle(bot, inbound({ text: '帮我写个文件' }));
     await Bun.sleep(50);
-    const ack = replies.find(item => item.text.includes('收到，正在处理'));
-    expect(ack).toBeDefined();
+    expect(replies.some(item => item.text.includes('收到，正在处理'))).toBe(false);
+    expect(typing.slice(typingBeforeTask).includes(true)).toBe(true);
+    expect(typing.at(-1)).toBe(false);
     expect(agent.runs.length).toBe(1);
     expect(agent.runs[0]?.userMessage).toBe('帮我写个文件');
     expect(agent.runs[0]?.permissionMode).toBe('auto');
@@ -378,6 +386,7 @@ describe('gateway', () => {
       supportsMarkdown: () => false,
       channelLabel: () => 'QQ用户模式',
       sendText: async () => undefined,
+      setTyping: async () => undefined,
       getBot: botId => (botId === bot.botId ? bot : null),
       updateBotOptions: async () => undefined,
     });
@@ -397,12 +406,12 @@ describe('gateway', () => {
         ],
       }),
     );
-    await Bun.sleep(100);
+    await Bun.sleep(200);
 
     expect(agent.runs.length).toBe(1);
     expect(agent.runs[0]?.attachments?.length).toBe(1);
     expect(existsSync(agent.runs[0]!.attachments![0]!)).toBe(true);
-    expect(agent.runs[0]?.userMessage).toContain('[IM 附件 · qq-onebot]');
+    expect(agent.runs[0]?.userMessage).toContain('[IM 附件 · qq-official]');
     expect(agent.runs[0]?.userMessage).toContain('b.pdf');
   });
 
@@ -423,6 +432,7 @@ describe('gateway', () => {
       sendText: async (_bot, _target, text) => {
         replies.push(text);
       },
+      setTyping: async () => undefined,
       getBot: botId => (botId === bot.botId ? bot : null),
       updateBotOptions: async () => undefined,
     });
@@ -455,15 +465,16 @@ describe('gateway', () => {
       supportsMarkdown: () => false,
       channelLabel: () => 'QQ用户模式',
       sendText: async () => undefined,
+      setTyping: async () => undefined,
       getBot: botId => (botId === bot.botId ? bot : null),
       updateBotOptions: async () => undefined,
     });
     gateway.handle(
       bot,
       inbound({ kind: 'group', conversationKey: 'group:90001', addressed: false, replyTarget: {
-        channel: 'qq-onebot',
+        channel: 'qq-official',
         kind: 'group',
-        groupId: '90001',
+        targetId: '90001',
       } }),
     );
     await Bun.sleep(20);
@@ -472,9 +483,8 @@ describe('gateway', () => {
 });
 
 describe('wechat descriptor', () => {
-  test('支持手动添加：必填校验与平台身份', async () => {
+  test('支持扫码与手动添加：必填校验与平台身份', async () => {
     expect(wechatDescriptor.capabilities.qrLogin).toBe(true);
-    expect(wechatDescriptor.capabilities.qrOnly).toBeUndefined();
     await expect(wechatDescriptor.verify({})).rejects.toThrow('Bot Token 与 Bot ID 必填');
     const identity = await wechatDescriptor.verify({ botToken: 'token', botId: 'bot-1' });
     expect(identity.platformId).toBe('bot-1');
@@ -482,8 +492,14 @@ describe('wechat descriptor', () => {
   });
 });
 
+describe('qq descriptor', () => {
+  test('支持扫码接入与手动凭据校验', () => {
+    expect(qqDescriptor.capabilities.qrLogin).toBe(true);
+  });
+});
+
 describe('retired channel cleanup', () => {
-  test('启动时移除飞书/钉钉机器人并写回文件', async () => {
+  test('启动时移除飞书/钉钉/企微/OneBot 机器人并写回文件', async () => {
     const dir = tempDir();
     const file = join(dir, 'im', 'bots.json');
     mkdirSync(join(dir, 'im'), { recursive: true });
@@ -503,6 +519,8 @@ describe('retired channel cleanup', () => {
         bots: [
           { ...base, botId: 'fs_retired', channel: 'feishu', platformId: 'cli_retired' },
           { ...base, botId: 'dt_retired', channel: 'dingtalk', platformId: 'ding_retired' },
+          { ...base, botId: 'wc_retired', channel: 'wecom-aibot', platformId: 'wecom_retired' },
+          { ...base, botId: 'ob_retired', channel: 'qq-onebot', platformId: 'onebot:6199' },
           { ...base, botId: 'wx_kept', channel: 'wechat-ilink', platformId: 'bot-kept' },
         ],
       }),
@@ -549,6 +567,7 @@ describe('gateway interaction', () => {
     replies: string[],
     getBot: (botId: string) => StoredImBot | null,
     updateBotOptions: (botId: string, patch: Partial<StoredImBot['options']>) => Promise<unknown>,
+    typing: boolean[] = [],
   ): ImGateway {
     return new ImGateway({
       logger: fakeLogger(),
@@ -561,6 +580,9 @@ describe('gateway interaction', () => {
       sendText: async (_bot, _target, text) => {
         replies.push(text);
       },
+      setTyping: async (_bot, _target, active) => {
+        typing.push(active);
+      },
       getBot,
       updateBotOptions,
     });
@@ -572,6 +594,7 @@ describe('gateway interaction', () => {
     let current: StoredImBot = { ...bot, options: { ...bot.options, permissionMode: 'unset' } };
     const agent = new FakeAgent();
     const replies: string[] = [];
+    const typing: boolean[] = [];
     const gateway = buildGateway(
       agent,
       state,
@@ -581,17 +604,24 @@ describe('gateway interaction', () => {
       async (_botId, patch) => {
         current = { ...current, options: { ...current.options, ...patch } };
       },
+      typing,
     );
 
     gateway.handle(current, inbound({ text: '帮我写个文件' }));
     await Bun.sleep(20);
     expect(replies.some(text => text.includes('请选择 MOSS 的执行权限'))).toBe(true);
     expect(agent.runs.length).toBe(0);
+    // 消息一到先显示正在输入，权限菜单发出后停止
+    expect(typing.slice(0, 2)).toEqual([true, false]);
 
     gateway.handle(current, inbound({ text: '1' }));
     await Bun.sleep(60);
     expect(agent.runs.length).toBe(1);
     expect(agent.runs[0]?.permissionMode).toBe('auto');
+    expect(replies.some(text => text.includes('已设置权限：自动审批。'))).toBe(true);
+    expect(replies.some(text => text.includes('开始执行任务'))).toBe(false);
+    expect(typing.filter(value => value === true).length).toBeGreaterThanOrEqual(2);
+    expect(typing.at(-1)).toBe(false);
   });
 
   test('ask 事件转数字菜单，回复数字后 resolveAsk', async () => {
@@ -611,17 +641,21 @@ describe('gateway interaction', () => {
       },
     ];
     const replies: string[] = [];
-    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+    const typing: boolean[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined, typing);
 
     gateway.handle(bot, inbound({ text: '开始' }));
     await Bun.sleep(40);
     expect(replies.some(text => text.includes('选择数据库'))).toBe(true);
+    expect(typing.slice(0, 2)).toEqual([true, false]);
 
     gateway.handle(bot, inbound({ text: '2' }));
     await Bun.sleep(30);
     expect(agent.resolvedAsks.length).toBe(1);
     expect(agent.resolvedAsks[0]?.outcome.action).toBe('accept');
     expect(agent.resolvedAsks[0]?.outcome.answers?.[0]?.selectedValues).toEqual(['pg']);
+    expect(typing.slice(2).includes(true)).toBe(true);
+    expect(typing.at(-1)).toBe(false);
   });
 
   test('confirm 事件用 1/2/3 回复，resolveConfirm 支持会话级放行', async () => {
@@ -631,16 +665,20 @@ describe('gateway interaction', () => {
     agent.confirmHold = true;
     agent.injectConfirm = { toolName: 'write', question: '写入文件？' };
     const replies: string[] = [];
-    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+    const typing: boolean[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined, typing);
 
     gateway.handle(bot, inbound({ text: '开始' }));
     await Bun.sleep(40);
     expect(replies.some(text => text.includes('需要确认'))).toBe(true);
+    expect(typing.slice(0, 2)).toEqual([true, false]);
 
     gateway.handle(bot, inbound({ text: '3' }));
     await Bun.sleep(30);
     expect(agent.resolvedConfirms[0]?.ok).toBe(true);
     expect(agent.resolvedConfirms[0]?.remember).toBe('session');
+    expect(typing.slice(2).includes(true)).toBe(true);
+    expect(typing.at(-1)).toBe(false);
   });
 
   test('todo 工具结束后推送任务清单', async () => {
@@ -677,78 +715,224 @@ describe('gateway interaction', () => {
     await Bun.sleep(60);
     expect(replies.some(text => text.includes('任务清单') && text.includes('写代码'))).toBe(true);
   });
-});
 
-describe('qq-onebot adapter', () => {
-  test('反向 WS 收事件并按 OneBot 动作回复', async () => {
-    const { bot } = await makeBot();
-    const messages: ImInboundMessage[] = [];
-    const statuses: Array<Record<string, unknown>> = [];
-    const adapter = createAdapter({
-      bot,
-      logger: fakeLogger(),
-      signal: new AbortController().signal,
-      onMessage: (message: ImInboundMessage) => messages.push(message),
-      onStatus: (patch: Partial<ImRuntimeStatus>) => statuses.push(patch as Record<string, unknown>),
+  test('run 结束后延迟到达的 todo 事件不再推送或点亮正在输入', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const dataDir = tempDir();
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const typing: boolean[] = [];
+    const gateway = buildGateway(agent, state, dataDir, replies, () => bot, async () => undefined, typing);
+
+    gateway.handle(bot, inbound({ text: '开始' }));
+    await Bun.sleep(60);
+    const sessionId = agent.runs[0]?.sessionId;
+    expect(sessionId).toBeTruthy();
+    writeSessionTodoStore(getSessionTodoPathFromDir(dataDir, sessionId!), {
+      nextId: 2,
+      items: [
+        {
+          id: '1',
+          text: '延迟任务',
+          status: 'in_progress',
+          priority: 'high',
+          createdAt: '',
+          updatedAt: '',
+        },
+      ],
     });
-
-    await adapter.start();
-    const ws = new WebSocket('ws://127.0.0.1:16199/onebot/v11/ws');
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', () => reject(new Error('ws error')), { once: true });
+    const typingBefore = typing.length;
+    agent.lastOnEvent?.({
+      type: 'tool-call-end',
+      sessionId: sessionId!,
+      toolName: 'todo',
+      toolCallId: 'tc-late',
+      result: { content: [] },
     });
-
-    const received: Array<Record<string, unknown>> = [];
-    ws.addEventListener('message', event => {
-      received.push(JSON.parse(String(event.data)) as Record<string, unknown>);
-      const payload = JSON.parse(String(event.data)) as { echo?: string };
-      if (payload.echo) {
-        ws.send(JSON.stringify({ status: 'ok', retcode: 0, data: null, echo: payload.echo }));
-      }
-    });
-
-    // 生命周期事件：记录 self_id
-    ws.send(JSON.stringify({ post_type: 'meta_event', meta_event_type: 'lifecycle', self_id: 10000 }));
-    await Bun.sleep(20);
-    expect(statuses.some(item => item.connected === true)).toBe(true);
-
-    // 群消息：@机器人 → addressed
-    ws.send(
-      JSON.stringify({
-        post_type: 'message',
-        message_type: 'group',
-        message_id: 1,
-        self_id: 10000,
-        group_id: 90001,
-        user_id: 10001,
-        sender: { nickname: '测试用户' },
-        message: [
-          { type: 'at', data: { qq: '10000' } },
-          { type: 'text', data: { text: ' 你好' } },
-        ],
-        raw_message: '[CQ:at,qq=10000] 你好',
-      }),
-    );
     await Bun.sleep(30);
-    expect(messages.length).toBe(1);
-    expect(messages[0]?.addressed).toBe(true);
-    expect(messages[0]?.text).toBe('你好');
-    expect(messages[0]?.conversationKey).toBe('group:90001');
+    expect(replies.some(text => text.includes('延迟任务'))).toBe(false);
+    expect(typing.slice(typingBefore).filter(Boolean)).toHaveLength(0);
+  });
 
-    await adapter.sendText({ channel: 'qq-onebot', kind: 'group', groupId: '90001' }, '回复');
-    expect(received.some(item => item.action === 'send_group_msg')).toBe(true);
+  test('过程播报：read 完成后逐条回复「已读取」', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
 
-    ws.close();
-    await adapter.stop();
-    await Bun.sleep(20);
+    agent.onRun = sessionId => {
+      agent.lastOnEvent?.({ type: 'tool-call-start', sessionId, toolName: 'read', toolCallId: 'tc-read', args: '' });
+      agent.lastOnEvent?.({
+        type: 'tool-call-delta',
+        sessionId,
+        toolCallId: 'tc-read',
+        argumentsDelta: JSON.stringify({ path: 'src/a.ts' }),
+      });
+      agent.lastOnEvent?.({ type: 'tool-call-executing', sessionId, toolName: 'read', toolCallId: 'tc-read' });
+      agent.lastOnEvent?.({
+        type: 'tool-call-end',
+        sessionId,
+        toolName: 'read',
+        toolCallId: 'tc-read',
+        result: { content: [] },
+      });
+    };
+
+    gateway.handle(bot, inbound({ text: '读一下文件' }));
+    await Bun.sleep(60);
+    expect(replies).toContain('已读取 src/a.ts');
+    // 过程播报先于最终答案
+    expect(replies.indexOf('已读取 src/a.ts')).toBeLessThan(replies.indexOf('任务完成'));
+  });
+
+  test('过程播报：多文件按行列出', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+
+    agent.onRun = sessionId => {
+      agent.lastOnEvent?.({ type: 'tool-call-start', sessionId, toolName: 'read', toolCallId: 'tc-multi', args: '' });
+      agent.lastOnEvent?.({
+        type: 'tool-call-delta',
+        sessionId,
+        toolCallId: 'tc-multi',
+        argumentsDelta: JSON.stringify({ paths: ['src/a.ts', 'src/b.ts', 'src/c.ts'] }),
+      });
+      agent.lastOnEvent?.({ type: 'tool-call-executing', sessionId, toolName: 'read', toolCallId: 'tc-multi' });
+      agent.lastOnEvent?.({
+        type: 'tool-call-end',
+        sessionId,
+        toolName: 'read',
+        toolCallId: 'tc-multi',
+        result: { content: [] },
+      });
+    };
+
+    gateway.handle(bot, inbound({ text: '批量读取' }));
+    await Bun.sleep(60);
+    expect(replies).toContain('已读取3个文件：\nsrc/a.ts\nsrc/b.ts\nsrc/c.ts');
+  });
+
+  test('过程播报：同批多个子智能体合并为一条', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+
+    agent.onRun = sessionId => {
+      for (const [index, template] of ['agent_explorer', 'agent_coder'].entries()) {
+        const toolCallId = `tc-agent-${index}`;
+        const task = index === 0 ? '探索认证模块' : '实现登录接口';
+        agent.lastOnEvent?.({ type: 'tool-call-start', sessionId, toolName: 'agent', toolCallId, args: '' });
+        agent.lastOnEvent?.({
+          type: 'tool-call-delta',
+          sessionId,
+          toolCallId,
+          argumentsDelta: JSON.stringify({ template, task }),
+        });
+        agent.lastOnEvent?.({ type: 'tool-call-executing', sessionId, toolName: 'agent', toolCallId });
+      }
+    };
+
+    gateway.handle(bot, inbound({ text: '并行两个子任务' }));
+    await Bun.sleep(60);
+    const batch = replies.filter(text => text.startsWith('已调起'));
+    expect(batch).toHaveLength(1);
+    expect(batch[0]).toBe(
+      '已调起2个子智能体：\n'
+      + '智能体1（agent_explorer）：探索认证模块\n'
+      + '智能体2（agent_coder）：实现登录接口',
+    );
+  });
+
+  test('过程播报：progress=false 时不产生操作消息', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+    const quietBot: StoredImBot = { ...bot, options: { ...bot.options, progress: false } };
+
+    agent.onRun = sessionId => {
+      agent.lastOnEvent?.({ type: 'tool-call-start', sessionId, toolName: 'read', toolCallId: 'tc-quiet', args: '' });
+      agent.lastOnEvent?.({
+        type: 'tool-call-delta',
+        sessionId,
+        toolCallId: 'tc-quiet',
+        argumentsDelta: JSON.stringify({ path: 'src/a.ts' }),
+      });
+      agent.lastOnEvent?.({
+        type: 'tool-call-end',
+        sessionId,
+        toolName: 'read',
+        toolCallId: 'tc-quiet',
+        result: { content: [] },
+      });
+    };
+
+    gateway.handle(quietBot, inbound({ text: '读一下文件' }));
+    await Bun.sleep(60);
+    expect(replies.some(text => text.includes('已读取'))).toBe(false);
+    expect(replies.some(text => text.includes('任务完成'))).toBe(true);
   });
 });
 
-describe('descriptor', () => {
-  test('OneBot 校验返回模式与反向地址', async () => {
-    const identity = await descriptor.verify({ port: '6200' });
-    expect(identity.platformId).toBe('onebot:reverse:6200');
-    expect(identity.extra?.wsUrl).toBe('ws://127.0.0.1:6200/onebot/v11/ws');
+describe('controller save', () => {
+  test('编辑机器人时必填字段留空回填旧值', async () => {
+    const dir = tempDir();
+    const logger = fakeLogger();
+    const store = new ImBotStore(dir, logger);
+    const state = new ImStateStore(dir, logger);
+    await store.load();
+    await state.load();
+    const botId = deriveBotId('wechat-ilink', 'bot-1');
+    await store.save({
+      botId,
+      channel: 'wechat-ilink',
+      name: '旧名称',
+      platformId: 'bot-1',
+      credentials: { botToken: 'old-token', botId: 'bot-1' },
+      enabled: false,
+      pairingCode: '123456',
+      options: { cwd: '', permissionMode: 'ask', groupTrigger: 'mention', progress: true },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const controller = new ImController({
+      store,
+      state,
+      logger,
+      services: fakeRegistry(new FakeAgent(), { workingDirectory: '' }),
+      server: fakeServer(),
+      dataDir: dir,
+    });
+
+    const saved = await controller.saveBot({
+      botId,
+      channel: 'wechat-ilink',
+      name: '新名称',
+      credentials: { botToken: 'new-token', botId: '' },
+      enabled: false,
+    });
+    expect(saved.name).toBe('新名称');
+    const updated = store.get(botId);
+    expect(updated?.credentials.botId).toBe('bot-1');
+    expect(updated?.credentials.botToken).toBe('new-token');
+    await controller.dispose();
+  });
+});
+
+describe('qq auth error', () => {
+  test('仅把授权失效识别为需要重新扫码', () => {
+    expect(isQqAuthorizationError(new Error('Failed to get access_token: {"code":100016,"message":"invalid appid or secret"}')))
+      .toBe(true);
+    expect(isQqAuthorizationError(new Error('invalid appid or secret'))).toBe(true);
+    expect(isQqAuthorizationError(new Error('token expired'))).toBe(true);
+    expect(isQqAuthorizationError(new Error('Network error [getGatewayUrl]: fetch failed'))).toBe(false);
   });
 });

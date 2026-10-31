@@ -1,8 +1,8 @@
 // webui/src/components/pages/settings/ImSettingsSection.tsx
-// IM 连接设置分区（/settings/im）：渠道卡片 + 机器人管理 + 配对码 + 微信扫码。
+// IM 连接设置分区（/settings/im）：渠道卡片 + 机器人管理 + 配对码 + 渠道扫码接入。
 // 页面结构对齐「远程控制」：标题/说明 + 状态总览 + 卡片网格，移动端单列。
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Loader2, RefreshCw } from 'lucide-react';
@@ -27,7 +27,7 @@ import { CHANNEL_BRAND } from './im/channel-meta';
 import { ImBindingDialog } from './im/ImBindingDialog';
 import { ImBotDialog } from './im/ImBotDialog';
 import { ImChannelCard } from './im/ImChannelCard';
-import { ImWechatLoginDialog } from './im/ImWechatLoginDialog';
+import { ImQrLoginDialog } from './im/ImQrLoginDialog';
 
 export function ImSettingsSection() {
   const { t } = useTranslation();
@@ -36,7 +36,7 @@ export function ImSettingsSection() {
   const [editing, setEditing] = useState<ImBotStatus | null>(null);
   const [bindingBotId, setBindingBotId] = useState<string | null>(null);
   const [deleteBotId, setDeleteBotId] = useState<string | null>(null);
-  const [wechatOpen, setWechatOpen] = useState(false);
+  const [qrChannel, setQrChannel] = useState<ImChannelDescriptor | null>(null);
   const [activeChannelId, setActiveChannelId] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -67,14 +67,23 @@ export function ImSettingsSection() {
   };
 
   const handleAdd = (channel: ImChannelDescriptor, mode: 'qr' | 'manual'): void => {
-    // 当前仅微信支持扫码接入，统一打开微信扫码登录对话框
     if (mode === 'qr') {
-      setWechatOpen(true);
+      setQrChannel(channel);
       return;
     }
     setEditing(null);
     setDialogChannel(channel);
   };
+
+  const handleQrOpenChange = useCallback((open: boolean): void => {
+    if (!open) setQrChannel(null);
+  }, []);
+
+  const handleReauth = useCallback((bot: ImBotStatus): void => {
+    const channel = channels.find(item => item.id === bot.channel);
+    if (!channel?.capabilities.qrLogin) return;
+    setQrChannel(channel);
+  }, [channels]);
 
   const handleEdit = (bot: ImBotStatus): void => {
     const channel = channels.find(item => item.id === bot.channel) ?? null;
@@ -167,6 +176,7 @@ export function ImSettingsSection() {
               onTest={bot =>
                 void run(bot.botId, () => api.testImBot(bot.botId), t('settings.im.testSent'))
               }
+              onReauth={handleReauth}
               onReconnect={bot =>
                 void run(bot.botId, () => api.reconnectImBot(bot.botId), t('settings.im.reconnected'))
               }
@@ -196,9 +206,10 @@ export function ImSettingsSection() {
         onChanged={refresh}
       />
 
-      <ImWechatLoginDialog
-        open={wechatOpen}
-        onOpenChange={setWechatOpen}
+      <ImQrLoginDialog
+        channel={qrChannel}
+        open={qrChannel !== null}
+        onOpenChange={handleQrOpenChange}
         onConnected={refresh}
       />
 

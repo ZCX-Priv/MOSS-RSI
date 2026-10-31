@@ -5,7 +5,6 @@
 import { t } from '../../core/i18n';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { createAdapter, getDescriptor, listDescriptors } from './adapters/registry';
-import { readOneBotConfig } from './adapters/onebot/gateway';
 import { ImGateway } from './gateway';
 import { DEFAULT_BOT_NAME, deriveBotId, generatePairingCode, isValidPairingCode, maskPlatformId } from './identity';
 import type { ImBotStore } from './store';
@@ -71,6 +70,7 @@ export class ImController {
       supportsMarkdown: bot => getDescriptor(bot.channel)?.capabilities.markdown ?? false,
       channelLabel: bot => getDescriptor(bot.channel)?.label ?? bot.channel,
       sendText: (bot, target, text) => this.sendViaBot(bot.botId, target, text),
+      setTyping: (bot, target, active) => this.setTypingViaBot(bot.botId, target, active),
       getBot: botId => this.deps.store.get(botId),
       updateBotOptions: (botId, patch) => this.updateBotOptions(botId, patch),
     });
@@ -116,7 +116,6 @@ export class ImController {
     const channel = input.channel as ImChannelId;
     const descriptor = getDescriptor(channel);
     if (!descriptor) throw new Error(`不支持的渠道：${input.channel}`);
-    if (descriptor.capabilities.qrOnly) throw new Error('该渠道请通过扫码登录接入');
 
     const provided = input.credentials ?? {};
     const credentials: Record<string, string> = {};
@@ -125,16 +124,14 @@ export class ImController {
     }
     const existing = input.botId ? this.deps.store.get(input.botId) : null;
 
-    // 编辑时密码字段留空 = 保留旧值
+    // 编辑时密码字段留空 = 保留旧值；必填字段为空也回填旧值，避免只改名称/目录时清空平台标识
     if (existing) {
       for (const field of descriptor.fields) {
-        if (field.type !== 'password') continue;
-        if (!credentials[field.key] && existing.credentials[field.key]) {
+        if (!credentials[field.key] && existing.credentials[field.key]
+          && (field.type === 'password' || field.required)) {
           credentials[field.key] = existing.credentials[field.key];
         }
       }
-      // 旧微信机器人未单独保存 botId（以 platformId 为准），编辑时回填避免必填校验失败
-      if (channel === 'wechat-ilink' && !credentials.botId) credentials.botId = existing.platformId;
     }
 
     const missing = missingRequiredFields(descriptor.fields, credentials);
@@ -150,18 +147,6 @@ export class ImController {
     }
 
     const botId = deriveBotId(channel, identity.platformId);
-    // OneBot 监听端口在本机必须唯一（正向模式不监听）
-    if (channel === 'qq-onebot') {
-      const config = readOneBotConfig(credentials);
-      if (config.mode !== 'forward-ws') {
-        const conflict = this.deps.store.list().find(item => {
-          if (item.channel !== 'qq-onebot' || item.botId === botId) return false;
-          const other = readOneBotConfig(item.credentials);
-          return other.mode !== 'forward-ws' && other.listenPort === config.listenPort;
-        });
-        if (conflict) throw new Error(`端口 ${config.listenPort} 已被机器人「${conflict.name}」占用`);
-      }
-    }
     // platformId 变化（例如换了 App）→ 视为新机器人：停掉并移除旧条目
     if (existing && existing.botId !== botId) {
       await this.removeBot(existing.botId);
@@ -200,7 +185,12 @@ export class ImController {
   }
 
   /** 微信扫码登录成功后创建/更新机器人，并把扫码者设为已绑定用户 */
-  async createWechatBot(credentials: { botToken: string; botId: string; ownerUserId: string }): Promise<ImBotStatusSnapshot> {
+  async createWechatBot(credentials: {
+    botToken: string;
+    botId: string;
+    ownerUserId: string;
+    baseUrl?: string;
+  }): Promise<ImBotStatusSnapshot> {
     const botId = deriveBotId('wechat-ilink', credentials.botId);
     const previous = this.deps.store.get(botId);
     const now = new Date().toISOString();
@@ -212,7 +202,7 @@ export class ImController {
       credentials: {
         botToken: credentials.botToken,
         botId: credentials.botId,
-        baseUrl: 'https://ilinkai.weixin.qq.com/',
+        baseUrl: credentials.baseUrl?.trim() || 'https://ilinkai.weixin.qq.com/',
         ownerUserId: credentials.ownerUserId,
       },
       enabled: true,
@@ -227,6 +217,42 @@ export class ImController {
       name: '扫码者',
       boundAt: now,
     });
+    await this.startBot(bot).catch(error => {
+      this.deps.logger.warn(t('im.botStartFailed'), {
+        botId: bot.botId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return this.snapshot(bot);
+  }
+
+  /** QQ 官方扫码成功后创建/更新机器人；扫码者 openid 可选，存在时自动绑定 */
+  async createQqBot(input: {
+    appId: string;
+    appSecret: string;
+    ownerUserOpenid?: string;
+  }): Promise<ImBotStatusSnapshot> {
+    const platformId = input.appId.trim();
+    const botId = deriveBotId('qq-official', platformId);
+    const previous = this.deps.store.get(botId);
+    const now = new Date().toISOString();
+    const bot: StoredImBot = {
+      botId,
+      channel: 'qq-official',
+      name: DEFAULT_BOT_NAME,
+      platformId,
+      credentials: { appId: platformId, appSecret: input.appSecret },
+      enabled: true,
+      pairingCode: previous?.pairingCode ?? generatePairingCode(),
+      options: previous?.options ?? defaultBotOptions(),
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+    };
+    await this.deps.store.save(bot);
+    const openid = input.ownerUserOpenid?.trim();
+    if (openid) {
+      this.deps.state.bind(bot.botId, { id: openid, name: '扫码者', boundAt: now });
+    }
     await this.startBot(bot).catch(error => {
       this.deps.logger.warn(t('im.botStartFailed'), {
         botId: bot.botId,
@@ -349,7 +375,10 @@ export class ImController {
       if (entry) {
         entry.starting = false;
         entry.status.connected = false;
-        entry.status.lastError = error instanceof Error ? error.message : String(error);
+        // 适配器可能已写入更友好的授权失效文案，保留它而不是覆盖成原始 SDK 错误
+        if (!entry.status.lastError) {
+          entry.status.lastError = error instanceof Error ? error.message : String(error);
+        }
       }
       throw error;
     }
@@ -385,6 +414,21 @@ export class ImController {
     if (!entry) throw new Error('机器人未启用或尚未启动');
     await entry.adapter.sendText(target, text);
     entry.status.replied += 1;
+  }
+
+  /** 正在输入只是客户端表现，失败不影响任务执行与消息投递 */
+  private async setTypingViaBot(botId: string, target: ImReplyTarget, active: boolean): Promise<void> {
+    const entry = this.runtimes.get(botId);
+    if (!entry?.adapter.setTyping) return;
+    try {
+      await entry.adapter.setTyping(target, active);
+    } catch (error) {
+      this.deps.logger.debug('im: 正在输入状态切换失败', {
+        botId,
+        active,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 快照

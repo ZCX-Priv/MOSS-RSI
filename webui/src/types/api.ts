@@ -751,9 +751,7 @@ export interface RemoteToggleResult {
 /** 支持的 IM 渠道 */
 export type ImChannelId =
   | 'wechat-ilink'
-  | 'wecom-aibot'
-  | 'qq-official'
-  | 'qq-onebot';
+  | 'qq-official';
 
 /** 渠道表单字段（后端下发，前端通用渲染） */
 export interface ImFormField {
@@ -772,13 +770,15 @@ export interface ImChannelDescriptor {
   label: string;
   guide: string;
   fields: ImFormField[];
-  capabilities: { markdown: boolean; group: boolean; qrLogin: boolean; qrOnly?: boolean };
+  capabilities: { markdown: boolean; group: boolean; qrLogin: boolean };
 }
 
 export interface ImBotOptions {
   cwd: string;
   permissionMode: 'unset' | 'auto' | 'skip' | 'ask';
   groupTrigger: 'mention' | 'all';
+  /** 过程播报：把工具调用逐条推送为 IM 消息（默认开启） */
+  progress: boolean;
   agentId?: string;
 }
 
@@ -827,17 +827,33 @@ export interface ImSaveBotInput {
   enabled?: boolean;
 }
 
-/** 微信扫码登录 */
-export interface ImWechatQrStart {
-  loginId: string;
-  /** iLink 返回的是登录链接（liteapp.weixin.qq.com/...），前端需编码成二维码图片 */
-  qrUrl: string;
-}
+/** 统一扫码接入会话快照（微信 / QQ） */
+export type ImProvisioningStatus =
+  | 'starting'
+  | 'pending'
+  | 'scanned'
+  | 'needs_verification'
+  | 'refreshing'
+  | 'connecting'
+  | 'connected'
+  | 'expired'
+  | 'failed'
+  | 'cancelled';
 
-export interface ImWechatQrState {
-  status: string;
+export interface ImProvisioningSnapshot {
+  loginId: string;
+  channel: ImChannelId;
+  status: ImProvisioningStatus;
+  /** 原始二维码链接，前端用 qrcode 编码成图片 */
+  qrUrl?: string;
+  qrRevision: number;
+  expiresAt?: number;
+  pollIntervalMs: number;
+  verificationRequired?: boolean;
   message?: string;
+  error?: string;
   bot?: ImBotStatus;
+  alreadyConnected?: boolean;
 }
 
 /** 压缩历史记录（session.compactions 元素 / GET /api/context/:id/compactions） */

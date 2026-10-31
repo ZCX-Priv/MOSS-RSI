@@ -1,8 +1,8 @@
 // webui/src/components/pages/settings/im/ImBotRow.tsx
-// 单个机器人状态行：状态点 + 名称 + 掩码身份 + 操作（测试/重连/编辑/配对/删除）+ 启用开关。
+// 单个机器人状态行：状态点 + 名称 + 掩码身份 + 操作（测试/重新扫码/重连/编辑/配对/删除）+ 启用开关。
 
 import { useTranslation } from 'react-i18next';
-import { KeyRound, Loader2, Pencil, PlugZap, RefreshCw, Trash2 } from 'lucide-react';
+import { KeyRound, Loader2, Pencil, PlugZap, QrCode, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -15,12 +15,12 @@ interface Props {
   busy: boolean;
   onToggle: (bot: ImBotStatus, enabled: boolean) => void;
   onTest: (bot: ImBotStatus) => void;
+  /** 扫码授权被平台回收后重新扫码（更新同一个机器人） */
+  onReauth: (bot: ImBotStatus) => void;
   onReconnect: (bot: ImBotStatus) => void;
   onEdit: (bot: ImBotStatus) => void;
   onBinding: (bot: ImBotStatus) => void;
   onDelete: (bot: ImBotStatus) => void;
-  /** 扫码类渠道没有可编辑字段，隐藏编辑入口 */
-  editable?: boolean;
 }
 
 export function ImBotRow({
@@ -28,11 +28,11 @@ export function ImBotRow({
   busy,
   onToggle,
   onTest,
+  onReauth,
   onReconnect,
   onEdit,
   onBinding,
   onDelete,
-  editable = true,
 }: Props) {
   const { t } = useTranslation();
   const stateLabel =
@@ -66,16 +66,29 @@ export function ImBotRow({
           >
             {busy ? <Loader2 className="size-3.5 animate-spin" /> : <PlugZap className="size-3.5" />}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-            title={t('settings.im.reconnect')}
-            disabled={busy}
-            onClick={() => onReconnect(bot)}
-          >
-            <RefreshCw className="size-3.5" />
-          </Button>
+          {bot.extra?.authExpired === 'true' ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              title={t('settings.im.reauthHint')}
+              onClick={() => onReauth(bot)}
+            >
+              <QrCode className="size-3.5" />
+              {t('settings.im.reauth')}
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+              title={t('settings.im.reconnect')}
+              disabled={busy}
+              onClick={() => onReconnect(bot)}
+            >
+              <RefreshCw className="size-3.5" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -85,17 +98,15 @@ export function ImBotRow({
           >
             <KeyRound className="size-3.5" />
           </Button>
-          {editable ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-              title={t('common.edit')}
-              onClick={() => onEdit(bot)}
-            >
-              <Pencil className="size-3.5" />
-            </Button>
-          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+            title={t('common.edit')}
+            onClick={() => onEdit(bot)}
+          >
+            <Pencil className="size-3.5" />
+          </Button>
           <Button
             variant="ghost"
             size="sm"

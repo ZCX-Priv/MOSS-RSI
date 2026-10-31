@@ -5,9 +5,7 @@ import type { ImChannelId } from './types';
 
 /** 各渠道单条消息字符上限（留出余量，避免平台硬截断） */
 export const CHANNEL_TEXT_LIMIT: Record<ImChannelId, number> = {
-  'wecom-aibot': 6000,
   'qq-official': 2000,
-  'qq-onebot': 4000,
   'wechat-ilink': 1800,
 };
 

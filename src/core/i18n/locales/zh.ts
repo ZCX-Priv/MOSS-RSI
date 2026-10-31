@@ -591,7 +591,7 @@ export const zh = {
       permissionMenu:
         '首次使用，请选择 MOSS 的执行权限（回复数字）：\n1. 自动审批（推荐）——低风险操作自动放行，高风险操作仍需确认\n2. 完全访问——所有操作直接执行（谨慎使用）\n3. 每次确认——每个写操作都需要你确认',
       permissionInvalid: '请回复数字 1 / 2 / 3 选择权限。',
-      permissionSaved: '已设置权限：{{label}}。开始执行任务…',
+      permissionSaved: '已设置权限：{{label}}。',
       permissionLabel: { auto: '自动审批', skip: '完全访问', ask: '每次确认' },
       askHead: '❓ 问题 {{index}}/{{total}}：{{question}}',
       askTextHint: '请直接回复你的答案。',

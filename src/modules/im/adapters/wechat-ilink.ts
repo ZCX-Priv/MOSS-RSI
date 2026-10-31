@@ -1,7 +1,7 @@
 // src/modules/im/adapters/wechat-ilink.ts
 // 微信（iLink）：扫码登录后以「微信机器人身份」收发私聊消息。
 // 说明：iLink 得到的是机器人身份，不是个人微信号；普通微信群通常无法邀请加入。
-// 协议：get_bot_qrcode → get_qrcode_status → getupdates（长轮询）→ sendmessage。
+// 协议：notifystart → getupdates（长轮询）→ sendmessage；notifystop 下线。
 
 import { createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
 import type {
@@ -15,12 +15,23 @@ import type {
 } from '../types';
 import { segmentsToText } from '../segments';
 import { DEFAULT_BOT_NAME } from '../identity';
-import { asRecord, errorText, fetchBuffer, fetchJson, sleep, str } from './util';
+import { asRecord, errorText, fetchBuffer, fetchJson, HttpError, sleep, str } from './util';
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com/';
 const PROTOCOL_VERSION = '2.4.6';
 const LONG_POLL_TIMEOUT_MS = 35_000;
+const NOTIFY_TIMEOUT_MS = 10_000;
+const START_RETRY_DELAYS_MS = [250, 1_000, 3_000];
 const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
+const STALE_TOKEN_MESSAGE = '微信登录凭据已失效，请重新扫码接入';
+const TYPING_KEEPALIVE_MS = 5_000;
+const TYPING_REQUEST_TIMEOUT_MS = 10_000;
+const TYPING_STOP_TIMEOUT_MS = 5_000;
+
+interface WechatTypingEntry {
+  ticket: string;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 function baseInfo(): Record<string, string> {
   return { channel_version: PROTOCOL_VERSION, bot_agent: 'MOSS/1.2.0' };
@@ -47,6 +58,35 @@ function resolveBaseUrl(value: string): string {
   const text = value.trim();
   if (!text) return DEFAULT_BASE_URL;
   return text.endsWith('/') ? text : `${text}/`;
+}
+
+/** ret/errcode 任一非 0 即视为上游拒绝；-14 表示登录凭据失效 */
+function rejectedCode(value: Record<string, unknown> | null): string {
+  if (!value) return '';
+  for (const key of ['ret', 'errcode']) {
+    const raw = value[key];
+    if (raw === undefined || raw === null) continue;
+    const text = String(raw).trim();
+    if (text && text !== '0') return text;
+  }
+  return '';
+}
+
+function rejectionMessage(value: Record<string, unknown> | null, code: string, prefix: string): string {
+  return `${prefix}：${str(value?.errmsg) || `错误码 ${code}`}`;
+}
+
+/** 仅网络错误、超时与 408/425/429/5xx 可重试（启动通知） */
+function retryableStartError(error: unknown): boolean {
+  if (error instanceof HttpError) {
+    return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+  }
+  if (error instanceof Error && error.name === 'AbortError') return true;
+  return error instanceof TypeError;
+}
+
+function backoffMs(failures: number): number {
+  return Math.min(30_000, 1_000 * (2 ** Math.min(failures - 1, 4)));
 }
 
 /** iLink 媒体密钥：aeskey 十六进制，或 media.aes_key 的 base64 */
@@ -80,7 +120,7 @@ function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-/** item_list → 统一消息段（文本 / 图片 / 文件） */
+/** item_list → 统一消息段（文本 / 语音转写 / 图片 / 文件） */
 function segmentsFromItems(items: unknown): ImSegment[] {
   if (!Array.isArray(items)) return [];
   const segments: ImSegment[] = [];
@@ -90,6 +130,11 @@ function segmentsFromItems(items: unknown): ImSegment[] {
     if (entry.type === 1) {
       const text = str(asRecord(entry.text_item)?.text);
       if (text) segments.push({ type: 'text', text });
+      continue;
+    }
+    if (entry.type === 3) {
+      const transcript = str(asRecord(entry.voice_item)?.text);
+      if (transcript) segments.push({ type: 'text', text: transcript });
       continue;
     }
     const imageItem = asRecord(entry.image_item);
@@ -137,108 +182,6 @@ function segmentsFromItems(items: unknown): ImSegment[] {
   return segments;
 }
 
-/** 二维码登录会话（轮询由前端驱动，服务端只保存状态） */
-interface LoginSession {
-  qrcode: string;
-  qrUrl: string;
-  baseUrl: string;
-  createdAt: number;
-  verifyCode: string;
-  status: string;
-  credentials?: { botToken: string; botId: string; ownerUserId: string };
-  error?: string;
-}
-
-const LOGIN_TTL_MS = 10 * 60 * 1000;
-
-export class WechatLoginManager {
-  private readonly sessions = new Map<string, LoginSession>();
-
-  async start(): Promise<{ loginId: string; qrUrl: string }> {
-    this.cleanup();
-    const response = asRecord(
-      await fetchJson(
-        `${DEFAULT_BASE_URL}ilink/bot/get_bot_qrcode?bot_type=3`,
-        {
-          method: 'POST',
-          headers: commonHeaders(),
-          body: JSON.stringify({ local_token_list: [] }),
-        },
-        10_000,
-      ),
-    );
-    const qrcode = str(response?.qrcode);
-    const qrUrl = str(response?.qrcode_img_content) || str(response?.qrcode_url);
-    if (!qrcode || !qrUrl) throw new Error('微信服务没有返回二维码');
-    const loginId = randomUUID();
-    this.sessions.set(loginId, {
-      qrcode,
-      qrUrl,
-      baseUrl: DEFAULT_BASE_URL,
-      createdAt: Date.now(),
-      verifyCode: '',
-      status: 'wait',
-    });
-    return { loginId, qrUrl };
-  }
-
-  setVerifyCode(loginId: string, code: string): void {
-    const session = this.sessions.get(loginId);
-    if (!session) throw new Error('登录会话不存在或已过期');
-    session.verifyCode = code.trim();
-  }
-
-  /** 拉取一次上游扫码状态（前端每 2s 调一次） */
-  async poll(loginId: string): Promise<{
-    status: string;
-    message?: string;
-    credentials?: { botToken: string; botId: string; ownerUserId: string };
-  }> {
-    const session = this.sessions.get(loginId);
-    if (!session) return { status: 'expired', message: '登录会话已过期，请重新获取二维码' };
-    if (Date.now() - session.createdAt > LOGIN_TTL_MS) {
-      this.sessions.delete(loginId);
-      return { status: 'expired', message: '二维码已过期，请重新获取' };
-    }
-    if (session.status === 'confirmed' && session.credentials) {
-      return { status: 'confirmed', credentials: session.credentials };
-    }
-    let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(session.qrcode)}`;
-    if (session.verifyCode) endpoint += `&verify_code=${encodeURIComponent(session.verifyCode)}`;
-    const response = asRecord(
-      await fetchJson(`${session.baseUrl}${endpoint}`, { method: 'GET', headers: commonHeaders() }, LONG_POLL_TIMEOUT_MS),
-    );
-    const status = str(response?.status);
-    if (!status) return { status: session.status, message: '微信服务未返回状态' };
-    session.status = status;
-    if (status === 'confirmed') {
-      const botToken = str(response?.bot_token);
-      const botId = str(response?.ilink_bot_id);
-      const ownerUserId = str(response?.ilink_user_id);
-      if (!botToken || !botId || !ownerUserId) {
-        return { status: 'expired', message: '微信授权成功但返回的账号凭据不完整，请重试' };
-      }
-      session.credentials = { botToken, botId, ownerUserId };
-      return { status: 'confirmed', credentials: session.credentials };
-    }
-    if (status === 'expired') {
-      return { status, message: '二维码已过期，请重新获取' };
-    }
-    return { status };
-  }
-
-  cancel(loginId: string): void {
-    this.sessions.delete(loginId);
-  }
-
-  private cleanup(): void {
-    const now = Date.now();
-    for (const [id, session] of this.sessions) {
-      if (now - session.createdAt > LOGIN_TTL_MS) this.sessions.delete(id);
-    }
-  }
-}
-
 export const descriptor: ImChannelDescriptor = {
   id: 'wechat-ilink',
   label: '微信',
@@ -284,8 +227,182 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
   const ownerUserId = str(bot.credentials.ownerUserId);
 
   let stopped = false;
+  let typingClosed = false;
+  const typingEntries = new Map<string, WechatTypingEntry>();
+  const typingQueues = new Map<string, Promise<void>>();
+
+  /** 凭据只用于「对方正在输入」；失败全部降级为日志，不影响消息收发 */
+  const fetchTypingTicket = async (toUserId: string, contextToken: string): Promise<string> => {
+    const response = asRecord(
+      await fetchJson(
+        `${baseUrl}ilink/bot/getconfig`,
+        {
+          method: 'POST',
+          headers: authHeaders(token),
+          body: JSON.stringify({
+            ilink_user_id: toUserId,
+            ...(contextToken ? { context_token: contextToken } : {}),
+            base_info: baseInfo(),
+          }),
+        },
+        TYPING_REQUEST_TIMEOUT_MS,
+        signal,
+      ),
+    );
+    const code = rejectedCode(response);
+    if (code) throw new Error(rejectionMessage(response, code, '微信正在输入凭证获取失败'));
+    const ticket = str(response?.typing_ticket);
+    if (!ticket) throw new Error('微信未返回正在输入凭证');
+    return ticket;
+  };
+
+  const sendTypingStatus = async (
+    toUserId: string,
+    ticket: string,
+    status: 1 | 2,
+    timeoutMs: number,
+    useAdapterSignal: boolean,
+  ): Promise<void> => {
+    const response = asRecord(
+      await fetchJson(
+        `${baseUrl}ilink/bot/sendtyping`,
+        {
+          method: 'POST',
+          headers: authHeaders(token),
+          body: JSON.stringify({
+            ilink_user_id: toUserId,
+            typing_ticket: ticket,
+            status,
+            base_info: baseInfo(),
+          }),
+        },
+        timeoutMs,
+        useAdapterSignal ? signal : undefined,
+      ),
+    );
+    const code = rejectedCode(response);
+    if (code) throw new Error(rejectionMessage(response, code, '微信正在输入状态更新失败'));
+  };
+
+  /** 同一用户的启动/停止串行执行，避免 status 1 与 2 乱序 */
+  const queueTyping = (toUserId: string, operation: () => Promise<void>): Promise<void> => {
+    const previous = typingQueues.get(toUserId) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(operation);
+    const tracked = task.catch(() => undefined);
+    typingQueues.set(toUserId, tracked);
+    void tracked.finally(() => {
+      if (typingQueues.get(toUserId) === tracked) typingQueues.delete(toUserId);
+    });
+    return task;
+  };
+
+  const scheduleTyping = (toUserId: string, entry: WechatTypingEntry): void => {
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      void queueTyping(toUserId, async () => {
+        if (typingClosed || stopped || typingEntries.get(toUserId) !== entry) return;
+        try {
+          await sendTypingStatus(toUserId, entry.ticket, 1, TYPING_REQUEST_TIMEOUT_MS, true);
+          if (typingClosed || stopped || typingEntries.get(toUserId) !== entry) return;
+          scheduleTyping(toUserId, entry);
+        } catch (error) {
+          if (typingEntries.get(toUserId) === entry) typingEntries.delete(toUserId);
+          if (!typingClosed && !stopped) {
+            logger.warn('im: 微信正在输入心跳失败', { botId: bot.botId, error: errorText(error) });
+          }
+        }
+      });
+    }, TYPING_KEEPALIVE_MS);
+  };
+
+  const startTypingFor = async (toUserId: string, contextToken: string): Promise<void> => {
+    if (typingClosed || stopped) return;
+    const existing = typingEntries.get(toUserId);
+    let ticket = existing?.ticket ?? '';
+    try {
+      if (!ticket) ticket = await fetchTypingTicket(toUserId, contextToken);
+      if (typingClosed || stopped) return;
+      await sendTypingStatus(toUserId, ticket, 1, TYPING_REQUEST_TIMEOUT_MS, true);
+    } catch (error) {
+      if (existing?.timer) clearTimeout(existing.timer);
+      if (existing && typingEntries.get(toUserId) === existing) typingEntries.delete(toUserId);
+      if (!typingClosed && !stopped) {
+        logger.warn('im: 微信正在输入启动失败', { botId: bot.botId, error: errorText(error) });
+      }
+      return;
+    }
+    if (typingClosed || stopped) return;
+    if (existing?.timer) clearTimeout(existing.timer);
+    const entry: WechatTypingEntry = { ticket, timer: null };
+    typingEntries.set(toUserId, entry);
+    scheduleTyping(toUserId, entry);
+  };
+
+  const stopTypingFor = async (toUserId: string): Promise<void> => {
+    const entry = typingEntries.get(toUserId);
+    if (!entry) return;
+    typingEntries.delete(toUserId);
+    if (entry.timer) clearTimeout(entry.timer);
+    try {
+      await sendTypingStatus(toUserId, entry.ticket, 2, TYPING_STOP_TIMEOUT_MS, false);
+    } catch (error) {
+      logger.warn('im: 微信正在输入取消失败', { botId: bot.botId, error: errorText(error) });
+    }
+  };
+
+  const notifyStart = async (): Promise<void> => {
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal.aborted) throw new Error('微信连接已停止');
+      try {
+        const response = asRecord(
+          await fetchJson(
+            `${baseUrl}ilink/bot/msg/notifystart`,
+            { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ base_info: baseInfo() }) },
+            NOTIFY_TIMEOUT_MS,
+          ),
+        );
+        const code = rejectedCode(response);
+        if (code) {
+          if (code === '-14') throw new Error(STALE_TOKEN_MESSAGE);
+          throw new Error(rejectionMessage(response, code, '微信连接启动失败'));
+        }
+        return;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
+          throw new Error(STALE_TOKEN_MESSAGE);
+        }
+        const wait = START_RETRY_DELAYS_MS[attempt];
+        if (wait === undefined || !retryableStartError(error)) throw error;
+        logger.warn('im: 微信上线通知失败，准备重试', {
+          botId: bot.botId,
+          error: errorText(error),
+        });
+        await sleep(wait, signal);
+      }
+    }
+  };
+
+  const notifyStop = async (): Promise<void> => {
+    try {
+      const response = asRecord(
+        await fetchJson(
+          `${baseUrl}ilink/bot/msg/notifystop`,
+          { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ base_info: baseInfo() }) },
+          NOTIFY_TIMEOUT_MS,
+        ),
+      );
+      const code = rejectedCode(response);
+      if (code) {
+        logger.warn('im: 微信下线通知未被确认', { botId: bot.botId, code });
+      }
+    } catch (error) {
+      logger.warn('im: 微信下线通知失败', { botId: bot.botId, error: errorText(error) });
+    }
+  };
 
   const pollLoop = async (): Promise<void> => {
+    let failures = 0;
     while (!stopped && !signal.aborted) {
       try {
         const response = asRecord(
@@ -300,18 +417,22 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
             signal,
           ),
         );
-        onStatus({ connected: true, lastError: null });
-        const ret = response?.ret;
-        if (typeof ret === 'number' && ret !== 0) {
-          const message = str(response?.errmsg) || `微信服务返回错误码 ${ret}`;
-          onStatus({ connected: false, lastError: message });
-          if (ret === 401 || ret === 403) {
-            onStatus({ lastError: '微信凭据已失效，请重新扫码接入' });
+        const code = rejectedCode(response);
+        if (code) {
+          if (code === '-14') {
+            onStatus({ connected: false, lastError: STALE_TOKEN_MESSAGE });
             return;
           }
-          await sleep(3_000, signal);
+          failures += 1;
+          onStatus({
+            connected: false,
+            lastError: rejectionMessage(response, code, '微信消息同步被拒绝'),
+          });
+          await sleep(backoffMs(failures), signal);
           continue;
         }
+        failures = 0;
+        onStatus({ connected: true, lastError: null });
         const nextCursor = str(response?.get_updates_buf);
         if (nextCursor) cursor?.set(nextCursor);
         const messages = Array.isArray(response?.msgs) ? response.msgs : [];
@@ -320,7 +441,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
           if (!message) continue;
           if (message.message_type === 2) continue; // 自己发出的消息回显
           const senderId = str(message.from_user_id);
-          const messageId = str(message.msg_id) || str(message.client_id) || randomUUID();
+          const messageId = str(message.message_id) || str(message.msg_id) || str(message.client_id) || randomUUID();
           if (!senderId) continue;
           const segments = segmentsFromItems(message.item_list);
           if (segments.length === 0) continue;
@@ -348,8 +469,19 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
         }
       } catch (error) {
         if (stopped || signal.aborted) return;
+        if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
+          onStatus({ connected: false, lastError: STALE_TOKEN_MESSAGE });
+          return;
+        }
+        // 35s 长轮询自身超时：本轮无新消息，保持连接
+        if (error instanceof Error && error.name === 'AbortError') {
+          failures = 0;
+          onStatus({ connected: true, lastError: null });
+          continue;
+        }
+        failures += 1;
         onStatus({ connected: false, lastError: errorText(error) });
-        await sleep(3_000, signal);
+        await sleep(backoffMs(failures), signal);
       }
     }
   };
@@ -357,6 +489,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
   return {
     async start() {
       if (!token) throw new Error('微信凭据缺失，请重新扫码接入');
+      await notifyStart();
       onStatus({ connected: true, lastError: null });
       void pollLoop();
       logger.info('im: 微信长轮询已启动', { botId: bot.botId });
@@ -364,7 +497,26 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
 
     async stop() {
       stopped = true;
+      typingClosed = true;
+      for (const [toUserId, entry] of typingEntries) {
+        if (entry.timer) clearTimeout(entry.timer);
+        void sendTypingStatus(toUserId, entry.ticket, 2, TYPING_STOP_TIMEOUT_MS, false).catch(() => undefined);
+      }
+      typingEntries.clear();
+      typingQueues.clear();
+      await notifyStop();
       onStatus({ connected: false });
+    },
+
+    async setTyping(target: ImReplyTarget, active: boolean) {
+      const toUserId = str(target.userId);
+      if (!toUserId || typingClosed || stopped) return;
+      const contextToken = str(target.contextToken);
+      if (!active) {
+        await queueTyping(toUserId, () => stopTypingFor(toUserId));
+        return;
+      }
+      await queueTyping(toUserId, () => startTypingFor(toUserId, contextToken));
     },
 
     async sendText(target: ImReplyTarget, text: string) {
@@ -393,9 +545,9 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
           15_000,
         ),
       );
-      const ret = response?.ret;
-      if (typeof ret === 'number' && ret !== 0) {
-        throw new Error(`微信回复失败：${str(response?.errmsg) || `错误码 ${ret}`}`);
+      const code = rejectedCode(response);
+      if (code) {
+        throw new Error(rejectionMessage(response, code, '微信回复失败'));
       }
     },
   };

@@ -108,9 +108,9 @@ describe('prompt 与格式', () => {
   test('有文本 + 附件清单', async () => {
     const dir = tempDir();
     const result = await stageAttachments(dir, 'bot1', [media('x', 'a.txt')], new AbortController().signal, logger());
-    const prompt = buildPromptWithAttachments('帮我看看', result.staged, result.skipped, 'qq-onebot');
+    const prompt = buildPromptWithAttachments('帮我看看', result.staged, result.skipped, 'qq-official');
     expect(prompt).toContain('帮我看看');
-    expect(prompt).toContain('[IM 附件 · qq-onebot]');
+    expect(prompt).toContain('[IM 附件 · qq-official]');
     expect(prompt).toContain(result.staged[0]!.path);
   });
 

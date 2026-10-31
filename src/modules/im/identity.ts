@@ -6,9 +6,7 @@ import type { ImChannelId } from './types';
 
 /** 渠道前缀（botId 可读性用） */
 const CHANNEL_PREFIX: Record<ImChannelId, string> = {
-  'wecom-aibot': 'wc',
   'qq-official': 'qq',
-  'qq-onebot': 'ob',
   'wechat-ilink': 'wx',
 };
 

@@ -1,11 +1,11 @@
 // src/modules/im/routes.ts
-// /api/im/* 路由：渠道描述符、状态快照、机器人 CRUD、测试、配对码/绑定、微信扫码登录。
+// /api/im/* 路由：渠道描述符、状态快照、机器人 CRUD、测试、配对码/绑定、统一扫码接入。
 // 所有路由 auth:true（与 config/remote 一致）；凭据只进 bots.json，不出现在响应里。
 
 import type { HttpRequest, HttpResponse, Route } from '../server/types';
 import { asRecord, str } from './adapters/util';
 import type { ImController } from './controller';
-import type { WechatLoginManager } from './adapters/wechat-ilink';
+import type { ImProvisioningManager } from './provisioning';
 import type { ImBotOptions } from './types';
 
 function ok(body: unknown): HttpResponse {
@@ -22,7 +22,7 @@ function bodyOf(req: HttpRequest): Record<string, unknown> {
 
 export function createImRoutes(
   controller: ImController,
-  wechatLogin: WechatLoginManager,
+  provisioning: ImProvisioningManager,
 ): Route[] {
   const botIdOf = (params?: Record<string, string>): string => str(params?.botId);
 
@@ -157,11 +157,11 @@ export function createImRoutes(
     },
     {
       method: 'POST',
-      pattern: '/api/im/wechat/qr/start',
+      pattern: '/api/im/provisioning/:channel/start',
       auth: true,
-      handler: async (): Promise<HttpResponse> => {
+      handler: async (_req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
         try {
-          return ok(await wechatLogin.start());
+          return ok(await provisioning.start(str(params?.channel)));
         } catch (error) {
           return fail(error, 502);
         }
@@ -169,18 +169,14 @@ export function createImRoutes(
     },
     {
       method: 'GET',
-      pattern: '/api/im/wechat/qr/:loginId',
+      pattern: '/api/im/provisioning/:loginId',
       auth: true,
       handler: async (_req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
-        const loginId = str(params?.loginId);
         try {
-          const result = await wechatLogin.poll(loginId);
-          if (result.status === 'confirmed' && result.credentials) {
-            const bot = await controller.createWechatBot(result.credentials);
-            wechatLogin.cancel(loginId);
-            return ok({ status: 'confirmed', bot });
-          }
-          return ok({ status: result.status, ...(result.message ? { message: result.message } : {}) });
+          const loginId = str(params?.loginId);
+          const snapshot = provisioning.get(loginId);
+          if (!snapshot) throw new Error('登录会话不存在或已过期');
+          return ok(snapshot);
         } catch (error) {
           return fail(error);
         }
@@ -188,14 +184,11 @@ export function createImRoutes(
     },
     {
       method: 'POST',
-      pattern: '/api/im/wechat/qr/:loginId/verify',
+      pattern: '/api/im/provisioning/:loginId/verify',
       auth: true,
       handler: async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
         try {
-          const code = str(bodyOf(req).code);
-          if (!code) throw new Error('请输入验证码');
-          wechatLogin.setVerifyCode(str(params?.loginId), code);
-          return ok({ saved: true });
+          return ok(await provisioning.verify(str(params?.loginId), str(bodyOf(req).code)));
         } catch (error) {
           return fail(error);
         }
@@ -203,11 +196,14 @@ export function createImRoutes(
     },
     {
       method: 'POST',
-      pattern: '/api/im/wechat/qr/:loginId/cancel',
+      pattern: '/api/im/provisioning/:loginId/cancel',
       auth: true,
       handler: async (_req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
-        wechatLogin.cancel(str(params?.loginId));
-        return ok({ cancelled: true });
+        try {
+          return ok(await provisioning.cancel(str(params?.loginId)));
+        } catch (error) {
+          return fail(error);
+        }
       },
     },
   ];

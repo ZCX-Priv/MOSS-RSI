@@ -1,7 +1,7 @@
 // webui/src/components/pages/settings/im/ImBotDialog.tsx
 // 新增/编辑机器人对话框：字段由后端渠道描述符驱动（fields），选项为 MOSS 侧运行参数。
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogBody,
@@ -33,31 +34,33 @@ export function ImBotDialog({ channel, editing, onOpenChange, onSaved }: Props) 
   const { t } = useTranslation();
   const open = channel !== null;
   const [saving, setSaving] = useState(false);
-  const [name, setName] = useState(editing?.name ?? 'MOSS');
-  const [values, setValues] = useState<Record<string, string>>(() => {
+  const [name, setName] = useState('MOSS');
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [cwd, setCwd] = useState(SYSTEM_WORKING_DIRECTORY);
+  const [permissionMode, setPermissionMode] = useState<'unset' | 'auto' | 'skip' | 'ask'>('unset');
+  const [groupTrigger, setGroupTrigger] = useState<'mention' | 'all'>('mention');
+  const [progress, setProgress] = useState(true);
+
+  // 打开或切换机器人时重置表单，避免把上一次编辑的值带入下一次（尤其是 AppID/Secret）
+  useEffect(() => {
+    if (!open || !channel) return;
+    setName(editing?.name ?? 'MOSS');
     const initial: Record<string, string> = {};
-    for (const field of channel?.fields ?? []) {
-      initial[field.key] = editing?.credentialPreview[field.key] ?? field.defaultValue ?? '';
+    for (const field of channel.fields) {
+      initial[field.key] = editing && field.type !== 'password'
+        ? (editing.credentialPreview[field.key] ?? field.defaultValue ?? '')
+        : (field.defaultValue ?? '');
     }
-    return initial;
-  });
-  const [cwd, setCwd] = useState(editing?.options.cwd || SYSTEM_WORKING_DIRECTORY);
-  const [permissionMode, setPermissionMode] = useState<'unset' | 'auto' | 'skip' | 'ask'>(
-    editing?.options.permissionMode ?? 'unset',
-  );
-  const [groupTrigger, setGroupTrigger] = useState<'mention' | 'all'>(
-    editing?.options.groupTrigger ?? 'mention',
-  );
+    setValues(initial);
+    setCwd(editing?.options.cwd || SYSTEM_WORKING_DIRECTORY);
+    setPermissionMode(editing?.options.permissionMode ?? 'unset');
+    setGroupTrigger(editing?.options.groupTrigger ?? 'mention');
+    setProgress(editing?.options.progress ?? true);
+  }, [open, channel?.id, editing?.botId]);
 
   if (!open || !channel) return null;
 
-  const onebotMode = channel.id === 'qq-onebot' ? (values.mode || 'reverse-ws') : '';
-  const visibleFields = channel.fields.filter(field => {
-    if (channel.id !== 'qq-onebot') return true;
-    if (field.key === 'listenPort') return onebotMode !== 'forward-ws';
-    if (field.key === 'backendUrl') return onebotMode !== 'reverse-ws';
-    return true;
-  });
+  const visibleFields = channel.fields;
 
   const submit = async (): Promise<void> => {
     if (saving) return;
@@ -75,7 +78,7 @@ export function ImBotDialog({ channel, editing, onOpenChange, onSaved }: Props) 
         channel: channel.id,
         name: name.trim() || undefined,
         credentials,
-        options: { cwd: cwd.trim(), permissionMode, groupTrigger },
+        options: { cwd: cwd.trim(), permissionMode, groupTrigger, progress },
       });
       toast.success(t('settings.im.saved'));
       await onSaved();
@@ -196,26 +199,15 @@ export function ImBotDialog({ channel, editing, onOpenChange, onSaved }: Props) 
                   </SelectContent>
                 </Select>
               </div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col gap-0.5">
+                  <Label htmlFor="im-progress">{t('settings.im.progress')}</Label>
+                  <span className="text-xs text-muted-foreground">{t('settings.im.progressHint')}</span>
+                </div>
+                <Switch id="im-progress" checked={progress} onCheckedChange={setProgress} />
+              </div>
             </div>
 
-            {channel.id === 'qq-onebot' ? (
-              <div className="flex flex-col gap-1 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                <span>
-                  {t('settings.im.onebotHint', {
-                    url: onebotMode === 'reverse-ws'
-                      ? `ws://127.0.0.1:${values.listenPort || '6199'}/onebot/v11/ws`
-                      : values.backendUrl || '—',
-                  })}
-                </span>
-                {onebotMode === 'http' ? (
-                  <span className="font-mono">
-                    {t('settings.im.onebotEventUrl', {
-                      url: `http://127.0.0.1:${values.listenPort || '6199'}/onebot/v11/event`,
-                    })}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
           </div>
         </DialogBody>
         <DialogFooter>
