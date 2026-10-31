@@ -23,13 +23,8 @@ export function generateModelId(): string {
 export function flattenModels(cfg: ApiConfig): ModelConfig[] {
   const out: ModelConfig[] = [];
   for (const provider of cfg.providers) {
-    // 搜索 / 语音服务商无 LLM 端点，models 恒空，跳过并让 format 收窄
-    if (
-      provider.kind === 'search' ||
-      provider.format === 'search' ||
-      provider.kind === 'voice' ||
-      provider.format === 'voice'
-    ) {
+    // 语音服务商无 LLM 端点，models 恒空，跳过并让 format 收窄
+    if (provider.kind === 'voice' || provider.format === 'voice') {
       continue;
     }
     for (const model of provider.models) {

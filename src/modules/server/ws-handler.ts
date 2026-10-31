@@ -827,9 +827,12 @@ export class WsHandler {
         })
       : false;
     if (!ok) {
+      // 该提问已被其他端回答或已超时：只做幂等的卡片移除，绝不作为 agent 错误污染运行态
       state.conn.send({
-        type: 'error',
-        payload: { message: ErrorCode.WS_NO_PENDING_ASK },
+        type: 'tool.ask.accepted',
+        sessionId: msg.sessionId,
+        toolCallId: payload.toolCallId,
+        payload: { stale: true },
       });
       return;
     }
@@ -852,9 +855,12 @@ export class WsHandler {
       ? agent.resolveConfirm(msg.sessionId, payload.toolCallId, payload.ok, payload.remember)
       : false;
     if (!ok) {
+      // 该确认已被其他端处理或已超时：只做幂等的卡片移除，绝不作为 agent 错误污染运行态
       state.conn.send({
-        type: 'error',
-        payload: { message: ErrorCode.WS_NO_PENDING_ASK },
+        type: 'tool.confirm.accepted',
+        sessionId: msg.sessionId,
+        toolCallId: payload.toolCallId,
+        payload: { stale: true },
       });
       return;
     }

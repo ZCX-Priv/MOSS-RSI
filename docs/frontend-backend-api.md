@@ -91,7 +91,6 @@
 |---|---|---|---|
 | GET | `/api/providers` | 是 | Provider/模型总览与当前选择 |
 | PUT | `/api/providers/current` | 是 | 设置当前模型 |
-| PUT | `/api/providers/search-current` | 是 | 设置当前联网搜索服务商 |
 | PUT | `/api/providers/reorder` | 是 | Provider 排序 |
 | POST | `/api/providers` | 是 | 新建 Provider |
 | PATCH | `/api/providers/:id` | 是 | 更新 Provider |
@@ -351,7 +350,6 @@
 {
   providers: ProviderConfig[];
   current: string;               // 当前默认模型（config.agent.defaultModel）
-  currentSearchProvider: string; // 空串 = 本地免费引擎链
 }
 ```
 
@@ -592,7 +590,6 @@ export interface AppConfig {
     protectedPaths: string[];
   };
   context?: Record<string, unknown>;  // 压缩/修剪/自愈/遥测参数，见 src/modules/context/types.ts
-  web: { searchProviderId: string };
   voice: { enabled: boolean; providerId: string; localModel: string; language: string };
 }
 

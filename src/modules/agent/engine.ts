@@ -2281,6 +2281,8 @@ export class AgentEngineImpl implements AgentEngine {
     if (pending.timer) clearTimeout(pending.timer);
     this.pendingAsks.delete(key);
     pending.resolve(outcome);
+    // 跨端同步：无论回答来自 WebUI 还是 IM，都通知该会话全部订阅者移除提问卡片
+    this.notifyResolution(sessionId, 'tool.ask.accepted', toolCallId);
     return true;
   }
 
@@ -2317,7 +2319,34 @@ export class AgentEngineImpl implements AgentEngine {
       }
     }
     pending.resolve(ok);
+    // 跨端同步：IM 回复「允许/拒绝」后，WebUI 的确认卡片立即消失
+    this.notifyResolution(sessionId, 'tool.confirm.accepted', toolCallId);
     return true;
+  }
+
+  /**
+   * 广播「交互已解决」给该会话的全部 WS 订阅者。
+   * 前端 tool.ask.accepted / tool.confirm.accepted 分支据此移除残留卡片；
+   * 事件形状与 ws-handler 既有发送保持一致（sessionId/toolCallId 放顶层）。
+   */
+  private notifyResolution(
+    sessionId: string,
+    type: 'tool.ask.accepted' | 'tool.confirm.accepted',
+    toolCallId: string,
+  ): void {
+    const server = this.services.tryResolve<{
+      sendToSession: (sid: string, msg: unknown) => void;
+    }>(ServiceNames.SERVER_INSTANCE);
+    try {
+      server?.sendToSession(sessionId, {
+        type,
+        sessionId,
+        toolCallId,
+        payload: { sessionId, toolCallId },
+      });
+    } catch {
+      // WS 不可用：静默（不阻断交互 resolve）
+    }
   }
 
   /** 列出某 session 的待确认 confirm（供 WS 重连恢复 pending confirms）。 */
@@ -2366,6 +2395,8 @@ export class AgentEngineImpl implements AgentEngine {
       const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
       const timer = setTimeout(() => {
         this.pendingConfirms.delete(pendingKey);
+        // 超时同样要通知前端/IM 移除确认卡片；否则卡片会残留到用户下次回复才暴露
+        ctx.onEvent({ type: 'confirm-cancel', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
         resolve(false);
       }, timeoutMs);
       const question = customQuestion ?? `Tool "${toolName}" requires confirmation (permission mode)`;

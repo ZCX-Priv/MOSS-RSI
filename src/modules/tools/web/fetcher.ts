@@ -13,11 +13,13 @@
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import iconv from 'iconv-lite';
 import {
   extractVisibleTextFromHtml,
   extractLinks,
   normalizeWhitespace,
 } from './html-extract';
+import { extractReadableText, looksLikeChallengePage } from './readable';
 
 /** DNS 查找函数签名（注入便于单测 mock） */
 export type LookupFn = (
@@ -33,6 +35,7 @@ export type FetchErrorCode =
   | 'too-large'
   | 'unsupported-type'
   | 'too-many-redirects'
+  | 'blocked'
   | 'network';
 
 /** 类型化错误：携带错误码与原因，供工具层转换用户可读消息 */
@@ -58,6 +61,10 @@ export interface FetchOptions {
   signal?: AbortSignal;
   /** DNS 查找注入（测试用），默认 node:dns/promises.lookup */
   lookup?: LookupFn;
+  /** 正文增强时携带搜索引擎结果页作为 Referer */
+  referer?: string;
+  /** HTTP 代理（工具配置；空 = 不使用） */
+  proxyUrl?: string;
 }
 
 export interface FetchResult {
@@ -75,6 +82,7 @@ export interface FetchResult {
     truncated: boolean;
     redirectChain: string[];
     elapsedMs: number;
+    quality: 'high' | 'low';
   };
 }
 
@@ -82,7 +90,8 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_CHARS = 20_000;
 const MAX_FETCH_BYTES = 2_000_000;
 const MAX_REDIRECTS = 5;
-const USER_AGENT = 'MOSS-OS/1.0 (+web tool)';
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
 /** 抓取 URL 归一化：无协议时补 https://，仅允许 http/https，拒绝内嵌凭证 */
 export function normalizeFetchUrl(input: string): URL {
@@ -90,7 +99,9 @@ export function normalizeFetchUrl(input: string): URL {
   if (!trimmed) {
     throw new FetchError('invalid-url', 'Fetch URL is required.');
   }
-  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  // 已带任意 scheme（ftp:/javascript: 等）时不能盲目补 https://，否则会被拼成 https://ftp//...
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+  const withScheme = hasScheme ? trimmed : `https://${trimmed}`;
   let parsed: URL;
   try {
     parsed = new URL(withScheme);
@@ -199,7 +210,7 @@ export async function runFetch(options: FetchOptions): Promise<FetchResult> {
       // 每一跳都重新做完整 SSRF 校验（含重新 DNS 解析），防止中途跳向内网
       await assertSafeTarget(currentUrl, lookup);
 
-      const response = await fetchOnce(currentUrl, signal);
+      const response = await fetchOnceWithRetry(currentUrl, signal, options);
 
       if (isRedirectStatus(response.status)) {
         const location = response.headers.get('location');
@@ -228,9 +239,20 @@ export async function runFetch(options: FetchOptions): Promise<FetchResult> {
 
       const normalizedContentType = contentTypeHeader.split(';')[0]?.trim().toLowerCase() || '';
       const isHtml = normalizedContentType.includes('html') || normalizedContentType.includes('xhtml');
-      const extraction = isHtml
+
+      // 反爬挑战页不能当正文返回：显式报 blocked，避免 Agent 拿到「精心构造的垃圾」
+      if (isHtml && looksLikeChallengePage(decoded, response.status)) {
+        throw new FetchError('blocked', 'Target returned a verification or anti-bot page.');
+      }
+
+      const readable = isHtml ? extractReadableText(decoded) : null;
+      const fallback = isHtml
         ? extractVisibleTextFromHtml(decoded)
         : { title: null, text: normalizeWhitespace(decoded) };
+      const extraction = readable && readable.text
+        ? { title: readable.title, text: readable.text }
+        : fallback;
+      const quality: 'high' | 'low' = readable?.quality ?? (extraction.text.length >= 300 ? 'high' : 'low');
 
       // 提取链接需要原始 HTML（只对 HTML 做）
       const links = isHtml ? extractLinks(decoded, currentUrl.toString()) : [];
@@ -247,6 +269,8 @@ export async function runFetch(options: FetchOptions): Promise<FetchResult> {
         warnings.push(
           'Very little text came back. The page is probably rendered by JavaScript, which this fetcher does not run.',
         );
+      } else if (quality === 'low') {
+        warnings.push('Page text looks noisy (navigation/ads dominate); treat the extracted text with caution.');
       }
 
       return {
@@ -264,6 +288,7 @@ export async function runFetch(options: FetchOptions): Promise<FetchResult> {
           truncated: trimmed.truncated,
           redirectChain,
           elapsedMs: Date.now() - startedAt,
+          quality,
         },
       };
     }
@@ -285,7 +310,7 @@ export async function runFetch(options: FetchOptions): Promise<FetchResult> {
 }
 
 /** 单次请求（redirect: manual 由调用方逐跳处理） */
-async function fetchOnce(url: URL, signal: AbortSignal): Promise<Response> {
+async function fetchOnce(url: URL, signal: AbortSignal, options: FetchOptions): Promise<Response> {
   try {
     return await fetch(url, {
       method: 'GET',
@@ -295,7 +320,18 @@ async function fetchOnce(url: URL, signal: AbortSignal): Promise<Response> {
         'user-agent': USER_AGENT,
         accept:
           'text/html,application/xhtml+xml,application/json,text/plain,application/xml,text/xml;q=0.9,*/*;q=0.5',
+        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'sec-ch-ua': '"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': options.referer ? 'same-origin' : 'none',
+        'sec-fetch-user': '?1',
+        'upgrade-insecure-requests': '1',
+        ...(options.referer ? { referer: options.referer } : {}),
       },
+      ...(options.proxyUrl?.trim() ? { proxy: options.proxyUrl.trim() } : {}),
     });
   } catch (err) {
     if (isAbortError(err)) throw err;
@@ -305,6 +341,26 @@ async function fetchOnce(url: URL, signal: AbortSignal): Promise<Response> {
       err instanceof Error ? err.message : String(err),
     );
   }
+}
+
+/** 网络错误重试一次（超时/取消不重试，避免在已耗尽的 deadline 上再等一轮） */
+async function fetchOnceWithRetry(
+  url: URL,
+  signal: AbortSignal,
+  options: FetchOptions,
+): Promise<Response> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetchOnce(url, signal, options);
+    } catch (err) {
+      if (attempt === 0 && err instanceof FetchError && err.code === 'network') {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new FetchError('network', `Request failed for ${url.toString()}`);
 }
 
 /** 流式读取 body，超过 MAX_FETCH_BYTES 立即中止（Content-Length 预检 + 累计双保险） */
@@ -349,13 +405,22 @@ async function readBodyWithLimit(
   return { body: result, bytes: total };
 }
 
-/** 按 content-type 的 charset 解码 body（回退 utf-8） */
+/** 按 content-type / <meta charset> 解码 body；GBK 系走 iconv-lite */
 function decodeBody(body: Uint8Array, contentTypeHeader: string): string {
-  const charset = parseCharset(contentTypeHeader) || 'utf-8';
+  const buffer = Buffer.from(body);
+  const charset = parseCharset(contentTypeHeader) || sniffMetaCharset(buffer) || 'utf-8';
+  const normalized = charset.toLowerCase();
   try {
-    return new TextDecoder(charset).decode(body);
+    if (/^(gbk|gb2312|gb18030|big5|shift_jis|euc-jp)$/i.test(normalized)) {
+      return iconv.decode(buffer, normalized);
+    }
+    return new TextDecoder(normalized).decode(buffer);
   } catch {
-    return new TextDecoder('utf-8').decode(body);
+    try {
+      return iconv.decode(buffer, 'utf-8');
+    } catch {
+      return buffer.toString('utf8');
+    }
   }
 }
 
@@ -363,6 +428,22 @@ function parseCharset(contentTypeHeader: string): string | null {
   const matched = /charset=([^;]+)/i.exec(contentTypeHeader);
   if (!matched) return null;
   return matched[1].trim().toLowerCase().replace(/^"|"$/g, '');
+}
+
+/** 从 HTML 前 4KB 的 <meta charset> / http-equiv 嗅探编码 */
+function sniffMetaCharset(buffer: Buffer): string | null {
+  const head = buffer.subarray(0, 4096).toString('utf8');
+  const direct = /<meta\s+charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>/i.exec(head);
+  if (direct) {
+    return (direct[1] ?? direct[2] ?? direct[3] ?? '').trim().toLowerCase();
+  }
+  const equiv = /<meta\s+http-equiv\s*=\s*(?:"content-type"|'content-type')[^>]*content\s*=\s*(?:"([^"]+)"|'([^']+)')/i.exec(head);
+  if (equiv) {
+    const content = equiv[1] ?? equiv[2] ?? '';
+    const matched = /charset=([^;]+)/i.exec(content);
+    if (matched) return matched[1].trim().toLowerCase();
+  }
+  return null;
 }
 
 function isTextLikeContentType(contentTypeHeader: string): boolean {

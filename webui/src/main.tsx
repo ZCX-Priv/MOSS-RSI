@@ -5,7 +5,7 @@ import App from './App.tsx'
 import { ErrorBoundary } from './components/shared/ErrorBoundary'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { I18nProvider } from './contexts/I18nContext'
-import { idbGet, idbSet, migrateLegacyDatabase } from './utils/idb'
+import { idbGet, idbSet, migrateLegacyDatabase, migrateLegacyLocalStorage } from './utils/idb'
 import { normalizeShortcut } from './utils/shortcut'
 import { waitForBackendReady } from './api/readiness'
 import { useStore, type PersistedState, LEGACY_DEFAULT_WORKING_DIRECTORY, DEFAULT_WORKING_DIRECTORY } from './store'
@@ -134,6 +134,8 @@ async function prefetchStoreState(): Promise<Record<string, unknown>> {
 async function initPersisted(): Promise<Record<string, unknown>> {
   try {
     await migrateLegacyDatabase();
+    // 最近使用命令：旧 localStorage → IndexedDB（写入内存缓存后，TaskInput 首帧同步读取即可命中）
+    await migrateLegacyLocalStorage('moss.recent-commands');
     return await prefetchStoreState();
   } catch (err) {
     // 启动兜底：持久化状态读取失败按空状态继续（全部回落默认值）

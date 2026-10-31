@@ -68,7 +68,10 @@ export class InteractionManager {
   }
 }
 
-/** 数字选择解析：返回选项序号（从 1 开始）、'cancel' 或 null（无法解析） */
+/**
+ * 数字选择解析：支持 `4` 与 `[4]` 两种写法（多选可 `[1],[3]` 或 `1,3`）。
+ * 返回选项序号（从 1 开始）、'cancel' 或 null（含非序号内容/越界 → 交给「其他」逻辑）。
+ */
 export function parseChoice(
   text: string,
   count: number,
@@ -77,9 +80,16 @@ export function parseChoice(
   const source = text.trim();
   if (!source) return null;
   if (/^(0|取消|取消提问|cancel)$/i.test(source)) return 'cancel';
-  const numbers = (source.match(/\d+/g) ?? [])
-    .map(Number)
-    .filter(value => value >= 1 && value <= count);
+  const tokens = source.split(/[,，、\s]+/).filter(Boolean);
+  const numbers: number[] = [];
+  for (const token of tokens) {
+    // 只接受「纯数字」或「[数字]」；夹带其他文字时整条消息不是选项选择
+    const match = /^\[?\s*(\d+)\s*\]?$/.exec(token);
+    if (!match) return null;
+    const value = Number(match[1]);
+    if (value < 1 || value > count) return null;
+    numbers.push(value);
+  }
   if (numbers.length === 0) return null;
   if (mode === 'single') return [numbers[0]!];
   return [...new Set(numbers)].sort((a, b) => a - b);
@@ -115,8 +125,8 @@ export function renderAskQuestion(question: AskQuestion, index: number, total: n
   if (type === 'boolean') {
     return [
       head,
-      `1. ${t('im.interaction.yes')}`,
-      `2. ${t('im.interaction.no')}`,
+      `[1] ${t('im.interaction.yes')}`,
+      `[2] ${t('im.interaction.no')}`,
       t('im.interaction.askSingleHint'),
     ].join('\n');
   }
@@ -124,19 +134,20 @@ export function renderAskQuestion(question: AskQuestion, index: number, total: n
   const options = question.options ?? [];
   const lines = options.map((option, i) => {
     const suffix = option.description ? `（${option.description}）` : '';
-    return `${i + 1}. ${option.label}${suffix}`;
+    return `[${i + 1}] ${option.label}${suffix}`;
   });
   const hint = type === 'multi' ? t('im.interaction.askMultiHint') : t('im.interaction.askSingleHint');
-  return [head, ...lines, hint].join('\n');
+  // 「其他」不占序号：用户直接发送文字即作为 otherText
+  return [head, ...lines, t('im.interaction.askOtherOption'), hint].join('\n');
 }
 
 /** 工具执行确认 */
 export function renderConfirm(toolName: string, question: string): string {
   return [
     t('im.interaction.confirmHead', { tool: toolName, question }),
-    `1. ${t('im.interaction.confirmAllow')}`,
-    `2. ${t('im.interaction.confirmDeny')}`,
-    `3. ${t('im.interaction.confirmAlways')}`,
+    `[1] ${t('im.interaction.confirmAllow')}`,
+    `[2] ${t('im.interaction.confirmDeny')}`,
+    `[3] ${t('im.interaction.confirmAlways')}`,
   ].join('\n');
 }
 

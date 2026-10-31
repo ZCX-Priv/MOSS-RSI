@@ -65,8 +65,8 @@ export function ModelSelector() {
   const { providers, currentModel, setCurrent, updateProviderModel } = useProviders();
   const isMobile = useIsMobile();
   const hasAnyModel = providers.some((p) => p.models.length > 0);
-  // 模型列表只展示「有模型的模型服务商」；搜索服务商（kind='search'）不属于模型服务，一律隐藏
-  const modelProviders = providers.filter((p) => p.kind !== 'search' && p.models.length > 0);
+  // 模型列表只展示「有模型的服务商」；语音服务商 models 恒空，自然被过滤
+  const modelProviders = providers.filter((p) => p.models.length > 0);
   const currentModelName = providers
     .flatMap((p) => p.models)
     .find((m) => m.id === currentModel)?.name;

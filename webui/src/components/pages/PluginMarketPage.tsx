@@ -2,7 +2,7 @@
 // 插件库：两 tab 路由化
 //   /plugins/skills（技能，默认）| /plugins/mcp（MCP 服务器）
 
-import { useState, useCallback, useEffect, type ChangeEvent } from 'react';
+import { useState, useCallback, useEffect, useMemo, type ChangeEvent, type CSSProperties, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import JSZip from 'jszip';
 import {
@@ -10,9 +10,17 @@ import {
   Loader2, Plus, RefreshCw, Trash2, PlugZap, Unplug,
   BookOpen, ListChecks, Eye, Lightbulb, Sparkles, ShieldAlert, FlaskConical,
   Server, Copy, FileUp, Terminal,
+  ArrowLeft, Check, CheckCheck, GripVertical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
+import {
+  DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -21,6 +29,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Checkbox } from '@/components/ui/checkbox';
+import { cn } from '@/lib/utils';
 import {
   Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
@@ -34,6 +44,7 @@ import { useStore } from '../../store';
 import { api } from '../../api/http';
 import { copyText } from '../../lib/clipboard';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
+import { savePluginOrder, SKILL_ORDER_KEY, MCP_ORDER_KEY } from '../../lib/plugin-order';
 import type { McpServer } from '../../types/api';
 
 /** skill.icon（Lucide kebab-case 名）→ 图标组件；未命中回退 WandSparkles */
@@ -79,37 +90,156 @@ export function PluginMarketPage() {
     if (skillsRefreshSeq > 0) void reloadSkills();
   }, [skillsRefreshSeq, reloadSkills]);
 
-  const tabPath = (v: string) => `/plugins/${v}`;
+  // ---- 管理模式：复选框 + 拖拽排序 + 批量删除 ----
+  const [manageMode, setManageMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+
+  // 可选中项：技能页排除内置技能（后端同样拒绝删除）
+  const selectableNames = useMemo(
+    () =>
+      tab === 'skills'
+        ? skills.filter((s) => !s.builtin).map((s) => s.name)
+        : servers.map((s) => s.name),
+    [tab, skills, servers],
+  );
+  const visibleNames = useMemo(
+    () => (tab === 'skills' ? skills.map((s) => s.name) : servers.map((s) => s.name)),
+    [tab, skills, servers],
+  );
+  const allSelected =
+    selectableNames.length > 0 && selectableNames.every((name) => selected.has(name));
+
+  // 列表刷新（删除/热重载）后剔除已不存在的选中项
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(Array.from(prev).filter((name) => visibleNames.includes(name)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleNames]);
+
+  // tab 变化（含浏览器前进/后退直接切换路径）时退出管理模式，避免跨类型残留选择
+  useEffect(() => {
+    setManageMode(false);
+    setSelected(new Set());
+    setQuery('');
+  }, [tab]);
+
+  const enterManage = useCallback(() => {
+    setManageMode(true);
+    setSelected(new Set());
+    setQuery('');
+  }, []);
+
+  const exitManage = useCallback(() => {
+    setManageMode(false);
+    setSelected(new Set());
+  }, []);
+
+  const toggleSelect = useCallback((name: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => {
+      if (selectableNames.length === 0) return new Set();
+      const all = selectableNames.every((name) => prev.has(name));
+      return all ? new Set() : new Set(selectableNames);
+    });
+  }, [selectableNames]);
+
+  // tab 切换：退出管理模式并清空选择，避免把一类数据的选择带到另一类
+  const handleTabChange = useCallback(
+    (v: string) => {
+      setManageMode(false);
+      setSelected(new Set());
+      setQuery('');
+      navigate(`/plugins/${v}`);
+    },
+    [navigate],
+  );
+
+  // 批量删除：逐项直调接口 + 汇总失败 + 最后统一刷新
+  const handleBatchDelete = useCallback(async () => {
+    if (selected.size === 0 || batchDeleting) return;
+    const names = Array.from(selected);
+    setBatchDeleting(true);
+    const results = await Promise.allSettled(
+      names.map((name) => (tab === 'skills' ? api.deleteSkill(name) : api.deleteMcpServer(name))),
+    );
+    const failed = names.filter((_, i) => results[i].status === 'rejected');
+    if (failed.length > 0) {
+      toast.error(t('plugins.batchDeleteFailed', { count: failed.length }));
+    }
+    setBatchDeleting(false);
+    setBatchDeleteOpen(false);
+    setSelected(new Set());
+    if (tab === 'skills') void reloadSkills();
+    else void reload();
+  }, [batchDeleting, reload, reloadSkills, selected, t, tab]);
+
+  const openCreate = tab === 'skills' ? () => setSkillsOpen(true) : requestMcpDialog;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Header：左标题右操作（按 tab 显示技能/MCP专属按钮；移动端收纳进全局顶栏，与自动化页一致） */}
+      {/* Header：返回插件库 + 管理插件标题；右侧按钮随管理模式切换（移动端收纳进全局顶栏） */}
       <div className="hidden items-center justify-between gap-4 px-6 py-4 md:flex">
         <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-foreground">{t('plugins.title')}</h1>
+          <Button
+            variant="ghost"
+            size="xs"
+            className="-ml-1.5 w-fit gap-1 px-1.5 text-xs text-muted-foreground"
+            onClick={() => navigate('/plugins')}
+          >
+            <ArrowLeft className="size-3" />
+            {t('plugins.backToMarket')}
+          </Button>
+          <h1 className="text-xl font-semibold text-foreground">{t('plugins.manageTitle')}</h1>
           <p className="text-sm text-muted-foreground">{t('plugins.subtitle')}</p>
         </div>
-        {tab === 'skills' && (
+        {manageMode ? (
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => void reloadSkills()}>
-              <RefreshCw className="size-3.5" />
-              {t('common.refresh')}
-            </Button>
-            <Button size="sm" className="h-8 gap-1" onClick={() => setSkillsOpen(true)}>
+            <Button size="sm" className="h-8 gap-1" onClick={openCreate}>
               <Plus className="size-3.5" />
-              {t('plugins.skillsAdd')}
+              {tab === 'skills' ? t('plugins.createSkill') : t('plugins.createMcp')}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-8 gap-1"
+              disabled={selected.size === 0}
+              onClick={() => setBatchDeleteOpen(true)}
+            >
+              <Trash2 className="size-3.5" />
+              {t('plugins.deleteSelected')}
+              {selected.size > 0 ? ` (${selected.size})` : ''}
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 gap-1" onClick={exitManage}>
+              <Check className="size-3.5" />
+              {t('plugins.done')}
             </Button>
           </div>
-        )}
-        {tab === 'mcp' && (
+        ) : (
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="h-8 gap-1" onClick={() => void reload()}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1"
+              onClick={() => void (tab === 'skills' ? reloadSkills() : reload())}
+            >
               <RefreshCw className="size-3.5" />
               {t('common.refresh')}
             </Button>
-            <Button size="sm" className="h-8 gap-1" onClick={requestMcpDialog}>
-              <Plus className="size-3.5" />
-              {t('plugins.mcpAdd')}
+            <Button variant="outline" size="sm" className="h-8 gap-1" onClick={enterManage}>
+              <ListChecks className="size-3.5" />
+              {t('plugins.manage')}
             </Button>
           </div>
         )}
@@ -118,7 +248,7 @@ export function PluginMarketPage() {
       {/* Tabs（路由驱动） */}
       <Tabs
         value={tab}
-        onValueChange={(v) => navigate(tabPath(v))}
+        onValueChange={handleTabChange}
       >
         <div className="flex flex-col gap-3 px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
           <TabsList>
@@ -133,83 +263,316 @@ export function PluginMarketPage() {
               <Badge variant="secondary">{servers.length}</Badge>
             </TabsTrigger>
           </TabsList>
-          <div className="relative w-full sm:w-64 sm:shrink-0">
-            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              type="text"
-              placeholder={t('plugins.searchPlaceholder')}
-              className="pl-8"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <div className="relative w-full sm:w-64 sm:shrink-0">
+              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder={t('plugins.searchPlaceholder')}
+                className="pl-8"
+                value={query}
+                disabled={manageMode}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            {/* 移动端管理模式切换（桌面入口在页面标题区） */}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 md:hidden"
+              title={manageMode ? t('plugins.done') : t('plugins.manage')}
+              aria-label={manageMode ? t('plugins.done') : t('plugins.manage')}
+              onClick={manageMode ? exitManage : enterManage}
+            >
+              {manageMode ? <Check /> : <ListChecks />}
+            </Button>
           </div>
         </div>
       </Tabs>
 
+      {/* 管理工具条：全选 / 已选数（移动端另含新建与批量删除入口） */}
+      {manageMode && (
+        <ManageToolbar
+          className="px-6"
+          selectedCount={selected.size}
+          selectableCount={selectableNames.length}
+          allSelected={allSelected}
+          batchDisabled={selected.size === 0}
+          createLabel={tab === 'skills' ? t('plugins.createSkill') : t('plugins.createMcp')}
+          onCreate={openCreate}
+          onBatchDelete={() => setBatchDeleteOpen(true)}
+          onToggleSelectAll={toggleSelectAll}
+        />
+      )}
+
       {/* 管理内容（技能 / MCP） */}
       <div className="flex-1 overflow-auto">
-        {tab === 'skills' ? <SkillsTab query={query} /> : <McpTab query={query} />}
+        {tab === 'skills' ? (
+          <SkillsTab
+            query={query}
+            managing={manageMode}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+          />
+        ) : (
+          <McpTab
+            query={query}
+            managing={manageMode}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+          />
+        )}
       </div>
 
       {/* 添加技能弹窗（新建 / 导入 zip；桌面 header 与移动端全局 header 按钮共用） */}
       <SkillsDialog open={skillsOpen} onOpenChange={setSkillsOpen} onDone={() => void reloadSkills()} />
+
+      {/* 批量删除确认弹窗（技能 / MCP 共用，文案按 tab 区分） */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        title={t('plugins.batchDeleteTitle')}
+        description={
+          tab === 'skills'
+            ? t('plugins.batchDeleteSkillsDesc', { count: selected.size })
+            : t('plugins.batchDeleteMcpDesc', { count: selected.size })
+        }
+        destructive
+        loading={batchDeleting}
+        onConfirm={() => void handleBatchDelete()}
+        onOpenChange={(o) => !batchDeleting && setBatchDeleteOpen(o)}
+      />
+    </div>
+  );
+}
+
+/* ===== 管理模式工具条（全选 / 已选数 / 移动端操作入口） ===== */
+function ManageToolbar({
+  className,
+  selectedCount,
+  selectableCount,
+  allSelected,
+  batchDisabled,
+  createLabel,
+  onCreate,
+  onBatchDelete,
+  onToggleSelectAll,
+}: {
+  className?: string;
+  selectedCount: number;
+  selectableCount: number;
+  allSelected: boolean;
+  batchDisabled: boolean;
+  createLabel: string;
+  onCreate: () => void;
+  onBatchDelete: () => void;
+  onToggleSelectAll: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className={cn('flex items-center gap-1 pb-2', className)}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 gap-1 px-2 text-xs"
+        disabled={selectableCount === 0}
+        onClick={onToggleSelectAll}
+      >
+        <CheckCheck className="size-3.5" />
+        {allSelected ? t('plugins.deselectAll') : t('plugins.selectAll')}
+      </Button>
+      <span className="text-xs text-muted-foreground">
+        {t('plugins.selectedCount', { count: selectedCount })}
+      </span>
+      {/* 移动端：桌面标题区按钮的替代入口 */}
+      <div className="ml-auto flex items-center gap-1 md:hidden">
+        <Button variant="outline" size="icon-sm" title={createLabel} aria-label={createLabel} onClick={onCreate}>
+          <Plus />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="text-destructive hover:text-destructive"
+          title={t('plugins.deleteSelected')}
+          aria-label={t('plugins.deleteSelected')}
+          disabled={batchDisabled}
+          onClick={onBatchDelete}
+        >
+          <Trash2 />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/* ===== 可拖拽列表项（管理模式下显示复选框与手柄） ===== */
+function SortableItem({
+  id,
+  managing,
+  selected,
+  onToggleSelect,
+  selectable = true,
+  undeletableHint,
+  children,
+}: {
+  id: string;
+  managing: boolean;
+  selected: boolean;
+  onToggleSelect: (name: string) => void;
+  /** false = 禁止勾选（内置技能） */
+  selectable?: boolean;
+  undeletableHint?: string;
+  children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+    disabled: !managing,
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(isDragging && 'rounded-xl outline-2 outline-dashed outline-primary-strong/40')}
+    >
+      <div className="flex items-center gap-2">
+        {managing && (
+          <Checkbox
+            checked={selected}
+            disabled={!selectable}
+            title={!selectable ? undeletableHint : undefined}
+            aria-label={!selectable ? undeletableHint : undefined}
+            onCheckedChange={() => {
+              if (selectable) onToggleSelect(id);
+            }}
+            className="shrink-0"
+          />
+        )}
+        <div className="min-w-0 flex-1">{children}</div>
+        {managing && (
+          <button
+            type="button"
+            aria-label={t('plugins.dragHandle')}
+            className="flex size-6 shrink-0 cursor-grab items-center justify-center text-muted-foreground hover:text-foreground active:cursor-grabbing"
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="size-4" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
 /* ===== 技能 tab（icon + files + 启停） ===== */
-export function SkillsTab({ query }: { query: string }) {
+export function SkillsTab({
+  query,
+  managing,
+  selected,
+  onToggleSelect,
+}: {
+  query: string;
+  managing: boolean;
+  selected: Set<string>;
+  onToggleSelect: (name: string) => void;
+}) {
   const { t } = useTranslation();
   const { skills, toggleSkill } = useSkills();
+  const setSkills = useStore((s) => s.setSkills);
+  // 拖拽排序：PointerSensor 距离阈值 5px，避免与复选框/开关点击冲突
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const q = query.trim().toLowerCase();
-  const filteredSkills = q
-    ? skills.filter(
-        (s) =>
-          s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
-      )
-    : skills;
+  // 管理模式下展示全量（搜索框已禁用并清空），保证拖拽顺序与保存的序列一致
+  const filteredSkills = managing
+    ? skills
+    : q
+      ? skills.filter(
+          (s) =>
+            s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+        )
+      : skills;
+
+  const handleDragEnd = useCallback(
+    ({ active, over }: DragEndEvent) => {
+      if (!over || active.id === over.id) return;
+      const oldIndex = skills.findIndex((s) => s.name === active.id);
+      const newIndex = skills.findIndex((s) => s.name === over.id);
+      if (oldIndex < 0 || newIndex < 0) return;
+      const next = arrayMove(skills, oldIndex, newIndex);
+      setSkills(next);
+      savePluginOrder(SKILL_ORDER_KEY, next.map((s) => s.name));
+    },
+    [skills, setSkills],
+  );
 
   return (
-    <div className="p-6">
+    <div className="p-6 pt-2">
       <div className="flex flex-col gap-2">
         {filteredSkills.length === 0 && (
           <div className="py-12 text-center text-sm text-muted-foreground">
             {t('plugins.noSkills')}
           </div>
         )}
-        {filteredSkills.map((skill) => {
-          const Icon = SKILL_ICON_MAP[skill.icon ?? ''] ?? WandSparkles;
-          const enabled = skill.enabled !== false;
-          return (
-            <Card key={skill.name} className="flex flex-row items-center gap-3 p-3">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                <Icon className="size-5" />
-              </div>
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-medium text-foreground">{skill.name}</h3>
-                  {skill.files && skill.files.length > 0 && (
-                    <Badge variant="outline" className="font-normal">
-                      {t('plugins.skillFiles', { count: skill.files.length })}
-                    </Badge>
-                  )}
-                </div>
-                <p className="truncate text-xs text-muted-foreground">{skill.description}</p>
-                <p className="truncate text-[11px] text-muted-foreground/70">
-                  {t('plugins.skillUsage')}: /{skill.name}
-                </p>
-              </div>
-              <Switch
-                checked={enabled}
-                onCheckedChange={(checked) =>
-                  void toggleSkill(skill.name, checked).catch(() => toast.error(t('plugins.skillToggleFailed')))
-                }
-                aria-label={enabled ? t('common.close') : t('common.open')}
-              />
-            </Card>
-          );
-        })}
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={filteredSkills.map((s) => s.name)}
+            strategy={verticalListSortingStrategy}
+          >
+            {filteredSkills.map((skill) => {
+              const Icon = SKILL_ICON_MAP[skill.icon ?? ''] ?? WandSparkles;
+              const enabled = skill.enabled !== false;
+              return (
+                <SortableItem
+                  key={skill.name}
+                  id={skill.name}
+                  managing={managing}
+                  selected={selected.has(skill.name)}
+                  onToggleSelect={onToggleSelect}
+                  selectable={skill.builtin !== true}
+                  undeletableHint={t('plugins.builtinUndeletable')}
+                >
+                  <Card className="flex flex-row items-center gap-3 p-3">
+                    <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Icon className="size-5" />
+                    </div>
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-medium text-foreground">{skill.name}</h3>
+                        {managing && skill.builtin && (
+                          <Badge variant="secondary" className="font-normal">
+                            {t('plugins.builtinBadge')}
+                          </Badge>
+                        )}
+                        {skill.files && skill.files.length > 0 && (
+                          <Badge variant="outline" className="font-normal">
+                            {t('plugins.skillFiles', { count: skill.files.length })}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">{skill.description}</p>
+                      <p className="truncate text-[11px] text-muted-foreground/70">
+                        {t('plugins.skillUsage')}: /{skill.name}
+                      </p>
+                    </div>
+                    <Switch
+                      checked={enabled}
+                      onCheckedChange={(checked) =>
+                        void toggleSkill(skill.name, checked).catch(() => toast.error(t('plugins.skillToggleFailed')))
+                      }
+                      aria-label={enabled ? t('common.close') : t('common.open')}
+                    />
+                  </Card>
+                </SortableItem>
+              );
+            })}
+          </SortableContext>
+        </DndContext>
       </div>
     </div>
   );
@@ -696,9 +1059,22 @@ function MossServerCard() {
   );
 }
 
-export function McpTab({ query }: { query: string }) {
+export function McpTab({
+  query,
+  managing,
+  selected,
+  onToggleSelect,
+}: {
+  query: string;
+  managing: boolean;
+  selected: Set<string>;
+  onToggleSelect: (name: string) => void;
+}) {
   const { t } = useTranslation();
   const { servers, tools, reload, connect, disconnect, remove, setEnabled } = useMcp();
+  const setMcpServers = useStore((s) => s.setMcpServers);
+  // 拖拽排序：PointerSensor 距离阈值 5px，避免与按钮/开关点击冲突
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   const [addOpen, setAddOpen] = useState(false);
   const [form, setForm] = useState<McpServerForm>(EMPTY_MCP_FORM);
@@ -731,14 +1107,30 @@ export function McpTab({ query }: { query: string }) {
   }, [mcpRefreshSeq, reload]);
 
   const q = query.trim().toLowerCase();
-  const filteredServers = q
-    ? servers.filter(
-        (s) =>
-          s.name.toLowerCase().includes(q) ||
-          (s.command ?? '').toLowerCase().includes(q) ||
-          (s.url ?? '').toLowerCase().includes(q),
-      )
-    : servers;
+  // 管理模式下展示全量（搜索框已禁用并清空），保证拖拽顺序与保存的序列一致
+  const filteredServers = managing
+    ? servers
+    : q
+      ? servers.filter(
+          (s) =>
+            s.name.toLowerCase().includes(q) ||
+            (s.command ?? '').toLowerCase().includes(q) ||
+            (s.url ?? '').toLowerCase().includes(q),
+        )
+      : servers;
+
+  const handleDragEnd = useCallback(
+    ({ active, over }: DragEndEvent) => {
+      if (!over || active.id === over.id) return;
+      const oldIndex = servers.findIndex((s) => s.name === active.id);
+      const newIndex = servers.findIndex((s) => s.name === over.id);
+      if (oldIndex < 0 || newIndex < 0) return;
+      const next = arrayMove(servers, oldIndex, newIndex);
+      setMcpServers(next);
+      savePluginOrder(MCP_ORDER_KEY, next.map((s) => s.name));
+    },
+    [servers, setMcpServers],
+  );
 
   const submitForm = useCallback(async () => {
     if (!form.name.trim() || saving) return;
@@ -819,111 +1211,126 @@ export function McpTab({ query }: { query: string }) {
     s === 'connected' ? 'bg-emerald-500' : s === 'error' ? 'bg-red-500' : 'bg-muted-foreground/40';
 
   return (
-    <div className="p-6">
+    <div className="p-6 pt-2">
       <div className="flex flex-col gap-2">
-        {/* MOSS 自身 MCP 服务器（/mcp 端点）置顶卡片：开关 / 端点预览 / 复制 JSON */}
+        {/* MOSS 自身 MCP 服务器（/mcp 端点）置顶卡片：开关 / 端点预览 / 复制 JSON；不参与选择与排序 */}
         <MossServerCard />
         {filteredServers.length === 0 && (
           <div className="py-12 text-center text-sm text-muted-foreground">
             {t('plugins.noMcpServers')}
           </div>
         )}
-        {filteredServers.map((server) => {
-          const serverTools = tools.filter((tl) => tl.server === server.name);
-          const enabled = server.enabled !== false;
-          return (
-            <Card key={server.name} className="flex flex-col gap-2 p-3">
-              <div className="flex flex-row items-center gap-3">
-                <div className="relative flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                  <Cable className="size-5" />
-                  <span
-                    className={statusColor(server.status)}
-                    title={server.status + (server.lastError ? `: ${server.lastError}` : '')}
-                    aria-label={server.status}
-                  />
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-medium text-foreground">{server.name}</h3>
-                    <Badge variant="outline" className="font-normal">{server.transport ?? 'stdio'}</Badge>
-                    <Badge variant="secondary" className="font-normal">
-                      {t('plugins.mcpToolCount', { count: server.toolCount })}
-                    </Badge>
-                  </div>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {server.transport === 'http' || server.transport === 'sse'
-                      ? server.url
-                      : [server.command, ...(server.args ?? [])].filter(Boolean).join(' ')}
-                  </p>
-                  {server.status === 'error' && server.lastError && (
-                    <p className="truncate text-xs text-destructive" title={server.lastError}>
-                      {server.lastError}
-                    </p>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  {server.status === 'connected' ? (
-                    <Button
-                      variant="ghost" size="icon-sm" title={t('plugins.mcpDisconnect')}
-                      disabled={busy === server.name}
-                      onClick={() => { setBusy(server.name); void disconnect(server.name).finally(() => setBusy(null)); }}
-                    >
-                      {busy === server.name ? <Loader2 className="size-4 animate-spin" /> : <Unplug className="size-4" />}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="ghost" size="icon-sm" title={t('plugins.mcpConnect')}
-                      disabled={busy === server.name}
-                      onClick={() => { setBusy(server.name); void connect(server.name).finally(() => setBusy(null)); }}
-                    >
-                      {busy === server.name ? <Loader2 className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost" size="icon-sm" title={t('common.delete')}
-                    onClick={() => setDeleteTarget(server.name)}
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                  <Switch
-                    checked={enabled}
-                    onCheckedChange={(checked) =>
-                      void setEnabled(server.name, checked).catch(() => toast.error(t('plugins.mcpToggleFailed')))
-                    }
-                    aria-label={enabled ? t('common.close') : t('common.open')}
-                  />
-                </div>
-              </div>
-              {/* 工具清单（可折叠）：name + annotations 徽章 */}
-              {serverTools.length > 0 && (
-                <details className="group rounded-md border border-border px-2 py-1.5">
-                  <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-                    <Wrench className="size-3" />
-                    {t('plugins.mcpToolsOf', { name: server.name, count: serverTools.length })}
-                  </summary>
-                  <div className="mt-1.5 flex flex-col gap-1">
-                    {serverTools.map((tl) => (
-                      <div key={tl.name} className="flex flex-wrap items-center gap-1.5 text-xs">
-                        <span className="font-mono">{tl.name}</span>
-                        {tl.annotations?.readOnlyHint && (
-                          <Badge variant="outline" className="px-1 py-0 text-[10px] font-normal">RO</Badge>
-                        )}
-                        {tl.annotations?.destructiveHint && (
-                          <Badge variant="secondary" className="px-1 py-0 text-[10px] font-normal text-amber-600">
-                            {t('plugins.destructive')}
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={filteredServers.map((s) => s.name)}
+            strategy={verticalListSortingStrategy}
+          >
+            {filteredServers.map((server) => {
+              const serverTools = tools.filter((tl) => tl.server === server.name);
+              const enabled = server.enabled !== false;
+              return (
+                <SortableItem
+                  key={server.name}
+                  id={server.name}
+                  managing={managing}
+                  selected={selected.has(server.name)}
+                  onToggleSelect={onToggleSelect}
+                >
+                  <Card className="flex flex-col gap-2 p-3">
+                    <div className="flex flex-row items-center gap-3">
+                      <div className="relative flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                        <Cable className="size-5" />
+                        <span
+                          className={statusColor(server.status)}
+                          title={server.status + (server.lastError ? `: ${server.lastError}` : '')}
+                          aria-label={server.status}
+                        />
+                      </div>
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-sm font-medium text-foreground">{server.name}</h3>
+                          <Badge variant="outline" className="font-normal">{server.transport ?? 'stdio'}</Badge>
+                          <Badge variant="secondary" className="font-normal">
+                            {t('plugins.mcpToolCount', { count: server.toolCount })}
                           </Badge>
-                        )}
-                        {tl.description && (
-                          <span className="min-w-0 flex-1 truncate text-muted-foreground">{tl.description}</span>
+                        </div>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {server.transport === 'http' || server.transport === 'sse'
+                            ? server.url
+                            : [server.command, ...(server.args ?? [])].filter(Boolean).join(' ')}
+                        </p>
+                        {server.status === 'error' && server.lastError && (
+                          <p className="truncate text-xs text-destructive" title={server.lastError}>
+                            {server.lastError}
+                          </p>
                         )}
                       </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-            </Card>
-          );
-        })}
+                      <div className="flex shrink-0 items-center gap-1">
+                        {server.status === 'connected' ? (
+                          <Button
+                            variant="ghost" size="icon-sm" title={t('plugins.mcpDisconnect')}
+                            disabled={busy === server.name}
+                            onClick={() => { setBusy(server.name); void disconnect(server.name).finally(() => setBusy(null)); }}
+                          >
+                            {busy === server.name ? <Loader2 className="size-4 animate-spin" /> : <Unplug className="size-4" />}
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost" size="icon-sm" title={t('plugins.mcpConnect')}
+                            disabled={busy === server.name}
+                            onClick={() => { setBusy(server.name); void connect(server.name).finally(() => setBusy(null)); }}
+                          >
+                            {busy === server.name ? <Loader2 className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost" size="icon-sm" title={t('common.delete')}
+                          onClick={() => setDeleteTarget(server.name)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                        <Switch
+                          checked={enabled}
+                          onCheckedChange={(checked) =>
+                            void setEnabled(server.name, checked).catch(() => toast.error(t('plugins.mcpToggleFailed')))
+                          }
+                          aria-label={enabled ? t('common.close') : t('common.open')}
+                        />
+                      </div>
+                    </div>
+                    {/* 工具清单（可折叠）：name + annotations 徽章 */}
+                    {serverTools.length > 0 && (
+                      <details className="group rounded-md border border-border px-2 py-1.5">
+                        <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                          <Wrench className="size-3" />
+                          {t('plugins.mcpToolsOf', { name: server.name, count: serverTools.length })}
+                        </summary>
+                        <div className="mt-1.5 flex flex-col gap-1">
+                          {serverTools.map((tl) => (
+                            <div key={tl.name} className="flex flex-wrap items-center gap-1.5 text-xs">
+                              <span className="font-mono">{tl.name}</span>
+                              {tl.annotations?.readOnlyHint && (
+                                <Badge variant="outline" className="px-1 py-0 text-[10px] font-normal">RO</Badge>
+                              )}
+                              {tl.annotations?.destructiveHint && (
+                                <Badge variant="secondary" className="px-1 py-0 text-[10px] font-normal text-amber-600">
+                                  {t('plugins.destructive')}
+                                </Badge>
+                              )}
+                              {tl.description && (
+                                <span className="min-w-0 flex-1 truncate text-muted-foreground">{tl.description}</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </Card>
+                </SortableItem>
+              );
+            })}
+          </SortableContext>
+        </DndContext>
       </div>
 
       {/* 删除服务器确认弹窗 */}

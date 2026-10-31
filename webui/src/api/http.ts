@@ -524,23 +524,14 @@ export const api = {
     request<{
       providers: ProviderItem[];
       current: string;
-      /** 默认搜索引擎（web 工具消费）：空串 = 本地免费引擎链 */
-      currentSearchProvider?: string;
     }>('GET', '/api/providers'),
   setCurrentModel: (modelId: string) =>
     request<{ current: string }>('PUT', '/api/providers/current', { modelId }),
-  /** 设置默认搜索引擎（providerId 空串 = 本地免费引擎） */
-  setSearchCurrentProvider: (providerId: string) =>
-    request<{ currentSearchProvider: string }>('PUT', '/api/providers/search-current', {
-      providerId,
-    }),
   createProvider: (data: {
     name: string;
-    /** 服务商类型：model（缺省）= 模型服务商；search = 搜索服务商；voice = 语音服务商 */
-    kind?: 'model' | 'search' | 'voice';
+    /** 服务商类型：model（缺省）= 模型服务商；voice = 语音服务商 */
+    kind?: 'model' | 'voice';
     format?: ProviderItem['format'];
-    /** 搜索引擎（kind='search' 必填）：zhipu / bocha / tavily */
-    searchEngine?: 'zhipu' | 'bocha' | 'tavily';
     /** 语音引擎（kind='voice' 必填）：openai-transcriptions */
     voiceEngine?: 'openai-transcriptions';
     /** 语音模型名（kind='voice' 可选） */
@@ -658,6 +649,9 @@ export const api = {
   getSkill: (name: string) => request<{ skill: SkillDetail }>('GET', `/api/skills/${name}`),
   updateSkill: (name: string, patch: { enabled: boolean }) =>
     request<{ name: string; enabled: boolean }>('PATCH', `/api/skills/${encodeURIComponent(name)}`, patch),
+  /** 删除技能（目录式删目录 / 单文件删 .md；内置技能后端会拒绝） */
+  deleteSkill: (name: string) =>
+    request<{ deleted: boolean; name: string }>('DELETE', `/api/skills/${encodeURIComponent(name)}`),
   /** 新建目录式技能（写 ~/.moss/skills/<name>/SKILL.md，watch 热重载生效） */
   createSkill: (data: { name: string; description: string; prompt?: string; icon?: string }) =>
     request<{ name: string }>('POST', '/api/skills', data),

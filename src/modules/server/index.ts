@@ -36,6 +36,7 @@ import {
   createListSkillsHandler,
   createGetSkillHandler,
   createUpdateSkillHandler,
+  createDeleteSkillHandler,
   createCreateSkillHandler,
   createImportSkillHandler,
 } from './routes/skills';
@@ -71,7 +72,6 @@ import { createVersionHandler } from './routes/version';
 import {
   createListProvidersHandler,
   createSetCurrentModelHandler,
-  createSetCurrentSearchProviderHandler,
   createCreateProviderHandler,
   createUpdateProviderHandler,
   createDeleteProviderHandler,
@@ -372,13 +372,15 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'DELETE', pattern: '/api/mcp/servers/:name', handler: createDeleteMcpServerHandler(services), auth: true });
 
     // skills
-    this.router.addRoute({ method: 'GET', pattern: '/api/skills', handler: createListSkillsHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/skills', handler: createListSkillsHandler(services, env), auth: true });
     // SkillHub 技能市场（静态路由必须先于 /api/skills/:name 注册，否则 market 会被当作技能名）
     this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/query', handler: createMarketSkillsHandler(), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/skills/market/categories', handler: createMarketCategoriesHandler(), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/install', handler: createInstallMarketSkillHandler(services, config, env), auth: true });
-    this.router.addRoute({ method: 'GET', pattern: '/api/skills/:name', handler: createGetSkillHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/skills/:name', handler: createGetSkillHandler(services, env), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/skills/:name', handler: createUpdateSkillHandler(services, config), auth: true });
+    // 删除技能（内置技能由 handler 拒绝）
+    this.router.addRoute({ method: 'DELETE', pattern: '/api/skills/:name', handler: createDeleteSkillHandler(services, env), auth: true });
     // skills 新建 / zip 导入（前端解包后批量写文件；目录 watch 热重载自动生效）
     this.router.addRoute({ method: 'POST', pattern: '/api/skills', handler: createCreateSkillHandler(services, env), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/skills/import', handler: createImportSkillHandler(services, env), auth: true });
@@ -396,7 +398,6 @@ class ServerModule implements Module {
     // providers（服务商 + 旗下模型；静态路由先于 :id 参数路由注册）
     this.router.addRoute({ method: 'GET', pattern: '/api/providers', handler: createListProvidersHandler(config), auth: true });
     this.router.addRoute({ method: 'PUT', pattern: '/api/providers/current', handler: createSetCurrentModelHandler(config), auth: true });
-    this.router.addRoute({ method: 'PUT', pattern: '/api/providers/search-current', handler: createSetCurrentSearchProviderHandler(config), auth: true });
     this.router.addRoute({ method: 'PUT', pattern: '/api/providers/reorder', handler: createReorderProvidersHandler(config), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/providers', handler: createCreateProviderHandler(config), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/providers/:id', handler: createUpdateProviderHandler(config), auth: true });

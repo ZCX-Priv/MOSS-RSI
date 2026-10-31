@@ -6,6 +6,7 @@ import { useEffect, useCallback } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
+import { applyPluginOrder, loadPluginOrder, SKILL_ORDER_KEY } from '../lib/plugin-order';
 
 export function useSkills() {
   const setSkills = useStore((s) => s.setSkills);
@@ -13,7 +14,9 @@ export function useSkills() {
   const load = useCallback(async () => {
     try {
       const { skills } = await api.listSkills();
-      setSkills(skills);
+      // 应用浏览器本地保存的自定义顺序（IndexedDB）
+      const order = await loadPluginOrder(SKILL_ORDER_KEY);
+      setSkills(applyPluginOrder(skills, order));
     } catch (err) {
       console.warn('useSkills load failed:', err);
     }

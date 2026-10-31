@@ -68,6 +68,30 @@ export async function idbSet<T>(key: string, value: T): Promise<void> {
 }
 
 /**
+ * 一次性迁移：把某个旧 localStorage key 搬入 IndexedDB（同时写入内存缓存）。
+ * IndexedDB 已有值或 localStorage 无值时跳过；完成后清除 localStorage 旧值。
+ * 仅适用于普通 JSON 数据：认证令牌、首帧主题快照等需要同步读取的项不适用。
+ */
+export async function migrateLegacyLocalStorage(key: string): Promise<void> {
+  try {
+    const current = await idbGet<unknown>(key);
+    if (current !== undefined) return;
+    const legacy = localStorage.getItem(key);
+    if (legacy === null) return;
+    let parsed: unknown = legacy;
+    try {
+      parsed = JSON.parse(legacy);
+    } catch {
+      // 非 JSON：按原始字符串迁移
+    }
+    await idbSet(key, parsed);
+    localStorage.removeItem(key);
+  } catch {
+    // 迁移失败静默：保留旧值，下次启动再试
+  }
+}
+
+/**
  * 一次性迁移：把改名前的旧库 `moss-db` 全部条目搬入新库 `MOSS-DB`（同时写入内存缓存），
  * 完成后删除旧库。旧库不存在或迁移失败时静默忽略，不阻塞启动。
  */

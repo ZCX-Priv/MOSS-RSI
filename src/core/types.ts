@@ -287,11 +287,6 @@ export interface AppConfig {
   context?: ContextEngineConfig;
   /** 远程访问配置（由 remote 模块消费：局域网/公网隧道控制 webui；Zod schema 全 default 自愈） */
   remote: RemoteConfig;
-  /** web 工具配置（联网搜索默认引擎；由 web 工具消费） */
-  web?: {
-    /** 默认搜索服务商 id；空串 = 本地免费引擎（bing/baidu/sogou 回退链） */
-    searchProviderId: string;
-  };
   /** 语音输入配置（由 voice 模块消费；Zod schema 全 default 自愈） */
   voice?: {
     /** 总开关（默认关闭；关闭时输入框麦克风按钮隐藏） */
@@ -318,13 +313,10 @@ export interface ProviderConfig {
   /** 显示名，如 "OpenAI" */
   name: string;
   /**
-   * 服务商类型：model=模型服务商（默认，缺省等同）、search=搜索服务商。
-   * search 服务商 format 固定为 'search'，由 searchEngine 决定引擎，models 恒为空。
+   * 服务商类型：model=模型服务商（默认，缺省等同）、voice=语音服务商。
    */
-  kind?: 'model' | 'search' | 'voice';
-  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'search' | 'voice';
-  /** 搜索引擎类型（kind='search' 时必填）：zhipu=智谱 search_pro、bocha=博查、tavily=Tavily */
-  searchEngine?: 'zhipu' | 'bocha' | 'tavily';
+  kind?: 'model' | 'voice';
+  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'voice';
   /**
    * 语音引擎类型（kind='voice' 时必填）：openai-transcriptions = OpenAI 兼容
    * /audio/transcriptions 整段转写接口。本地引擎不占用服务商条目（providerId 空串即本地）。

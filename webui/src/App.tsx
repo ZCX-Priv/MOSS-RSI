@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Plus, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, Plus, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
 import type { OverlayType } from './types';
 import { Sidebar } from './components/layout/Sidebar';
 import { TaskPage } from './components/pages/TaskPage';
@@ -93,12 +93,16 @@ export default function App() {
   const isPluginsMarketRoute = pathname === '/plugins';
   const isPluginsMcpRoute = pathname === '/plugins/mcp';
   const isPluginsSkillsRoute = pathname === '/plugins/skills';
+  // 插件库管理页（技能 / MCP）：标题「管理插件」并显示返回插件库按钮
+  const isPluginsManageRoute = isPluginsMcpRoute || isPluginsSkillsRoute;
   const isAutomationRoute = pathname.startsWith('/automation');
   const isSettingsRoute = pathname.startsWith('/settings');
   const isProviderRoute = pathname.startsWith('/settings/provider');
-  const mobileTitle = isPluginsRoute
-    ? t('plugins.title')
-    : isAutomationRoute
+  const mobileTitle = isPluginsManageRoute
+    ? t('plugins.manageTitle')
+    : isPluginsRoute
+      ? t('plugins.title')
+      : isAutomationRoute
       ? t('automation.title')
       : isSettingsRoute
         ? t('settings.title')
@@ -133,7 +137,21 @@ export default function App() {
           {/* 移动端顶部 header：仅非 TaskPage 路由显示（TaskPage 自带含左 trigger 的 header） */}
           {!isTaskRoute && (
             <header className="grid h-12 grid-cols-3 items-center border-b border-border px-3 md:hidden">
-              <SidebarTrigger />
+              <div className="flex items-center gap-1">
+                <SidebarTrigger />
+                {/* 插件库管理页：返回插件库（桌面返回键在页面标题区） */}
+                {isPluginsManageRoute && (
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    title={t('plugins.backToMarket')}
+                    aria-label={t('plugins.backToMarket')}
+                    onClick={() => navigate('/plugins')}
+                  >
+                    <ArrowLeft />
+                  </Button>
+                )}
+              </div>
               <h1 className="truncate text-center text-sm font-medium text-foreground">
                 {mobileTitle}
               </h1>

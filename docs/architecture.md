@@ -254,7 +254,6 @@ subagent → file-history → daemon → automation
     "cautionPolicy": "ask",
     "protectedPaths": ["~/.ssh", "~/.gnupg", "~/.aws"]
   },
-  "web": { "searchProviderId": "" },
   "voice": { "enabled": false, "providerId": "", "localModel": "", "language": "auto" },
   "tools": {
     "read": { "enabled": true },

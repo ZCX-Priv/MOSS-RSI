@@ -540,6 +540,16 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     }
     case 'error': {
       flushPending(); // 流式文本在终止前全部写入
+      // 协议级错误（如「该确认已失效」）不带 sessionId：只提示，不进入会话错误态。
+      // 否则会用 activeSessionId 兜底，把当前会话里仍在运行的任务误标记为失败并停止「正在回复」。
+      if (!msg.sessionId) {
+        const protocolMessage = ((msg.payload ?? {}) as { message?: string }).message ?? '';
+        const localizedProtocolMessage = i18n.exists(`errors.${protocolMessage}`)
+          ? i18n.t(`errors.${protocolMessage}`)
+          : (protocolMessage || i18n.t('errors.UNKNOWN'));
+        if (!opts?.silent) toast.error(localizedProtocolMessage);
+        break;
+      }
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       const event = (msg.payload ?? {}) as { message?: string; providerError?: string; messageId?: string };
       const errorCode = event.message ?? '';

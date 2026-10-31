@@ -352,13 +352,16 @@ export class ImGateway {
     const index = choice === 'cancel' ? 2 : choice[0]!;
     const ok = index === 1 || index === 3;
     this.interactions.shift(key);
-    engine.resolveConfirm(pending.sessionId, pending.toolCallId, ok, index === 3 ? 'session' : undefined);
+    const resolved = engine.resolveConfirm(pending.sessionId, pending.toolCallId, ok, index === 3 ? 'session' : undefined);
     await this.reply(
       bot,
       message.replyTarget,
-      ok ? t('im.interaction.confirmAllowed') : t('im.interaction.confirmDenied'),
+      resolved
+        ? (ok ? t('im.interaction.confirmAllowed') : t('im.interaction.confirmDenied'))
+        : t('im.interaction.confirmExpired'),
     );
-    this.resumeTyping(bot, key, message.replyTarget);
+    // 请求已失效（超时/其他端处理）时不再点亮「正在输入」
+    if (resolved) this.resumeTyping(bot, key, message.replyTarget);
   }
 
   /** ask 逐题回答：答完一题自动发下一题，全部完成回传引擎 */
@@ -390,17 +393,24 @@ export class ImGateway {
       const count = type === 'boolean' ? 2 : (question.options?.length ?? 0);
       const choice = parseChoice(text, count, type === 'multi' ? 'multi' : 'single');
       if (choice === null) {
-        await this.reply(bot, message.replyTarget, t('im.interaction.askInvalid'));
-        return;
-      }
-      if (choice === 'cancel') {
+        if (type === 'boolean') {
+          await this.reply(bot, message.replyTarget, t('im.interaction.askInvalid'));
+          return;
+        }
+        // 选择题：非序号文本 = 用户直接填写「其他」答案
+        const other = text.trim();
+        if (!other) {
+          await this.reply(bot, message.replyTarget, t('im.interaction.askInvalid'));
+          return;
+        }
+        answer = { otherText: other };
+      } else if (choice === 'cancel') {
         this.interactions.shift(key);
         this.engine()?.resolveAsk(pending.sessionId, pending.toolCallId, { action: 'cancel' });
         await this.reply(bot, message.replyTarget, t('im.interaction.askCancelled'));
         this.resumeTyping(bot, key, message.replyTarget);
         return;
-      }
-      if (type === 'boolean') {
+      } else if (type === 'boolean') {
         const yes = choice[0] === 1;
         answer = {
           selectedValues: [yes ? 'yes' : 'no'],
@@ -437,9 +447,10 @@ export class ImGateway {
       await this.reply(bot, message.replyTarget, t('im.interaction.engineUnavailable'));
       return;
     }
-    engine.resolveAsk(pending.sessionId, pending.toolCallId, { action: 'accept', answers: pending.answers });
-    await this.reply(bot, message.replyTarget, t('im.interaction.askAccepted'));
-    this.resumeTyping(bot, key, message.replyTarget);
+    const resolved = engine.resolveAsk(pending.sessionId, pending.toolCallId, { action: 'accept', answers: pending.answers });
+    await this.reply(bot, message.replyTarget, resolved ? t('im.interaction.askAccepted') : t('im.interaction.askExpired'));
+    // 请求已失效（超时/其他端回答）时不再点亮「正在输入」
+    if (resolved) this.resumeTyping(bot, key, message.replyTarget);
   }
 
   /** Agent 事件 → IM 消息（仅处理主会话；子代理事件忽略） */
@@ -613,9 +624,11 @@ export class ImGateway {
         signal: controller.signal,
       });
 
+      this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
       await this.deliverResult(bot, message.replyTarget, result.finishReason, result.finalText);
     } catch (error) {
+      this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
       if (controller.signal.aborted) {
         await this.reply(bot, message.replyTarget, '任务已停止。');
@@ -625,11 +638,11 @@ export class ImGateway {
         await this.reply(bot, message.replyTarget, `执行失败：${reason}`);
       }
     } finally {
-      // 先让所有异步回调的代际失效，再停止正在输入，最后清理运行态
+      // 先立即停止「正在输入」再等待播报队列：任务已失败/中止时 typing 不得残留
+      this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
       this.discardProgress(key);
       this.invalidateRunEpoch(key);
-      this.fireTyping(bot, message.replyTarget, false);
       if (sessionId) this.deps.server?.unregisterExternalRun(sessionId, controller);
       // run 结束后未应答的提问/确认已无意义，清理避免下一条普通消息被误当作回答
       this.interactions.clear(key);

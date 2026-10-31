@@ -1,7 +1,7 @@
 {
   "name": "web",
-  "description": "联网能力工具，一个工具两种模式。mode=search 联网搜索（query 必填）：默认使用本地免费引擎（bing→baidu→sogou 自动回退，无需任何配置），若在设置页配置了搜索服务商（智谱/博查/Tavily）并设为默认则优先使用，失败自动切回本地引擎；返回标题/URL/摘要/来源。mode=fetch 抓取网页正文（url 必填）：直连目标 URL，剥离 HTML 提取可见文本并附页内链接。回答时效性问题（新闻/版本/价格/最新文档）、查证不确定事实、读取搜索结果中的具体网页时使用。",
-  "description_en": "Web access tool with two modes. mode=search performs a web search (query required): defaults to the free local engine chain (bing→baidu→sogou auto-fallback, zero config); if a search provider (zhipu/bocha/Tavily) is configured and set as default in Settings, it is used first with automatic fallback to the local chain on failure; returns title/URL/snippet/source. mode=fetch retrieves a web page's readable text (url required): direct HTTP fetch, strips HTML to visible text with in-page links. Use it for time-sensitive questions, fact verification, and reading pages found via search.",
+  "description": "联网能力工具，一个工具两种模式。mode=search 联网搜索（query 必填；翻页可改用 searchId）：provider 省略或 default 时是元搜索引擎——并行请求 bing、baidu、sogou，合并、清洗、去重、相关性排序，并抓取头部结果正文，返回清爽的编号结果与来源；也可用 provider=bing/baidu/sogou 只查单个引擎。首次返回最多 100 条的缓存结果池，用 pageSize(10-20) 分页、offset 向后读取。mode=fetch 抓取网页正文（url 必填）：浏览器头直连、编码识别、正文可读性提取、SSRF 防护，验证码/反爬页明确报错。回答时效性问题（新闻/版本/价格/最新文档）、查证不确定事实、读取搜索结果中的具体网页时使用。",
+  "description_en": "Web access tool with two modes. mode=search performs a web search (query required; use searchId for pagination): when provider is omitted or set to default it is a meta search engine that queries bing, baidu and sogou in parallel, merges, cleans, deduplicates, ranks by relevance and fetches content for the top results, then returns clean numbered results with sources; provider=bing/baidu/sogou queries a single engine. The first call builds a cached pool of up to 100 results; use pageSize (10-20) and offset to read further pages. mode=fetch retrieves a page's readable text (url required): browser-like HTTP, encoding detection, readability extraction, SSRF protection, and explicit errors for CAPTCHA/anti-bot pages. Use it for time-sensitive questions, fact verification, and reading pages found via search.",
   "icon": "globe",
   "annotations": {
     "readOnlyHint": true
@@ -12,42 +12,54 @@
       "mode": {
         "type": "string",
         "enum": ["search", "fetch"],
-        "description": "search=联网搜索（需 query）；fetch=抓取网页正文（需 url）",
-        "description_en": "search=web search (requires query); fetch=fetch page text (requires url)"
+        "description": "search=联网搜索（需 query 或 searchId）；fetch=抓取网页正文（需 url）",
+        "description_en": "search=web search (requires query or searchId); fetch=fetch page text (requires url)"
       },
       "query": {
         "type": "string",
-        "description": "搜索关键词或自然语言问题（mode=search 必填，建议 ≤70 字；搜索引擎会做意图识别，无需堆砌关键词）",
-        "description_en": "Search keywords or natural-language question (required for mode=search, recommended ≤70 chars; the engine does intent recognition, no keyword stuffing needed)"
+        "description": "搜索词或自然语言问题（首次 search 必填；翻页带 searchId 时可省略）。建议 ≤70 字",
+        "description_en": "Search query or natural-language question (required for the first search; optional when paging with searchId). Recommended ≤70 chars"
       },
       "url": {
         "type": "string",
         "description": "要抓取的网页 URL（mode=fetch 必填，http/https；无协议前缀时默认补 https://）",
         "description_en": "Web page URL to fetch (required for mode=fetch, http/https; https:// is prepended when the scheme is missing)"
       },
-      "engine": {
+      "provider": {
         "type": "string",
-        "enum": ["auto", "local"],
-        "description": "搜索引擎选择（仅 search 模式）：auto=按设置页「默认搜索引擎」配置（本地引擎或搜索服务商，默认）；local=强制使用本地免费引擎（bing→baidu→sogou 回退），忽略默认搜索引擎设置",
-        "description_en": "Engine choice (search mode only): auto=follow the default search engine setting in Settings (local chain or search provider, default); local=force the free local engine chain (bing→baidu→sogou), ignoring the default setting"
+        "enum": ["default", "bing", "baidu", "sogou"],
+        "description": "搜索引擎（仅 search）：default=元搜索（bing+baidu+sogou 并行、清洗去重、抓正文，默认）；bing/baidu/sogou=只查指定引擎（不回退）",
+        "description_en": "Search provider (search only): default=meta search over bing+baidu+sogou with cleaning/dedup/content enrichment (default); bing/baidu/sogou=query only that engine (no fallback)"
       },
-      "maxResults": {
+      "pageSize": {
         "type": "integer",
-        "description": "搜索结果条数上限（默认 8，最大 20）",
-        "description_en": "Max search results (default 8, max 20)",
-        "minimum": 1,
+        "description": "本次返回条数（10-20，默认 10）。结果池最多缓存 100 条",
+        "description_en": "Results returned this call (10-20, default 10). The cached pool holds up to 100",
+        "minimum": 10,
         "maximum": 20
+      },
+      "offset": {
+        "type": "integer",
+        "description": "结果池起始下标（0-99，默认 0）。读完前 1-10 条后用 offset=10 继续读 11-20",
+        "description_en": "Start index in the result pool (0-99, default 0). After reading 1-10, use offset=10 to read 11-20",
+        "minimum": 0,
+        "maximum": 99
+      },
+      "searchId": {
+        "type": "string",
+        "description": "首次搜索返回的结果池 ID；翻页时带上它 + offset/pageSize 可复用缓存，不重复请求搜索引擎",
+        "description_en": "Result-pool ID returned by the first search; pass it with offset/pageSize to page through the cache without re-querying search engines"
       },
       "freshness": {
         "type": "string",
         "enum": ["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"],
-        "description": "时效过滤（仅 search 模式且使用智谱/博查服务商时生效）：oneDay=一天内、oneWeek=一周内、oneMonth=一月内、oneYear=一年内、noLimit=不限（默认）。本地引擎忽略此参数",
-        "description_en": "Recency filter (search mode, effective only with zhipu/bocha providers): oneDay/oneWeek/oneMonth/oneYear/noLimit (default). Ignored by local engines"
+        "description": "时效过滤（三个引擎各自映射）：oneDay=一天内、oneWeek=一周内、oneMonth=一月内、oneYear=一年内、noLimit=不限（默认）",
+        "description_en": "Recency filter mapped per engine: oneDay/oneWeek/oneMonth/oneYear/noLimit (default)"
       },
       "timeoutMs": {
         "type": "integer",
-        "description": "单次请求超时毫秒数（默认 20000，范围 3000-60000）。目标站点慢时可调大",
-        "description_en": "Per-request timeout in ms (default 20000, range 3000-60000). Increase for slow sites"
+        "description": "整次调用总预算毫秒数（默认 30000，范围 3000-120000）。搜索包含多引擎并发 + 按需翻页 + 正文抓取",
+        "description_en": "Total budget for the whole call in ms (default 30000, range 3000-120000). Search includes parallel engines, on-demand paging and content enrichment"
       }
     },
     "required": ["mode"],
@@ -56,21 +68,22 @@
   "config": {
     "defaults": {
       "enabled": true,
-      "timeoutMs": 20000,
-      "maxResults": 8,
-      "maxFetchChars": 20000
+      "timeoutMs": 30000,
+      "pageSize": 10,
+      "maxFetchChars": 20000,
+      "proxyUrl": ""
     },
     "schema": {
       "timeoutMs": {
         "type": "integer",
-        "description": "单次请求默认超时（毫秒，3000-60000）",
+        "description": "单次调用默认总预算（毫秒，3000-120000）",
         "min": 3000,
-        "max": 60000
+        "max": 120000
       },
-      "maxResults": {
+      "pageSize": {
         "type": "integer",
-        "description": "搜索结果默认条数上限（1-20）",
-        "min": 1,
+        "description": "搜索默认每页条数（10-20）",
+        "min": 10,
         "max": 20
       },
       "maxFetchChars": {
@@ -78,6 +91,10 @@
         "description": "fetch 模式正文最大字符数（1000-100000）",
         "min": 1000,
         "max": 100000
+      },
+      "proxyUrl": {
+        "type": "string",
+        "description": "可选 HTTP/HTTPS 代理（如 http://127.0.0.1:7890）；留空则读 HTTPS_PROXY/HTTP_PROXY 环境变量"
       }
     }
   }

@@ -1,114 +1,70 @@
 // tools/web/index.ts
-// web 工具 execute 逻辑：联网能力单工具双模式。
-//   mode=search → providers.runSearch（默认搜索服务商→失败降级本地引擎链 bing→baidu→sogou；
-//                 engine=local 直达本地链；未配置服务商 = 直接本地链）
-//   mode=fetch  → fetcher.runFetch（本地直连 + SSRF 防护 + HTML 转可见文本）
-// 搜索服务商与默认引擎来自「设置页 → 服务商」体系（api.json providers kind='search' +
-// config.json web.searchProviderId），经 CONFIG_SERVICE 服务运行时读取。
-// 输出面向 LLM 阅读优化：header（引擎/条数/耗时/降级标记）+ 编号条目 + 结构化 metadata。
-// 元数据见同目录 tool.json。
+// web 工具：mode=search 走 AI 原生元搜索引擎；mode=fetch 走加固后的正文抓取。
+//
+// search 契约：
+// - provider = default | bing | baidu | sogou（省略 = default 元搜索）
+// - pageSize 10-20，offset 0-99；首次返回 searchId，后续可只传 searchId+offset 翻页
+// - 同一 query/provider/freshness 命中结果池缓存（15 分钟），避免重复打引擎被风控
 
 import { t } from '../../../core/i18n';
-import type { ConfigService } from '../../../core/types';
-import { ServiceNames } from '../../../core/types';
 import type { ToolContext, ToolResult } from '../types';
-import {
-  runSearch,
-  SearchError,
-  type SearchOutcome,
-  type SearchProviderRef,
-} from './providers';
+import type { Freshness, ProviderName, SearchPage } from './search/types';
+import { SearchError } from './search/types';
+import { runSearch } from './search/orchestrator';
 import { runFetch, FetchError } from './fetcher';
 
-/** 工具输入参数（LLM function call） */
 interface WebParams {
   mode?: 'search' | 'fetch';
   query?: string;
   url?: string;
-  engine?: 'auto' | 'local';
-  maxResults?: number;
-  freshness?: 'noLimit' | 'oneDay' | 'oneWeek' | 'oneMonth' | 'oneYear';
+  provider?: string;
+  pageSize?: number;
+  offset?: number;
+  searchId?: string;
+  freshness?: Freshness;
   timeoutMs?: number;
 }
 
-/** config.json tools.web 段（仅行为参数；服务商 key 在 api.json，不在此处） */
 interface WebToolConfig {
   timeoutMs?: number;
-  maxResults?: number;
+  pageSize?: number;
   maxFetchChars?: number;
+  proxyUrl?: string;
 }
 
 const MAX_QUERY_LENGTH = 500;
-const MAX_SNIPPET_CHARS = 400;
-const MAX_TITLE_CHARS = 200;
+const MAX_TITLE_CHARS = 120;
+const MAX_URL_CHARS = 500;
+const MAX_OUTPUT_CHARS = 7_800;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
     const p = (params ?? {}) as WebParams;
-
     if (p.mode !== 'search' && p.mode !== 'fetch') {
       return {
         content: [{ type: 'text', text: `Error: ${t('tools.webModeInvalid')}` }],
         isError: true,
       };
     }
-
     const cfg = (ctx.toolConfig ?? {}) as WebToolConfig;
     return p.mode === 'search'
-      ? await executeSearch(p, cfg, ctx)
-      : await executeFetch(p, cfg, ctx);
+      ? executeSearch(p, cfg, ctx)
+      : executeFetch(p, cfg, ctx);
   },
 };
 
-// ============================================================================
-// 服务商解析（api.json kind='search' + config.json web.searchProviderId）
-// ============================================================================
-
-/** 从服务注册表解析默认搜索服务商；解析失败/未配置返回 undefined（= 本地引擎链） */
-function resolveSearchProvider(ctx: ToolContext): SearchProviderRef | undefined {
-  const config = ctx.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
-  if (!config) return undefined;
-
-  let providerId = '';
-  let providers: Array<{
-    id: string;
-    name: string;
-    kind?: string;
-    searchEngine?: string;
-    apiKey?: string;
-    endpoint?: string;
-  }> = [];
-  try {
-    providerId = config.getAppConfig().web?.searchProviderId ?? '';
-    providers = config.getApiConfig().providers;
-  } catch {
-    return undefined;
-  }
-
-  if (!providerId) return undefined;
-  const found = providers.find(
-    (p) => p.id === providerId && p.kind === 'search' && !!p.searchEngine,
-  );
-  if (!found) return undefined;
-
-  const engine = found.searchEngine;
-  if (engine !== 'zhipu' && engine !== 'bocha' && engine !== 'tavily') return undefined;
-
-  const ref: SearchProviderRef = {
-    id: found.id,
-    name: found.name,
-    searchEngine: engine,
-    apiKey: found.apiKey ?? '',
-  };
-  // 自定义端点（兼容第三方网关；空 = 官方端点）
-  if (found.endpoint && found.endpoint.trim()) {
-    ref.baseURL = found.endpoint.trim();
-  }
-  return ref;
+function normalizeProvider(value: string | undefined): ProviderName | null {
+  if (!value || value.trim() === '') return 'default';
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'default') return 'default';
+  if (normalized === 'bing') return 'bing';
+  if (normalized === 'baidu') return 'baidu';
+  if (normalized === 'sogou' || normalized === 'sougou') return 'sogou';
+  return null;
 }
 
 // ============================================================================
-// search 模式
+// search
 // ============================================================================
 
 async function executeSearch(
@@ -116,132 +72,176 @@ async function executeSearch(
   cfg: WebToolConfig,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  // ---- query 校验 ----
-  if (!p.query || typeof p.query !== 'string' || !p.query.trim()) {
-    return { content: [{ type: 'text', text: `Error: ${t('tools.webQueryRequired')}` }], isError: true };
+  if (!p.searchId?.trim()) {
+    if (!p.query || typeof p.query !== 'string' || !p.query.trim()) {
+      return { content: [{ type: 'text', text: `Error: ${t('tools.webQueryRequired')}` }], isError: true };
+    }
+    if (p.query.length > MAX_QUERY_LENGTH) {
+      return {
+        content: [{ type: 'text', text: `Error: ${t('tools.webQueryTooLong', { max: MAX_QUERY_LENGTH })}` }],
+        isError: true,
+      };
+    }
   }
-  if (p.query.length > MAX_QUERY_LENGTH) {
+
+  const provider = normalizeProvider(p.provider);
+  if (!provider) {
     return {
-      content: [{ type: 'text', text: `Error: ${t('tools.webQueryTooLong', { max: MAX_QUERY_LENGTH })}` }],
+      content: [{ type: 'text', text: `Error: ${t('tools.webProviderInvalid')}` }],
       isError: true,
     };
   }
 
-  // ---- 参数合并（调用参数 > 工具配置 > 默认值）----
-  const maxResults = clampInt(p.maxResults ?? cfg.maxResults ?? 8, 1, 20);
-  const timeoutMs = clampInt(p.timeoutMs ?? cfg.timeoutMs ?? 20_000, 3_000, 60_000);
-
-  // 引擎路由：local=强制本地链；auto=默认搜索服务商（未配置则本地链）
-  const provider = p.engine === 'local' ? undefined : resolveSearchProvider(ctx);
+  const pageSize = clampInt(p.pageSize ?? cfg.pageSize ?? 10, 10, 20);
+  const offset = clampInt(p.offset ?? 0, 0, 99);
+  const timeoutMs = clampInt(p.timeoutMs ?? cfg.timeoutMs ?? 30_000, 3_000, 120_000);
+  const freshness: Freshness = p.freshness ?? 'noLimit';
 
   ctx.emit?.({ type: 'progress', message: t('tools.webSearching') });
 
-  const startedAt = Date.now();
   try {
-    const outcome = await runSearch(
-      {
-        query: p.query.trim(),
-        maxResults,
-        freshness: p.freshness,
-        timeoutMs,
-      },
-      provider ? { provider } : {},
-    );
-    return formatSearchResult(outcome, p.query.trim(), Date.now() - startedAt);
+    const page = await runSearch({
+      sessionId: ctx.sessionId,
+      query: p.query?.trim() ?? '',
+      provider,
+      pageSize,
+      offset,
+      ...(p.searchId?.trim() ? { searchId: p.searchId.trim() } : {}),
+      freshness,
+      timeoutMs,
+      signal: ctx.signal,
+      ...(cfg.proxyUrl?.trim() ? { proxyUrl: cfg.proxyUrl.trim() } : {}),
+    });
+    return formatSearchResult(page);
   } catch (err) {
     return formatSearchError(err);
   }
 }
 
-/** search 成功输出：header（含引擎/降级标记）+ 可选引擎总述 + 编号条目 */
-function formatSearchResult(outcome: SearchOutcome, query: string, elapsedMs: number): ToolResult {
-  const engineLabel =
-    outcome.engineKind === 'local'
-      ? `${outcome.engine}(本地)`
-      : `${outcome.engine}(服务商)`;
-  const degradedSuffix = outcome.degradedFrom
-    ? ` | ${t('tools.webDegradedFrom', { provider: outcome.degradedFrom })}`
-    : '';
-  const header =
-    t('tools.webResultHeader', {
-      engine: engineLabel,
-      count: outcome.items.length,
-      elapsed: elapsedMs,
-    }) + degradedSuffix;
+function formatSearchResult(page: SearchPage): ToolResult {
+  const from = page.items.length > 0 ? page.offset + 1 : 0;
+  const to = page.offset + page.items.length;
+  const range = `${from}-${to}/${page.totalAvailable}`;
+  const engineLabel = page.engines.succeeded.length > 0
+    ? page.engines.succeeded.join('+')
+    : page.engines.attempted.join('+');
+  const header = t('tools.webResultHeader', {
+    provider: page.provider,
+    range,
+    engines: engineLabel,
+    elapsed: page.elapsedMs,
+  });
 
-  // 引擎总述（Tavily answer）：置于条目前，标注为引擎生成
-  const noteLines = outcome.note
-    ? [`${t('tools.webEngineNote')}: ${outcome.note}`, '']
-    : [];
+  const warnings = [...page.warnings];
+  if (page.engines.failed.length > 0) {
+    warnings.push(
+      `${t('tools.webEngineFailed')}: ${page.engines.failed
+        .map((failure) => `[${failure.engine}] ${failure.reason}`)
+        .join('；')}`,
+    );
+  }
+  if (page.partial) warnings.push(t('tools.webSearchPartial'));
 
-  if (outcome.items.length === 0) {
+  if (page.items.length === 0) {
+    const lines = [header, t('tools.webNoResults')];
+    if (warnings.length > 0) {
+      lines.push('', `${t('tools.webWarningLabel')}:`, ...warnings.map((item) => `- ${item}`));
+    }
     return {
-      content: [{ type: 'text', text: `${header}\n${t('tools.webNoResults')}` }],
-      metadata: {
-        mode: 'search',
-        engineKind: outcome.engineKind,
-        engine: outcome.engine,
-        query,
-        count: 0,
-        items: [],
-        ...(outcome.degradedFrom ? { degradedFrom: outcome.degradedFrom } : {}),
-      },
+      content: [{ type: 'text', text: lines.join('\n') }],
+      metadata: searchMetadata(page),
     };
   }
 
-  const itemLines: string[] = [];
-  outcome.items.forEach((item, i) => {
+  const baseText = renderSearchText(page, header, warnings, false);
+  const fullText = renderSearchText(page, header, warnings, true);
+  let text = fullText.length <= MAX_OUTPUT_CHARS ? fullText : baseText;
+  if (text.length > MAX_OUTPUT_CHARS) {
+    text = `${text.slice(0, MAX_OUTPUT_CHARS)}\n${t('tools.webSearchTruncated')}`;
+  }
+
+  return { content: [{ type: 'text', text }], metadata: searchMetadata(page) };
+}
+
+function renderSearchText(
+  page: SearchPage,
+  header: string,
+  warnings: string[],
+  includeContent: boolean,
+): string {
+  const snippetCap = page.pageSize <= 10 ? 260 : 180;
+  const excerptCap = page.pageSize <= 10 ? 320 : 240;
+  const blocks = page.items.map((item, index) => {
+    const number = page.offset + index + 1;
     const lines: string[] = [];
-    lines.push(`[${i + 1}] ${truncate(item.title || item.url, MAX_TITLE_CHARS)}`);
-    if (item.url) lines.push(`    URL: ${item.url}`);
-    if (item.snippet) lines.push(`    ${t('tools.webSnippetLabel')}: ${truncate(item.snippet, MAX_SNIPPET_CHARS)}`);
+    lines.push(`[${number}] ${truncate(item.title || item.url, MAX_TITLE_CHARS)}`);
+    if (item.url) lines.push(`    URL: ${truncate(item.url, MAX_URL_CHARS)}`);
     const metaParts: string[] = [];
-    if (item.source) metaParts.push(item.source);
+    if (item.source) metaParts.push(`${t('tools.webSourceLabel')}: ${item.source}`);
     if (item.publishedAt) metaParts.push(item.publishedAt);
+    if (item.engines.length > 0) metaParts.push(`${t('tools.webHitLabel')}: ${item.engines.join('+')}`);
     if (metaParts.length > 0) lines.push(`    ${metaParts.join(' | ')}`);
-    itemLines.push(lines.join('\n'));
+    if (item.snippet) lines.push(`    ${t('tools.webSnippetLabel')}: ${truncate(item.snippet, snippetCap)}`);
+    if (includeContent && item.contentExcerpt) {
+      lines.push(`    ${t('tools.webContentLabel')}: ${truncate(item.contentExcerpt, excerptCap)}`);
+    }
+    return lines.join('\n');
   });
 
-  // 降级说明（服务商用尽后本地链仍成功）：附失败链摘要供 LLM 理解
-  const fallbackNote =
-    outcome.fallbackFrom && outcome.fallbackFrom.length > 0
-      ? `\n${t('tools.webFallbackNote')}: ${outcome.fallbackFrom
-          .map((f) => `[${f.engine}] ${f.reason}`)
-          .join('；')}`
-      : '';
+  const sections: string[] = [header, '', blocks.join('\n\n')];
+  if (page.hasMore && page.nextOffset !== undefined) {
+    sections.push(
+      '',
+      t('tools.webSearchNextHint', {
+        searchId: page.searchId,
+        offset: page.nextOffset,
+        pageSize: page.pageSize,
+      }),
+    );
+  } else {
+    sections.push('', t('tools.webSearchNoMore'));
+  }
+  if (warnings.length > 0) {
+    sections.push('', `${t('tools.webWarningLabel')}:`, ...warnings.map((item) => `- ${item}`));
+  }
+  return sections.join('\n');
+}
 
+function searchMetadata(page: SearchPage): Record<string, unknown> {
   return {
-    content: [
-      {
-        type: 'text',
-        text: [header, ...noteLines, '', itemLines.join('\n\n'), fallbackNote].join('\n'),
-      },
-    ],
-    metadata: {
-      mode: 'search',
-      engineKind: outcome.engineKind,
-      engine: outcome.engine,
-      query,
-      count: outcome.items.length,
-      items: outcome.items,
-      ...(outcome.degradedFrom ? { degradedFrom: outcome.degradedFrom } : {}),
-      ...(outcome.fallbackFrom ? { fallbackFrom: outcome.fallbackFrom } : {}),
-    },
+    mode: 'search',
+    searchId: page.searchId,
+    provider: page.provider,
+    query: page.query,
+    offset: page.offset,
+    pageSize: page.pageSize,
+    returned: page.items.length,
+    totalAvailable: page.totalAvailable,
+    hasMore: page.hasMore,
+    ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
+    engines: page.engines,
+    stats: page.stats,
+    partial: page.partial,
+    cacheHit: page.cacheHit,
+    warnings: page.warnings,
+    elapsedMs: page.elapsedMs,
+    items: page.items,
   };
 }
 
-/** SearchError → 用户可读错误（含逐引擎失败明细） */
 function formatSearchError(err: unknown): ToolResult {
   if (err instanceof SearchError) {
     if (err.code === 'all-failed') {
-      const lines = err.failures.map((f) => `[${f.engine}] ${f.reason}`).join('\n');
+      const lines = err.failures
+        .map((failure) => `[${failure.engine}] ${failure.reason}${failure.cooldownMs ? `（冷却 ${Math.ceil(failure.cooldownMs / 1000)}s）` : ''}`)
+        .join('\n');
       return {
         content: [{ type: 'text', text: `Error: ${t('tools.webAllEnginesFailed')}\n${lines}` }],
         isError: true,
       };
     }
     return {
-      content: [{ type: 'text', text: `Error: ${t('tools.webEngineFailed')}: ${err.message}` }],
+      content: [{ type: 'text', text: `Error: ${err.message}` }],
       isError: true,
     };
   }
@@ -252,7 +252,7 @@ function formatSearchError(err: unknown): ToolResult {
 }
 
 // ============================================================================
-// fetch 模式
+// fetch
 // ============================================================================
 
 async function executeFetch(
@@ -260,7 +260,6 @@ async function executeFetch(
   cfg: WebToolConfig,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  // ---- url 校验 ----
   if (!p.url || typeof p.url !== 'string' || !p.url.trim()) {
     return { content: [{ type: 'text', text: `Error: ${t('tools.webUrlRequired')}` }], isError: true };
   }
@@ -276,6 +275,7 @@ async function executeFetch(
       timeoutMs,
       maxChars,
       signal: ctx.signal,
+      ...(cfg.proxyUrl?.trim() ? { proxyUrl: cfg.proxyUrl.trim() } : {}),
     });
     return formatFetchResult(result);
   } catch (err) {
@@ -283,7 +283,6 @@ async function executeFetch(
   }
 }
 
-/** fetch 成功输出：header + 标题 + 正文 + 页内链接 + 警告 */
 function formatFetchResult(result: Awaited<ReturnType<typeof runFetch>>): ToolResult {
   const header = t('tools.webFetchHeader', {
     url: result.finalUrl,
@@ -293,21 +292,15 @@ function formatFetchResult(result: Awaited<ReturnType<typeof runFetch>>): ToolRe
   });
 
   const sections: string[] = [header];
-  if (result.title) {
-    sections.push(`${t('tools.webTitleLabel')}: ${result.title}`);
-  }
+  if (result.title) sections.push(`${t('tools.webTitleLabel')}: ${result.title}`);
   sections.push('', result.text);
-  if (result.meta.truncated) {
-    sections.push('', t('tools.webTruncated'));
-  }
+  if (result.meta.truncated) sections.push('', t('tools.webTruncated'));
   if (result.links.length > 0) {
-    const linkLines = result.links.map(
-      (link, i) => `${i + 1}. ${link.text} → ${link.url}`,
-    );
+    const linkLines = result.links.map((link, index) => `${index + 1}. ${link.text} → ${link.url}`);
     sections.push('', t('tools.webLinksLabel'), linkLines.join('\n'));
   }
   if (result.warnings.length > 0) {
-    sections.push('', result.warnings.map((w) => `${t('tools.webWarningLabel')}: ${w}`).join('\n'));
+    sections.push('', result.warnings.map((warning) => `${t('tools.webWarningLabel')}: ${warning}`).join('\n'));
   }
 
   return {
@@ -322,13 +315,13 @@ function formatFetchResult(result: Awaited<ReturnType<typeof runFetch>>): ToolRe
       truncated: result.meta.truncated,
       redirectChain: result.meta.redirectChain,
       title: result.title,
+      quality: result.meta.quality,
       elapsedMs: result.meta.elapsedMs,
       links: result.links,
     },
   };
 }
 
-/** FetchError → 用户可读错误（按 code 映射 i18n） */
 function formatFetchError(err: unknown, timeoutMs: number): ToolResult {
   if (err instanceof FetchError) {
     const reason = [err.message, err.causeMessage].filter(Boolean).join(': ');
@@ -345,6 +338,8 @@ function formatFetchError(err: unknown, timeoutMs: number): ToolResult {
         return { content: [{ type: 'text', text: `Error: ${t('tools.webUnsupportedType', { reason: err.message })}` }], isError: true };
       case 'too-many-redirects':
         return { content: [{ type: 'text', text: `Error: ${t('tools.webTooManyRedirects')}` }], isError: true };
+      case 'blocked':
+        return { content: [{ type: 'text', text: `Error: ${t('tools.webBlockedPage')}` }], isError: true };
       default:
         return { content: [{ type: 'text', text: `Error: ${t('tools.webFetchFailed', { reason })}` }], isError: true };
     }
@@ -356,7 +351,7 @@ function formatFetchError(err: unknown, timeoutMs: number): ToolResult {
 }
 
 // ============================================================================
-// 辅助
+// helpers
 // ============================================================================
 
 function clampInt(value: number, min: number, max: number): number {

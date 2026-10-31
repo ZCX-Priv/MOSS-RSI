@@ -5,6 +5,7 @@ import { useEffect, useCallback } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
+import { applyPluginOrder, loadPluginOrder, MCP_ORDER_KEY } from '../lib/plugin-order';
 
 export function useMcp() {
   const setMcpServers = useStore((s) => s.setMcpServers);
@@ -12,8 +13,13 @@ export function useMcp() {
 
   const load = useCallback(async () => {
     try {
-      const [{ servers }, { tools }] = await Promise.all([api.listMcpServers(), api.listMcpTools()]);
-      setMcpServers(servers);
+      const [{ servers }, { tools }, order] = await Promise.all([
+        api.listMcpServers(),
+        api.listMcpTools(),
+        loadPluginOrder(MCP_ORDER_KEY),
+      ]);
+      // 应用浏览器本地保存的自定义顺序（IndexedDB）
+      setMcpServers(applyPluginOrder(servers, order));
       setMcpTools(tools);
     } catch (err) {
       console.warn('useMcp load failed:', err);

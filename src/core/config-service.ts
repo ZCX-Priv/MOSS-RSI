@@ -68,11 +68,9 @@ const providerConfigSchema = z
   .object({
     id: z.string().min(1),
     name: z.string(),
-    /** 服务商类型：model（默认/缺省）= 模型服务商；search = 搜索服务商；voice = 语音服务商 */
-    kind: z.enum(['model', 'search', 'voice']).optional(),
-    format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'search', 'voice']),
-    /** 搜索引擎类型（kind='search' 时必填）：zhipu / bocha / tavily */
-    searchEngine: z.enum(['zhipu', 'bocha', 'tavily']).optional(),
+    /** 服务商类型：model（默认/缺省）= 模型服务商；voice = 语音服务商 */
+    kind: z.enum(['model', 'voice']).optional(),
+    format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'voice']),
     /** 语音引擎类型（kind='voice' 时必填）：openai-transcriptions（OpenAI 兼容整段转写） */
     voiceEngine: z.enum(['openai-transcriptions']).optional(),
     /** 语音模型名（kind='voice' 时使用，如 'whisper-1'） */
@@ -86,27 +84,7 @@ const providerConfigSchema = z
     models: z.array(providerModelConfigSchema).default([]),
   })
   .superRefine((p, ctx) => {
-    // kind='search'：必须带 searchEngine、format 固定 'search'、无模型
-    if (p.kind === 'search') {
-      if (!p.searchEngine) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "search provider requires 'searchEngine' (zhipu/bocha/tavily)",
-        });
-      }
-      if (p.format !== 'search') {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "search provider format must be 'search'",
-        });
-      }
-      if (p.models.length > 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'search provider must not carry models',
-        });
-      }
-    } else if (p.kind === 'voice') {
+    if (p.kind === 'voice') {
       // kind='voice'：必须带 voiceEngine、format 固定 'voice'、无模型
       if (!p.voiceEngine) {
         ctx.addIssue({
@@ -126,26 +104,12 @@ const providerConfigSchema = z
           message: 'voice provider must not carry models',
         });
       }
-      if (p.searchEngine !== undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "searchEngine is only allowed on kind='search' providers",
-        });
-      }
-    } else {
-      // 模型服务商（kind='model' 或缺省）：不得携带 searchEngine / voiceEngine
-      if (p.searchEngine !== undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "searchEngine is only allowed on kind='search' providers",
-        });
-      }
-      if (p.voiceEngine !== undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "voiceEngine is only allowed on kind='voice' providers",
-        });
-      }
+    } else if (p.voiceEngine !== undefined) {
+      // 模型服务商（kind='model' 或缺省）不得携带 voiceEngine
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "voiceEngine is only allowed on kind='voice' providers",
+      });
     }
   });
 
@@ -428,12 +392,6 @@ const appConfigSchema = z.object({
   safety: safetySchema.optional(),
   // context 可选，内层全 .default() 自愈补全（向后兼容旧配置）
   context: contextSchema.optional(),
-  // web 可选（联网搜索默认引擎；内层 .default() 自愈补全，旧配置缺段自动补 {searchProviderId: ''}）
-  web: z
-    .object({
-      searchProviderId: z.string().default(''),
-    })
-    .default({}),
   // voice 可选（语音输入总开关/服务商/本地模型；内层全 .default() 自愈补全，默认关闭）
   voice: z
     .object({
@@ -445,9 +403,19 @@ const appConfigSchema = z.object({
     .default({}),
 });
 
+/** 旧版搜索服务商（已彻底移除）：加载时过滤，避免整份 api.json 校验失败 */
+function isLegacySearchProvider(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as { kind?: unknown; format?: unknown };
+  return record.kind === 'search' || record.format === 'search';
+}
+
 const apiConfigSchema = z.object({
   version: z.number().int().positive(),
-  providers: z.array(providerConfigSchema),
+  providers: z.preprocess(
+    (value) => (Array.isArray(value) ? value.filter((item) => !isLegacySearchProvider(item)) : value),
+    z.array(providerConfigSchema),
+  ),
 });
 
 // ============================================================================
@@ -510,7 +478,6 @@ export function defaultAppConfig(): AppConfig {
       rules: { allow: [], deny: [], ask: [] },
       protectedPaths: ['~/.ssh', '~/.gnupg', '~/.aws'],
     },
-    web: { searchProviderId: '' },
     voice: { enabled: false, providerId: '', localModel: '', language: 'auto' },
   };
 }

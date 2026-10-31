@@ -17,7 +17,7 @@ import { descriptor as wechatDescriptor } from './adapters/wechat-ilink';
 import { ImController } from './controller';
 import { ImGateway } from './gateway';
 import { deriveBotId } from './identity';
-import { parseChoice, renderTodoList, todoSignature } from './interaction';
+import { parseChoice, renderAskQuestion, renderConfirm, renderTodoList, todoSignature } from './interaction';
 import { prepareOutbound, splitText, toPlainText } from './render';
 import { ImStateStore } from './state';
 import { ImBotStore } from './store';
@@ -170,11 +170,15 @@ class FakeAgent {
     this.release = null;
   }
 
+  /** 模拟「请求已失效」：resolveAsk / resolveConfirm 返回 false */
+  askResult = true;
+  confirmResult = true;
+
   resolveAsk(sessionId: string, toolCallId: string, outcome: AskOutcome): boolean {
     this.resolvedAsks.push({ sessionId, toolCallId, outcome });
     this.askRelease?.();
     this.askRelease = null;
-    return true;
+    return this.askResult;
   }
 
   resolveConfirm(
@@ -186,7 +190,7 @@ class FakeAgent {
     this.resolvedConfirms.push({ sessionId, toolCallId, ok, ...(remember ? { remember } : {}) });
     this.confirmRelease?.();
     this.confirmRelease = null;
-    return true;
+    return this.confirmResult;
   }
 }
 
@@ -538,13 +542,41 @@ describe('retired channel cleanup', () => {
 });
 
 describe('interaction', () => {
-  test('parseChoice 单选/多选/取消/越界', () => {
+  test('parseChoice 支持 [n] 与严格解析', () => {
     expect(parseChoice('2', 3, 'single')).toEqual([2]);
+    expect(parseChoice('[2]', 3, 'single')).toEqual([2]);
+    expect(parseChoice(' 2 ', 3, 'single')).toEqual([2]);
     expect(parseChoice('1,3', 3, 'multi')).toEqual([1, 3]);
+    expect(parseChoice('[1],[3]', 3, 'multi')).toEqual([1, 3]);
     expect(parseChoice('0', 3, 'single')).toBe('cancel');
     expect(parseChoice('取消', 3, 'single')).toBe('cancel');
     expect(parseChoice('9', 3, 'single')).toBeNull();
     expect(parseChoice('abc', 3, 'single')).toBeNull();
+    expect(parseChoice('abc4', 3, 'single')).toBeNull();
+  });
+
+  test('选项菜单使用 [n]，选择题附带「其他」提示', () => {
+    const text = renderAskQuestion(
+      {
+        id: 'q0',
+        question: '选择数据库',
+        answerType: 'single',
+        options: [
+          { value: 'mysql', label: 'MySQL' },
+          { value: 'pg', label: 'PostgreSQL' },
+        ],
+      },
+      0,
+      1,
+    );
+    expect(text).toContain('[1] MySQL');
+    expect(text).toContain('[2] PostgreSQL');
+    expect(text).toContain('其他：直接输入你的答案发送');
+
+    const confirmText = renderConfirm('write', '写入文件？');
+    expect(confirmText).toContain('[1]');
+    expect(confirmText).toContain('[2]');
+    expect(confirmText).toContain('[3]');
   });
 
   test('renderTodoList / todoSignature', () => {
@@ -879,6 +911,76 @@ describe('gateway interaction', () => {
     await Bun.sleep(60);
     expect(replies.some(text => text.includes('已读取'))).toBe(false);
     expect(replies.some(text => text.includes('任务完成'))).toBe(true);
+  });
+
+  test('提问选择题：直接输入文字作为「其他」答案', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    agent.askHold = true;
+    agent.injectAsk = [
+      {
+        id: 'q0',
+        question: '选择数据库',
+        answerType: 'single',
+        options: [
+          { value: 'mysql', label: 'MySQL' },
+          { value: 'pg', label: 'PostgreSQL' },
+        ],
+      },
+    ];
+    const replies: string[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined);
+
+    gateway.handle(bot, inbound({ text: '开始' }));
+    await Bun.sleep(40);
+    const askCard = replies.find(text => text.includes('选择数据库')) ?? '';
+    expect(askCard).toContain('[1] MySQL');
+    expect(askCard).toContain('其他：直接输入你的答案发送');
+
+    gateway.handle(bot, inbound({ text: '用 Redis' }));
+    await Bun.sleep(60);
+    expect(agent.resolvedAsks[0]?.outcome.answers?.[0]?.otherText).toBe('用 Redis');
+    expect(replies.some(text => text.includes('已回答全部问题'))).toBe(true);
+  });
+
+  test('确认已失效时提示失效，且不重新点亮正在输入', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    agent.confirmHold = true;
+    agent.confirmResult = false;
+    agent.injectConfirm = { toolName: 'write', question: '写入文件？' };
+    const replies: string[] = [];
+    const typing: boolean[] = [];
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined, typing);
+
+    gateway.handle(bot, inbound({ text: '开始' }));
+    await Bun.sleep(40);
+    expect(replies.some(text => text.includes('[1]'))).toBe(true);
+
+    gateway.handle(bot, inbound({ text: '[1]' }));
+    await Bun.sleep(60);
+    expect(agent.resolvedConfirms.length).toBe(1);
+    expect(replies.some(text => text.includes('该确认已失效'))).toBe(true);
+    expect(typing.at(-1)).toBe(false);
+  });
+
+  test('任务抛错后立即停止正在输入', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const replies: string[] = [];
+    const typing: boolean[] = [];
+    agent.onRun = () => {
+      throw new Error('boom');
+    };
+    const gateway = buildGateway(agent, state, tempDir(), replies, () => bot, async () => undefined, typing);
+
+    gateway.handle(bot, inbound({ text: '开始' }));
+    await Bun.sleep(60);
+    expect(replies.some(text => text.includes('执行失败：boom'))).toBe(true);
+    expect(typing.at(-1)).toBe(false);
   });
 });
 

@@ -3,6 +3,7 @@
 // 数据源由调用方动态注入（commands/skills/agents/文件搜索 API），本模块不含静态数据。
 
 import type { ComponentType } from 'react';
+import { idbGetSync, idbSet } from '../../utils/idb';
 
 export type MentionKind = 'command' | 'agent' | 'file';
 
@@ -329,8 +330,9 @@ export function renderPromptTemplate(prompt: string, args: string): string {
 }
 
 // ============================================================================
-// 最近使用命令（localStorage 持久化，最多 5 条去重；选中时移到最前）
+// 最近使用命令（IndexedDB 持久化，最多 5 条去重；选中时移到最前）
 // 存储结构：["cmd:<name>" | "skill:<name>"]；旧版纯 name 数据视为 skill:name 兼容。
+// 同步读取依赖 main.tsx 启动时把该 key 预填充到 idb 内存缓存（含旧 localStorage 迁移）。
 // ============================================================================
 
 const RECENT_COMMANDS_KEY = 'moss.recent-commands';
@@ -345,9 +347,7 @@ function parseRecentEntry(entry: string): { source: MentionCommandSource; name: 
 
 export function readRecentCommands(): Array<{ source: MentionCommandSource; name: string }> {
   try {
-    const raw = localStorage.getItem(RECENT_COMMANDS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
+    const parsed = idbGetSync<unknown>(RECENT_COMMANDS_KEY);
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((n): n is string => typeof n === 'string' && n.length > 0)
@@ -365,8 +365,8 @@ export function touchRecentCommand(source: MentionCommandSource, name: string): 
       (e) => (e.source === 'command' ? `cmd:${e.name}` : `skill:${e.name}`),
     );
     const next = [key, ...prev.filter((k) => k !== key)].slice(0, RECENT_COMMANDS_MAX);
-    localStorage.setItem(RECENT_COMMANDS_KEY, JSON.stringify(next));
+    void idbSet(RECENT_COMMANDS_KEY, next);
   } catch {
-    // localStorage 不可用（隐私模式等）：静默放弃持久化
+    // 持久化失败（隐私模式等）：静默放弃
   }
 }

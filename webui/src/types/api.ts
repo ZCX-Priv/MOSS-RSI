@@ -1174,11 +1174,9 @@ export interface ProviderItem {
   id: string;
   /** 显示名，如 "OpenAI" */
   name: string;
-  /** 服务商类型：model（缺省）= 模型服务商；search = 搜索服务商；voice = 语音服务商 */
-  kind?: 'model' | 'search' | 'voice';
-  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'search' | 'voice';
-  /** 搜索引擎类型（kind='search' 时存在）：zhipu / bocha / tavily */
-  searchEngine?: 'zhipu' | 'bocha' | 'tavily';
+  /** 服务商类型：model（缺省）= 模型服务商；voice = 语音服务商 */
+  kind?: 'model' | 'voice';
+  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'voice';
   /** 语音引擎类型（kind='voice' 时存在）：openai-transcriptions（OpenAI 兼容整段转写） */
   voiceEngine?: 'openai-transcriptions';
   /** 语音模型名（kind='voice' 时使用，如 whisper-1） */
@@ -1365,6 +1363,8 @@ export interface SkillItem {
   files?: string[];
   /** 目录式 skill 根目录 */
   dir?: string;
+  /** 内置技能（随包分发）：不可删除 */
+  builtin?: boolean;
 }
 
 /** SkillHub 技能市场列表项（GET /api/skills/market） */
