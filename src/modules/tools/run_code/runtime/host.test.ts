@@ -180,4 +180,58 @@ describe('run_code runtime host', () => {
     expect(result.error).toBeUndefined();
     expect(result.value).toEqual({ a: { items: [1, 2] }, b: { ok: true } });
   });
+
+  test('两次大调用都保留完整富数据（不再有整次总量配额）', async () => {
+    const bigTool = async (): Promise<ToolResult> => ({
+      content: [{ type: 'text', text: 'x'.repeat(256 * 1024) }],
+      metadata: { value: { items: Array.from({ length: 1000 }, (_unused, index) => `item-${index}`) } },
+    });
+    const result = await runCodeProgram({
+      program: 'await tools.big();\nawait tools.big();\nreturn { ok: true };',
+      bindings: ['big'],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: bigTool,
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.calls.length).toBe(2);
+    for (const call of result.calls) {
+      expect(call.resultText?.length).toBe(256 * 1024);
+      const value = call.resultMetadata?.value as { items?: unknown[] } | undefined;
+      expect(value?.items?.length).toBe(1000);
+    }
+  });
+
+  test('大入参完整保留（不再按 16KB 截断）', async () => {
+    const echo = async (name: string, args: unknown): Promise<ToolResult> => ({
+      content: [{ type: 'text', text: JSON.stringify({ name, size: (args as { payload?: string }).payload?.length ?? 0 }) }],
+    });
+    const result = await runCodeProgram({
+      program: "const r = await tools.echo({ payload: 'y'.repeat(64 * 1024) });\nreturn r;",
+      bindings: ['echo'],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echo,
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.calls[0]?.argumentsJson?.length ?? 0).toBeGreaterThan(64 * 1024);
+  });
+
+  test('大日志不再受总量预算截断', async () => {
+    const result = await runCodeProgram({
+      program: "console.log('z'.repeat(2 * 1024 * 1024));\nreturn 'ok';",
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.logs[0]?.length).toBe(2 * 1024 * 1024);
+  });
 });

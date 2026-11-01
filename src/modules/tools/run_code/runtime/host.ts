@@ -82,15 +82,10 @@ interface ChildProcessLike {
   kill(signal?: number | NodeJS.Signals): void;
 }
 
-/** 单条日志的格式化保护（不是总输出预算；PTC 输出不设预算） */
-const MAX_LOG_ENTRY_BYTES = 1024 * 1024;
+/** 单条日志的格式化保护（协议帧硬上限，不是内容预算） */
+const MAX_LOG_ENTRY_BYTES = MAX_FRAME_BYTES;
+/** 嵌套调用记录条数上限（只限制条数，不截内容） */
 const MAX_CALL_RECORDS = 100;
-/** 嵌套调用富数据（供前端渲染普通工具卡） */
-const MAX_CALL_ARG_BYTES = 16 * 1024;
-const MAX_CALL_RESULT_TEXT_BYTES = 32 * 1024;
-const MAX_CALL_METADATA_BYTES = 64 * 1024;
-/** 单次 run_code 所有嵌套调用富数据总量：超限后退回 preview 简版，避免 transcript 膨胀 */
-const MAX_CALL_DETAIL_TOTAL_BYTES = 192 * 1024;
 const STDERR_CAP_BYTES = 8_192;
 const EXIT_GRACE_MS = 150;
 const EXIT_HARD_WAIT_MS = 800;
@@ -133,7 +128,6 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   const logs: string[] = [];
   const calls: CodeRunCallRecord[] = [];
   let callsTruncated = false;
-  let callDetailBytes = 0;
   let stderr = '';
   let finished = false;
   let runSent = false;
@@ -227,27 +221,19 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     /**
      * 嵌套调用的富数据（前端复用普通工具卡渲染）。
-     * 单条按字段上限裁剪，整次 run_code 再受总预算约束；超预算的调用退回 preview 简版。
+     * 预览完全放开：入参、结果正文、metadata 都不按字节截断。
      */
     const collectCallDetails = (
       args: unknown,
       result?: ToolResult,
       fallbackText?: string,
     ): Pick<CodeRunCallRecord, 'argumentsJson' | 'resultText' | 'resultMetadata'> => {
-      const argumentsJson = safeJsonText(args, MAX_CALL_ARG_BYTES);
+      const argumentsJson = jsonText(args);
       const rawText = result ? toolResultText(result) : (fallbackText ?? '');
-      const resultText = rawText ? truncateToBytes(rawText, MAX_CALL_RESULT_TEXT_BYTES) : undefined;
-      const resultMetadata = capCallMetadata(result?.metadata);
-      const bytes =
-        (argumentsJson ? byteLength(argumentsJson) : 0) +
-        (resultText ? byteLength(resultText) : 0) +
-        (resultMetadata ? byteLength(JSON.stringify(resultMetadata)) : 0);
-      if (callDetailBytes + bytes > MAX_CALL_DETAIL_TOTAL_BYTES) return {};
-      callDetailBytes += bytes;
       return {
         ...(argumentsJson ? { argumentsJson } : {}),
-        ...(resultText ? { resultText } : {}),
-        ...(resultMetadata ? { resultMetadata } : {}),
+        ...(rawText ? { resultText: rawText } : {}),
+        ...(result?.metadata ? { resultMetadata: result.metadata } : {}),
       };
     };
 
@@ -676,24 +662,11 @@ function normalizeValueWarnings(value: unknown): SanitizeWarning[] {
   return out;
 }
 
-/** 完整 JSON 文本（带字节上限）；不可序列化时返回 undefined */
-function safeJsonText(value: unknown, maxBytes: number): string | undefined {
+/** 完整 JSON 文本（预览完全放开，不再按字节截断）；不可序列化时返回 undefined */
+function jsonText(value: unknown): string | undefined {
   try {
     const json: string | undefined = JSON.stringify(value);
-    if (json === undefined) return undefined;
-    return truncateToBytes(json, maxBytes);
-  } catch {
-    return undefined;
-  }
-}
-
-/** 结果 metadata 体积保护：超过单条上限直接丢弃（前端退回文本预览） */
-function capCallMetadata(metadata: ToolResult['metadata']): ToolResult['metadata'] | undefined {
-  if (!metadata) return undefined;
-  try {
-    const json: string | undefined = JSON.stringify(metadata);
-    if (json === undefined || byteLength(json) > MAX_CALL_METADATA_BYTES) return undefined;
-    return metadata;
+    return json === undefined ? undefined : json;
   } catch {
     return undefined;
   }

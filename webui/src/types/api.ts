@@ -33,9 +33,9 @@ export interface CodeRunCall {
   durationMs: number;
   ok: boolean;
   error?: string;
-  /** 完整入参 JSON（后端 ≤16KB）；缺失时回退 argsPreview */
+  /** 完整入参 JSON；缺失时回退 argsPreview */
   argumentsJson?: string;
-  /** 结果正文（后端 ≤32KB）；缺失时回退 resultPreview / error */
+  /** 完整结果正文；缺失时回退 resultPreview / error */
   resultText?: string;
   /** 结果 metadata（diff / terminal / 搜索条目等富预览依据） */
   resultMetadata?: ToolResultMetadata;
@@ -52,7 +52,7 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];
-  /** 返回值预览（裁剪后的文本，供结果区展示） */
+  /** 完整返回值文本（供结果区展示，不按长度裁剪） */
   valuePreview?: string;
   durationMs: number;
   truncated?: boolean;

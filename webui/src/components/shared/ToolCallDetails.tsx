@@ -331,7 +331,7 @@ function SearchResultsView({ preview }: { preview: SearchResultsPreviewData }) {
                   {item.title || item.url}
                 </span>
                 {summary && (
-                  <span className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground/70">
+                  <span className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-muted-foreground/70">
                     {summary}
                   </span>
                 )}

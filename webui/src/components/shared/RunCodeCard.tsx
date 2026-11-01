@@ -185,7 +185,7 @@ function RunCodeResultPreview({
             {t('task.runCode.diagnostics', { count: diagnostics.length })}
           </div>
           <ul className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">
-            {diagnostics.slice(0, 20).map((d, index) => (
+            {diagnostics.map((d, index) => (
               <li key={index} className="break-words">
                 <span className="font-mono">{d.code}</span> @ {d.path}
                 {d.detail ? ` — ${d.detail}` : ''}

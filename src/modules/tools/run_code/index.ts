@@ -16,7 +16,7 @@ import type { MCPManager, ToolRegistry } from '../../contracts';
 import type { ToolContext, ToolResult } from '../types';
 import { isPtcForbiddenTool } from './forbidden';
 import { runCodeProgram, type CodeRunCallRecord } from './runtime/host';
-import { truncateToBytes, type CodeFailureKind, type CodeValue } from './runtime/protocol';
+import type { CodeFailureKind, CodeValue } from './runtime/protocol';
 import { validateUISpec } from './ui/validate';
 import type { UIDiagnostic, UISpec } from './ui/spec';
 
@@ -36,13 +36,11 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: UISpec;
   uiDiagnostics?: UIDiagnostic[];
-  /** 返回值预览（裁剪后的文本，供结果区展示；完整值仍在工具结果正文里） */
+  /** 完整返回值文本（供结果区展示，不再按长度裁剪） */
   valuePreview?: string;
   durationMs: number;
   truncated?: boolean;
 }
-
-const MAX_METADATA_BYTES = 384 * 1024;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -161,12 +159,12 @@ export default {
       description,
     });
 
-    // ---- metadata ----
+    // ---- metadata（预览完全放开，不做任何长度裁剪） ----
     const valuePreview =
       !hostFailed && hostResult.value !== undefined
-        ? truncateToBytes(formatValue(hostResult.value), 2000)
+        ? formatValue(hostResult.value)
         : undefined;
-    const metadata = capMetadata({
+    const metadata: CodeRunMetadata = {
       version: 1,
       kind,
       description,
@@ -178,7 +176,7 @@ export default {
       ...(valuePreview ? { valuePreview } : {}),
       durationMs: hostResult.durationMs,
       ...(hostResult.truncated ? { truncated: true } : {}),
-    });
+    };
 
     return {
       content: [{ type: 'text', text }],
@@ -300,62 +298,4 @@ function formatValue(value: CodeValue): string {
   }
 }
 
-/** metadata 里最多保留的日志字节数（仅 UI 展示；正文里的日志不受此限制） */
-const MAX_METADATA_LOG_BYTES = 128 * 1024;
 
-/** 按字节预算裁日志（避免对超大日志反复 JSON.stringify） */
-function trimLogsForMetadata(logs: string[]): string[] {
-  const out: string[] = [];
-  let used = 0;
-  for (const line of logs) {
-    const bytes = Buffer.byteLength(line, 'utf8') + 1;
-    if (used + bytes <= MAX_METADATA_LOG_BYTES) {
-      out.push(line);
-      used += bytes;
-      continue;
-    }
-    const remain = MAX_METADATA_LOG_BYTES - used;
-    if (remain > 0) {
-      out.push(`${truncateToBytes(line, remain)}\n…（metadata 日志已裁剪）`);
-    }
-    break;
-  }
-  return out;
-}
-
-/** metadata 体积保护：先裁日志，再裁 calls 预览；uiSpec 保留（自身已 ≤256KB）。 */
-function capMetadata(meta: CodeRunMetadata): CodeRunMetadata {
-  const bytes = () => Buffer.byteLength(JSON.stringify(meta), 'utf8');
-  if (bytes() <= MAX_METADATA_BYTES) return meta;
-
-  const logs = trimLogsForMetadata(meta.logs);
-  meta = { ...meta, logs, truncated: true };
-
-  if (byteLengthOfObject(meta) > MAX_METADATA_BYTES) {
-    meta = {
-      ...meta,
-      calls: meta.calls.slice(0, 20).map((c) => ({
-        id: c.id,
-        name: c.name,
-        argsPreview: truncateToBytes(c.argsPreview, 120),
-        resultPreview: truncateToBytes(c.resultPreview, 120),
-        durationMs: c.durationMs,
-        ok: c.ok,
-        ...(c.error ? { error: truncateToBytes(c.error, 200) } : {}),
-        // 富数据同步裁剪；resultMetadata 直接丢弃（超大 diff 等不再撑爆 transcript）
-        ...(c.argumentsJson ? { argumentsJson: truncateToBytes(c.argumentsJson, 2048) } : {}),
-        ...(c.resultText ? { resultText: truncateToBytes(c.resultText, 2048) } : {}),
-      })),
-      callsTruncated: true,
-    };
-  }
-  return meta;
-}
-
-function byteLengthOfObject(value: unknown): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(value), 'utf8');
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
-}
