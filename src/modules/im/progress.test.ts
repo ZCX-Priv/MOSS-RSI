@@ -44,15 +44,6 @@ describe('文件与代码', () => {
       .toBe('已编辑2个文件：\nsrc/a.ts\nsrc/b.ts');
   });
 
-  test('copy / move 单源与多源', () => {
-    expect(single('copy', { source: abs('src/a.ts'), dest: abs('src/b.ts') }))
-      .toBe('已复制 src/a.ts → src/b.ts');
-    expect(single('copy', { sources: [abs('a.ts'), abs('b.ts')], dest: abs('dist') }))
-      .toBe('已复制2个文件：\na.ts → dist\nb.ts → dist');
-    expect(single('move', { source: abs('src/a.ts'), dest: abs('src/b.ts') }))
-      .toBe('已移动 src/a.ts → src/b.ts');
-  });
-
   test('delete 单项与多项', () => {
     expect(single('delete', { path: abs('src/a.ts') })).toBe('已删除 src/a.ts');
     expect(single('delete', { paths: [abs('a.ts'), abs('b.ts')] }))

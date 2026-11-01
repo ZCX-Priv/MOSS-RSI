@@ -5,7 +5,7 @@
 import {
   Wrench, Plug, FileText, FilePlus, FilePen, Trash2, Terminal,
   FolderSearch, Search, ListChecks, HelpCircle, Sparkles, List, BookOpen,
-  FileCode, Copy, FolderInput, CalendarClock, Bot, Brain, Globe, Monitor,
+  FileCode, Copy, FolderInput, CalendarClock, Timer, Bot, Brain, Globe, Monitor,
   AppWindow, Code,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -29,6 +29,7 @@ export const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   'copy': Copy,
   'folder-input': FolderInput,
   'calendar-clock': CalendarClock,
+  'timer': Timer,
   'bot': Bot,
   'brain': Brain,
   'globe': Globe,

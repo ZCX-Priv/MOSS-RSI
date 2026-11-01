@@ -108,6 +108,8 @@ export interface TerminalService {
   snapshotAsync(id: string): Promise<string | undefined>;
   /** 在终端内执行一条命令并等待完成标记，返回该次输出（signal 中止 → Ctrl+C 并提前返回） */
   run(id: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<TerminalRunResult>;
+  /** 该终端当前是否有经 run() 执行中的命令（计数式，支持并发；人工输入的命令不可观测） */
+  isCommandRunning(id: string): boolean;
   /** 登记运行中的工具调用 → 终端 id（前端停止按钮用） */
   registerRun(toolCallId: string, terminalId: string): void;
   /** 注销运行登记 */

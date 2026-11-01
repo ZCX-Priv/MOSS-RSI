@@ -710,7 +710,7 @@ export const zh = {
       cautionAsk: '弹确认',
       cautionDeny: '直接拒绝',
       protectedPaths: '保护路径',
-      protectedPathsDesc: '写类工具（write/edit/move/delete/copy）对这些路径的写入将被拒绝；支持 ~ 前缀',
+      protectedPathsDesc: '写类工具（write/edit/delete）对这些路径的写入将被拒绝；支持 ~ 前缀',
       hardProtected: '硬保护：',
       hardProtectedDesc: '（AI 配置目录，防自我提权，不可关闭）',
       rulesTitle: '权限规则',

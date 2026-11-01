@@ -94,14 +94,6 @@ function fileListText(prefix: string, paths: string[], unit: string, isError: bo
   return [`${prefix}${paths.length}${unit}${suffix}：`, ...paths].join('\n');
 }
 
-/** 复制/移动：单源一行；多源分行「源 → 目标」 */
-function transferText(prefix: string, sources: string[], dest: string, isError: boolean): string | null {
-  if (!dest || sources.length === 0) return null;
-  if (sources.length === 1) return `${prefix} ${sources[0]} → ${dest}`;
-  const suffix = isError ? FAILED_SUFFIX : '';
-  return [`${prefix}${sources.length}个文件${suffix}：`, ...sources.map(source => `${source} → ${dest}`)].join('\n');
-}
-
 /** run_code 内部调用 → 可读短语 */
 function codeCallText(name: string, args: Record<string, unknown> | null, preview: string): string {
   const lower = name.toLowerCase();
@@ -336,14 +328,6 @@ function buildProgressText(
         .map(path => displayPath(path, cwd))
         .filter(Boolean);
       return fileListText('已删除', paths, '项', isError);
-    }
-    case 'copy':
-    case 'move': {
-      const prefix = toolName === 'copy' ? '已复制' : '已移动';
-      const sources = [...stringsOf(args.source), ...stringsOf(args.sources)]
-        .map(source => displayPath(source, cwd))
-        .filter(Boolean);
-      return transferText(prefix, sources, displayPath(args.dest, cwd), isError);
     }
     case 'grep': {
       const pattern = textOf(args.pattern);

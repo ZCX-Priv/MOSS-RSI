@@ -709,7 +709,7 @@ export const en = {
       cautionAsk: 'Ask',
       cautionDeny: 'Deny',
       protectedPaths: 'Protected Paths',
-      protectedPathsDesc: 'Writes (write/edit/move/delete/copy) to these paths are rejected; ~ prefix supported',
+      protectedPathsDesc: 'Writes (write/edit/delete) to these paths are rejected; ~ prefix supported',
       hardProtected: 'Hard protected: ',
       hardProtectedDesc: '(AI config directory, prevents self-escalation, cannot be disabled)',
       rulesTitle: 'Permission Rules',

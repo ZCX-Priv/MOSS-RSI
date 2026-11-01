@@ -313,6 +313,8 @@ export class TerminalManager implements TerminalService {
   private readonly defaultByKind = new Map<string, Map<InterpreterKind, string>>();
   /** 运行中的工具调用 → 终端 id（前端停止按钮按 toolCallId 精确中断单条命令） */
   private readonly activeRuns = new Map<string, string>();
+  /** 终端 id → 经 run() 执行中的命令计数（缺失/0 = 空闲；同一终端并发命令累计） */
+  private readonly commandCounts = new Map<string, number>();
   private readonly emit: TerminalEmitter;
   private readonly logger: Logger;
   private readonly isWindows: boolean;
@@ -606,6 +608,8 @@ export class TerminalManager implements TerminalService {
   }
 
   close(id: string): boolean {
+    // 命令忙闲计数兜底清理：终端关闭后不允许残留 busy 状态（wait 工具据此判断命令结束）
+    this.commandCounts.delete(id);
     const rt = this.runtimes.get(id);
     if (!rt) {
       // 离线历史项：仅清除落盘条目，并通知前端移除标签
@@ -713,6 +717,23 @@ export class TerminalManager implements TerminalService {
    * - 信号中止：立即 Ctrl+C 并返回，不再等满超时。
    */
   async run(id: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<TerminalRunResult> {
+    this.commandCounts.set(id, (this.commandCounts.get(id) ?? 0) + 1);
+    try {
+      return await this.runCore(id, command, timeoutMs, signal);
+    } finally {
+      const left = (this.commandCounts.get(id) ?? 1) - 1;
+      if (left <= 0) this.commandCounts.delete(id);
+      else this.commandCounts.set(id, left);
+    }
+  }
+
+  /** 该终端当前是否有经 run() 执行中的命令（计数式；人工输入的命令无法观测，不计入） */
+  isCommandRunning(id: string): boolean {
+    return (this.commandCounts.get(id) ?? 0) > 0;
+  }
+
+  /** run 的实际实现：执行一条命令并等待完成（结算策略见上方 JSDoc） */
+  private async runCore(id: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<TerminalRunResult> {
     const rt = this.runtimes.get(id);
     if (!rt) throw new Error(t('terminal.notFound', { id }));
     if (!command || !command.trim()) throw new Error(t('terminal.commandRequired'));

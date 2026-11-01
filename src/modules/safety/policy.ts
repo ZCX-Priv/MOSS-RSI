@@ -29,7 +29,7 @@ import { SYSTEM_SCOPE } from '../filesys/roots';
 /** 内置工具风险分类表（按操作可恢复性；fail-closed：未知工具归 L3） */
 const READONLY_TOOLS = new Set(['read', 'glob', 'grep']);
 const STATE_TOOLS = new Set(['ask', 'todo']);
-const RECOVERABLE_WRITE_TOOLS = new Set(['write', 'edit', 'move', 'delete', 'copy']);
+const RECOVERABLE_WRITE_TOOLS = new Set(['write', 'edit', 'delete']);
 const UNSAFE_TOOLS = new Set(['terminal']);
 
 /**

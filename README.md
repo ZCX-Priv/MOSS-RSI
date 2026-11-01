@@ -34,7 +34,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 - **ReAct Agent 引擎** —— 流式文本与思维链输出、多轮工具调用循环、任务引导/中断、上下文自动压缩与裁剪、工具结果智能折叠
 - **多 LLM Provider 路由** —— 内置 openai-chat / openai-responses / anthropic / gemini 等接口格式，支持 DeepSeek、Anthropic、OpenAI、Gemini、Qwen、GLM、Kimi 等主流模型，按模型自动解析路由，支持 thinking 推理输出
 - **MCP 双向支持** —— 作为客户端接入任意 Model Context Protocol 外部工具服务器；同时通过 `/mcp` 端点与 `moss mcp`（stdio）向外部 Agent 暴露 MOSS 工具
-- **内置工具集** —— 19 个可配置内置工具（read / write / edit / delete / move / copy / glob / grep / terminal / todo / ask / web / skill / mcp / memory / context / automation / browser / computer）+ `use_command` 斜杠命令执行，写操作与命令执行可配置逐次确认
+- **内置工具集** —— 18 个可配置内置工具（read / write / edit / delete / glob / grep / terminal / wait / todo / ask / web / skill / mcp / memory / context / automation / browser / computer）+ `use_command` 斜杠命令执行，写操作与命令执行可配置逐次确认
 - **Skills 与自定义命令** —— 以 Markdown + YAML front-matter 定义的可复用技能与斜杠命令，支持用户自定义与热重载
 - **子代理（Subagent）** —— `agent` 工具委派一次性子代理：内置 explorer / planner / coder / reviewer 模板、独立隐藏会话、嵌套深度保护与实时过程卡片
 - **持久终端** —— 原生 PTY 会话：人类经 WebSocket 操作，Agent 经 terminal 工具操作，二者共用同一批终端
