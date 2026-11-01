@@ -59,6 +59,17 @@ const TONE_SURFACE: Record<string, string> = {
   info: 'bg-sky-500/10',
 };
 
+/** Progress 指示条颜色（radix Progress 的 indicator 带 data-slot） */
+const TONE_PROGRESS: Record<string, string> = {
+  default: '',
+  muted: '[&_[data-slot=progress-indicator]]:bg-muted-foreground',
+  primary: '[&_[data-slot=progress-indicator]]:bg-blue-500',
+  success: '[&_[data-slot=progress-indicator]]:bg-emerald-500',
+  warning: '[&_[data-slot=progress-indicator]]:bg-amber-500',
+  danger: '[&_[data-slot=progress-indicator]]:bg-red-500',
+  info: '[&_[data-slot=progress-indicator]]:bg-sky-500',
+};
+
 const CALL_OUT: Record<string, string> = {
   info: 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300',
   success: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
@@ -403,6 +414,7 @@ const COMPONENTS: Record<string, GenUIComponent> = {
     const max = Math.max(1, resolveNumberProp(node, ctx, 'max', 100));
     const value = clampNumber(ctx.resolveToNumber(props.value), 0, max);
     const label = ctx.resolveText(props.label);
+    const tone = toneOf(node, ctx);
     return (
       <div className="flex min-w-0 flex-col gap-1">
         {label ? (
@@ -411,7 +423,10 @@ const COMPONENTS: Record<string, GenUIComponent> = {
             <span className="shrink-0 tabular-nums">{Math.round((value / max) * 100)}%</span>
           </div>
         ) : null}
-        <Progress value={(value / max) * 100} />
+        <Progress
+          className={cn(TONE_PROGRESS[tone] ?? '')}
+          value={(value / max) * 100}
+        />
       </div>
     );
   },

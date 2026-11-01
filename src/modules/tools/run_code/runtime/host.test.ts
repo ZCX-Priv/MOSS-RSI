@@ -8,7 +8,6 @@ import { runCodeProgram } from './host';
 
 const LIMITS = {
   timeoutMs: 15_000,
-  maxOutputBytes: 262_144,
   maxCodeChars: 20_000,
   maxParallelSubCalls: 4,
 };
@@ -114,5 +113,71 @@ describe('run_code runtime host', () => {
     });
     expect(result.error?.kind).toBe('timeout');
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  test('语法错误返回 syntax 且带程序行号与代码片段', async () => {
+    const result = await runCodeProgram({
+      program: ['const a = ui.box({ gap: 1 }, [', "  ui.text({}, 'x'),", '] }));', "return 'ok';"].join('\n'),
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error?.kind).toBe('syntax');
+    expect(result.error?.message).toContain('第 3 行第 3 列');
+    expect(result.error?.message).toContain("多余的 '}'");
+    expect(result.error?.message).toContain('] }));');
+  });
+
+  test('返回值自动净化：undefined/Date 不再导致整次失败', async () => {
+    const result = await runCodeProgram({
+      program: 'return { a: undefined, d: new Date("2026-11-01T00:00:00Z"), n: NaN };',
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual({ d: '2026-11-01T00:00:00.000Z', n: null });
+    expect(result.valueWarnings?.some((warning) => warning.path === 'root.a')).toBe(true);
+  });
+
+  test('返回值不设输出预算：约 1MB 结果仍完整返回', async () => {
+    const result = await runCodeProgram({
+      program: "return { text: 'x'.repeat(1024 * 1024) };",
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    const text = (result.value as { text?: string } | undefined)?.text ?? '';
+    expect(text.length).toBe(1024 * 1024);
+  });
+
+  test('metadata.value 与 metadata.structured 都能进入程序', async () => {
+    const valueTool = async (name: string): Promise<ToolResult> => {
+      if (name === 'withValue') {
+        return { content: [{ type: 'text', text: 'display text' }], metadata: { value: { items: [1, 2] } } };
+      }
+      return { content: [{ type: 'text', text: 'display text' }], metadata: { structured: { ok: true } } };
+    };
+    const result = await runCodeProgram({
+      program: 'const a = await tools.withValue();\nconst b = await tools.withStructured();\nreturn { a, b };',
+      bindings: ['withValue', 'withStructured'],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: valueTool,
+      isConcurrencySafe: () => true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual({ a: { items: [1, 2] }, b: { ok: true } });
   });
 });

@@ -144,4 +144,25 @@ describe('validateUISpec', () => {
     expect(result.spec?.root.type).toBe('Grid');
     expect(result.diagnostics.filter((d) => d.severity === 'error').length).toBe(0);
   });
+
+  test('Progress 支持 tone（不再报 unknown_prop）', () => {
+    const result = validateUISpec({
+      version: 1,
+      root: { type: 'Progress', props: { value: 68, tone: 'warning' } },
+      state: {},
+    });
+    expect(result.fatal).toBe(false);
+    expect(result.spec?.root.props?.tone).toBe('warning');
+    expect(result.diagnostics.some((d) => d.code === 'unknown_prop')).toBe(false);
+  });
+
+  test('unknown_prop 的诊断包含该组件允许的属性列表', () => {
+    const result = validateUISpec({
+      version: 1,
+      root: { type: 'Progress', props: { value: 68, bogus: 1 } },
+      state: {},
+    });
+    const diagnostic = result.diagnostics.find((d) => d.code === 'unknown_prop');
+    expect(diagnostic?.detail).toContain('allowed props: value, max, label, tone');
+  });
 });

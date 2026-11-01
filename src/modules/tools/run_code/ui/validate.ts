@@ -158,7 +158,13 @@ function walkNode(
 
   const component = UI_COMPONENT_MAP.get(type);
   if (!component) {
-    diag(ctx, 'unknown_component', path, 'warning', type.slice(0, 80));
+    diag(
+      ctx,
+      'unknown_component',
+      path,
+      'warning',
+      `${type.slice(0, 80)}; known components: ${[...UI_COMPONENT_MAP.keys()].join(', ')}`,
+    );
     return { type: 'Unsupported', props: { component: type } };
   }
 
@@ -172,7 +178,13 @@ function walkNode(
       for (const [key, value] of Object.entries(raw.props)) {
         const propSpec = component.props[key];
         if (!propSpec) {
-          diag(ctx, 'unknown_prop', `${path}.props.${key}`, 'warning', `${component.name}.${key}`);
+          diag(
+            ctx,
+            'unknown_prop',
+            `${path}.props.${key}`,
+            'warning',
+            `${component.name}.${key} is not supported; allowed props: ${Object.keys(component.props).join(', ')}`,
+          );
           continue;
         }
         const clean = sanitizeProp(value, propSpec, `${path}.props.${key}`, ctx, state, depth);

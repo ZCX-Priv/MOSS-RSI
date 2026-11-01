@@ -75,7 +75,10 @@ export interface SearchPage {
   query: string;
   offset: number;
   pageSize: number;
+  /** 当前页条目（含正文摘录） */
   items: SearchItem[];
+  /** 当前结果池中的全部清洗结果（最多 100 条；供 PTC 一次性拿到完整结果） */
+  pool: SearchItem[];
   totalAvailable: number;
   hasMore: boolean;
   nextOffset?: number;

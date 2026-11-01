@@ -414,8 +414,6 @@ export const zh = {
       codeModeTimeoutDesc: '单次程序运行的最大时长，包含嵌套工具与审批等待',
       codeModeMaxChars: '程序长度上限（字符）',
       codeModeMaxCharsDesc: '模型单次提交的 TypeScript 源码长度上限',
-      codeModeMaxOutput: '输出上限（KB）',
-      codeModeMaxOutputDesc: '返回值 + 日志序列化后的字节上限',
       codeModeMaxParallel: '嵌套调用并发',
       codeModeMaxParallelDesc: '只读工具可重叠，写操作/终端会独占执行',
       codeModeHint: '修改会实时生效（下一次请求/程序执行）。run_code 默认与 terminal 同级，需要用户确认。',

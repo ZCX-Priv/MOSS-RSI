@@ -8,7 +8,7 @@
 
 import { t } from '../../../core/i18n';
 import type { ToolContext, ToolResult } from '../types';
-import type { Freshness, ProviderName, SearchPage } from './search/types';
+import type { Freshness, ProviderName, SearchItem, SearchPage } from './search/types';
 import { SearchError } from './search/types';
 import { runSearch } from './search/orchestrator';
 import { runFetch, FetchError } from './fetcher';
@@ -35,7 +35,11 @@ interface WebToolConfig {
 const MAX_QUERY_LENGTH = 500;
 const MAX_TITLE_CHARS = 120;
 const MAX_URL_CHARS = 500;
-const MAX_OUTPUT_CHARS = 7_800;
+/** 展示文本预算：按优先级降级渲染，绝不再 slice 掉整条结果 */
+const MAX_OUTPUT_CHARS = 16_000;
+
+/** 展示文本的降级级别：0=完整，1=去正文，2=短摘要，3=仅标题/URL/来源 */
+export type RenderLevel = 0 | 1 | 2 | 3;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -92,7 +96,7 @@ async function executeSearch(
     };
   }
 
-  const pageSize = clampInt(p.pageSize ?? cfg.pageSize ?? 10, 10, 20);
+  const pageSize = clampInt(p.pageSize ?? cfg.pageSize ?? 20, 10, 20);
   const offset = clampInt(p.offset ?? 0, 0, 99);
   const timeoutMs = clampInt(p.timeoutMs ?? cfg.timeoutMs ?? 30_000, 3_000, 120_000);
   const freshness: Freshness = p.freshness ?? 'noLimit';
@@ -153,23 +157,26 @@ function formatSearchResult(page: SearchPage): ToolResult {
     };
   }
 
-  const baseText = renderSearchText(page, header, warnings, false);
-  const fullText = renderSearchText(page, header, warnings, true);
-  let text = fullText.length <= MAX_OUTPUT_CHARS ? fullText : baseText;
-  if (text.length > MAX_OUTPUT_CHARS) {
-    text = `${text.slice(0, MAX_OUTPUT_CHARS)}\n${t('tools.webSearchTruncated')}`;
+  // 分级降级：先丢正文，再压短摘要，最后只留标题/URL/来源；
+  // 任何一级都不删除结果条目，也绝不 slice 整段文本（避免把后面的结果整条切掉）。
+  const levels: RenderLevel[] = [0, 1, 2, 3];
+  let text = renderSearchText(page, header, warnings, 3);
+  for (const level of levels) {
+    const candidate = renderSearchText(page, header, warnings, level);
+    text = candidate;
+    if (candidate.length <= MAX_OUTPUT_CHARS) break;
   }
 
   return { content: [{ type: 'text', text }], metadata: searchMetadata(page) };
 }
 
-function renderSearchText(
+export function renderSearchText(
   page: SearchPage,
   header: string,
   warnings: string[],
-  includeContent: boolean,
+  level: RenderLevel,
 ): string {
-  const snippetCap = page.pageSize <= 10 ? 260 : 180;
+  const snippetCap = level === 2 ? 120 : page.pageSize <= 10 ? 260 : 180;
   const excerptCap = page.pageSize <= 10 ? 320 : 240;
   const blocks = page.items.map((item, index) => {
     const number = page.offset + index + 1;
@@ -179,10 +186,14 @@ function renderSearchText(
     const metaParts: string[] = [];
     if (item.source) metaParts.push(`${t('tools.webSourceLabel')}: ${item.source}`);
     if (item.publishedAt) metaParts.push(item.publishedAt);
-    if (item.engines.length > 0) metaParts.push(`${t('tools.webHitLabel')}: ${item.engines.join('+')}`);
+    if (level <= 2 && item.engines.length > 0) {
+      metaParts.push(`${t('tools.webHitLabel')}: ${item.engines.join('+')}`);
+    }
     if (metaParts.length > 0) lines.push(`    ${metaParts.join(' | ')}`);
-    if (item.snippet) lines.push(`    ${t('tools.webSnippetLabel')}: ${truncate(item.snippet, snippetCap)}`);
-    if (includeContent && item.contentExcerpt) {
+    if (level <= 2 && item.snippet) {
+      lines.push(`    ${t('tools.webSnippetLabel')}: ${truncate(item.snippet, snippetCap)}`);
+    }
+    if (level === 0 && item.contentExcerpt) {
       lines.push(`    ${t('tools.webContentLabel')}: ${truncate(item.contentExcerpt, excerptCap)}`);
     }
     return lines.join('\n');
@@ -207,6 +218,57 @@ function renderSearchText(
   return sections.join('\n');
 }
 
+/**
+ * PTC 内的结构化搜索结果（metadata.value）：
+ * - items：当前页完整条目（含正文摘录）；
+ * - pool：本轮已抓到的全部结果（最多 100 条，轻量字段），一次调用即可拿到全量；
+ * - searchId/offset/hasMore/nextOffset：需要更多时继续翻页。
+ */
+export function buildSearchValue(page: SearchPage): Record<string, unknown> {
+  return {
+    mode: 'search',
+    searchId: page.searchId,
+    provider: page.provider,
+    query: page.query,
+    offset: page.offset,
+    pageSize: page.pageSize,
+    totalAvailable: page.totalAvailable,
+    hasMore: page.hasMore,
+    ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
+    engines: page.engines,
+    warnings: page.warnings,
+    partial: page.partial,
+    elapsedMs: page.elapsedMs,
+    items: page.items.map(structuredItem),
+    pool: page.pool.map(poolItem),
+  };
+}
+
+function structuredItem(item: SearchItem): Record<string, unknown> {
+  return {
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+    ...(item.source ? { source: item.source } : {}),
+    ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
+    engines: item.engines,
+    ...(item.contentExcerpt ? { contentExcerpt: item.contentExcerpt } : {}),
+    ...(item.contentQuality ? { contentQuality: item.contentQuality } : {}),
+  };
+}
+
+/** 全量池条目：轻量字段（snippet 截到 200 字符），避免 structured value 过大 */
+function poolItem(item: SearchItem): Record<string, unknown> {
+  return {
+    title: truncate(item.title, MAX_TITLE_CHARS),
+    url: truncate(item.url, MAX_URL_CHARS),
+    snippet: truncate(item.snippet, 200),
+    ...(item.source ? { source: item.source } : {}),
+    ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
+    engines: item.engines,
+  };
+}
+
 function searchMetadata(page: SearchPage): Record<string, unknown> {
   return {
     mode: 'search',
@@ -226,6 +288,8 @@ function searchMetadata(page: SearchPage): Record<string, unknown> {
     warnings: page.warnings,
     elapsedMs: page.elapsedMs,
     items: page.items,
+    // PTC 专用结构化值（原生调用的展示文本不读这个字段）
+    value: buildSearchValue(page),
   };
 }
 
@@ -318,6 +382,21 @@ function formatFetchResult(result: Awaited<ReturnType<typeof runFetch>>): ToolRe
       quality: result.meta.quality,
       elapsedMs: result.meta.elapsedMs,
       links: result.links,
+      // PTC 专用结构化值：完整正文（受 maxFetchChars 限制）+ 元信息
+      value: {
+        mode: 'fetch',
+        url: result.requestUrl,
+        finalUrl: result.finalUrl,
+        status: result.status,
+        contentType: result.contentType,
+        ...(result.title ? { title: result.title } : {}),
+        text: result.text,
+        truncated: result.meta.truncated,
+        links: result.links,
+        warnings: result.warnings,
+        bytes: result.meta.bytes,
+        elapsedMs: result.meta.elapsedMs,
+      },
     },
   };
 }

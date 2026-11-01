@@ -370,8 +370,6 @@ export interface CodeModeConfig {
   timeoutMs: number;
   /** 程序源码长度上限 */
   maxCodeChars: number;
-  /** 返回值 + 日志字节上限 */
-  maxOutputBytes: number;
   /** 嵌套工具调用并发上限 */
   maxParallelSubCalls: number;
 }

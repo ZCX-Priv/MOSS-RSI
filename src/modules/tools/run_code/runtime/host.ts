@@ -24,6 +24,7 @@ import {
   type RunLimits,
 } from './protocol';
 import { toolResultErrorMessage, toolResultText, toolResultToCodeValue } from './value';
+import type { SanitizeWarning } from './sanitize';
 
 export interface CodeRunCallRecord {
   id: string;
@@ -57,6 +58,8 @@ export interface RunCodeHostOptions {
 
 export interface RunCodeHostResult {
   value?: CodeValue;
+  /** 返回值净化警告（undefined/Date/Map/循环引用等） */
+  valueWarnings?: SanitizeWarning[];
   logs: string[];
   ui?: unknown;
   uiDiagnostics?: unknown;
@@ -79,8 +82,8 @@ interface ChildProcessLike {
   kill(signal?: number | NodeJS.Signals): void;
 }
 
-/** 子进程日志/结果共享的预算上限 */
-const MAX_LOG_ENTRY_BYTES = 16_384;
+/** 单条日志的格式化保护（不是总输出预算；PTC 输出不设预算） */
+const MAX_LOG_ENTRY_BYTES = 1024 * 1024;
 const MAX_CALL_RECORDS = 100;
 /** 嵌套调用富数据（供前端渲染普通工具卡） */
 const MAX_CALL_ARG_BYTES = 16 * 1024;
@@ -130,7 +133,6 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   const logs: string[] = [];
   const calls: CodeRunCallRecord[] = [];
   let callsTruncated = false;
-  let logBytes = 0;
   let callDetailBytes = 0;
   let stderr = '';
   let finished = false;
@@ -167,21 +169,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   return await new Promise<RunCodeHostResult>((resolvePromise) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const writeFrame = (frame: HostToChild): boolean => {
+    const writeLine = (line: string): boolean => {
       if (finished) return false;
-      const line = encodeFrame(frame);
-      if (byteLength(line) > MAX_FRAME_BYTES) {
-        void settle({
-          logs,
-          calls,
-          callsTruncated,
-          nestedCalls: calls.length,
-          hasUi,
-          truncated: true,
-          error: { kind: 'protocol', message: `frame exceeds ${MAX_FRAME_BYTES} bytes` },
-        });
-        return false;
-      }
       try {
         child.stdin.write(line);
         void child.stdin.flush();
@@ -203,11 +192,10 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       }
     };
 
-    const appendLog = (text: string): void => {
-      if (finished) return;
-      const clean = truncateToBytes(text, MAX_LOG_ENTRY_BYTES);
-      const bytes = byteLength(clean) + 1;
-      if (logBytes + bytes > opts.limits.maxOutputBytes) {
+    const writeFrame = (frame: HostToChild): boolean => {
+      if (finished) return false;
+      const line = encodeFrame(frame);
+      if (byteLength(line) > MAX_FRAME_BYTES) {
         void settle({
           logs,
           calls,
@@ -215,15 +203,18 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           nestedCalls: calls.length,
           hasUi,
           truncated: true,
-          error: {
-            kind: 'output-limit',
-            message: `logs exceeded maxOutputBytes (${opts.limits.maxOutputBytes})`,
-          },
+          error: { kind: 'protocol', message: `control frame exceeds ${MAX_FRAME_BYTES} bytes` },
         });
-        return;
+        return false;
       }
-      logBytes += bytes;
-      logs.push(clean);
+      return writeLine(line);
+    };
+
+    const appendLog = (text: string): void => {
+      if (finished) return;
+      const oversized = byteLength(text) > MAX_LOG_ENTRY_BYTES;
+      const clean = truncateToBytes(text, MAX_LOG_ENTRY_BYTES);
+      logs.push(oversized ? `${clean}\n…（单条日志过长，已截断）` : clean);
     };
 
     const recordCall = (record: CodeRunCallRecord): void => {
@@ -421,6 +412,32 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           return;
         }
         const value = toolResultToCodeValue(result);
+        const frame = { v: 1 as const, type: 'tool-result' as const, id: call.id, ok: true as const, value };
+        const line = encodeFrame(frame);
+        if (byteLength(line) > MAX_FRAME_BYTES) {
+          // 工具结果超过协议硬上限：只让这次调用失败（程序可 catch），不终止整个程序。
+          const message =
+            `${call.name} result exceeds protocol frame limit (${byteLength(line)} bytes > ${MAX_FRAME_BYTES}); ` +
+            'narrow the query or request fewer fields';
+          recordCall({
+            id: call.id,
+            name: call.name,
+            argsPreview: previewJson(call.args),
+            resultPreview: truncateToBytes(message, 400),
+            durationMs,
+            ok: false,
+            error: truncateToBytes(message, 800),
+            ...collectCallDetails(call.args, undefined, message),
+          });
+          writeFrame({
+            v: 1,
+            type: 'tool-result',
+            id: call.id,
+            ok: false,
+            error: { name: TOOL_CALL_ERROR_NAME, message },
+          });
+          return;
+        }
         recordCall({
           id: call.id,
           name: call.name,
@@ -430,7 +447,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           ok: true,
           ...collectCallDetails(call.args, result),
         });
-        writeFrame({ v: 1, type: 'tool-result', id: call.id, ok: true, value });
+        writeLine(line);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const durationMs = Math.round(performance.now() - started);
@@ -458,38 +475,13 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     };
 
     const settleSuccess = async (frame: Extract<ChildToHost, { type: 'result' }>): Promise<void> => {
+      // 子进程已用 sanitizeForJson 净化返回值；经 JSON 帧传输后必然是合法 JSON，不再按预算拒绝。
       const value = frame.value;
-      if (value !== undefined && !isLosslessJsonValue(value)) {
-        await settle({
-          logs: logs.slice(),
-          calls: calls.slice(),
-          callsTruncated,
-          nestedCalls: calls.length,
-          hasUi: false,
-          truncated: false,
-          error: { kind: 'invalid-output', message: 'program return value is not lossless JSON' },
-        });
-        return;
-      }
-      const valueBytes = value === undefined ? 0 : byteLength(JSON.stringify(value));
-      if (logBytes + valueBytes > opts.limits.maxOutputBytes) {
-        await settle({
-          logs: logs.slice(),
-          calls: calls.slice(),
-          callsTruncated,
-          nestedCalls: calls.length,
-          hasUi: false,
-          truncated: true,
-          error: {
-            kind: 'output-limit',
-            message: `result + logs exceeded maxOutputBytes (${opts.limits.maxOutputBytes})`,
-          },
-        });
-        return;
-      }
+      const valueWarnings = normalizeValueWarnings(frame.valueWarnings);
       hasUi = frame.hasUi === true && frame.ui !== undefined;
       await settle({
         ...(value !== undefined ? { value } : {}),
+        ...(valueWarnings.length > 0 ? { valueWarnings } : {}),
         logs: logs.slice(),
         ...(frame.ui !== undefined ? { ui: frame.ui } : {}),
         ...(frame.uiDiagnostics !== undefined ? { uiDiagnostics: frame.uiDiagnostics } : {}),
@@ -660,11 +652,28 @@ function isFailureKind(value: unknown): value is CodeFailureKind {
     value === 'timeout' ||
     value === 'abort' ||
     value === 'worker-exit' ||
-    value === 'invalid-output' ||
+    value === 'syntax' ||
     value === 'output-limit' ||
     value === 'protocol' ||
     value === 'sandbox-unavailable'
   );
+}
+
+/** 子进程回传的净化警告：做形状校验与长度保护（仅用于展示） */
+function normalizeValueWarnings(value: unknown): SanitizeWarning[] {
+  if (!Array.isArray(value)) return [];
+  const out: SanitizeWarning[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const warning = item as { path?: unknown; reason?: unknown };
+    if (typeof warning.path !== 'string' || typeof warning.reason !== 'string') continue;
+    out.push({
+      path: warning.path.slice(0, 300),
+      reason: warning.reason.slice(0, 300),
+    });
+    if (out.length >= 100) break;
+  }
+  return out;
 }
 
 /** 完整 JSON 文本（带字节上限）；不可序列化时返回 undefined */

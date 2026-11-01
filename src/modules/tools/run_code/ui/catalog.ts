@@ -148,6 +148,7 @@ export const UI_COMPONENTS: readonly UIComponentSpec[] = [
       value: { kind: 'number', required: true, min: 0, max: 100 },
       max: { kind: 'number', min: 1, max: 1000 },
       label: { kind: 'string', maxLength: 500 },
+      tone: { kind: 'enum', values: TONE },
     },
   },
   {

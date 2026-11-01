@@ -19,6 +19,7 @@ import { resolveInterpreter } from '../../terminal/interpreter';
 import { digestCommandOutput } from '../../terminal/output-digest';
 import type { InterpreterKind, TerminalInfo, TerminalRunResult } from '../../terminal/types';
 import type { ToolContext, ToolResult } from '../types';
+import { runCommandRaw } from './raw-run';
 
 /** terminal 工具输入参数 */
 interface TerminalParams {
@@ -30,6 +31,11 @@ interface TerminalParams {
   timeout?: number;
   /** 解释器类型：实际可用性以 env-probe 实测为准（系统提示「终端环境」段），不可用时回退默认 */
   interpreter?: InterpreterKind;
+  /**
+   * 仅 action=exec：非 PTY 一次性执行并返回原始 stdout/stderr。
+   * 用于 JSON/CSV/长行等机器可读输出（PTY 会按列宽硬折行）；不保留 shell 状态。
+   */
+  raw?: boolean;
 }
 
 /** 统一的工具结果文本 */
@@ -95,6 +101,10 @@ export default {
     const p = params as TerminalParams;
     const action = p.action ?? 'exec';
 
+    if (p.raw === true && action !== 'exec') {
+      return textResult(`Error: ${t('tools.terminalRawOnlyExec')}`, true);
+    }
+
     // filesys 服务（cwd 越权语义与 read/write/edit 一致）
     const filesys = ctx.services.tryResolve<FilesysService>(ServiceNames.FILESYS);
     if (!filesys) {
@@ -102,7 +112,7 @@ export default {
     }
 
     if (action === 'exec') {
-      return handleRun(p, ctx, filesys);
+      return p.raw === true ? handleRawRun(p, ctx, filesys) : handleRun(p, ctx, filesys);
     }
     return handlePersistent(action, p, ctx, filesys);
   },
@@ -222,6 +232,84 @@ async function handleRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysSe
   } catch (err) {
     return textResult(`Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`, true);
   }
+}
+
+/**
+ * raw 模式：非 PTY 一次性执行。
+ * 输出不经过终端模拟器，因此不会出现 80 列硬折行；metadata.value 给 PTC 完整 stdout/stderr。
+ */
+async function handleRawRun(p: TerminalParams, ctx: ToolContext, filesys: FilesysService): Promise<ToolResult> {
+  const command = p.command;
+  if (!command || !command.trim()) {
+    return textResult(`Error: ${t('tools.terminalCommandRequired')}`, true);
+  }
+
+  const cwdRes = resolveCwdOrError(p.cwd, ctx, filesys);
+  if ('error' in cwdRes) return textResult(`Error: ${cwdRes.error}`, true);
+
+  const rawTimeout = p.timeout ?? (ctx.toolConfig?.timeout as number | undefined) ?? 30_000;
+  const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
+
+  const snap = await filesys.beginTerminalSnapshot(cwdRes.cwd, ctx.sessionId);
+  let res: Awaited<ReturnType<typeof runCommandRaw>>;
+  try {
+    res = await runCommandRaw({
+      command,
+      cwd: cwdRes.cwd,
+      ...(p.interpreter ? { interpreter: p.interpreter } : {}),
+      timeoutMs,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+  } catch (err) {
+    return textResult(`Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`, true);
+  }
+  const workspaceNote = await finishSnapshot(filesys, snap, ctx);
+
+  const codeLabel = res.exitCode === null ? '?' : String(res.exitCode);
+  const header = t('tools.terminalRawHeader', {
+    label: res.interpreterLabel,
+    code: codeLabel,
+    ms: res.durationMs,
+  });
+
+  const out = digestCommandOutput(res.stdout, {
+    ...(res.exitCode !== null ? { exitCode: res.exitCode } : {}),
+    maxChars: DIGEST_MAX_CHARS,
+  });
+  const body = out.text.trim() ? out.text : t('tools.terminalEmpty');
+  const errDigest = res.stderr.trim()
+    ? digestCommandOutput(res.stderr, { maxChars: READ_DIGEST_MAX_CHARS }).text
+    : '';
+  const notes: string[] = [];
+  if (res.timedOut) notes.push(t('tools.terminalRawTimeout', { timeoutMs }));
+  if (res.aborted) notes.push(t('tools.terminalRawAborted'));
+  if (res.truncated) notes.push(t('tools.terminalRawTruncated'));
+  const stderrSection = errDigest ? `\n--- stderr ---\n${errDigest}` : '';
+
+  const isError = res.exitCode === null ? res.timedOut || res.aborted || res.truncated : res.exitCode !== 0;
+  return textResult(
+    `${header}\n${body}${stderrSection}${notes.length > 0 ? `\n${notes.join('\n')}` : ''}${workspaceNote}`,
+    isError,
+    {
+      raw: true,
+      cwd: cwdRes.cwd,
+      interpreter: res.interpreterLabel,
+      exitCode: res.exitCode,
+      timedOut: res.timedOut,
+      aborted: res.aborted,
+      truncated: res.truncated,
+      durationMs: res.durationMs,
+      // PTC 结构化返回：完整原始输出（捕获上限内），不折行
+      value: {
+        stdout: res.stdout,
+        stderr: res.stderr,
+        exitCode: res.exitCode,
+        timedOut: res.timedOut,
+        aborted: res.aborted,
+        truncated: res.truncated,
+      },
+    },
+  );
 }
 
 /** 显式动作（create/send/read/list/kill/restart） */

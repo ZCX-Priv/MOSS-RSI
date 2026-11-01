@@ -298,8 +298,6 @@ const codeModeSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
   /** 程序源码长度上限 */
   maxCodeChars: z.number().int().min(1_000).max(200_000).default(20_000),
-  /** 返回值 + 日志序列化后的字节上限 */
-  maxOutputBytes: z.number().int().min(1_024).max(1_048_576).default(262_144),
   /** 嵌套工具调用并发上限（只读工具可重叠，写工具独占） */
   maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
 });
@@ -337,7 +335,6 @@ const appConfigSchema = z.object({
       uiEnabled: true,
       timeoutMs: 120_000,
       maxCodeChars: 20_000,
-      maxOutputBytes: 262_144,
       maxParallelSubCalls: 10,
     }),
   }),
@@ -438,7 +435,6 @@ export function defaultAppConfig(): AppConfig {
         uiEnabled: true,
         timeoutMs: 120_000,
         maxCodeChars: 20_000,
-        maxOutputBytes: 262_144,
         maxParallelSubCalls: 10,
       },
     },

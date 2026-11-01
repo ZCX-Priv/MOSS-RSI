@@ -71,9 +71,34 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '- 只读工具可以用 `Promise.all` 并发；写操作/终端等会按提交顺序独占执行。',
     `- 代码程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}；违反会导致程序直接报错。`,
     '- 不要 `import`/`require`/`fetch`/使用 `Bun`；程序只应依赖注入的 `tools`、`ui`、`console` 与受限 `process`。',
-    '- 返回值必须是 lossless JSON（不能含 undefined/函数/BigInt/循环引用/非有限数）。',
-    '- 程序有执行预算与输出字节上限；死循环会被强杀，日志不要打印大对象。',
+    '- 返回值对象里的 undefined/函数/BigInt/Date/Map/Set/NaN/循环引用会被自动净化并给出警告，不需要手工清洗；只返回需要的字段即可。',
+    '- 程序有执行时间预算；返回值不设输出字节预算，会完整返回（仅 64MB 协议硬上限）。只返回必要字段，避免上下文被无用数据占满。',
+    '- 语法/转译错误会给出程序自身的行号、列号与代码片段；按提示只改对应语句，不要在未定位前整段重写。',
+    '- 大段 UI 建议先按块建变量，再组装，最后 `ui.render`；超深嵌套容易造成括号错配。',
+    '- 不确定工具返回结构时，先写最小探针（单次调用 + `console.log`）确认，再批量执行。',
   );
+
+  const hasWeb = tools.some((tool) => tool.name === 'web');
+  const hasTerminal = tools.some((tool) => tool.name === 'terminal');
+  if (hasWeb || hasTerminal) {
+    parts.push('', '### 工具返回形态（仅 run_code 内）');
+    if (hasWeb) {
+      parts.push(
+        "- `tools.web({ mode: 'search' })` → 结构化对象：`items`（当前页完整条目，含正文摘录）、`pool`（本轮已抓到的全部结果，最多 100 条）、`searchId`、`totalAvailable`、`hasMore`、`nextOffset`。需要更多时带 `searchId + offset` 翻页；`pageSize` 建议 20。",
+        "- `tools.web({ mode: 'fetch' })` → `{ url, finalUrl, status, title?, text, truncated, links }`，`text` 为完整正文（受 maxFetchChars 限制）。",
+      );
+    }
+    if (hasTerminal) {
+      parts.push(
+        "- `tools.terminal({ raw: true })` → `{ stdout, stderr, exitCode, timedOut, aborted, truncated }`，原始输出不折行。需要解析 JSON/CSV/长行时必须用 `raw: true`。",
+        '- 非 raw 的终端输出会按终端列宽硬折行，禁止用来解析 JSON/CSV；它只适合人看的命令输出。',
+      );
+    }
+    parts.push(
+      '- MCP 工具：有 structured output 时返回对象；否则返回文本。',
+      '- 其它工具默认返回文本；若整段文本是合法 JSON，会自动解析为对象。',
+    );
+  }
 
   if (input.uiEnabled) {
     parts.push('', buildUiSdkText());

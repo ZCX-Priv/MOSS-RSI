@@ -413,8 +413,6 @@ export const en = {
       codeModeTimeoutDesc: 'Maximum duration of one program run, including nested tools and approval waits',
       codeModeMaxChars: 'Program size limit (chars)',
       codeModeMaxCharsDesc: 'Maximum TypeScript source length the model may submit per run',
-      codeModeMaxOutput: 'Output limit (KB)',
-      codeModeMaxOutputDesc: 'Byte cap for the serialized return value + logs',
       codeModeMaxParallel: 'Nested call concurrency',
       codeModeMaxParallelDesc: 'Read-only tools may overlap; writes/terminal run exclusively',
       codeModeHint: 'Changes apply to the next request/program run. run_code is treated like terminal and requires user confirmation by default.',

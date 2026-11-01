@@ -17,22 +17,27 @@ import {
 } from '../ui/builder';
 import type { UIDiagnostic, UINode, UIStateValue, UISpec } from '../ui/spec';
 import {
-  isLosslessJsonValue,
+  byteLength,
+  MAX_FRAME_BYTES,
   parseFrameLine,
   type ChildToHost,
   type CodeValue,
   type HostToChild,
   type RunLimits,
 } from './protocol';
+import { findJsonViolation, sanitizeForJson } from './sanitize';
+import { calibrateWrapperExtraLines, PROGRAM_SOURCE_URL, rewriteRuntimeStack } from './stack';
+import { formatSourceExcerpt, locateChunkFailure, scanStructure } from './syntax';
 import { ToolCallError } from './value';
 
 const realProcess = process;
 const stdoutSink = Bun.stdout.writer();
 
-/** 写一帧到 stdout（宿主按行读取）。写失败（宿主已退出）返回 false。 */
+/** 写一帧到 stdout（宿主按行读取）。写失败（宿主已退出/超过协议上限）返回 false。 */
 async function writeFrame(frame: ChildToHost): Promise<boolean> {
   try {
     const line = `${JSON.stringify(frame)}\n`;
+    if (byteLength(line) > MAX_FRAME_BYTES) return false;
     stdoutSink.write(line);
     await stdoutSink.flush();
     return true;
@@ -58,13 +63,15 @@ const state: RunState = {
   started: false,
   limits: {
     timeoutMs: 120_000,
-    maxOutputBytes: 262_144,
     maxCodeChars: 20_000,
     maxParallelSubCalls: 10,
   },
   cwd: realProcess.cwd(),
   uiEnabled: false,
 };
+
+/** new Function 包装的固定行号偏移（用于运行时错误栈改写） */
+const WRAPPER_EXTRA_LINES = calibrateWrapperExtraLines();
 
 const pending = new Map<string, PendingCall>();
 let callSeq = 0;
@@ -79,8 +86,9 @@ function createToolsProxy(allowlist: string[]): Record<string, (args?: unknown) 
         throw new Error(`Unknown tool "${prop}". Only tools listed in the SDK are available inside run_code.`);
       }
       return async (args?: unknown): Promise<CodeValue> => {
-        if (args !== undefined && !isLosslessJsonValue(args)) {
-          throw new ToolCallError(prop, 'arguments must be lossless JSON (no undefined/function/BigInt/non-finite number)');
+        const violation = args === undefined ? null : findJsonViolation(args, `tools.${prop}(...)`);
+        if (violation) {
+          throw new ToolCallError(prop, `${violation.path}: ${violation.reason}`);
         }
         const id = `c${++callSeq}`;
         return await new Promise<CodeValue>((resolve, reject) => {
@@ -165,22 +173,23 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   // 用 async 函数声明包裹：既允许程序使用顶层 await/return，又避开
   // Bun.Transpiler 对「ECMAScript module 顶层 return」的拒绝。
   // 注：Bun.Transpiler 会裁剪裸表达式语句，因此必须用函数声明而不是 IIFE 表达式。
-  const wrapped = [
-    'async function __moss_run_program_2026__(tools, ui, console, process, require, fetch, Bun, globalThis, Function, setTimeout, setInterval, clearTimeout, clearInterval) {',
-    '"use strict";',
-    frame.program,
-    '}',
-  ].join('\n');
+  const wrapped = wrapProgram(frame.program);
 
   let js: string;
   try {
     js = new Bun.Transpiler({ loader: 'ts' }).transformSync(wrapped);
   } catch (err) {
+    // 转译器只给 Parse error，没有位置；失败时再用结构扫描器补充精确行列。
+    // 以转译结果为准：扫描器只在转译失败时参与诊断，避免正则启发式误报阻止合法代码。
+    const issue = scanStructure(frame.program);
+    const detail = describeTranspileErrors(err);
     await writeFrame({
       v: 1,
       type: 'error',
-      kind: 'exception',
-      message: `TypeScript transform failed: ${err instanceof Error ? err.message : String(err)}`,
+      kind: 'syntax',
+      message: issue.ok
+        ? buildTranspileFailure(frame.program, err)
+        : `${formatSyntaxIssue(issue.issue)}${detail ? `\nTS 解析器信息：${detail}` : ''}`,
     });
     return;
   }
@@ -194,15 +203,15 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   let fn: (...args: unknown[]) => Promise<unknown>;
   try {
     // 只编译一次：new Function 返回转译后的 async 函数声明。
-    fn = new Function(`"use strict";\n${js}\nreturn __moss_run_program_2026__;`)() as (
-      ...args: unknown[]
-    ) => Promise<unknown>;
+    // sourceURL 让运行时栈固定显示 moss-run-code.js，便于行号回写。
+    const body = `"use strict";\n${js}\nreturn __moss_run_program_2026__;\n//# sourceURL=${PROGRAM_SOURCE_URL}`;
+    fn = new Function(body)() as (...args: unknown[]) => Promise<unknown>;
   } catch (err) {
     await writeFrame({
       v: 1,
       type: 'error',
-      kind: 'exception',
-      message: `failed to compile program: ${err instanceof Error ? err.message : String(err)}`,
+      kind: 'syntax',
+      message: buildCompileFailure(frame.program, err),
     });
     return;
   }
@@ -214,30 +223,30 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
       ui,
       consoleShim,
       processShim,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+      blockedCallable('require'),
+      blockedCallable('fetch'),
+      blockedObject('Bun'),
+      blockedObject('globalThis'),
+      blockedCallable('Function'),
+      blockedCallable('setTimeout'),
+      blockedCallable('setInterval'),
+      blockedCallable('clearTimeout'),
+      blockedCallable('clearInterval'),
     );
   } catch (err) {
-    const message = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
+    const rawStack = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
+    const message = rewriteRuntimeStack(rawStack, js, frame.program, WRAPPER_EXTRA_LINES);
     await writeFrame({ v: 1, type: 'error', kind: 'exception', message });
     return;
   }
 
-  if (value !== undefined && !isLosslessJsonValue(value)) {
-    await writeFrame({
-      v: 1,
-      type: 'error',
-      kind: 'invalid-output',
-      message: 'program return value is not lossless JSON (no undefined field/function/BigInt/cyclic reference)',
-    });
-    return;
+  // ---- 2) 返回值净化：常见类型自动转换，不再因 invalid-output 整次失败 ----
+  let sanitizedValue: CodeValue | undefined;
+  let valueWarnings: ReturnType<typeof sanitizeForJson>['warnings'] = [];
+  if (value !== undefined) {
+    const sanitized = sanitizeForJson(value);
+    sanitizedValue = sanitized.value;
+    valueWarnings = sanitized.warnings;
   }
 
   const built = builder.getResult();
@@ -251,14 +260,144 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
     : undefined;
   const diagnostics: UIDiagnostic[] = built.diagnostics;
 
-  await writeFrame({
+  const resultLine = `${JSON.stringify({
     v: 1,
     type: 'result',
-    ...(value !== undefined ? { value: value as CodeValue } : {}),
+    ...(sanitizedValue !== undefined ? { value: sanitizedValue } : {}),
+    ...(valueWarnings.length > 0 ? { valueWarnings } : {}),
     ...(spec ? { ui: spec } : {}),
     uiDiagnostics: diagnostics,
     nestedCalls: callSeq,
     hasUi: !!spec,
+  })}\n`;
+  if (byteLength(resultLine) > MAX_FRAME_BYTES) {
+    await writeFrame({
+      v: 1,
+      type: 'error',
+      kind: 'output-limit',
+      message:
+        `program result exceeds protocol frame limit (${byteLength(resultLine)} bytes > ${MAX_FRAME_BYTES}); ` +
+        'return fewer fields or aggregate inside the program',
+    });
+    return;
+  }
+  try {
+    stdoutSink.write(resultLine);
+    await stdoutSink.flush();
+  } catch {
+    // 宿主已退出
+  }
+}
+
+/** 程序包裹函数头（转译与执行共用，保证定位一致） */
+const PROGRAM_FUNCTION_HEADER =
+  'async function __moss_run_program_2026__(tools, ui, console, process, require, fetch, Bun, globalThis, Function, setTimeout, setInterval, clearTimeout, clearInterval) {';
+
+function wrapProgram(program: string): string {
+  return [PROGRAM_FUNCTION_HEADER, program, '}'].join('\n');
+}
+
+function formatSyntaxIssue(issue: {
+  line: number;
+  column: number;
+  message: string;
+  excerpt: string;
+  hint?: string;
+}): string {
+  return [
+    `语法错误：第 ${issue.line} 行第 ${issue.column} 列：${issue.message}`,
+    issue.excerpt,
+    ...(issue.hint ? [`提示：${issue.hint}`] : []),
+  ].join('\n');
+}
+
+/** 把 Bun.Transpiler 的 AggregateError 拍平成可读文本 */
+function describeTranspileErrors(err: unknown): string {
+  const errors = (err as { errors?: unknown }).errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    const messages = errors
+      .slice(0, 6)
+      .map((item) => (item instanceof Error ? item.message : String(item)))
+      .filter((message) => message.trim() !== '');
+    if (messages.length > 0) return messages.join('；');
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** 程序行数概览：短程序全量、长程序取头尾（都带行号） */
+function codeOverview(program: string): string {
+  const lines = program.split(/\r\n|\r|\n/);
+  const width = String(lines.length).length;
+  if (lines.length <= 60) {
+    return lines.map((text, index) => `${String(index + 1).padStart(width)} | ${text}`).join('\n');
+  }
+  const head = lines.slice(0, 30).map((text, index) => `${String(index + 1).padStart(width)} | ${text}`);
+  const tail = lines
+    .slice(-10)
+    .map((text, index) => `${String(lines.length - 10 + index + 1).padStart(width)} | ${text}`);
+  return [...head, '…（中间省略）', ...tail].join('\n');
+}
+
+/** 转译失败：先按顶层语句二分定位，再给出 TS 解析细节 */
+function buildTranspileFailure(program: string, err: unknown): string {
+  const detail = describeTranspileErrors(err);
+  const located = locateChunkFailure(program, (candidate) => {
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(wrapProgram(candidate));
+  });
+  if (located) {
+    const head = located.chunk.split(/\r\n|\r|\n/).slice(0, 8).join('\n');
+    return [
+      `TypeScript 解析失败：第 ${located.line} 行起的语句无法解析`,
+      formatSourceExcerpt(program, located.line, 1),
+      `该语句开头：\n${head}`,
+      `TS 解析器信息：${detail || 'Parse error'}`,
+      '提示：检查该语句的括号/引号/类型注解是否完整；大段 UI 建议拆成变量逐步组装。',
+    ].join('\n');
+  }
+  return [
+    'TypeScript 解析失败（无法定位到具体语句）',
+    codeOverview(program),
+    `TS 解析器信息：${detail || 'Parse error'}`,
+  ].join('\n');
+}
+
+/** new Function 编译失败：同样按顶层语句二分定位 */
+function buildCompileFailure(program: string, err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err);
+  const located = locateChunkFailure(program, (candidate) => {
+    const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(wrapProgram(candidate));
+    new Function(`"use strict";\n${js}\nreturn __moss_run_program_2026__;\n//# sourceURL=moss-compile.js`);
+  });
+  if (located) {
+    return [
+      `JavaScript 编译失败：第 ${located.line} 行起的语句无法编译`,
+      formatSourceExcerpt(program, located.line, 1),
+      `编译错误：${detail}`,
+      '提示：检查该语句是否使用了子进程不可用的语法（如 import）。',
+    ].join('\n');
+  }
+  return ['JavaScript 编译失败', codeOverview(program), `编译错误：${detail}`].join('\n');
+}
+
+/** 被禁用的可调用全局（调用时给出明确原因） */
+function blockedCallable(name: string): (...args: unknown[]) => never {
+  return (..._args: unknown[]): never => {
+    throw new Error(`${name} is not available inside run_code; use tools.* / ui.* instead.`);
+  };
+}
+
+/** 被禁用的对象型全局（任何属性访问都给出明确原因） */
+function blockedObject(name: string): Record<string, never> {
+  return new Proxy(Object.create(null) as Record<string, never>, {
+    get(): never {
+      throw new Error(`${name} is not available inside run_code; use tools.* / ui.* instead.`);
+    },
+    has(): boolean {
+      throw new Error(`${name} is not available inside run_code; use tools.* / ui.* instead.`);
+    },
+    ownKeys(): Array<string | symbol> {
+      throw new Error(`${name} is not available inside run_code; use tools.* / ui.* instead.`);
+    },
   });
 }
 

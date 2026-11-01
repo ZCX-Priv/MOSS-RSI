@@ -1,19 +1,17 @@
 // src/modules/tools/run_code/runtime/value.ts
 // ToolResult ↔ CodeValue 转换。
-// MOSS 工具返回文本 + 图片路径，没有统一的 typed JSON 契约；因此：
-//   1. 优先使用 metadata.value（未来 typed-return 约定）；
-//   2. 其次 metadata.structuredContent（MCP structured output）；
-//   3. 纯文本若整体是合法 JSON，则解析为 JSON 值；
-//   4. 否则返回字符串；
-//   5. 含图片时返回 { text, images: [{ path, mimeType }] }，不把 base64 送进程序。
+// MOSS 工具返回文本 + 图片路径；PTC 内优先拿到结构化数据（完整、不按展示文本截断）：
+//   1. metadata.value（工具的 typed-return 约定，如 web search/fetch、terminal raw）；
+//   2. metadata.structured（MCP structured output，AgentEngine 实际写入的键）；
+//   3. metadata.structuredContent（兼容 MCP 规范命名）；
+//   4. 纯文本整体为合法 JSON → 解析为 JSON 值；
+//   5. 否则返回完整文本字符串；
+//   6. 含图片时返回 { text, images: [{ path, mimeType }] }，不把 base64 送进程序。
+// 所有结构化值都会经过 sanitizeForJson，避免 Date/undefined 等导致调用失败。
 
 import type { ToolResult } from '../../types';
-import {
-  isLosslessJsonValue,
-  MAX_TOOL_RESULT_BYTES,
-  truncateToBytes,
-  type CodeValue,
-} from './protocol';
+import { sanitizeForJson } from './sanitize';
+import { truncateToBytes, type CodeValue } from './protocol';
 
 /** 程序内可 catch 的工具失败（宿主回传为同 name 的错误） */
 export class ToolCallError extends Error {
@@ -49,14 +47,14 @@ export function toolResultImages(result: ToolResult): Array<{ path?: string; mim
   return out;
 }
 
-/** 成功结果 → 程序可见值（带字节上限保护） */
+/** 成功结果 → 程序可见值（结构化优先；不按输出预算截断） */
 export function toolResultToCodeValue(result: ToolResult): CodeValue {
   const meta = result.metadata;
-  if (meta && 'value' in meta && isLosslessJsonValue(meta.value)) {
-    return capValue(meta.value);
-  }
-  if (meta && 'structuredContent' in meta && isLosslessJsonValue(meta.structuredContent)) {
-    return capValue(meta.structuredContent);
+  if (meta) {
+    for (const candidate of [meta.value, meta.structured, meta.structuredContent]) {
+      if (candidate === undefined) continue;
+      return sanitizeForJson(candidate).value;
+    }
   }
 
   const text = toolResultText(result);
@@ -67,43 +65,36 @@ export function toolResultToCodeValue(result: ToolResult): CodeValue {
       if (img.path) item.path = img.path;
       return item;
     });
-    return capValue({
-      text: truncateToBytes(text, MAX_TOOL_RESULT_BYTES),
-      images: imagesForCode,
-    });
+    return { text, images: imagesForCode };
   }
 
-  const capped = truncateToBytes(text, MAX_TOOL_RESULT_BYTES);
-  const parsed = tryParseJson(capped);
+  const parsed = tryParseJson(text);
   if (parsed !== undefined) return parsed;
-  return capped;
+  return text;
 }
 
 function tryParseJson(text: string): CodeValue | undefined {
   const trimmed = text.trim();
   if (!trimmed) return undefined;
-  if (!(trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('"') || /^-?\d/.test(trimmed) || trimmed === 'true' || trimmed === 'false' || trimmed === 'null')) {
+  if (
+    !(
+      trimmed.startsWith('{') ||
+      trimmed.startsWith('[') ||
+      trimmed.startsWith('"') ||
+      /^-?\d/.test(trimmed) ||
+      trimmed === 'true' ||
+      trimmed === 'false' ||
+      trimmed === 'null'
+    )
+  ) {
     return undefined;
   }
   try {
     const parsed: unknown = JSON.parse(trimmed);
-    return isLosslessJsonValue(parsed) ? parsed : undefined;
+    return sanitizeForJson(parsed).value;
   } catch {
     return undefined;
   }
-}
-
-function capValue(value: CodeValue): CodeValue {
-  const json = JSON.stringify(value);
-  if (Buffer.byteLength(json, 'utf8') <= MAX_TOOL_RESULT_BYTES) return value;
-  if (typeof value === 'string') return truncateToBytes(value, MAX_TOOL_RESULT_BYTES);
-  if (Array.isArray(value)) {
-    return { truncated: true, note: `result exceeded ${MAX_TOOL_RESULT_BYTES} bytes`, preview: truncateToBytes(json, MAX_TOOL_RESULT_BYTES) };
-  }
-  if (value && typeof value === 'object') {
-    return { truncated: true, note: `result exceeded ${MAX_TOOL_RESULT_BYTES} bytes`, preview: truncateToBytes(json, MAX_TOOL_RESULT_BYTES) };
-  }
-  return value;
 }
 
 /** 错误结果 → 程序内错误消息（保留工具名与可读细节） */

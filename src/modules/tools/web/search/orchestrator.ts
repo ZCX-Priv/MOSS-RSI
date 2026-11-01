@@ -374,7 +374,8 @@ export async function runSearch(params: SearchParams): Promise<SearchPage> {
     const prefix = slice.slice(0, enrichCount);
     const result = await enrichItems(prefix, {
       query: effectiveQuery,
-      maxChars: pageSize <= 10 ? 320 : 240,
+      // 结构化值（PTC）需要更完整的正文摘录；展示文本仍按 320/240 字符截断
+      maxChars: 1_000,
       deadlineAt,
       signal: params.signal,
       proxyUrl: params.proxyUrl,
@@ -406,6 +407,7 @@ export async function runSearch(params: SearchParams): Promise<SearchPage> {
     offset,
     pageSize,
     items: slice,
+    pool: currentPool.items.slice(),
     totalAvailable: currentPool.items.length,
     hasMore,
     ...(hasMore ? { nextOffset } : {}),

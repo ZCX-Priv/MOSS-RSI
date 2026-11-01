@@ -15,10 +15,9 @@ export type CodeValue =
   | CodeValue[]
   | { [key: string]: CodeValue };
 
-/** 单次程序执行的预算 */
+/** 单次程序执行的预算（PTC 不设输出字节预算，仅有协议帧崩溃保护） */
 export interface RunLimits {
   timeoutMs: number;
-  maxOutputBytes: number;
   maxCodeChars: number;
   maxParallelSubCalls: number;
 }
@@ -54,6 +53,8 @@ export type ChildToHost =
       /** 原始 UISpec（宿主 validate.ts 净化后才可使用） */
       ui?: unknown;
       uiDiagnostics?: unknown;
+      /** 返回值自动净化记录（undefined/Date/Map/循环引用等） */
+      valueWarnings?: unknown;
       nestedCalls?: number;
       hasUi?: boolean;
     }
@@ -65,16 +66,16 @@ export type CodeFailureKind =
   | 'timeout'
   | 'abort'
   | 'worker-exit'
-  | 'invalid-output'
+  | 'syntax'
   | 'output-limit'
   | 'protocol'
   | 'sandbox-unavailable';
 
-/** 单帧字节上限 */
-export const MAX_FRAME_BYTES = 1_048_576;
-
-/** 单次工具结果进入程序前的字节上限（防止把巨型文件直接塞进子进程） */
-export const MAX_TOOL_RESULT_BYTES = 524_288;
+/**
+ * 单帧字节上限：崩溃保护，不是输出预算。
+ * PTC 返回值/工具结果不截断；只有超过该硬上限才明确报错。
+ */
+export const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 /** 控制帧 call id 形状 */
 export const CALL_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;

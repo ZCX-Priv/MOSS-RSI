@@ -2173,7 +2173,6 @@ export function ToolsSettings() {
   // 代码模式（PTC + Intelligent UI）草稿
   const [codeTimeoutDraft, setCodeTimeoutDraft] = useState('');
   const [codeMaxCharsDraft, setCodeMaxCharsDraft] = useState('');
-  const [codeMaxOutputDraft, setCodeMaxOutputDraft] = useState('');
   const [codeMaxParallelDraft, setCodeMaxParallelDraft] = useState('');
 
   /** 编辑对话框保存：写配置成功后 toast 并关闭 */
@@ -2191,7 +2190,6 @@ export function ToolsSettings() {
     uiEnabled: true,
     timeoutMs: 120_000,
     maxCodeChars: 20_000,
-    maxOutputBytes: 262_144,
     maxParallelSubCalls: 10,
   };
 
@@ -2203,9 +2201,8 @@ export function ToolsSettings() {
   useEffect(() => {
     setCodeTimeoutDraft(String(Math.round(codeMode.timeoutMs / 1000)));
     setCodeMaxCharsDraft(String(codeMode.maxCodeChars));
-    setCodeMaxOutputDraft(String(Math.round(codeMode.maxOutputBytes / 1024)));
     setCodeMaxParallelDraft(String(codeMode.maxParallelSubCalls));
-  }, [codeMode.timeoutMs, codeMode.maxCodeChars, codeMode.maxOutputBytes, codeMode.maxParallelSubCalls]);
+  }, [codeMode.timeoutMs, codeMode.maxCodeChars, codeMode.maxParallelSubCalls]);
 
   const patchCodeMode = async (patch: Partial<CodeModeConfig>) => {
     if (!agentCfg) return;
@@ -2419,36 +2416,6 @@ export function ToolsSettings() {
               }}
               className="h-8 w-28 shrink-0 text-right"
               aria-label={t('settings.tools.codeModeMaxChars')}
-            />
-          </div>
-
-          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxOutput')}</span>
-              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxOutputDesc')}</span>
-            </div>
-            <Input
-              type="number"
-              min={1}
-              max={1024}
-              value={codeMaxOutputDraft}
-              disabled={!codeMode.enabled}
-              onChange={(e) => setCodeMaxOutputDraft(e.target.value)}
-              onBlur={() =>
-                commitCodeNumber(
-                  codeMaxOutputDraft,
-                  Math.round(codeMode.maxOutputBytes / 1024),
-                  1,
-                  1024,
-                  (n) => patchCodeMode({ maxOutputBytes: n * 1024 }),
-                  (n) => setCodeMaxOutputDraft(String(n)),
-                )
-              }
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur();
-              }}
-              className="h-8 w-24 shrink-0 text-right"
-              aria-label={t('settings.tools.codeModeMaxOutput')}
             />
           </div>
 

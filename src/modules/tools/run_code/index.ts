@@ -43,7 +43,6 @@ export interface CodeRunMetadata {
 }
 
 const MAX_METADATA_BYTES = 384 * 1024;
-const MAX_TEXT_RESULT_BYTES = 128 * 1024;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -128,7 +127,6 @@ export default {
       cwd: ctx.cwd,
       limits: {
         timeoutMs,
-        maxOutputBytes: codeMode.maxOutputBytes,
         maxCodeChars: codeMode.maxCodeChars,
         maxParallelSubCalls: codeMode.maxParallelSubCalls,
       },
@@ -155,6 +153,7 @@ export default {
       hostFailed,
       error: hostResult.error,
       value: hostResult.value,
+      valueWarnings: hostResult.valueWarnings,
       logs: hostResult.logs,
       uiDiagnostics,
       uiFatal: validation.fatal,
@@ -182,7 +181,7 @@ export default {
     });
 
     return {
-      content: [{ type: 'text', text: truncateToBytes(text, MAX_TEXT_RESULT_BYTES) }],
+      content: [{ type: 'text', text }],
       isError: hostFailed,
       metadata: { codeRun: metadata },
     };
@@ -221,6 +220,7 @@ interface FormatInput {
   hostFailed: boolean;
   error?: { kind: CodeFailureKind; message: string };
   value?: CodeValue;
+  valueWarnings?: Array<{ path: string; reason: string }>;
   logs: string[];
   uiDiagnostics: UIDiagnostic[];
   uiFatal: boolean;
@@ -241,8 +241,13 @@ function formatResultText(input: FormatInput): string {
     if (e?.kind === 'abort') {
       parts.push('程序被用户/父 run 中止。');
     }
+    if (e?.kind === 'syntax') {
+      parts.push('这是代码结构/语法问题：按上面的行号只修改对应语句，不要在未定位前整段重写。');
+    }
     if (e?.kind === 'output-limit') {
-      parts.push('返回值/日志超过输出上限。请裁剪返回值或减少 console 输出。');
+      parts.push(
+        '返回值超过协议帧硬上限（64MB，仅崩溃保护，不是输出预算）。请只返回必要字段，或先在程序内聚合/裁剪。',
+      );
     }
   } else {
     if (input.kind === 'ui') {
@@ -267,6 +272,16 @@ function formatResultText(input: FormatInput): string {
     const shown = input.uiDiagnostics.slice(0, 8).map((d) => `${d.code} @ ${d.path}${d.detail ? `: ${d.detail}` : ''}`);
     parts.push(`[UI 诊断]\n${shown.join('\n')}${input.uiDiagnostics.length > 8 ? `\n… 共 ${input.uiDiagnostics.length} 条` : ''}`);
   }
+  if (input.valueWarnings && input.valueWarnings.length > 0) {
+    const shown = input.valueWarnings
+      .slice(0, 8)
+      .map((warning) => `${warning.path}: ${warning.reason}`);
+    parts.push(
+      `[返回值净化]\n${shown.join('\n')}${
+        input.valueWarnings.length > 8 ? `\n… 共 ${input.valueWarnings.length} 条` : ''
+      }`,
+    );
+  }
   if (input.logs.length > 0) {
     parts.push(`--- 日志 ---\n${input.logs.join('\n')}`);
   }
@@ -276,10 +291,36 @@ function formatResultText(input: FormatInput): string {
 function formatValue(value: CodeValue): string {
   if (typeof value === 'string') return value;
   try {
-    return JSON.stringify(value, null, 2);
+    const pretty = JSON.stringify(value, null, 2);
+    if (pretty.length <= 65_536) return pretty;
+    // 大结果用紧凑 JSON：避免 pretty-print 的空白把上下文再撑大一圈
+    return JSON.stringify(value);
   } catch {
     return String(value);
   }
+}
+
+/** metadata 里最多保留的日志字节数（仅 UI 展示；正文里的日志不受此限制） */
+const MAX_METADATA_LOG_BYTES = 128 * 1024;
+
+/** 按字节预算裁日志（避免对超大日志反复 JSON.stringify） */
+function trimLogsForMetadata(logs: string[]): string[] {
+  const out: string[] = [];
+  let used = 0;
+  for (const line of logs) {
+    const bytes = Buffer.byteLength(line, 'utf8') + 1;
+    if (used + bytes <= MAX_METADATA_LOG_BYTES) {
+      out.push(line);
+      used += bytes;
+      continue;
+    }
+    const remain = MAX_METADATA_LOG_BYTES - used;
+    if (remain > 0) {
+      out.push(`${truncateToBytes(line, remain)}\n…（metadata 日志已裁剪）`);
+    }
+    break;
+  }
+  return out;
 }
 
 /** metadata 体积保护：先裁日志，再裁 calls 预览；uiSpec 保留（自身已 ≤256KB）。 */
@@ -287,10 +328,7 @@ function capMetadata(meta: CodeRunMetadata): CodeRunMetadata {
   const bytes = () => Buffer.byteLength(JSON.stringify(meta), 'utf8');
   if (bytes() <= MAX_METADATA_BYTES) return meta;
 
-  let logs = meta.logs;
-  while (logs.length > 1 && byteLengthOfObject({ ...meta, logs }) > MAX_METADATA_BYTES) {
-    logs = logs.slice(0, Math.max(1, Math.floor(logs.length / 2)));
-  }
+  const logs = trimLogsForMetadata(meta.logs);
   meta = { ...meta, logs, truncated: true };
 
   if (byteLengthOfObject(meta) > MAX_METADATA_BYTES) {
