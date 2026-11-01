@@ -2,7 +2,7 @@
 // 发送视图构建测试：ephemeral 尾部消息（L2 记忆召回）、锚定消息恒保留、
 // breakdown 的 rules/memory 构成统计。
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

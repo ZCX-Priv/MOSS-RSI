@@ -2,7 +2,7 @@
 // 「重新生成」重跑起点：在完整历史里挑选最后一条**真实用户消息**
 // （排除 env-context / memory-l1 等带 name 的锚定消息，以及已软删除消息）。
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'bun:test';
 import { pickLastUserMessage } from './engine';
 import type { AgentMessage } from '../contracts';
 

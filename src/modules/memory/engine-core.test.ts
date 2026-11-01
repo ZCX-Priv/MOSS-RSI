@@ -2,7 +2,7 @@
 // 记忆引擎核心逻辑单元测试：分词器（中文 bigram）、内容哈希、宫殿存储 CRUD、
 // L2 双翼检索覆盖（user wing）、按消息切换的召回去重语义。
 
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

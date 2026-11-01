@@ -36,7 +36,7 @@ export function SpreadsheetPreview({ buffer, ext, fileName }: SpreadsheetPreview
     void (async () => {
       try {
         // 动态 import（SheetJS 体积较大，仅在打开非 OOXML 表格时加载）
-        const XLSX = await import('xlsx');
+        const XLSX = await import('@e965/xlsx');
         const wb = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true });
         const sheets: SheetModel[] = wb.SheetNames.map((name) => {
           const ws = wb.Sheets[name];

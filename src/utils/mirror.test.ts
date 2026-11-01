@@ -1,7 +1,7 @@
 // src/utils/mirror.test.ts
 // 多镜像测速选源的单测：全程注入 fetch stub，不触网。
 
-import { describe, test, expect, beforeEach } from 'vitest';
+import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   GITHUB_ASSET_MIRRORS,
   cachedRankMirrors,

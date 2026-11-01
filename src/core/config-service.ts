@@ -88,26 +88,26 @@ const providerConfigSchema = z
       // kind='voice'：必须带 voiceEngine、format 固定 'voice'、无模型
       if (!p.voiceEngine) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: "voice provider requires 'voiceEngine' (openai-transcriptions)",
         });
       }
       if (p.format !== 'voice') {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: "voice provider format must be 'voice'",
         });
       }
       if (p.models.length > 0) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: 'voice provider must not carry models',
         });
       }
     } else if (p.voiceEngine !== undefined) {
       // 模型服务商（kind='model' 或缺省）不得携带 voiceEngine
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: 'custom',
         message: "voiceEngine is only allowed on kind='voice' providers",
       });
     }
@@ -133,7 +133,7 @@ const filesysSchema = z.object({
       timeoutMs: z.number().int().positive().default(3000),
       totalTimeoutMs: z.number().int().positive().default(600),
     })
-    .default({}),
+    .prefault({}),
 });
 
 // safety：统一权限决策配置（内层全 .default() 自愈，旧 config.json 缺字段自动补全）
@@ -148,11 +148,11 @@ const safetySchema = z.object({
       deny: z.array(z.string()).default([]),
       ask: z.array(z.string()).default([]),
     })
-    .default({}),
+    .prefault({}),
   protectedPaths: z.array(z.string()).default(['~/.ssh', '~/.gnupg', '~/.aws']),
 });
 
-// logs：日志系统配置（内层全 .default() 自愈；外层 .default({}) 使旧 config.json 缺段自动补全）
+// logs：日志系统配置（内层全 .default() 自愈；外层 .prefault({}) 使旧 config.json 缺段自动补全）
 const logsSchema = z.object({
   level: logLevelSchema.default('info'),
   retentionDays: z.number().int().min(1).max(365).default(14),
@@ -177,7 +177,7 @@ const contextSchema = z.object({
       cooldownGrowthTokens: z.number().int().min(0).default(2000),
       cooldownMs: z.number().int().min(0).default(60000),
     })
-    .default({}),
+    .prefault({}),
   toolPruning: z
     .object({
       enabled: z.boolean().default(true),
@@ -185,19 +185,19 @@ const contextSchema = z.object({
       keepHeadChars: z.number().int().positive().default(4096),
       keepTailChars: z.number().int().positive().default(1024),
     })
-    .default({}),
+    .prefault({}),
   healer: z
     .object({
       enabled: z.boolean().default(true),
       toolNameFuzzy: z.boolean().default(true),
       schemaFix: z.boolean().default(true),
     })
-    .default({}),
+    .prefault({}),
   telemetry: z
     .object({
       enabled: z.boolean().default(true),
     })
-    .default({}),
+    .prefault({}),
   // 文件索引模块（三引擎，默认全关；图谱/SAG 依赖索引引擎，开启时联动）
   fileIndex: z
     .object({
@@ -205,22 +205,22 @@ const contextSchema = z.object({
         .object({
           enabled: z.boolean().default(false),
         })
-        .default({}),
+        .prefault({}),
       graph: z
         .object({
           enabled: z.boolean().default(false),
         })
-        .default({}),
+        .prefault({}),
       sag: z
         .object({
           enabled: z.boolean().default(false),
           llmModel: z.string().default('inherit'),
           llmMaxChunks: z.number().int().min(0).max(100000).default(2000),
         })
-        .default({}),
+        .prefault({}),
       ignore: z.array(z.string()).default([]),
     })
-    .default({}),
+    .prefault({}),
   // 用户规则引擎（always/paths 双加载模式）
   rules: z
     .object({
@@ -228,14 +228,14 @@ const contextSchema = z.object({
       maxAlwaysTokens: z.number().int().positive().default(4000),
       maxInjectPerSession: z.number().int().positive().min(1).max(100).default(20),
     })
-    .default({}),
+    .prefault({}),
   // 生命周期钩子引擎（终端命令 + TS 模块）
   hooks: z
     .object({
       enabled: z.boolean().default(true),
       defaultTimeout: z.number().int().positive().default(10000),
     })
-    .default({}),
+    .prefault({}),
   // 记忆引擎（记忆宫殿 + verbatim/蒸馏混合 + BM25 检索）
   memory: z
     .object({
@@ -247,7 +247,7 @@ const contextSchema = z.object({
       l1ImportanceThreshold: z.number().min(0).max(1).default(0.75),
       l1MaxEntries: z.number().int().min(1).max(100).default(20),
     })
-    .default({}),
+    .prefault({}),
   // 图片发送前优化（TinyPNG 式；sharp 不可用时自动降级为不压缩发送原图）
   imageOptimization: z
     .object({
@@ -260,20 +260,20 @@ const contextSchema = z.object({
       skipBelowBytes: z.number().int().min(0).default(64 * 1024),
       maxTotalImageBytes: z.number().int().min(0).default(4 * 1024 * 1024),
     })
-    .default({}),
+    .prefault({}),
   // 思考内容回传（计入估算对所有 provider 生效；回传按 provider 语义）
   thinking: z
     .object({
       replayOpenAICompat: z.boolean().default(false),
     })
-    .default({}),
+    .prefault({}),
   // 上下文过半提醒（每轮注入、不持久化；占用 ≥ ratio 时提醒 AI 交接并自主压缩）
   pressureReminder: z
     .object({
       enabled: z.boolean().default(true),
       ratio: z.number().min(0.1).max(0.95).default(0.5),
     })
-    .default({}),
+    .prefault({}),
   // 单次请求体字节上限（256 KiB–64 MiB；默认 8 MiB）。
   // 旧 config.json 缺该字段时由 .default() 自动补全；热更新经 config:changed 生效。
   maxRequestBytes: z
@@ -314,7 +314,7 @@ const appConfigSchema = z.object({
     enabled: z.boolean(),
   }),
   // 日志系统配置（缺段时自动补全默认值；旧版 daemon.logLevel 在读取前迁移）
-  logs: logsSchema.default({}),
+  logs: logsSchema.prefault({}),
   update: z.object({
     autoCheck: z.boolean(),
     channel: z.enum(['stable', 'beta']),
@@ -377,7 +377,7 @@ const appConfigSchema = z.object({
       lanPasswordEnabled: z.boolean().default(true),
       lanIpOverride: z.string().default(''),
     })
-    .default({}),
+    .prefault({}),
   // fileHistory 可选，缺失时用默认值（向后兼容旧配置）
   fileHistory: fileHistorySchema.optional(),
   // filesys 可选，内层全 .default() 自愈补全（向后兼容旧配置）
@@ -394,7 +394,7 @@ const appConfigSchema = z.object({
       localModel: z.string().default(''),
       language: z.string().default('auto'),
     })
-    .default({}),
+    .prefault({}),
 });
 
 /** 旧版搜索服务商（已彻底移除）：加载时过滤，避免整份 api.json 校验失败 */

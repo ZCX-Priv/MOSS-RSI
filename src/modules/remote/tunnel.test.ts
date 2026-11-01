@@ -1,7 +1,7 @@
 // src/modules/remote/tunnel.test.ts
 // cloudflared 资产名推导与 Termux 判定的纯函数单测（不 spawn、不触网）。
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect } from 'bun:test';
 import { cloudflaredAssetOf, isTermux } from './tunnel';
 
 describe('cloudflaredAssetOf：三端资产名', () => {

@@ -1,8 +1,10 @@
 // read/handlers/office-markdown.ts
 // 现代 Office 容器（OOXML / ODF / RTF）→ Markdown 转换 + 内嵌媒体抽取。
 //
-// 技术路线：officeparser v7 的 parseOffice(buf, { fileType, extractAttachments:true }) 得到 AST，
-// 再用 ast.to('md', { includeImages, onNode }) 生成 Markdown。图片节点默认会被内联成 base64 data URI，
+// 技术路线：officeparser v8 的 parseOffice(buf, { fileType, extractAttachments:true }) 得到 AST。
+// v8 把 includeImages 由布尔改为模式字符串：'image-only' 等价旧版 includeImages:true，
+// 保证图片节点仍会进入渲染管线并被 onNode 回调接管（自己落盘 + 输出本地路径）。
+// 再用 ast.to('md', { includeImages, onNode }) 生成 Markdown。内置渲染会内联 base64 data URI，
 // 这里用 onNode 回调覆写渲染：把附件字节落到 <产物>/assets/，并在原位置输出 ![alt](<绝对路径>)，
 // 从而保证图片出现在「对应的内容处」且路径可被 read 工具直接读取。
 //
@@ -195,7 +197,7 @@ export async function convertModernOffice(input: ModernConvertInput): Promise<Mo
     return ref ? `![${escapeAlt(att.altText ?? meta.altText ?? 'image')}](${ref})` : '';
   };
 
-  const { value } = await ast.to('md', { includeImages: true, includeFormatting: false, onNode });
+  const { value } = await ast.to('md', { includeImages: 'image-only', includeFormatting: false, onNode });
   let markdown = typeof value === 'string' ? value : String(value ?? '');
 
   // 视频本体抽取（ZIP 容器）

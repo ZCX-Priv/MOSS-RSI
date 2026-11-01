@@ -2,7 +2,7 @@
 // 请求体字节护栏测试：序列化字节统计、降级顺序（先丢图后截断）、
 // 结构完整性（不删消息、保住 tool_calls ↔ tool 配对）、入参不可变。
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect } from 'bun:test';
 import { serializedBodyBytes, shrinkUnifiedRequest } from './request-budget';
 import type { UnifiedMessage } from './types';
 

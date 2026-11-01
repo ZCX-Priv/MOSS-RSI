@@ -1,7 +1,7 @@
 // src/modules/context/budgeter/estimator.test.ts
 // 字节估算测试：UTF-8 口径（含多字节 CJK 与 emoji 代理对）、消息级文本字节构成。
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect } from 'bun:test';
 import { estimateTextBytes, estimateMessageBytes } from './estimator';
 import type { ContextMessage } from '../types';
 

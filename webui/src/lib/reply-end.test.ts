@@ -1,7 +1,7 @@
 // webui/src/lib/reply-end.test.ts
 // 「一段 AI 回复的结尾」判定：复制按钮每条回复结尾都带；重新生成/诊断仅最新一段。
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from 'bun:test';
 import { computeReplyEnds, isReplyEnd, isSystemCard } from './reply-end';
 import type { TaskMessage } from '@/types/api';
 

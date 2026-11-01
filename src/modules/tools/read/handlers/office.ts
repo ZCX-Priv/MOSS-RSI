@@ -44,9 +44,9 @@ interface XlsxWorkbook {
   Sheets: Record<string, unknown>;
 }
 
-/** xlsx 模块类型 */
+/** xlsx 模块类型（@e965/xlsx 的 ESM 构建不内置 fs，改用 read + 自读字节） */
 interface XlsxModule {
-  readFile(path: string, options?: { cellDates?: boolean }): XlsxWorkbook;
+  read(data: Uint8Array, options?: { type?: 'buffer' | 'array'; cellDates?: boolean }): XlsxWorkbook;
   utils: {
     sheet_to_csv(sheet: unknown, options?: { blankrows?: boolean }): string;
   };
@@ -360,12 +360,15 @@ async function readLegacyDoc(path: string): Promise<ToolResult> {
 }
 
 /**
- * 读取 Excel 文件（xls/xlsx/xlsm/xltx/xltm），用 xlsx 库转为 CSV 格式，每个工作表分块展示。
+ * 读取 Excel 文件（xls/xlsx/xlsm/xltx/xltm），用 SheetJS（@e965/xlsx 维护分支）转为 CSV，
+ * 每个工作表分块展示。
  */
 async function readXlsx(path: string): Promise<ToolResult> {
-  const mod = (await import('xlsx')) as XlsxModule & { default?: XlsxModule };
+  const mod = (await import('@e965/xlsx')) as XlsxModule & { default?: XlsxModule };
   const XLSX: XlsxModule = mod.default ?? mod;
-  const wb = XLSX.readFile(path, { cellDates: true });
+  // @e965/xlsx 的 ESM 入口不自动接入 Node fs（readFile 在 Bun 下会失败），
+  // 这里自读字节走 read(type:'buffer')，行为与旧 xlsx.readFile 等价。
+  const wb = XLSX.read(readFileSync(path), { type: 'buffer', cellDates: true });
 
   const lines: string[] = [
     `Workbook: ${basename(path)}`,
@@ -396,7 +399,9 @@ async function readWithOfficeParser(path: string, ext: string): Promise<ToolResu
 
   const buf = readFileSync(path);
   const ast = await parseOffice(buf);
-  const text = ast.toText();
+  // officeparser v8 移除了 ast.toText()，统一走 ast.to('text') 并取 value
+  const { value } = await ast.to('text');
+  const text = typeof value === 'string' ? value : String(value ?? '');
 
   const label = ext.slice(1).toUpperCase();
   return {

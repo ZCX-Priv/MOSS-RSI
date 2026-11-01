@@ -9,6 +9,9 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolConfigManifest } from './types';
 
+/** zod v4 的 ZodRawShape 是只读映射，内部构建/校验用可写别名 */
+type ZodShape = Record<string, z.ZodTypeAny>;
+
 export interface ToolConfigSpec {
   /** 该工具配置字段的 Zod schema（不含 .default()） */
   schema: z.ZodObject<z.ZodRawShape>;
@@ -74,8 +77,8 @@ function loadToolConfigsFromDir(dir: string): Map<string, ToolConfigSpec> {
  * - 所有字段带 .default(默认值)：旧 config.json 缺新增字段时自动补全，
  *   避免整体校验失败回退默认配置（升级兼容）
  */
-export function buildConfigShape(config: ToolConfigManifest): z.ZodRawShape {
-  const shape: z.ZodRawShape = {};
+export function buildConfigShape(config: ToolConfigManifest): ZodShape {
+  const shape: ZodShape = {};
   // enabled 自动注入（所有工具都有；缺省视为启用）
   shape.enabled = z.boolean().default(true);
 
@@ -112,7 +115,7 @@ function buildConfigSpec(config: ToolConfigManifest): ToolConfigSpec {
  * - requireConfirmation 不在 shape 时也允许 boolean（通用行为覆盖，registry.execute 读取）
  */
 export function validateToolConfigPatch(
-  shape: z.ZodRawShape,
+  shape: ZodShape,
   patch: Record<string, unknown>,
 ): { ok: true } | { ok: false; error: string } {
   for (const [key, value] of Object.entries(patch)) {
@@ -181,9 +184,10 @@ const TOOL_CONFIGS: Map<string, ToolConfigSpec> = BUILTIN_DIR
  * 包含未知工具字段而校验失败。
  */
 export function buildToolsSchema() {
-  const shape: z.ZodRawShape = {};
+  const shape: ZodShape = {};
   for (const [name, spec] of TOOL_CONFIGS) {
-    shape[name] = spec.schema.default(spec.defaults);
+    // 动态配置默认值整体是 Record<string, unknown>，按 unknown 输出类型套用 default
+    shape[name] = (spec.schema as z.ZodTypeAny).default(spec.defaults);
   }
   return z.object(shape).passthrough();
 }

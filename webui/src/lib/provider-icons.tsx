@@ -4,60 +4,61 @@
 // - 仅使用默认 Mono 变体（跟随 currentColor，自动适配明暗主题）
 
 import type { ComponentType } from 'react';
-// 深导入（每图标默认导出）：与桶导入 `@lobehub/icons` 的 { X } 语义完全一致
-// （es/icons.js 内即 `export { default as OpenAI } from "./OpenAI"`）。
-// 必须深导入的原因：桶导入会让 Vite dev 把整包 500+ 图标预构建成一个 ~25MB 依赖块
-// （伴生 ~13MB sourcemap），F12 打开时 DevTools 需解析该巨型产物 → 内容面板白屏/卡死；
-// 构建版被 rollup tree-shake 到 ~0.8MB，故 :7766 无此问题（白屏为 dev 专属）。
-import OpenAI from '@lobehub/icons/es/OpenAI';
-import Anthropic from '@lobehub/icons/es/Anthropic';
-import Claude from '@lobehub/icons/es/Claude';
-import Google from '@lobehub/icons/es/Google';
-import Gemini from '@lobehub/icons/es/Gemini';
-import DeepSeek from '@lobehub/icons/es/DeepSeek';
-import Qwen from '@lobehub/icons/es/Qwen';
-import Kimi from '@lobehub/icons/es/Kimi';
-import Moonshot from '@lobehub/icons/es/Moonshot';
-import Zhipu from '@lobehub/icons/es/Zhipu';
-import ChatGLM from '@lobehub/icons/es/ChatGLM';
-import Doubao from '@lobehub/icons/es/Doubao';
-import ByteDance from '@lobehub/icons/es/ByteDance';
-import Minimax from '@lobehub/icons/es/Minimax';
-import Mistral from '@lobehub/icons/es/Mistral';
-import Meta from '@lobehub/icons/es/Meta';
-import XAI from '@lobehub/icons/es/XAI';
-import Grok from '@lobehub/icons/es/Grok';
-import Groq from '@lobehub/icons/es/Groq';
-import Together from '@lobehub/icons/es/Together';
-import Fireworks from '@lobehub/icons/es/Fireworks';
-import Perplexity from '@lobehub/icons/es/Perplexity';
-import Cohere from '@lobehub/icons/es/Cohere';
-import OpenRouter from '@lobehub/icons/es/OpenRouter';
-import Ollama from '@lobehub/icons/es/Ollama';
-import SiliconCloud from '@lobehub/icons/es/SiliconCloud';
-import Azure from '@lobehub/icons/es/Azure';
-import Aws from '@lobehub/icons/es/Aws';
-import Bedrock from '@lobehub/icons/es/Bedrock';
-import HuggingFace from '@lobehub/icons/es/HuggingFace';
-import AlibabaCloud from '@lobehub/icons/es/AlibabaCloud';
-import Volcengine from '@lobehub/icons/es/Volcengine';
-import ZeroOne from '@lobehub/icons/es/ZeroOne';
-import Nvidia from '@lobehub/icons/es/Nvidia';
-import Github from '@lobehub/icons/es/Github';
-import LmStudio from '@lobehub/icons/es/LmStudio';
-import Baidu from '@lobehub/icons/es/Baidu';
-import Tencent from '@lobehub/icons/es/Tencent';
-import Hunyuan from '@lobehub/icons/es/Hunyuan';
-import SenseNova from '@lobehub/icons/es/SenseNova';
-import Stepfun from '@lobehub/icons/es/Stepfun';
-import Midjourney from '@lobehub/icons/es/Midjourney';
-import Stability from '@lobehub/icons/es/Stability';
-import Cloudflare from '@lobehub/icons/es/Cloudflare';
-import Vercel from '@lobehub/icons/es/Vercel';
-import DeepInfra from '@lobehub/icons/es/DeepInfra';
-import Novita from '@lobehub/icons/es/Novita';
-import Nebius from '@lobehub/icons/es/Nebius';
-import GiteeAI from '@lobehub/icons/es/GiteeAI';
+// 深导入 Mono 组件（每图标默认导出即该组件）：与桶导入 `@lobehub/icons` 的 { X } 语义一致。
+// 必须直达 components/Mono 的原因：
+// 1) 桶导入会让 Vite dev 把整包 500+ 图标预构建成一个 ~25MB 依赖块（伴生 ~13MB sourcemap），
+//    F12 打开时 DevTools 需解析该巨型产物 → 内容面板白屏/卡死；
+// 2) 品牌 index 会连带引入 Avatar / Combine / Text，而它们依赖 @lobehub/ui（peer，本项目
+//    不安装）与 antd-style→antd；只引 Mono 后整条依赖链消失（图标源码仅依赖 react）。
+import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono';
+import Anthropic from '@lobehub/icons/es/Anthropic/components/Mono';
+import Claude from '@lobehub/icons/es/Claude/components/Mono';
+import Google from '@lobehub/icons/es/Google/components/Mono';
+import Gemini from '@lobehub/icons/es/Gemini/components/Mono';
+import DeepSeek from '@lobehub/icons/es/DeepSeek/components/Mono';
+import Qwen from '@lobehub/icons/es/Qwen/components/Mono';
+import Kimi from '@lobehub/icons/es/Kimi/components/Mono';
+import Moonshot from '@lobehub/icons/es/Moonshot/components/Mono';
+import Zhipu from '@lobehub/icons/es/Zhipu/components/Mono';
+import ChatGLM from '@lobehub/icons/es/ChatGLM/components/Mono';
+import Doubao from '@lobehub/icons/es/Doubao/components/Mono';
+import ByteDance from '@lobehub/icons/es/ByteDance/components/Mono';
+import Minimax from '@lobehub/icons/es/Minimax/components/Mono';
+import Mistral from '@lobehub/icons/es/Mistral/components/Mono';
+import Meta from '@lobehub/icons/es/Meta/components/Mono';
+import XAI from '@lobehub/icons/es/XAI/components/Mono';
+import Grok from '@lobehub/icons/es/Grok/components/Mono';
+import Groq from '@lobehub/icons/es/Groq/components/Mono';
+import Together from '@lobehub/icons/es/Together/components/Mono';
+import Fireworks from '@lobehub/icons/es/Fireworks/components/Mono';
+import Perplexity from '@lobehub/icons/es/Perplexity/components/Mono';
+import Cohere from '@lobehub/icons/es/Cohere/components/Mono';
+import OpenRouter from '@lobehub/icons/es/OpenRouter/components/Mono';
+import Ollama from '@lobehub/icons/es/Ollama/components/Mono';
+import SiliconCloud from '@lobehub/icons/es/SiliconCloud/components/Mono';
+import Azure from '@lobehub/icons/es/Azure/components/Mono';
+import Aws from '@lobehub/icons/es/Aws/components/Mono';
+import Bedrock from '@lobehub/icons/es/Bedrock/components/Mono';
+import HuggingFace from '@lobehub/icons/es/HuggingFace/components/Mono';
+import AlibabaCloud from '@lobehub/icons/es/AlibabaCloud/components/Mono';
+import Volcengine from '@lobehub/icons/es/Volcengine/components/Mono';
+import ZeroOne from '@lobehub/icons/es/ZeroOne/components/Mono';
+import Nvidia from '@lobehub/icons/es/Nvidia/components/Mono';
+import Github from '@lobehub/icons/es/Github/components/Mono';
+import LmStudio from '@lobehub/icons/es/LmStudio/components/Mono';
+import Baidu from '@lobehub/icons/es/Baidu/components/Mono';
+import Tencent from '@lobehub/icons/es/Tencent/components/Mono';
+import Hunyuan from '@lobehub/icons/es/Hunyuan/components/Mono';
+import SenseNova from '@lobehub/icons/es/SenseNova/components/Mono';
+import Stepfun from '@lobehub/icons/es/Stepfun/components/Mono';
+import Midjourney from '@lobehub/icons/es/Midjourney/components/Mono';
+import Stability from '@lobehub/icons/es/Stability/components/Mono';
+import Cloudflare from '@lobehub/icons/es/Cloudflare/components/Mono';
+import Vercel from '@lobehub/icons/es/Vercel/components/Mono';
+import DeepInfra from '@lobehub/icons/es/DeepInfra/components/Mono';
+import Novita from '@lobehub/icons/es/Novita/components/Mono';
+import Nebius from '@lobehub/icons/es/Nebius/components/Mono';
+import GiteeAI from '@lobehub/icons/es/GiteeAI/components/Mono';
 
 /** 图标清单条目：key 持久化用，name 供选择器显示与搜索 */
 export interface ProviderIconEntry {

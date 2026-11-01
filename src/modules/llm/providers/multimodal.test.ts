@@ -2,7 +2,7 @@
 // 多模态图片映射测试：user 附件图片 / tool 结果图片 → 各 provider 原生请求结构。
 // 覆盖统一约定：data 为纯 base64（不含 data URI 前缀）。
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect } from 'bun:test';
 import { OpenAIChatProvider } from './openai-chat';
 import { OpenAIResponsesProvider } from './openai-responses';
 import { AnthropicProvider } from './anthropic';

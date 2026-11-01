@@ -23,13 +23,26 @@ function error(msg) {
   console.error(`[build] ERROR: ${msg}`);
 }
 
+const IS_WIN = process.platform === 'win32';
+
+/** shell 参数转义：仅含安全字符时原样，否则加双引号（路径可能含空格/中文） */
+function shellQuote(arg) {
+  return /^[A-Za-z0-9_@%+=:,./\\-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '\\"')}"`;
+}
+
+function spawn(cmd, args, opts = {}) {
+  // Windows：npm / npx / bun 均为 .cmd/.ps1 包装器，Node 禁止无 shell 直接 spawn
+  // （CVE-2024-27980 之后）；但「args 数组 + shell:true」会触发 DEP0190 弃用警告
+  // （参数未转义、仅拼接）。故 Windows 下把命令与参数拼成单条命令串交给 shell。
+  // POSIX：直接以「命令 + 参数数组」形态 spawn，避免路径含空格时被错误拆分。
+  const options = { stdio: 'inherit', cwd: ROOT, ...opts };
+  return IS_WIN
+    ? spawnSync([cmd, ...args].map(shellQuote).join(' '), { ...options, shell: true })
+    : spawnSync(cmd, args, options);
+}
+
 function run(cmd, args, opts = {}) {
-  const result = spawnSync(cmd, args, {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-    cwd: ROOT,
-    ...opts,
-  });
+  const result = spawn(cmd, args, opts);
   if (result.status !== 0) {
     error(`Command failed: ${cmd} ${args.join(' ')} (exit ${result.status})`);
     process.exit(result.status ?? 1);
@@ -37,18 +50,27 @@ function run(cmd, args, opts = {}) {
   return result;
 }
 
+function probe(cmd, args) {
+  const options = IS_WIN
+    ? { shell: true, stdio: 'ignore' }
+    : { stdio: 'ignore' };
+  return IS_WIN
+    ? spawnSync([cmd, ...args].map(shellQuote).join(' '), options)
+    : spawnSync(cmd, args, options);
+}
+
 function detectBun() {
   // 优先使用直接可用的 bun 命令
-  const r = spawnSync('bun', ['--version'], { shell: process.platform === 'win32' });
+  const r = probe('bun', ['--version']);
   if (r.status === 0) return { cmd: 'bun', args: [] };
   // 回退到 npx bun（兼容 bun 以 npm 包形式全局安装但不在 PATH 的场景）
-  const r2 = spawnSync('npx', ['bun', '--version'], { shell: process.platform === 'win32' });
+  const r2 = probe('npx', ['bun', '--version']);
   if (r2.status === 0) return { cmd: 'npx', args: ['bun'] };
   return null;
 }
 
 function detectNpx() {
-  const r = spawnSync('npx', ['--version'], { shell: process.platform === 'win32' });
+  const r = probe('npx', ['--version']);
   if (r.status === 0) return 'npx';
   return null;
 }
@@ -80,10 +102,7 @@ function buildBackend() {
     process.exit(1);
   }
   // bun build src/main.ts --outfile dist/server.js --target bun
-  // --external nativefiledialog-for-bun：该库通过 Bun.dlopen 加载 FFI 二进制（nfd.dll 等），
-  // 二进制路径基于 import.meta.dir 解析，若打包进 server.js 会指向 dist/ 找不到二进制，
-  // 故标记为 external，运行时从 node_modules 加载，由库自行解析同目录的 .dll/.dylib/.so。
-  // --external sherpa-onnx-node：同理，其原生 .node 绑定必须从磁盘加载；且这是必需项——
+  // --external sherpa-onnx-node：其原生 .node 绑定必须从磁盘加载；且这是必需项——
   // 不 external 时 bun 会额外产出一个原生资产文件（sherpa-onnx-*.node），
   // 而 --outfile 只允许单文件输出，构建会直接失败：
   //   error: cannot write multiple output files without an output directory
@@ -94,7 +113,6 @@ function buildBackend() {
     '--outfile', BACKEND_OUT,
     '--target', 'bun',
     '--format', 'esm',
-    '--external', 'nativefiledialog-for-bun',
     '--external', 'sherpa-onnx-node',
     '--external', 'sharp',
     // IM SDK：均为 CJS/含动态 require，打包进单文件会破坏其运行时解析，运行时从 node_modules 加载
@@ -186,16 +204,22 @@ function copyTreeSitterWasm() {
   cpSync(coreSrc, resolve(vendorDir, 'web-tree-sitter.wasm'));
 
   // 语言 wasm（按需子集，控制包体积；未拷语言运行时自动降级跳过）
+  // tree-sitter-wasm v2 布局为 <lang>/tree-sitter-<lang>.wasm，v1 为 out/<lang>/…；
+  // 产物仍统一落到 vendor/tree-sitter-wasm/out/<lang>/（运行时与既有安装包布局保持不变）。
   let copied = 0;
   for (const lang of TREE_SITTER_LANGS) {
-    const src = resolve(ROOT, 'node_modules', 'tree-sitter-wasm', 'out', lang, `tree-sitter-${lang}.wasm`);
-    if (!existsSync(src)) {
+    const fileName = `tree-sitter-${lang}.wasm`;
+    const src = [
+      resolve(ROOT, 'node_modules', 'tree-sitter-wasm', lang, fileName),
+      resolve(ROOT, 'node_modules', 'tree-sitter-wasm', 'out', lang, fileName),
+    ].find((p) => existsSync(p));
+    if (!src) {
       log(`  (skip) grammar not found: ${lang}`);
       continue;
     }
     const destDir = resolve(vendorDir, 'tree-sitter-wasm', 'out', lang);
     mkdirSync(destDir, { recursive: true });
-    cpSync(src, resolve(destDir, `tree-sitter-${lang}.wasm`));
+    cpSync(src, resolve(destDir, fileName));
     copied++;
   }
   log(`Tree-sitter wasm copied: core + ${copied} grammars -> ${vendorDir}`);
@@ -212,10 +236,7 @@ function buildFrontend() {
     process.exit(1);
   }
   // 在 webui/ 目录运行 npm run build（webui/ 有独立的 vite.config.ts，产物输出到 ../dist/webui）
-  run('npm', ['run', 'build'], {
-    cwd: uiDir,
-    shell: process.platform === 'win32',
-  });
+  run('npm', ['run', 'build'], { cwd: uiDir });
   if (!existsSync(WEBUI_DIST)) {
     error(`WebUI build output not found: ${WEBUI_DIST}`);
     process.exit(1);

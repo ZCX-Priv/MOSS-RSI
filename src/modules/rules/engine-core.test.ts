@@ -1,46 +1,12 @@
 // src/modules/rules/engine-core.test.ts
 // 规则引擎核心逻辑单元测试：内容哈希、双作用域 CRUD、always/paths 编译合并、
-// paths glob 匹配（Bun.Glob 以 vi.mock 提供语义等价的 ** / * 实现替换）。
+// paths glob 匹配（直接用 bun:test 运行时内置的 Bun.Glob，不再 mock）。
 
-import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 
-// Bun.Glob 的 Node 等价 mock（支持 ** / * / ?；与 Bun.Glob 的常用子集语义一致）
-vi.mock('bun', () => {
-  const globToRegex = (pattern: string): RegExp => {
-    let re = '';
-    for (let i = 0; i < pattern.length; i++) {
-      const c = pattern[i];
-      if (c === '*') {
-        if (pattern[i + 1] === '*') {
-          re += '.*';
-          i++;
-          if (pattern[i + 1] === '/') i++;
-        } else {
-          re += '[^/]*';
-        }
-      } else if (c === '?') {
-        re += '[^/]';
-      } else {
-        re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-      }
-    }
-    return new RegExp(`^${re}$`);
-  };
-  return {
-    Glob: class MockGlob {
-      private re: RegExp;
-      constructor(pattern: string) {
-        this.re = globToRegex(pattern);
-      }
-      match(s: string): boolean {
-        return this.re.test(s);
-      }
-    },
-  };
-});
 import {
   computeRuleId,
   globalRulesDir,

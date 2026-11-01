@@ -69,7 +69,7 @@ export default defineConfig({
   // “Failed to fetch dynamically imported module”（需重启 dev 生效）。
   optimizeDeps: {
     include: [
-      'sql.js', 'xlsx', 'epubjs', 'mermaid', 'shiki', 'pdfjs-dist', 'three',
+      'sql.js', '@e965/xlsx', 'epubjs', 'mermaid', 'shiki', 'pdfjs-dist', 'three',
       'docx-preview', 'libarchive.js', '@aiden0z/pptx-renderer', 'jszip',
       'fontkit', 'flv.js', 'video.js', 'wavesurfer.js', 'utif', 'heic2any',
       '@cornerstonejs/codec-openjpeg', 'smiles-drawer', 'dxf-render',
@@ -125,5 +125,23 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
     target: 'es2022',
+    // 主 chunk 体积告警阈值：应用外壳（React + 品牌图标 + 文件类型图标数据）约 5MB，
+    // 重依赖（pdfjs/three/mermaid/shiki…）已全部走动态 import 拆分到独立 chunk。
+    // 该阈值仅避免对「已知且有意为之」的入口体积重复告警，不改变产物结构。
+    chunkSizeWarningLimit: 6000,
+    rolldownOptions: {
+      onwarn(warning, warn) {
+        // @cornerstonejs/codec-openjpeg 为兼容 Node 静态 import 了 fs/path，
+        // 浏览器分支不会执行这两条路径；仅屏蔽该模块的 externalize 提示，其它告警照常输出。
+        const msg = String(warning?.message ?? '');
+        if (
+          msg.includes('has been externalized for browser compatibility') &&
+          msg.includes('@cornerstonejs/codec-openjpeg')
+        ) {
+          return;
+        }
+        warn(warning);
+      },
+    },
   },
 })

@@ -1,6 +1,6 @@
 // src/modules/context/file-index/graph-engine/parser.ts
 // web-tree-sitter 封装：Parser.init（一次）+ 语言 wasm 懒加载缓存。
-// 语法 wasm 来自 tree-sitter-wasm 预构建包（node_modules/tree-sitter-wasm/out/<lang>/）。
+// 语法 wasm 来自 tree-sitter-wasm 预构建包（v2 布局：node_modules/tree-sitter-wasm/<lang>/）。
 // wasm 定位策略：dist/vendor（构建产物）→ node_modules（开发模式），均支持。
 
 import { Parser, Language } from 'web-tree-sitter';
@@ -93,9 +93,14 @@ function getCoreWasmPath(): string | null {
 
 /** 语言 wasm 路径（tree-sitter-wasm 包内；定位失败为 null） */
 function getLangWasmPath(lang: string): string | null {
+  const fileName = `tree-sitter-${lang}.wasm`;
   return (
-    findFile(['node_modules', 'tree-sitter-wasm', 'out', lang, `tree-sitter-${lang}.wasm`])
-    ?? findFile(['vendor', 'tree-sitter-wasm', 'out', lang, `tree-sitter-${lang}.wasm`])
+    // 开发模式：tree-sitter-wasm v2 布局（<lang>/…），v1（out/<lang>/…）兼容
+    findFile(['node_modules', 'tree-sitter-wasm', lang, fileName])
+    ?? findFile(['node_modules', 'tree-sitter-wasm', 'out', lang, fileName])
+    // 构建产物：统一落在 out/<lang>/（见 scripts/build.mjs）
+    ?? findFile(['vendor', 'tree-sitter-wasm', 'out', lang, fileName])
+    ?? findFile(['vendor', 'tree-sitter-wasm', lang, fileName])
   );
 }
 

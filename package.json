@@ -21,7 +21,7 @@
     "postinstall": "node scripts/install-webui.mjs",
     "build": "node scripts/build.mjs",
     "build:ui": "cd webui && npm run build",
-    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external nativefiledialog-for-bun --external sherpa-onnx-node --external sharp --external @tencent-connect/qqbot-nodejs --external @tencent-connect/qqbot-connector",
+    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external sherpa-onnx-node --external sharp --external @tencent-connect/qqbot-nodejs --external @tencent-connect/qqbot-connector",
     "start": "bun src/main.ts start --foreground",
     "start:daemon": "bun src/main.ts start",
     "stop": "bun src/main.ts stop",
@@ -30,13 +30,14 @@
     "update": "bun src/main.ts update",
     "version": "bun src/main.ts version",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --path-ignore-patterns \"研究/**\" --path-ignore-patterns \"webui/**\"",
     "test:terminal": "bun test src/modules/tools/terminal",
-    "test:watch": "bun test --watch",
+    "test:watch": "bun test --watch --path-ignore-patterns \"研究/**\" --path-ignore-patterns \"webui/**\"",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@e965/xlsx": "^0.20.3",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@puppeteer/browsers": "^3.2.6",
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.5",
@@ -44,41 +45,45 @@
     "@xterm/headless": "^6.0.0",
     "cfb": "^1.2.2",
     "cheerio": "^1.2.0",
-    "cron-parser": "^5.7.0",
+    "cron-parser": "^5.10.3",
     "iconv-lite": "^0.7.3",
     "jszip": "^3.10.2",
-    "mammoth": "^1.12.1",
-    "nativefiledialog-for-bun": "^0.3.2",
-    "officeparser": "^7.6.1",
+    "mammoth": "^1.13.0",
+    "officeparser": "^8.4.1",
     "pdf-parse": "^2.4.5",
     "sharp": "^0.35.5",
     "sherpa-onnx-node": "^1.13.8",
     "tar": "^7.5.22",
     "trash": "^10.1.1",
-    "tree-sitter-wasm": "^1.1.4",
+    "tree-sitter-wasm": "^2.0.4",
     "unbzip2-stream": "^1.4.3",
-    "web-tree-sitter": "^0.26.13",
+    "web-tree-sitter": "^0.27.1",
     "word-extractor": "^1.0.4",
-    "xlsx": "^0.18.5",
-    "zod": "^3.23.8"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
     "@types/unbzip2-stream": "^1.4.3",
-    "@vitejs/plugin-react": "^4.3.4",
-    "bun-types": "^1.1.42",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-markdown": "^9.0.1",
-    "remark-gfm": "^4.0.0",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.9",
-    "zustand": "^4.5.5"
+    "bun-types": "^1.4.4",
+    "typescript": "~5.9.3"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.16",
+    "qs": "^6.17.1",
+    "body-parser": "^2.4.0",
+    "proxy-addr": "^2.0.8",
+    "ip-address": "^10.7.5",
+    "fast-uri": "^3.1.9",
+    "undici": "^7.30.1",
+    "mammoth": {
+      "@xmldom/xmldom": "0.8.15"
+    }
   },
   "engines": {
     "bun": ">=1.1.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "tesseract.js": false
+  }
 }

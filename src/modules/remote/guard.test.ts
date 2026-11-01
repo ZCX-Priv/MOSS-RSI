@@ -6,7 +6,7 @@
 // - 局域网攻击者无法把 TCP 源地址伪装成 loopback；
 // - 非 loopback 来源声称隧道域名 → 一律按公网强密码处理，伪造无收益。
 
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

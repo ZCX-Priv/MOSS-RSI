@@ -2,7 +2,7 @@
 // 认证核心单元测试：密码生成/轮换/自定义、cookie 签发与校验（sessionKey 轮换作废）、
 // 三层登录速率限制矩阵。
 
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

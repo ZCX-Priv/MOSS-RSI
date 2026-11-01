@@ -1,6 +1,6 @@
 // task-store 测试 —— 前端预分配会话 id（乐观导航）的关键行为：
 //   1. 传入 id 时沿用该 id 作为 task.id 与 sessionId（task.id 即 sessionId）
-//   2. 传入的 id 已被占用时回退随机 UUID，绝不覆盖已有任务
+//   2. 传入的 id 已被占用时幂等返回已有任务，绝不覆盖已有任务
 //   3. 未传 id 时生成随机 UUID（原有行为不变）
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
@@ -48,13 +48,14 @@ describe('TaskStore.createTask（前端预分配 id）', () => {
     expect(store.getTask('fixed-id-1')?.id).toBe('fixed-id-1');
   });
 
-  it('传入的 id 已被占用时回退随机 UUID（不覆盖已有任务）', () => {
+  it('传入的 id 已被占用时幂等返回已有任务（绝不覆盖已有任务）', () => {
     const store = makeStore();
     const first = store.createTask('第一个', undefined, 'dup-id');
     const second = store.createTask('第二个', undefined, 'dup-id');
-    expect(second.id).not.toBe('dup-id');
-    expect(second.id).not.toBe(first.id);
-    // 原任务保持不变
+    // 幂等：同 id 再次到达（HTTP 重试 / WS 重放 / 并发创建）返回原任务，不生成幽灵 UUID 任务
+    expect(second.id).toBe('dup-id');
+    expect(second.id).toBe(first.id);
+    // 原任务保持不变（标题不被第二次调用覆盖）
     expect(store.getTask('dup-id')?.title).toBe('第一个');
   });
 
