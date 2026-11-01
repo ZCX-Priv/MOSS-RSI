@@ -2188,7 +2188,6 @@ export function ToolsSettings() {
   const unlimited = maxTurns === 0;
   const codeMode: CodeModeConfig = agentCfg?.codeMode ?? {
     enabled: true,
-    presentation: 'standard',
     uiEnabled: true,
     timeoutMs: 120_000,
     maxCodeChars: 20_000,
@@ -2334,7 +2333,7 @@ export function ToolsSettings() {
         </div>
       </div>
 
-      {/* 代码模式（PTC + Intelligent UI）：呈现方式与执行预算 */}
+      {/* 代码模式（PTC + Intelligent UI）：执行预算 */}
       <div className="flex flex-col gap-3">
         <div className="text-sm font-medium text-foreground">{t('settings.tools.codeModeTitle')}</div>
         <div className="flex flex-col divide-y divide-border rounded-lg border border-border px-3">
@@ -2348,26 +2347,6 @@ export function ToolsSettings() {
               onCheckedChange={(v) => void patchCodeMode({ enabled: v })}
               aria-label={t('settings.tools.codeModeEnabled')}
             />
-          </div>
-
-          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <span className="text-sm text-foreground">{t('settings.tools.codeModePresentation')}</span>
-              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModePresentationDesc')}</span>
-            </div>
-            <Select
-              value={codeMode.presentation}
-              onValueChange={(v) => void patchCodeMode({ presentation: v as CodeModeConfig['presentation'] })}
-              disabled={!codeMode.enabled}
-            >
-              <SelectTrigger className="h-8 w-44 shrink-0" aria-label={t('settings.tools.codeModePresentation')}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="standard">{t('settings.tools.codeModeStandard')}</SelectItem>
-                <SelectItem value="ptc">{t('settings.tools.codeModePtc')}</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
 
           <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>

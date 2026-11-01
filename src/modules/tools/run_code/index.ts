@@ -1,19 +1,20 @@
 // tools/run_code/index.ts
 // 代码模式（PTC + Intelligent UI）唯一入口工具。
 //
-// 两档呈现（config.agent.codeMode.presentation）：
-//   - standard：wire 暴露全部原生工具 + run_code；模型可自由选择直接调用或写程序。
-//   - ptc：wire 只暴露 run_code；其余工具通过程序内 tools.* 调用。
+// wire 始终为混合模式：原生工具 + run_code；提示词主推并行/多步任务使用 PTC。
 //
 // 本工具负责：
 //   1. 参数/长度/命名空间预检（早失败，不启动子进程）；
 //   2. 生成可见工具 allowlist 与并发安全表；
 //   3. 调用 runtime/host.ts（Bun 子进程 + JSON-RPC + 超时/中止/限额）；
 //   4. 净化 UISpec、组装 ToolResult 与 metadata.codeRun（供 RunCodeCard/历史回放）。
+//
+// 硬限制：程序内禁止调用 ask / agent / todo；这三项不会注入子进程 tools，访问即报错。
 
 import { ServiceNames, type ConfigService } from '../../../core/types';
 import type { MCPManager, ToolRegistry } from '../../contracts';
 import type { ToolContext, ToolResult } from '../types';
+import { isPtcForbiddenTool } from './forbidden';
 import { runCodeProgram, type CodeRunCallRecord } from './runtime/host';
 import { truncateToBytes, type CodeFailureKind, type CodeValue } from './runtime/protocol';
 import { validateUISpec } from './ui/validate';
@@ -29,8 +30,6 @@ export interface CodeRunMetadata {
   version: 1;
   /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
   kind: 'text' | 'ui' | 'hybrid';
-  /** 本次请求的呈现档位 */
-  presentation: 'standard' | 'ptc';
   description: string;
   logs: string[];
   calls: CodeRunCallRecord[];
@@ -68,7 +67,9 @@ export default {
 
     // ---- 命名空间预检（advisory：早失败，避免无意义子进程启动） ----
     if (referencesNamespace(code, 'team')) {
-      return err('程序引用了 team 命名空间，但 Agent Teams 编排尚未实现。请改用 tools.* 或原生 agent 工具。');
+      return err(
+        '程序引用了 team 命名空间，但 Agent Teams 编排尚未实现。请改用 tools.*；子代理请在主流程直接调用原生 agent 工具。',
+      );
     }
     const usesUi = referencesNamespace(code, 'ui');
     if (usesUi && !codeMode.uiEnabled) {
@@ -80,7 +81,9 @@ export default {
     if (!registry) return err('run_code 不可用：工具注册表未注册');
     const mcpManager = ctx.services.tryResolve<MCPManager>(ServiceNames.MCP_MANAGER);
 
-    const builtinTools = registry.listSchemas().filter((t) => t.name !== 'run_code');
+    const builtinTools = registry
+      .listSchemas()
+      .filter((t) => t.name !== 'run_code' && !isPtcForbiddenTool(t.name));
     let mcpTools: Array<{
       name: string;
       description: string;
@@ -167,7 +170,6 @@ export default {
     const metadata = capMetadata({
       version: 1,
       kind,
-      presentation: codeMode.presentation,
       description,
       logs: hostResult.logs,
       calls: hostResult.calls,

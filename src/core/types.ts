@@ -219,10 +219,9 @@ export interface AppConfig {
     /** SSE 流空闲超时（ms）：推理型模型长思考/长程任务需放宽；缺省用内置默认（15 分钟） */
     llmStreamIdleTimeoutMs?: number;
     workingDirectory: string;
-    /** 代码模式（PTC + Intelligent UI）：run_code 呈现/限额 */
+    /** 代码模式（PTC + Intelligent UI）：run_code 限额 */
     codeMode: {
       enabled: boolean;
-      presentation: 'standard' | 'ptc';
       uiEnabled: boolean;
       timeoutMs: number;
       maxCodeChars: number;

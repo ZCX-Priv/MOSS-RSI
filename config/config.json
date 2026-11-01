@@ -23,7 +23,6 @@
     "workingDirectory": "",
     "codeMode": {
       "enabled": true,
-      "presentation": "standard",
       "uiEnabled": true,
       "timeoutMs": 120000,
       "maxCodeChars": 20000,

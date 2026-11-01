@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRequestView, ACTIVE_RULES_MSG_NAME, MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from './view-builder';
+import { PRUNE_MARKER } from '../compressor/tool-pruner';
 import type { ContextMessage, ContextSessionLike } from '../types';
 import { DEFAULT_TOOL_PRUNING_CONFIG } from '../types';
 
@@ -70,6 +71,56 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     });
     expect(view.breakdown.rules).toBe(0);
     expect(view.breakdown.memory).toBe(0);
+  });
+
+  test('run_code 结果不做头尾修剪（完整返回值交给模型）', () => {
+    // 模拟 60 条搜索结果（约 12KB，远超 8192 修剪阈值）
+    const longContent = Array.from(
+      { length: 60 },
+      (_, i) => `[${i + 1}] 搜索结果 ${'x'.repeat(180)}`,
+    ).join('\n');
+    const session = mkSession([
+      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'run_code', arguments: '{"code":"..."}' }] },
+      {
+        role: 'tool',
+        toolCallId: 'tc1',
+        name: 'run_code',
+        content: longContent,
+        metadata: { codeRun: { version: 1 } },
+      },
+    ]);
+    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+    const tool = view.messages.find(m => m.role === 'tool');
+    expect(tool?.content).toBe(longContent);
+    expect(tool?.content).not.toContain(PRUNE_MARKER);
+  });
+
+  test('codeRun metadata 兜底：工具名不匹配时仍跳过修剪', () => {
+    const longContent = 'x'.repeat(20_000);
+    const session = mkSession([
+      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'legacy_run', arguments: '{}' }] },
+      {
+        role: 'tool',
+        toolCallId: 'tc1',
+        name: 'legacy_run',
+        content: longContent,
+        metadata: { codeRun: { version: 1 } },
+      },
+    ]);
+    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+    const tool = view.messages.find(m => m.role === 'tool');
+    expect(tool?.content).toBe(longContent);
+  });
+
+  test('普通工具结果仍按头尾修剪', () => {
+    const longContent = 'x'.repeat(20_000);
+    const session = mkSession([
+      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.txt"}' }] },
+      { role: 'tool', toolCallId: 'tc1', name: 'read', content: longContent },
+    ]);
+    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+    const tool = view.messages.find(m => m.role === 'tool');
+    expect(tool?.content).toContain(PRUNE_MARKER);
   });
 
   test('多模态：tool 消息的图片路径被实时读盘编码，且不落 session', () => {

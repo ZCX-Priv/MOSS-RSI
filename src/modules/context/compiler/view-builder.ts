@@ -30,7 +30,7 @@ import {
   estimateMessageBytes,
 } from '../budgeter/estimator';
 import { sanitizeMessages, alignWindowBoundaries } from '../healer/pair-sanitize';
-import { pruneToolResultView } from '../compressor/tool-pruner';
+import { isToolResultPruningExempt, pruneToolResultView } from '../compressor/tool-pruner';
 import { ENV_CONTEXT_MSG_NAME } from './env-context';
 
 /** 摘要消息 name 标识（与 compressor 一致） */
@@ -230,7 +230,12 @@ export function buildRequestView(
     let next: ContextMessage = raw;
 
     // 2b. 工具结果微压缩（仅发送视图，session 原文不动）
-    if (next.role === 'tool' && opts.toolPruning.enabled) {
+    // run_code 等聚合型结果无法通过重新读取恢复，跳过修剪，完整交给模型。
+    if (
+      next.role === 'tool' &&
+      opts.toolPruning.enabled &&
+      !isToolResultPruningExempt(next)
+    ) {
       const pruned = pruneToolResultView(next.content, opts.toolPruning);
       if (pruned !== next.content) next = { ...next, content: pruned };
     }

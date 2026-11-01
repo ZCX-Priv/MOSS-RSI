@@ -38,6 +38,7 @@ import { readSessionTodoStore, getSessionTodoPath } from '../tools/todo/shared/s
 import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } from '../context/compiler';
 import type { PromptExtraSection } from '../context/compiler';
 import { buildCodeModePromptExtras } from '../tools/run_code/sdk';
+import { isPtcForbiddenTool } from '../tools/run_code/forbidden';
 import { DEFAULT_TOOL_PRUNING_CONFIG } from '../context/types';
 import type { RulesEngineServiceImpl } from '../rules/service';
 import type { HooksEngineServiceImpl } from '../hooks/service';
@@ -575,14 +576,9 @@ export class AgentEngineImpl implements AgentEngine {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    // 代码模式 wire 呈现：
-    //   standard = 原生工具 + run_code；ptc = 仅 run_code；关闭 = 排除 run_code。
+    // 代码模式 wire：开启 = 原生工具 + run_code 混合；关闭 = 排除 run_code。
     const codeMode = cfg.codeMode;
-    const wireOptions = codeMode.enabled
-      ? codeMode.presentation === 'ptc'
-        ? { includeOnly: new Set(['run_code']) }
-        : {}
-      : { exclude: new Set(['run_code']) };
+    const wireOptions = codeMode.enabled ? {} : { exclude: new Set(['run_code']) };
     const tools = buildTools(toolRegistry, mcpTools, wireOptions);
 
     // 系统提示 SDK 附加段：工具/配置不变时字节稳定（前缀缓存友好）。
@@ -604,7 +600,6 @@ export class AgentEngineImpl implements AgentEngine {
         })),
       ];
       const section = buildCodeModePromptExtras({
-        presentation: codeMode.presentation,
         uiEnabled: codeMode.uiEnabled,
         tools: sdkTools,
       });
@@ -2131,8 +2126,8 @@ export class AgentEngineImpl implements AgentEngine {
    *   - 不写 tool 消息、不发 tool-call-start/end（中间结果不回上下文）；
    *   - 仍完整走 safety（executeBuiltinTool/executeMcpTool 内部）、Pre/PostToolUse 钩子、
    *     文件访问规则登记与 todo/context 副作用；
-   *   - 嵌套 ask/confirm 事件使用嵌套 toolCallId，前端现有 pending 卡片可直接应答；
-   *   - 禁止递归 run_code（同一解释器内不能再开 run_code）。
+   *   - confirm 事件使用嵌套 toolCallId，前端现有 pending 卡片可直接应答；
+   *   - 禁止递归 run_code，且禁止 ask / agent / todo（程序内硬限制）。
    */
   private async invokeToolFromCode(
     name: string,
@@ -2147,6 +2142,17 @@ export class AgentEngineImpl implements AgentEngine {
     },
     requestedCallId?: string,
   ): Promise<ToolResult> {
+    if (isPtcForbiddenTool(name)) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error: PTC 程序内禁止调用 ${name} 工具。请直接在主流程调用原生工具，不要写进 run_code 程序。`,
+          },
+        ],
+        isError: true,
+      };
+    }
     if (name === 'run_code') {
       return {
         content: [{ type: 'text', text: 'Error: nested run_code is forbidden (recursion depth is fixed at 1)' }],

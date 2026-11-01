@@ -46,8 +46,6 @@ export interface CodeRunMetadata {
   version: 1;
   /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
   kind: 'text' | 'ui' | 'hybrid';
-  /** 本次请求的呈现档位 */
-  presentation: 'standard' | 'ptc';
   description: string;
   logs: string[];
   calls: CodeRunCall[];
@@ -366,8 +364,6 @@ export interface Session {
 export interface CodeModeConfig {
   /** 总开关：关闭后完全不暴露 run_code */
   enabled: boolean;
-  /** standard=原生工具+run_code；ptc=只暴露 run_code */
-  presentation: 'standard' | 'ptc';
   /** 是否允许程序内使用 ui.* 构建交互界面 */
   uiEnabled: boolean;
   /** 单次程序执行预算（毫秒） */

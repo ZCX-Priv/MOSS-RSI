@@ -287,14 +287,12 @@ const contextSchema = z.object({
 /**
  * 代码模式（PTC + Intelligent UI）配置。
  * - enabled=false：完全不暴露 run_code，行为与旧版一致。
- * - presentation='standard'：wire 暴露全部原生工具 + run_code（模型可自由选择直接调用或写程序）。
- * - presentation='ptc'：wire 只暴露 run_code，其余工具通过程序内 tools.* 调用。
+ * - enabled=true：wire 暴露全部原生工具 + run_code（混合模式），提示词主推并行/多步任务使用 PTC。
  * - uiEnabled：是否允许程序内使用 ui.* 构建交互界面。
  * requireConfirmation 不在本段：统一走 tools.run_code 工具配置（与 terminal 等一致）。
  */
 const codeModeSchema = z.object({
   enabled: z.boolean().default(true),
-  presentation: z.enum(['standard', 'ptc']).default('standard'),
   uiEnabled: z.boolean().default(true),
   /** 单次程序执行预算（毫秒，含嵌套工具与审批等待） */
   timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
@@ -336,7 +334,6 @@ const appConfigSchema = z.object({
     // 代码模式（PTC + Intelligent UI）：缺段时用默认值自愈，旧 config.json 不受影响
     codeMode: codeModeSchema.default({
       enabled: true,
-      presentation: 'standard',
       uiEnabled: true,
       timeoutMs: 120_000,
       maxCodeChars: 20_000,
@@ -438,7 +435,6 @@ export function defaultAppConfig(): AppConfig {
       workingDirectory: '',
       codeMode: {
         enabled: true,
-        presentation: 'standard',
         uiEnabled: true,
         timeoutMs: 120_000,
         maxCodeChars: 20_000,

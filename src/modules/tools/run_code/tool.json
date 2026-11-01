@@ -1,7 +1,7 @@
 {
   "name": "run_code",
-  "description": "在独立 Bun 子进程中执行一段 TypeScript 异步函数体（PTC）。用 await tools.<name>(args) 调用工具；用 ui.* 构建 Intelligent UI，界面会直接渲染在「代码」步骤下方的消息流里。只有 return 的值与 console.log 的文本会回到上下文，中间结果留在程序里。多步工具调用、循环、条件分支、并发、结果后处理，或需要聊天内可交互界面时优先使用；聊天内界面不要用 browser/HTML 代替。",
-  "description_en": "Execute a TypeScript async function body in an isolated Bun subprocess (PTC). Call tools with await tools.<name>(args); build Intelligent UI with ui.* and it renders inline under the code step in the message flow. Only the returned value and console.log text re-enter context; intermediate results stay inside the program. Prefer it for multi-step tool calls, loops, branches, concurrency, post-processing, or interactive in-chat UI. Do not use browser/HTML to fake in-chat UI.",
+  "description": "在独立 Bun 子进程中执行一段 TypeScript 异步函数体（PTC）。用 await tools.<name>(args) 调用工具；用 ui.* 构建 Intelligent UI，界面会直接渲染在「代码」步骤下方的消息流里。只有 return 的值与 console.log 的文本会回到上下文，中间结果留在程序里。多步工具调用、循环、条件分支、并发、结果后处理，或需要聊天内可交互界面时优先使用；聊天内界面不要用 browser/HTML 代替。硬限制：程序内禁止调用 ask、agent、todo（这三个工具不会注入 tools，访问即报错）。需要提问、派发子代理或维护待办时不要使用 run_code，直接调用对应原生工具。",
+  "description_en": "Execute a TypeScript async function body in an isolated Bun subprocess (PTC). Call tools with await tools.<name>(args); build Intelligent UI with ui.* and it renders inline under the code step in the message flow. Only the returned value and console.log text re-enter context; intermediate results stay inside the program. Prefer it for multi-step tool calls, loops, branches, concurrency, post-processing, or interactive in-chat UI. Do not use browser/HTML to fake in-chat UI. Hard restriction: ask, agent and todo are forbidden inside programs (they are not injected into tools; accessing them fails). When you need to ask the user, delegate to a subagent or maintain todos, do not use run_code; call the native tools directly.",
   "icon": "code",
   "annotations": {
     "destructiveHint": true,
@@ -12,7 +12,7 @@
     "properties": {
       "code": {
         "type": "string",
-        "description": "TypeScript 异步函数体（不含外层 async 包裹）。支持顶层 await 与 return；类型注解会被剥离。"
+        "description": "TypeScript 异步函数体（不含外层 async 包裹）。支持顶层 await 与 return；类型注解会被剥离。禁止调用 tools.ask / tools.agent / tools.todo。"
       },
       "description": {
         "type": "string",
