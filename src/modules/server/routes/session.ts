@@ -8,6 +8,7 @@ import { ServiceNames } from '../../../core/types';
 import type { AgentEngine } from '../../contracts';
 import type { AskQuestion } from '../../tools/types';
 import { ErrorCode } from '../../../core/error-codes';
+import { lightenHistoryMessages } from './history-light';
 
 /** 引擎扩展面（可选能力；未实现时安全降级） */
 type AgentEngineExt = AgentEngine & {
@@ -26,6 +27,10 @@ type AgentEngineExt = AgentEngine & {
   getActiveSkill?: (id: string) => { name: string; mode: 'system' | 'message'; content: string } | undefined;
   getPermissionMode?: (id: string) => 'ask' | 'auto' | 'skip' | undefined;
   getLastRunStats?: (id: string) => unknown;
+  getToolResult?: (
+    id: string,
+    toolCallId: string,
+  ) => { content: string; isError?: boolean; metadata?: Record<string, unknown> } | null;
   getPendingAsks?: (id: string) => Array<{
     toolCallId: string;
     sessionId: string;
@@ -121,6 +126,12 @@ export function createSessionHistoryHandler(services: ServiceRegistry): RouteHan
       messages = agent.getHistory(sessionId);
     }
 
+    // 分页读取（首屏 / 上滑加载）返回轻量工具结果：完整正文与 IntelligentUI spec
+    // 在卡片展开时才按 toolCallId 拉取。after 尾部补齐例外：刚结束的完整结果不应被截断。
+    if (paged && after === undefined) {
+      messages = lightenHistoryMessages(messages);
+    }
+
     // 当前激活的 skill 模式（前端刷新后恢复 Badge）
     const activeSkill = agent.getActiveSkill?.(sessionId) ?? undefined;
     // 会话级权限模式（前端刷新后恢复 PermissionModeSelector 徽章）
@@ -138,6 +149,29 @@ export function createSessionHistoryHandler(services: ServiceRegistry): RouteHan
         ...(lastRunStats ? { lastRunStats } : {}),
       },
     };
+  };
+}
+
+/**
+ * 单个工具结果（按需加载）：GET /api/session/:id/tool-result?toolCallId=...
+ * 分页历史只给轻量投影；WebUI 展开工具卡时用本接口拿完整正文与 metadata。
+ */
+export function createSessionToolResultHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
+    const sessionId = params?.id;
+    const toolCallId = req.query?.toolCallId;
+    if (!sessionId || !toolCallId) {
+      return { status: 400, body: { error: 'sessionId and toolCallId are required' } };
+    }
+    const agent = services.tryResolve<AgentEngineExt>('agent.engine');
+    if (!agent?.getToolResult) {
+      return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
+    }
+    const result = agent.getToolResult(sessionId, toolCallId);
+    if (!result) {
+      return { status: 404, body: { error: 'tool result not found', sessionId, toolCallId } };
+    }
+    return { status: 200, body: { sessionId, toolCallId, result } };
   };
 }
 

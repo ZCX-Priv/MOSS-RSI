@@ -1271,6 +1271,7 @@ export const zh = {
       nodeError: '该组件渲染失败，已跳过',
       unsupportedComponent: '不支持该组件：{{name}}',
       loadingUi: '正在加载界面…',
+      uiBadge: '含交互界面',
       kindUi: '交互界面',
       kindHybrid: '界面 + 工具',
       kindText: '文本结果',

@@ -6,17 +6,18 @@
 // （引擎未就绪），若不加门控，首批请求就会落在这个窗口里 → 首屏侧边栏/消息列表为空，
 // 需手动刷新（此时后端已就绪）才恢复。
 //
-// 做法：在首批数据请求前等待 agent 引擎注册完成（探测 /api/health 的 services 列表，
-// 该路由 auth:false，启动窗口内即可访问；moduleStates 要等全部模块初始化完才注册
-// kernel.modules，启动窗口内为空，不能用于就绪判定）。有等待上限，后端不可用时不无限阻塞。
+// 做法：在首批数据请求前等待「服务端 + 工具注册表 + 上下文引擎」就绪。
+// 不再等待 agent.engine：该模块依赖工具/文件系统/上下文等，等待它会阻塞整页渲染；
+// 任务列表/会话历史 hooks 已对 agent 引擎未就绪时的 503 做退避重试。
+// 探测 /api/health 的 services 列表（auth:false，启动窗口内即可访问）。
 
 import { api } from './http';
 
-/** 就绪标志：/api/health 返回的 services 中出现该服务名即代表 agent 引擎已注册可用 */
-const READY_SERVICE = 'agent.engine';
+/** 就绪标志：这些服务同时出现即代表首屏数据所需基础设施可用（agent 数据由请求重试兜底） */
+const READY_SERVICES = ['server.instance', 'tool.registry', 'context.engine'];
 const POLL_INTERVAL_MS = 250;
 /** 等待上限：超过则放行（由调用方自身的重试兜底），避免后端始终不可用时空转 */
-const MAX_WAIT_MS = 12_000;
+const MAX_WAIT_MS = 8_000;
 
 let knownReady = false;
 let pending: Promise<boolean> | null = null;
@@ -48,9 +49,8 @@ async function pollUntilReady(): Promise<boolean> {
   for (;;) {
     try {
       const health = await api.health();
-      if (health.services?.includes(READY_SERVICE) || health.moduleStates?.agent === 'active') {
-        return true;
-      }
+      const services = new Set(health.services ?? []);
+      if (READY_SERVICES.every((name) => services.has(name))) return true;
     } catch {
       // 后端未监听 / 代理失败：视为未就绪，继续轮询
     }

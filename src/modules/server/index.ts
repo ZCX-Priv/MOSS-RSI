@@ -21,6 +21,7 @@ import {
   createDeleteSessionHandler,
   createSessionHistoryHandler,
   createSessionStateHandler,
+  createSessionToolResultHandler,
 } from './routes/session';
 import {
   createListMcpServersHandler,
@@ -197,6 +198,7 @@ import {
   createVoiceWasmDataHandler,
 } from './routes/voice-wasm';
 import { McpExpose } from '../mcp/expose';
+import { resolveStartupPort, LiveMossPortError } from '../../utils/port-guard';
 import {
   createMigrationSourcesHandler,
   createExternalSessionsHandler,
@@ -271,7 +273,8 @@ class ServerModule implements Module {
       setRequestGuard: (guard: RequestGuard) => { this.guard = guard; },
       rebind: (hostname: string) => this.rebind(hostname),
       stop: async () => {
-        if (this.server) await this.server.stop();
+        // 关停必须立即断开活跃连接，避免监听套接字/句柄被残留进程继承
+        if (this.server) await this.server.stop(true);
       },
     };
     ctx.services.register(ServiceNames.SERVER_INSTANCE, instance, {
@@ -319,7 +322,7 @@ class ServerModule implements Module {
 
   async destroy(): Promise<void> {
     if (this.server) {
-      await this.server.stop();
+      await this.server.stop(true);
       this.ctx.logger.info(t('server.stopped'));
     }
   }
@@ -352,6 +355,8 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id', handler: createSessionHistoryHandler(services), auth: true });
     // 会话状态快照（运行态 + 流式草稿 + 待答/待确认）：刷新/重连后「不丢状态」的唯一入口
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/state', handler: createSessionStateHandler(services), auth: true });
+    // 工具结果按需加载（分页历史只返回轻量投影，展开卡片时才取完整正文/metadata）
+    this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/tool-result', handler: createSessionToolResultHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/sessions/:id/context', handler: createSessionContextHandler(services, config), auth: true });
 
     // 消息撤回（截断）：预览 + 执行 + 恢复（redo）
@@ -561,20 +566,46 @@ class ServerModule implements Module {
 
   private async startServer(): Promise<void> {
     const cfg = this.ctx.config.getAppConfig();
-    let port = cfg.server.port;
     const host = computeBindHost(cfg);
 
     if (isDevMode() && cfg.remote?.enabled) {
       this.ctx.logger.info('dev mode: remote access enabled — bound to 0.0.0.0 (LAN reachable)', { host });
     }
 
-    if (cfg.server.autoPort) {
-      port = await this.findFreePort(host, port);
-      if (port !== cfg.server.port) {
+    // 启动端口保卫：先甄别占用者身份再决定回收/复用/换端口/失败。
+    // 绝不静默漂移（旧行为会让 dev 前端仍代理旧端口 → WebUI 全白）。
+    let port: number;
+    try {
+      const decision = await resolveStartupPort({
+        configuredPort: cfg.server.port,
+        host,
+        autoPort: cfg.server.autoPort,
+        packageRoot: this.ctx.env.packageRoot,
+        logger: this.ctx.logger,
+        isPortFree,
+      });
+      port = decision.port;
+      if (decision.switched) {
         this.ctx.logger.warn(
           t('server.autoPortUnavailable', { configured: cfg.server.port, actual: port }),
         );
+        this.ctx.logger.info('server: WebUI 实际地址', {
+          url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`,
+          configuredPort: cfg.server.port,
+        });
       }
+    } catch (err) {
+      if (err instanceof LiveMossPortError) {
+        this.ctx.logger.error('server: 已有健康 MOSS 实例占用端口，本次启动终止', {
+          pid: err.pid,
+          port: err.port,
+        });
+      } else {
+        this.ctx.logger.error('server: 启动端口解析失败', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      throw err;
     }
 
     try {
@@ -768,14 +799,6 @@ class ServerModule implements Module {
     });
   }
 
-  private async findFreePort(host: string, startPort: number): Promise<number> {
-    let port = startPort;
-    for (let i = 0; i < 100; i++) {
-      if (await isPortFree(host, port)) return port;
-      port++;
-    }
-    return startPort;
-  }
 }
 
 /** 计算绑定地址：dev 未开远程回环（仅本机）→ remote.enabled（0.0.0.0）→ bindLocalhostOnly → server.host。 */

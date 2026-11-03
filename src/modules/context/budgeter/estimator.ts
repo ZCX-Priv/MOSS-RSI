@@ -27,11 +27,15 @@ export function estimateTextTokens(text: string): number {
   return Math.ceil(bytes / 4); // 拉丁主导
 }
 
-/** 单条消息 token 估算（含 thinking：思考内容计入上下文占用核算） */
-export function estimateMessageTokens(m: ContextMessage): number {
+/**
+ * 单条消息 token 估算。
+ * @param includeThinking 是否计入 thinking。默认 false：OpenAI 兼容 provider 默认不回传
+ *   reasoning_content，若把历史 thinking 计入会让长程会话估算虚高数倍（实测 54% vs 真实 24%）。
+ */
+export function estimateMessageTokens(m: ContextMessage, includeThinking = false): number {
   let total = MSG_FRAMING_TOKENS;
   total += estimateTextTokens(m.content);
-  if (m.thinking) total += estimateTextTokens(m.thinking);
+  if (includeThinking && m.thinking) total += estimateTextTokens(m.thinking);
   if (m.toolCallId) total += estimateTextTokens(m.toolCallId);
   if (m.name) total += estimateTextTokens(m.name);
   if (m.toolCalls) {
@@ -56,9 +60,9 @@ export function estimateTextBytes(text: string): number {
  * 不含图片字节——图片体积由调用方按文件真实大小核算（view-builder 的 imagePathBytes），
  * 因为图片以 base64 内联，与文本字节不是一个量级、且需要读盘/stat。
  */
-export function estimateMessageBytes(m: ContextMessage): number {
+export function estimateMessageBytes(m: ContextMessage, includeThinking = false): number {
   let total = estimateTextBytes(m.content);
-  if (m.thinking) total += estimateTextBytes(m.thinking);
+  if (includeThinking && m.thinking) total += estimateTextBytes(m.thinking);
   if (m.toolCallId) total += estimateTextBytes(m.toolCallId);
   if (m.name) total += estimateTextBytes(m.name);
   if (m.toolCalls) {
@@ -73,17 +77,20 @@ export function estimateMessageBytes(m: ContextMessage): number {
   return total;
 }
 
-/** 消息列表 token 估算总和 */
-export function estimateMessagesTokens(msgs: readonly ContextMessage[]): number {
+/** 消息列表 token 估算总和（默认不计 thinking，与发送视图口径一致） */
+export function estimateMessagesTokens(
+  msgs: readonly ContextMessage[],
+  includeThinking = false,
+): number {
   let total = 0;
-  for (const m of msgs) total += estimateMessageTokens(m);
+  for (const m of msgs) total += estimateMessageTokens(m, includeThinking);
   return total;
 }
 
 /** 消息实际发送字符数（校准用：与 provider 计费的 prompt 对齐的内容口径） */
-export function messageChars(m: ContextMessage): number {
+export function messageChars(m: ContextMessage, includeThinking = false): number {
   let n = m.content.length;
-  if (m.thinking) n += m.thinking.length;
+  if (includeThinking && m.thinking) n += m.thinking.length;
   if (m.name) n += m.name.length;
   if (m.toolCallId) n += m.toolCallId.length;
   if (m.toolCalls) {
@@ -94,10 +101,13 @@ export function messageChars(m: ContextMessage): number {
   return n;
 }
 
-/** 消息列表总字符数 */
-export function messagesChars(msgs: readonly ContextMessage[]): number {
+/** 消息列表总字符数（includeThinking 需与发送视图口径一致） */
+export function messagesChars(
+  msgs: readonly ContextMessage[],
+  includeThinking = false,
+): number {
   let n = 0;
-  for (const m of msgs) n += messageChars(m);
+  for (const m of msgs) n += messageChars(m, includeThinking);
   return n;
 }
 

@@ -1270,6 +1270,7 @@ export const en = {
       nodeError: 'This component failed to render and was skipped',
       unsupportedComponent: 'Unsupported component: {{name}}',
       loadingUi: 'Loading UI…',
+      uiBadge: 'Has interactive UI',
       kindUi: 'Interactive UI',
       kindHybrid: 'UI + tools',
       kindText: 'Text result',

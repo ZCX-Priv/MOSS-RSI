@@ -132,6 +132,7 @@ export default {
       signal: ctx.signal,
       invokeTool,
       isConcurrencySafe: (name) => safe.get(name) === true,
+      onProgress: ctx.onRunCodeProgress,
       logger: ctx.logger,
     });
 
@@ -226,12 +227,21 @@ interface FormatInput {
   description: string;
 }
 
+/** 耗时人类可读化：<1s 用 ms，<60s 用 s，其余用 min（避免几十万毫秒不可读） */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  return `${(ms / 60_000).toFixed(ms < 600_000 ? 1 : 0)}min`;
+}
+
 function formatResultText(input: FormatInput): string {
   const parts: string[] = [];
+  const duration = formatDuration(input.durationMs);
 
   if (input.hostFailed) {
     const e = input.error;
-    parts.push(`[run_code] 执行失败（${e?.kind ?? 'exception'}，${input.durationMs}ms）`);
+    parts.push(`[run_code] 执行失败（${e?.kind ?? 'exception'}，${duration}）`);
     parts.push(e?.message ?? 'unknown error');
     if (e?.kind === 'timeout') {
       parts.push('程序已超过执行预算，子进程已被终止。可以拆分任务、减少嵌套调用或显式增大 timeoutMs。');
@@ -251,9 +261,9 @@ function formatResultText(input: FormatInput): string {
     if (input.kind === 'ui') {
       parts.push(`已渲染交互界面：${input.description}`);
     } else if (input.kind === 'hybrid') {
-      parts.push(`程序完成（${input.durationMs}ms），已渲染交互界面：${input.description}`);
+      parts.push(`程序完成（${duration}），已渲染交互界面：${input.description}`);
     } else {
-      parts.push(`程序完成（${input.durationMs}ms）`);
+      parts.push(`程序完成（${duration}）`);
     }
     if (input.value !== undefined) {
       parts.push(`返回值：\n${formatValue(input.value)}`);

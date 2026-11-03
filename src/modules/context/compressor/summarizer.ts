@@ -10,6 +10,7 @@ import type { CompactionConfig, ContextMessage } from '../types';
 import type { LLMRouter } from '../../contracts';
 import type { UnifiedMessage } from '../../llm/types';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
+import { sanitizeMessages } from '../healer/pair-sanitize';
 
 /** 手动压缩附加焦点的引导语前缀 */
 const FOCUS_PREFIX = '\n\n本次压缩的附加焦点（优先保留以下内容）：';
@@ -48,6 +49,14 @@ export class SummarizeError extends Error {
   }
 }
 
+/**
+ * 摘要请求前的配对净化（与主发送视图同一口径）。
+ * 暴露为纯函数便于测试：assistant(tool_calls) → user → tool 的错位必须在这里被修平。
+ */
+export function sanitizeCompactionRegion(region: readonly ContextMessage[]): ContextMessage[] {
+  return sanitizeMessages(region).messages;
+}
+
 /** 被压缩区消息 → UnifiedMessage（与视图构建相同的转换口径） */
 function regionToUnifiedMessages(region: readonly ContextMessage[]): UnifiedMessage[] {
   return region.map(m => ({
@@ -74,9 +83,16 @@ export async function summarizeRegion(input: SummarizeInput): Promise<string> {
   }
 
   const instruction = loadCompactionInstruction(env, focus);
+  // 摘要请求必须与主请求同一配对净化口径：用户中断工具会留下
+  // assistant(tool_calls) → user → tool 的错位，直接原样发送会被 provider 以
+  // “insufficient tool messages following tool_calls message” 拒绝（HTTP 400）。
+  const sanitized = sanitizeCompactionRegion(region);
+  if (sanitized.length === 0) {
+    throw new SummarizeError('no valid messages after tool pair sanitize');
+  }
   const messages: UnifiedMessage[] = [
     { role: 'system', content: staticSystemPrompt },
-    ...regionToUnifiedMessages(region),
+    ...regionToUnifiedMessages(sanitized),
     { role: 'user', content: instruction },
   ];
 

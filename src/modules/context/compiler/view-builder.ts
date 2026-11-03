@@ -107,8 +107,12 @@ function imagePathBytes(p: string, optimized?: Map<string, OptimizedImage>): num
  * 单条消息的完整字节估算：文本部分（estimateMessageBytes，不含图片）
  * + 该消息图片的 base64 字节（优化结果优先）。
  */
-function messageBytes(m: ContextMessage, optimized?: Map<string, OptimizedImage>): number {
-  let total = estimateMessageBytes(m);
+function messageBytes(
+  m: ContextMessage,
+  optimized?: Map<string, OptimizedImage>,
+  includeThinking = false,
+): number {
+  let total = estimateMessageBytes(m, includeThinking);
   for (const p of messageImagePaths(m)) total += imagePathBytes(p, optimized);
   return total;
 }
@@ -157,6 +161,8 @@ function readImages(
 
 export interface BuildViewOptions {
   toolPruning: ToolPruningConfig;
+  /** 是否把 thinking 纳入发送视图与 token/字节核算（OpenAI 兼容默认 false；Anthropic 带签名时 true） */
+  includeThinking?: boolean;
   /** skill 内容解析回调（message 模式占位替换 / system 模式由调用方拼进 staticSystemPrompt） */
   resolveSkillPrompt?: (name: string) => string | null;
   /** 溢出兜底预算（窗口 token；undefined = 不做兜底裁剪） */
@@ -212,6 +218,7 @@ export function buildRequestView(
   opts: BuildViewOptions,
 ): BuiltView {
   const optimized = opts.optimizedImages;
+  const includeThinking = opts.includeThinking === true;
 
   // ===== 1. 可见消息（未软删、未压缩；触顶提示/系统错误消息纯 UI 不发 LLM） =====
   const visible = session.messages.filter(
@@ -252,6 +259,13 @@ export function buildRequestView(
       }
     }
 
+    // 2d. provider 不回传 thinking 时，从发送视图彻底移除（不只估算排除）：
+    // DeepSeek/OpenAI 兼容默认不回传 reasoning_content，若仍留在视图里，
+    // 既不会被 provider 发送，又会让 breakdown/字节预算虚高。
+    if (!opts.includeThinking && (next.thinking || next.thinkingSignature)) {
+      next = { ...next, thinking: undefined, thinkingSignature: undefined };
+    }
+
     originalOf.set(next, raw);
     return next;
   });
@@ -261,14 +275,14 @@ export function buildRequestView(
 
   // ===== 3. 预算裁剪：token 尾部保留 → 图片淘汰 → 字节尾部裁剪 =====
   const systemTokens = estimateTextTokens(staticSystemPrompt);
-  const ephemeralTokens = ephemeral.reduce((s, m) => s + estimateMessageTokens(m), 0);
+  const ephemeralTokens = ephemeral.reduce((s, m) => s + estimateMessageTokens(m, includeThinking), 0);
   const tokenBudget =
     opts.budgetTokens !== undefined
       ? opts.budgetTokens - systemTokens - ephemeralTokens - 500 // 500 token 余量
       : Number.POSITIVE_INFINITY;
 
   const systemBytes = estimateTextBytes(staticSystemPrompt);
-  const ephemeralBytes = ephemeral.reduce((s, m) => s + messageBytes(m, optimized), 0);
+  const ephemeralBytes = ephemeral.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
   const byteBudget =
     opts.budgetBytes !== undefined
       ? opts.budgetBytes - systemBytes - ephemeralBytes - 2048 // 2 KiB 余量（JSON 结构开销）
@@ -286,15 +300,15 @@ export function buildRequestView(
 
   if (opts.budgetTokens !== undefined || opts.budgetBytes !== undefined || imageTotalBudget !== Number.POSITIVE_INFINITY) {
     const anchors = prepared.filter(isAnchorMessage);
-    const anchorTokens = anchors.reduce((s, m) => s + estimateMessageTokens(m), 0);
-    const anchorBytes = anchors.reduce((s, m) => s + messageBytes(m, optimized), 0);
+    const anchorTokens = anchors.reduce((s, m) => s + estimateMessageTokens(m, includeThinking), 0);
+    const anchorBytes = anchors.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
     const rest = prepared.filter(m => !isAnchorMessage(m));
 
     // (A) token 尾部保留：从后往前累积，超 token 预算即停（至少保留 1 条普通消息）
     const keptRest: ContextMessage[] = [];
     let usedTokens = tokenBudget - anchorTokens;
     for (let i = rest.length - 1; i >= 0; i--) {
-      const t = estimateMessageTokens(rest[i]);
+      const t = estimateMessageTokens(rest[i], includeThinking);
       if (usedTokens - t < 0 && keptRest.length >= 1) break;
       keptRest.unshift(rest[i]);
       usedTokens -= t;
@@ -321,7 +335,7 @@ export function buildRequestView(
       const evictOrder = protectUnseen ? seenOnes : [...seenOnes, ...unseenOnes];
 
       let inlineImgBytes = windowed.reduce((s, m) => s + messageImageBytes(m, optimized), 0);
-      let totalBytes = windowed.reduce((s, m) => s + messageBytes(m, optimized), 0);
+      let totalBytes = windowed.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
 
       for (const m of evictOrder) {
         const overBytes = totalBytes > byteBudget;
@@ -358,14 +372,14 @@ export function buildRequestView(
 
     // (C) 字节兜底尾部裁剪：图片淘汰后仍超字节预算 → 从头部丢消息（保留锚定与 ≥1 条普通消息）
     if (byteBudget !== Number.POSITIVE_INFINITY) {
-      const currentBytes = windowed.reduce((s, m) => s + messageBytes(m, optimized), 0);
+      const currentBytes = windowed.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
       if (currentBytes > byteBudget) {
         const anchorsW = windowed.filter(isAnchorMessage);
         const restW = windowed.filter(m => !isAnchorMessage(m));
         const keptW: ContextMessage[] = [];
-        let usedBytes = byteBudget - anchorsW.reduce((s, m) => s + messageBytes(m, optimized), 0);
+        let usedBytes = byteBudget - anchorsW.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
         for (let i = restW.length - 1; i >= 0; i--) {
-          const b = messageBytes(restW[i], optimized);
+          const b = messageBytes(restW[i], optimized, includeThinking);
           if (usedBytes - b < 0 && keptW.length >= 1) break;
           keptW.unshift(restW[i]);
           usedBytes -= b;
@@ -421,7 +435,7 @@ export function buildRequestView(
   let rulesTokens = 0;
   let memoryTokens = 0;
   for (const m of full) {
-    const t = estimateMessageTokens(m);
+    const t = estimateMessageTokens(m, includeThinking);
     if (m.name === ENV_CONTEXT_MSG_NAME) envTokens += t;
     else if (m.name === COMPACTION_SUMMARY_MSG_NAME) summaryTokens += t;
     else if (m.name === ACTIVE_RULES_MSG_NAME) rulesTokens += t;
@@ -431,7 +445,7 @@ export function buildRequestView(
 
   // ===== 7. 请求体字节估算（文本 UTF-8 + 图片 base64；system 前缀计入） =====
   const bodyBytes =
-    estimateTextBytes(staticSystemPrompt) + full.reduce((s, m) => s + messageBytes(m, optimized), 0);
+    estimateTextBytes(staticSystemPrompt) + full.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
 
   return {
     messages: [{ role: 'system', content: staticSystemPrompt }, ...conversation],

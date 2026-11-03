@@ -56,6 +56,8 @@ export interface GovernorDeps {
   emitWs(sessionId: string, message: unknown): void;
   /** 压缩完成遥测回调 */
   onCompaction(sessionId: string, record: CompactionRecord): void;
+  /** 自动压缩失败回调（记录冷却，抑制压力提醒） */
+  onCompactionFailure?(sessionId: string, reason: string): void;
   /** 降级遥测回调 */
   onDegraded(sessionId: string, reason: string): void;
   /** 图片优化器（发送前压缩；模块未就绪返回 null → 发送原图） */
@@ -68,6 +70,10 @@ export interface GovernorDeps {
   getProjectOverview?(cwd: string): Promise<string | null>;
   /** 主动确保文件索引项目运行时（索引开启时每次请求幂等触发；fire-and-forget） */
   ensureFileIndex?(cwd: string): void;
+  /** 按真实 usage/char 校准后的 token 估算（未校准时返回 null，回退 breakdown 估算） */
+  estimateTokensForMessages?(messages: readonly import('../../llm/types').UnifiedMessage[]): number | null;
+  /** 最近一次压缩失败（用于抑制压力提醒，防止模型反复重试） */
+  getCompactionFailure?(sessionId: string): { at: number; reason: string } | undefined;
 }
 
 export interface PrepareRequestInput {
@@ -80,6 +86,8 @@ export interface PrepareRequestInput {
   windowTokens: number;
   /** 动态系统提示附加段（代码模式 SDK 等；由 agent 引擎每轮生成） */
   promptExtras?: PromptExtraSection[] | null;
+  /** 是否把 thinking 纳入发送视图（provider 会回传 reasoning_content 时才为 true） */
+  includeThinking?: boolean;
 }
 
 /** 解析 skill prompt（SkillRegistry 运行时解析；禁用/缺失返回 null） */
@@ -133,8 +141,9 @@ export const CONTEXT_PRESSURE_MSG_NAME = 'context-pressure';
 /** 提醒提示词缺失时的内置兜底文本（占位符由 renderTemplate 替换） */
 const PRESSURE_REMINDER_FALLBACK =
   '当前上下文占用已达 {{PERCENT}}%（约 {{USED}} / {{MAX}} tokens 的模型上下文窗口）。\n\n' +
-  '请在继续工作前先做好交接（写清关键结论、涉及文件/路径、未完成事项与下一步），' +
-  '随后调用 context 工具（action=compact）自主压缩较早的上下文。';
+  '处理建议：先写交接（关键结论、文件/路径、未完成事项与下一步），' +
+  '再调用 context 工具（action=compact）压缩较早消息。' +
+  '若压缩失败或不可用，不要反复重试，继续当前任务；上下文并未因失败而变满。';
 
 /**
  * 构造「上下文过半提醒」文本（纯函数，便于单测）。
@@ -165,6 +174,7 @@ export async function prepareRequest(
   input: PrepareRequestInput,
 ): Promise<PreparedRequest> {
   const { session, cwd, model, modelDisplayName, windowTokens } = input;
+  const includeThinking = input.includeThinking === true;
   const config = deps.getConfig();
 
   // ===== 0. 文件索引主动激活（仅开 indexing 时也需建运行时并扫描；幂等、不阻塞）=====
@@ -305,6 +315,7 @@ export async function prepareRequest(
   const buildView = (budgetTokens?: number, budgetBytes?: number) =>
     buildRequestView(session, staticSystemPrompt, {
       toolPruning: config.toolPruning,
+      includeThinking,
       resolveSkillPrompt: resolveSkill,
       budgetTokens,
       budgetBytes,
@@ -321,17 +332,39 @@ export async function prepareRequest(
   const preview = buildView();
   const byteBudget = config.maxRequestBytes;
 
-  // 上下文过半提醒（每轮注入、不持久化）：占用估算 ≥ 阈值时，提醒 AI 先交接、再自主压缩。
-  // 排在 ephemeral 末尾（紧邻模型下一个回复），只在本次发送视图生效，占用回落后自动消失。
-  if (config.pressureReminder.enabled && windowTokens > 0) {
-    const usedRatio = preview.breakdown.total / windowTokens;
+  // 真实 usage/char 校准后的有效占用：估算器（字节启发式）在混合中文+代码场景会偏差 1.5~2x；
+  // 未校准时回退 breakdown。阈值/压力/硬上限统一使用 effectiveTotal。
+  const calibratedTotal = deps.estimateTokensForMessages?.(preview.messages);
+  const effectiveTotal =
+    calibratedTotal !== null && calibratedTotal !== undefined && calibratedTotal > 0
+      ? calibratedTotal
+      : preview.breakdown.total;
+  // 估算器单位 → 真实 token 的换算比例（用于把窗口预算换算回 buildView 的估算单位）
+  const estimatorScale =
+    effectiveTotal > 0 && preview.breakdown.total > 0
+      ? preview.breakdown.total / effectiveTotal
+      : 1;
+
+  // 上下文过半提醒（每轮注入、不持久化）：仅在压缩功能可用且近期没有失败时提醒。
+  // 旧实现无条件注入：compaction.enabled=false 时模型被反复要求压缩，失败后形成复读。
+  const recentFailure = deps.getCompactionFailure?.(session.id);
+  const failureCooldownMs = config.compaction.cooldownMs;
+  const suppressedByFailure =
+    recentFailure !== undefined && Date.now() - recentFailure.at < failureCooldownMs;
+  if (
+    config.pressureReminder.enabled &&
+    compactionActive(config.compaction, windowTokens) &&
+    !suppressedByFailure &&
+    windowTokens > 0
+  ) {
+    const usedRatio = effectiveTotal / windowTokens;
     if (usedRatio >= config.pressureReminder.ratio) {
       const reminder: ContextMessage = {
         role: 'user',
         name: CONTEXT_PRESSURE_MSG_NAME,
         content: buildContextPressureReminder(
           deps.env,
-          preview.breakdown.total,
+          effectiveTotal,
           windowTokens,
           usedRatio,
         ),
@@ -340,9 +373,10 @@ export async function prepareRequest(
       ephemeralMessages = [...(ephemeralMessages ?? []), reminder];
       deps.logger.debug('context: pressure reminder injected', {
         sessionId: session.id,
-        usedTokens: preview.breakdown.total,
+        usedTokens: effectiveTotal,
         windowTokens,
         ratio: Number(usedRatio.toFixed(3)),
+        calibrated: calibratedTotal != null,
       });
     }
   }
@@ -353,7 +387,7 @@ export async function prepareRequest(
   // 同时以「规划预检 + 冷却水位」防抖：徒劳/过频压缩在这里被拦下（不再空发 compaction-started）。
   if (
     compactionActive(config.compaction, windowTokens) &&
-    shouldCompact(preview.breakdown.total, windowTokens, config.compaction.compactRatio)
+    shouldCompact(effectiveTotal, windowTokens, config.compaction.compactRatio)
   ) {
     const activeForPlan = session.messages.filter(m => !m.deletedAt && !m.compacted);
     const plan = planCompaction(
@@ -415,15 +449,17 @@ export async function prepareRequest(
               payload: { sessionId: session.id, compaction: outcome.record },
             });
           } else if (outcome.reason) {
-            // 区太小/摘要失败/收缩比不达标：不算降级（下轮再试），仅 debug
+            // 区太小/摘要失败/收缩比不达标：不算降级（下轮再试），记录失败冷却防复读
             deps.logger.debug('context: auto compaction skipped', {
               sessionId: session.id,
               reason: outcome.reason,
             });
+            deps.onCompactionFailure?.(session.id, outcome.reason);
           }
         } catch (err) {
           degradedReason = `compaction threw: ${err instanceof Error ? err.message : String(err)}`;
           deps.onDegraded(session.id, degradedReason);
+          deps.onCompactionFailure?.(session.id, degradedReason);
         }
       } else {
         degradedReason = 'llm router unavailable for compaction';
@@ -433,9 +469,11 @@ export async function prepareRequest(
   }
 
   // ===== 4. 最终视图（溢出兜底：压缩后仍超窗 → 尾部裁剪；字节超限 → 同步启用字节预算）=====
+  // buildView 内部按估算器单位记账：窗口预算需乘 estimatorScale 换算回估算单位，
+  // 否则已校准的 effectiveTotal 与内部估算差异会让裁剪过早/过晚。
   const final = buildView(
-    needsHardCeiling(preview.breakdown.total, windowTokens) || compactionTriggered
-      ? windowTokens
+    needsHardCeiling(effectiveTotal, windowTokens) || compactionTriggered
+      ? Math.round(windowTokens * estimatorScale)
       : undefined,
     byteOverBudget ? byteBudget : undefined,
   );
@@ -456,7 +494,8 @@ export async function prepareRequest(
   // 下次仍会重新发送该图（保证模型至少看过一次）。
   return {
     messages: final.messages,
-    estimatedTokens: final.breakdown.total,
+    // 对外报告真实口径（估算器单位 / 换算比例），与面板/压力阈值同源
+    estimatedTokens: Math.round(final.breakdown.total / (estimatorScale > 0 ? estimatorScale : 1)),
     windowTokens,
     compactionTriggered,
     breakdown: final.breakdown,

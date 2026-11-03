@@ -6,13 +6,9 @@
 
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
+import { formatDuration } from '@/lib/format-duration';
 import { useStore } from '../../store';
 import type { RunStats, ContextStats } from '../../types/api';
-
-function fmtMs(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.round(ms)}ms`;
-}
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -82,9 +78,9 @@ export function StatsBar({ stats, contextStats }: { stats?: RunStats; contextSta
         warning={nearTurnLimit}
       />
       <Separator />
-      <StatItem label={t('stats.llmLabel')} value={fmtMs(s.llmMs)} />
+      <StatItem label={t('stats.llmLabel')} value={formatDuration(s.llmMs)} />
       <Separator />
-      <StatItem label={t('stats.toolLabel')} value={fmtMs(s.toolMs)} />
+      <StatItem label={t('stats.toolLabel')} value={formatDuration(s.toolMs)} />
       <Separator />
       <StatItem label={t('stats.cacheLabel')} value={t('stats.percent', { pct: cacheHitPct })} />
       <Separator />

@@ -126,6 +126,36 @@ export interface AskOutcome {
   answers?: AskAnswer[];
 }
 
+/** run_code 嵌套调用实时状态（宿主 → AgentEvent → WebUI 流式展示） */
+export type RunCodeCallStatus = 'running' | 'done' | 'failed';
+
+export interface RunCodeProgressCall {
+  id: string;
+  name: string;
+  argsPreview: string;
+  argumentsJson?: string;
+  status: RunCodeCallStatus;
+  durationMs?: number;
+  ok?: boolean;
+  error?: string;
+  resultPreview?: string;
+  resultText?: string;
+  resultMetadata?: Record<string, unknown>;
+}
+
+/** run_code 执行进度事件（只用于 UI 流式展示，不落库） */
+export interface RunCodeProgressEvent {
+  phase: 'started' | 'log' | 'call-start' | 'call-end';
+  /** 程序开始执行时刻（epoch ms；仅 started 帧携带） */
+  startedAtMs?: number;
+  /** 已执行时长（仅 call-end 帧携带，便于前端无需本地时钟） */
+  elapsedMs?: number;
+  /** 单条日志（phase=log） */
+  log?: string;
+  /** 单次嵌套调用（phase=call-start/call-end） */
+  call?: RunCodeProgressCall;
+}
+
 export interface ToolContext {
   sessionId: string;
   cwd: string;
@@ -156,6 +186,11 @@ export interface ToolContext {
     args: unknown,
     opts?: { callId?: string; signal?: AbortSignal },
   ) => Promise<ToolResult>;
+  /**
+   * run_code 执行进度通道（仅 AgentEngine 注入）。
+   * 代码开始执行、嵌套工具开始/结束、日志到达时实时推送，供 WebUI 边执行边展示。
+   */
+  onRunCodeProgress?: (event: RunCodeProgressEvent) => void;
 }
 
 export type ToolEvent =

@@ -316,7 +316,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               .filter((c) => c.type === 'text')
               .map((c) => (c.type === 'text' ? c.text : ''))
               .join('\n');
-            index.set(entry.toolCallId, { text, isError: entry.result.isError === true });
+            index.set(entry.toolCallId, {
+              text,
+              isError: entry.result.isError === true,
+              ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
+            });
           }
         }
         cache.messages = messages;
@@ -2607,6 +2611,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               status: tc.status,
               resultText: matched?.text,
               isError: matched?.isError,
+              ...(matched?.lazy ? { lazy: true } : {}),
             };
           })}
         />

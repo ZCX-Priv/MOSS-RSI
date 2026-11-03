@@ -71,6 +71,7 @@ import type {
   ImChannelId,
   HistoryPageMeta,
   SessionState,
+  ToolResult,
   VoiceStatus,
   VoiceModelStatus,
   ResourceSnapshot,
@@ -223,6 +224,26 @@ export const api = {
   /** 会话状态快照：运行态 + 半截流式草稿 + 待答/待确认（刷新/重连恢复的唯一入口） */
   getSessionState: (id: string) =>
     request<SessionState>('GET', `/api/session/${encodeURIComponent(id)}/state`),
+  /** 按 toolCallId 拉取完整工具结果（分页历史只返回轻量投影，展开卡片时调用） */
+  getToolResult: async (sessionId: string, toolCallId: string): Promise<ToolResult> => {
+    const resp = await request<{
+      sessionId: string;
+      toolCallId: string;
+      result: {
+        content: string;
+        isError?: boolean;
+        metadata?: ToolResult['metadata'];
+      };
+    }>(
+      'GET',
+      `/api/session/${encodeURIComponent(sessionId)}/tool-result?toolCallId=${encodeURIComponent(toolCallId)}`,
+    );
+    return {
+      content: [{ type: 'text', text: resp.result.content }],
+      ...(resp.result.isError ? { isError: true } : {}),
+      ...(resp.result.metadata ? { metadata: resp.result.metadata } : {}),
+    };
+  },
   deleteSession: (id: string) => request<{ deleted: boolean }>('DELETE', `/api/session/${id}`),
   getSessionContext: (id: string) =>
     request<{ files: ContextFile[]; totalTokens: number; maxTokens: number }>(

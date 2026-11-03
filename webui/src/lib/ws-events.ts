@@ -40,6 +40,7 @@ import type {
   AutomationRun,
   WSMessage,
   ToolCall,
+  CodeRunLiveCall,
   RunStats,
   CompactionRecord,
   ContextStats,
@@ -63,6 +64,7 @@ function genId(): string {
 const AGENT_STREAM_EVENT_TYPES = new Set([
   'assistant-text', 'assistant-thinking',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
+  'run-code-progress',
   'ask', 'stats-updated',
 ]);
 
@@ -84,6 +86,7 @@ const STREAM_CHUNK_TYPES = new Set([
 const SUBAGENT_DISPLAY_EVENT_TYPES = new Set([
   'assistant-text', 'assistant-thinking',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
+  'run-code-progress',
   'ask', 'ask-timeout', 'confirm-required', 'stats-updated', 'error', 'done',
 ]);
 
@@ -463,6 +466,64 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
             toolResults: updatedToolResults,
           });
         }
+      }
+      break;
+    }
+    case 'run-code-progress': {
+      flushPending();
+      const event = msg.payload as {
+        toolCallId?: string;
+        messageId?: string;
+        payload?: {
+          phase?: 'started' | 'log' | 'call-start' | 'call-end';
+          startedAtMs?: number;
+          log?: string;
+          call?: CodeRunLiveCall;
+        };
+      };
+      if (!sessionId || !event.toolCallId || !event.payload) break;
+      const progress = event.payload;
+      const pending = pendingAssistant.get(sessionId);
+      const targetId = pending?.id ?? event.messageId;
+      const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
+      const target =
+        (targetId ? msgs.find((m) => m.id === targetId) : undefined) ??
+        findMessageByToolCallId(sessionId, event.toolCallId);
+      if (!target?.toolCalls) break;
+      const updated = target.toolCalls.map((tc): ToolCall => {
+        if (tc.id !== event.toolCallId) return tc;
+        const live = tc.live ?? { calls: [], logs: [] };
+        if (progress.phase === 'started') {
+          return {
+            ...tc,
+            status: 'executing',
+            live: {
+              ...live,
+              ...(progress.startedAtMs ? { startedAtMs: progress.startedAtMs } : {}),
+            },
+          };
+        }
+        if (progress.phase === 'log') {
+          const log = progress.log ?? '';
+          if (!log) return tc;
+          const logs = [...live.logs, log];
+          if (logs.length > 200) logs.splice(0, logs.length - 200);
+          return { ...tc, status: 'executing', live: { ...live, logs } };
+        }
+        if ((progress.phase === 'call-start' || progress.phase === 'call-end') && progress.call) {
+          const call = progress.call;
+          const idx = live.calls.findIndex((c) => c.id === call.id);
+          const calls =
+            idx >= 0
+              ? live.calls.map((c, i) => (i === idx ? { ...c, ...call } : c))
+              : [...live.calls, call];
+          return { ...tc, status: 'executing', live: { ...live, calls } };
+        }
+        return tc;
+      });
+      s.updateMessage(sessionId, target.id, { toolCalls: updated });
+      if (pending && pending.id === target.id) {
+        pendingAssistant.set(sessionId, { ...pending, toolCalls: updated });
       }
       break;
     }

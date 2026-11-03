@@ -40,7 +40,10 @@ async function runCompact(p: ContextParams, ctx: ToolContext): Promise<ToolResul
         content: [
           {
             type: 'text',
-            text: `压缩未执行：${outcome.reason ?? 'compaction not applicable'}`,
+            text:
+              `压缩未执行：${outcome.reason ?? 'compaction not applicable'}。` +
+              '当前上下文并未因这次失败而变满，请不要立即重复调用 context compact；' +
+              '继续当前任务，必要时先写交接（关键结论/文件路径/下一步）再重试。',
           },
         ],
         metadata: { ok: false, reason: outcome.reason },
@@ -51,7 +54,9 @@ async function runCompact(p: ContextParams, ctx: ToolContext): Promise<ToolResul
       content: [
         {
           type: 'text',
-          text: `已完成上下文压缩：${c.beforeTokens} → ${c.afterTokens} tokens，折叠 ${c.compactedCount} 条消息。摘要已替代较早消息，原始内容仍保存在会话中（可用 context search 检索）。`,
+          text:
+            `已完成上下文压缩：${c.beforeTokens} → ${c.afterTokens} tokens，折叠 ${c.compactedCount} 条消息。` +
+            '被折叠消息已从活跃上下文移除（不再发送给模型），摘要见上下文面板。',
         },
       ],
       metadata: { ok: true, compactionId: c.id, beforeTokens: c.beforeTokens, afterTokens: c.afterTokens },
@@ -110,7 +115,7 @@ function runSearch(p: ContextParams, ctx: ToolContext): ToolResult {
     content: [
       {
         type: 'text',
-        text: `检索到 ${hits.length} 条相关历史（scope=${scope}，score 降序，含已压缩原文）：\n${lines.join('\n')}`,
+        text: `检索到 ${hits.length} 条相关历史（scope=${scope}，score 降序，仅当前上下文）：\n${lines.join('\n')}`,
       },
     ],
     metadata: { count: hits.length, scope },

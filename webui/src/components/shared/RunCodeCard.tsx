@@ -3,15 +3,24 @@
 // - 程序卡片：复用 ToolCallDetails 的卡片外壳，头部显示「代码 · 说明 · 状态」，
 //   展开后「预览」页签只放返回值 / 日志 / 诊断 / 错误，「源码」页签放程序源码。
 // - 工具调用：每条直接复用 ToolCallDetails，与原生工具行的标题/摘要/hover/展开卡片完全同源。
-// - Intelligent UI：始终渲染在工具调用行之后，不依赖程序卡片展开。
-// - 程序源码来自 toolCall.arguments（流式期间容错提取），UI 规格来自 result.metadata.codeRun。
+// - Intelligent UI：仅程序卡片展开时懒加载渲染；折叠态只显示「含交互界面」徽标。
+// - 执行中通过 toolCall.live 展示实时嵌套调用/日志与 ms/s/min 计时。
+// - 程序源码/大 JSON 只在展开时解析；轻量历史结果展开时按 toolCallId 拉取完整 metadata。
 
-import { memo, useMemo } from 'react';
+import { lazy, memo, Suspense, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, CircleAlert, Loader2, X } from 'lucide-react';
-import { CodeBlock, GenUIRenderer } from '../../render';
+import { CodeBlock } from '../../render';
 import { ToolCallDetails } from './ToolCallDetails';
+import { useLazyToolResult } from '../../lib/lazy-tool-results';
+import { useStore } from '../../store';
+import { formatDuration } from '../../lib/format-duration';
 import type { CodeRunCall, CodeRunMetadata, ToolCall, ToolResult } from '../../types/api';
+
+/** IntelligentUI 渲染器懒加载：只有程序卡片展开且确有 spec 时才拉 catalog/chart 等重模块 */
+const GenUIRenderer = lazy(() =>
+  import('../../render/genui/GenUIRenderer').then((m) => ({ default: m.GenUIRenderer })),
+);
 
 interface RunCodeCardProps {
   toolCall: ToolCall;
@@ -34,14 +43,30 @@ export const RunCodeCard = memo(function RunCodeCard({
   iconMap,
 }: RunCodeCardProps) {
   const { t } = useTranslation();
-  const parsed = useMemo(() => parseRunCodeArgs(toolCall.arguments), [toolCall.arguments]);
-  const meta = result?.metadata?.codeRun;
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const [open, setOpen] = useState(false);
+  const [nestedOpenIds, setNestedOpenIds] = useState<Set<string>>(new Set());
+  // 程序卡片或任一嵌套调用展开时，才按需拉取完整的 codeRun metadata（含 uiSpec/日志）
+  const hydratedResult = useLazyToolResult(
+    activeSessionId,
+    toolCall.id,
+    result,
+    open || nestedOpenIds.size > 0,
+  );
+  // 大 JSON 源码只在展开时解析；折叠态不解析 20KB~ 的程序参数
+  const parsed: ParsedArgs = useMemo(
+    () => (open ? parseRunCodeArgs(toolCall.arguments) : { partial: true }),
+    [open, toolCall.arguments],
+  );
+  const meta = hydratedResult?.metadata?.codeRun;
   const status = toolCall.status ?? 'done';
-  const isError = result?.isError === true || (status === 'done' && fallbackIsError === true);
-  const bodyText = useMemo(() => resultText(result, fallbackText), [result, fallbackText]);
+  const isError =
+    hydratedResult?.isError === true || (status === 'done' && fallbackIsError === true);
+  const bodyText = open ? resultText(hydratedResult, fallbackText) : '';
   const running = status === 'generating' || status === 'executing';
   const hasCode = typeof parsed.code === 'string' && parsed.code.trim().length > 0;
-  const calls = meta?.calls ?? [];
+  const liveCalls = toolCall.live?.calls ?? [];
+  const calls = meta?.calls?.length ? meta.calls : liveCalls;
   const kindLabel =
     meta?.kind === 'ui'
       ? t('task.runCode.kindUi')
@@ -50,37 +75,76 @@ export const RunCodeCard = memo(function RunCodeCard({
         : meta?.kind === 'text'
           ? t('task.runCode.kindText')
           : '';
+  const hasUi = meta?.uiSpec !== undefined || meta?.hasUi === true;
 
-  const preview = meta ? (
-    <RunCodeResultPreview meta={meta} isError={isError} running={running} bodyText={bodyText} />
-  ) : undefined;
-  const source = hasCode ? (
+  // 执行中本地 ticker：仅运行中的卡片启动（避免每个历史卡片都挂定时器）
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => forceTick((v) => v + 1), 250);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  const startedAtMs = toolCall.live?.startedAtMs;
+  const liveElapsedMs =
+    running && startedAtMs !== undefined ? Math.max(0, Date.now() - startedAtMs) : undefined;
+
+  // 运行中还没有最终 metadata 时，用 live 日志构造一个只读预览（不伪造返回/诊断）
+  const displayMeta: CodeRunMetadata | undefined =
+    meta ??
+    (toolCall.live
+      ? {
+          version: 1,
+          kind: 'text',
+          description: '',
+          logs: toolCall.live.logs,
+          calls: [],
+          durationMs: liveElapsedMs ?? 0,
+        }
+      : undefined);
+  const preview =
+    open && displayMeta ? (
+      <RunCodeResultPreview meta={displayMeta} isError={isError} running={running} bodyText={bodyText} />
+    ) : undefined;
+  const source = open && hasCode ? (
     <CodeBlock code={parsed.code ?? ''} lang="ts" closed={!parsed.partial} variant="inline" />
   ) : undefined;
+
+  const setNestedOpen = (id: string, expanded: boolean): void => {
+    setNestedOpenIds((prev) => {
+      const next = new Set(prev);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
 
   return (
     <div className="flex flex-col gap-1">
       {/* 程序卡片：预览 = 文本结果，源码 = 程序代码；默认折叠，与普通工具一致 */}
       <ToolCallDetails
         toolCall={toolCall}
-        result={result}
+        result={hydratedResult}
         fallbackText={fallbackText}
         fallbackIsError={fallbackIsError}
         iconMap={iconMap}
         headerClassName="pl-1 pr-2"
         titleOverride={t('task.runCode.code')}
+        expanded={open}
+        onExpandedChange={setOpen}
         trailing={
           <RunStatusText
             status={status}
             isError={isError}
             durationMs={meta?.durationMs}
+            liveElapsedMs={liveElapsedMs}
             kindLabel={kindLabel}
             truncated={meta?.truncated === true}
+            hasUi={hasUi}
           />
         }
         previewOverride={preview}
         sourceOverride={source}
-        copyTextOverride={hasCode ? parsed.code : undefined}
+        copyTextOverride={open && hasCode ? parsed.code : undefined}
       />
 
       {/* 工具调用：直接复用普通工具调用卡片，与原生 tool 行完全同源同构 */}
@@ -94,6 +158,7 @@ export const RunCodeCard = memo(function RunCodeCard({
                 toolCall={view.toolCall}
                 result={view.result}
                 iconMap={iconMap}
+                onExpandedChange={(expanded) => setNestedOpen(call.id, expanded)}
               />
             );
           })}
@@ -103,31 +168,47 @@ export const RunCodeCard = memo(function RunCodeCard({
         </div>
       )}
 
-      {/* Intelligent UI：常显，不依赖程序卡片展开 */}
-      {meta?.uiSpec && (
+      {/* IntelligentUI：只在程序卡片展开且确有 spec 时懒加载渲染（重进会话不再全量挂载） */}
+      {open && meta?.uiSpec && (
         <div className="mt-0.5 ml-1 min-w-0">
-          <GenUIRenderer spec={meta.uiSpec} />
+          <Suspense
+            fallback={
+              <div className="text-[11px] text-muted-foreground">{t('task.runCode.loadingUi')}</div>
+            }
+          >
+            <GenUIRenderer spec={meta.uiSpec} />
+          </Suspense>
         </div>
       )}
     </div>
   );
 });
 
-/** 合成普通 ToolCall/ToolResult：优先使用后端富数据，旧会话回退 preview 字段 */
-function nestedToolView(call: CodeRunCall): { toolCall: ToolCall; result: ToolResult } {
+/** 合成普通 ToolCall/ToolResult：优先使用后端富数据，旧会话/执行中回退 preview 字段 */
+function nestedToolView(call: CodeRunCall & { status?: 'running' | 'done' | 'failed' }): {
+  toolCall: ToolCall;
+  result?: ToolResult;
+} {
+  const running = call.status === 'running';
+  const failed = call.status === 'failed' || (call.status !== 'running' && !call.ok);
   const text = call.resultText ?? (call.ok ? call.resultPreview : call.error ?? call.resultPreview);
   return {
     toolCall: {
       id: call.id,
       name: call.name,
       arguments: call.argumentsJson ?? call.argsPreview,
-      status: 'done',
+      status: running ? 'executing' : 'done',
     },
-    result: {
-      content: [{ type: 'text', text }],
-      isError: !call.ok,
-      ...(call.resultMetadata ? { metadata: call.resultMetadata } : {}),
-    },
+    // 执行中还没有结果：只显示标题行 + 转圈，避免伪造空结果
+    ...(running
+      ? {}
+      : {
+          result: {
+            content: [{ type: 'text', text }],
+            ...(failed ? { isError: true } : {}),
+            ...(call.resultMetadata ? { metadata: call.resultMetadata } : {}),
+          },
+        }),
   };
 }
 
@@ -212,14 +293,19 @@ function RunStatusText({
   status,
   isError,
   durationMs,
+  liveElapsedMs,
   kindLabel,
   truncated,
+  hasUi,
 }: {
   status: NonNullable<ToolCall['status']>;
   isError: boolean;
   durationMs?: number;
+  /** 执行中实时已用时（ms；仅 running 时存在） */
+  liveElapsedMs?: number;
   kindLabel: string;
   truncated: boolean;
+  hasUi: boolean;
 }) {
   const { t } = useTranslation();
   if (status === 'generating') {
@@ -235,6 +321,12 @@ function RunStatusText({
       <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         {t('task.runCode.running')}
+        {liveElapsedMs !== undefined && (
+          <>
+            <span>·</span>
+            <span className="tabular-nums">{formatDuration(liveElapsedMs)}</span>
+          </>
+        )}
       </span>
     );
   }
@@ -253,13 +345,19 @@ function RunStatusText({
       {durationMs != null && (
         <>
           <span>·</span>
-          <span className="tabular-nums">{durationMs}ms</span>
+          <span className="tabular-nums">{formatDuration(durationMs)}</span>
         </>
       )}
       {kindLabel && (
         <>
           <span>·</span>
           <span>{kindLabel}</span>
+        </>
+      )}
+      {hasUi && (
+        <>
+          <span>·</span>
+          <span className="text-sky-600 dark:text-sky-400">{t('task.runCode.uiBadge')}</span>
         </>
       )}
       {truncated && (

@@ -106,6 +106,12 @@ function safeRelDir(dir: string): string {
 
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
+  /**
+   * 启动时只建立「sessionId → 文件路径」轻量索引，不读 JSON。
+   * 原实现启动即全量 JSON.parse 全部会话（实测 231 个文件 / 45.5MB，agent 模块因此耗时 6s）；
+   * 现改为按需 loadFromDisk，未访问的会话零启动成本。
+   */
+  private readonly sessionFiles = new Map<string, { dir: string; filePath: string }>();
   private readonly logger: Logger;
   /** session 持久化根目录：~/.moss/tasks（session 文件按分组相对目录存于 tasks/<dir>/） */
   private readonly tasksDir: string;
@@ -137,12 +143,14 @@ export class SessionStore {
     this.logger = logger;
     this.tasksDir = join(env.dataDir, 'tasks');
     this.resolveSessionDir = opts?.resolveSessionDir ?? (() => null);
-    this.loadAll();
+    this.indexSessionFiles();
   }
 
-  /** 启动时全量加载所有 session 文件到内存（损坏文件跳过，目录不存在则跳过）。
-   *  同时自愈存量错位文件：物理目录 ≠ 索引组时按索引搬移归位（历史 bug 修复后一次性迁移） */
-  private loadAll(): void {
+  /**
+   * 启动索引：只扫描目录并记录 sessionId → 文件路径，不读取/解析 JSON。
+   * 旧实现启动即全量加载 45MB 会话（231 个文件），是内核启动最大的单点耗时。
+   */
+  private indexSessionFiles(): void {
     try {
       if (!existsSync(this.tasksDir)) return;
       for (const entry of readdirSync(this.tasksDir, { withFileTypes: true })) {
@@ -152,19 +160,26 @@ export class SessionStore {
         // 一级：tasks/<d1>/*.json（组内 task.json 是任务元信息，其余 .json 文件名即 sessionId）
         for (const name of readdirSync(d1Abs)) {
           if (!name.endsWith('.json') || name === 'task.json') continue;
-          this.loadOneSession(name, d1, `${d1}/${name}`);
+          this.sessionFiles.set(name.slice(0, -'.json'.length), {
+            dir: d1,
+            filePath: join(d1Abs, name),
+          });
         }
         // 二级：tasks/<d1>/<d2>/*.json（自定义嵌套分组）
         for (const sub of readdirSync(d1Abs, { withFileTypes: true })) {
           if (!sub.isDirectory()) continue;
           const relDir = `${d1}/${sub.name}`;
-          for (const name of readdirSync(join(d1Abs, sub.name))) {
+          const subAbs = join(d1Abs, sub.name);
+          for (const name of readdirSync(subAbs)) {
             if (!name.endsWith('.json') || name === 'task.json') continue;
-            this.loadOneSession(name, relDir, `${relDir}/${name}`);
+            this.sessionFiles.set(name.slice(0, -'.json'.length), {
+              dir: relDir,
+              filePath: join(subAbs, name),
+            });
           }
         }
       }
-      this.logger.debug(t('agent.loadedSessions', { count: this.sessions.size }));
+      this.logger.debug(t('agent.loadedSessions', { count: this.sessionFiles.size }));
     } catch (err) {
       this.logger.warn(t('agent.scanSessionsDirFailed'), {
         dir: this.tasksDir,
@@ -173,44 +188,10 @@ export class SessionStore {
     }
   }
 
-  /** 加载单个 session 文件：先错位自愈，再读入内存（失败仅告警） */
-  private loadOneSession(fileName: string, physicalDir: string, displayPath: string): void {
-    const sessionId = fileName.slice(0, -'.json'.length);
-    this.healMisplacedFile(sessionId, physicalDir, fileName);
-    if (!this.loadFromDisk(sessionId)) {
-      this.logger.warn(t('agent.loadSessionFailed'), { file: displayPath });
-    }
-  }
-
-  /** 错位文件搬移：物理目录 ≠ 索引目录且索引有效时，把文件搬到索引目录。失败仅告警不阻断启动 */
-  private healMisplacedFile(sessionId: string, physicalDir: string, fileName: string): void {
-    const indexedDir = this.resolveSessionDir(sessionId);
-    if (!indexedDir) return; // 索引缺失（任务已删/孤儿文件）：保持原位
-    const destDir = safeRelDir(indexedDir) || 'default';
-    if (destDir === physicalDir) return;
-    const src = join(this.tasksDir, physicalDir, fileName);
-    const dest = join(this.tasksDir, destDir, fileName);
-    try {
-      if (existsSync(dest)) {
-        this.logger.warn(t('agent.loadSessionFailed'), {
-          file: `${physicalDir}/${fileName}`,
-          reason: `dest exists: ${destDir}/${fileName}`,
-        });
-        return;
-      }
-      mkdirSync(join(this.tasksDir, destDir), { recursive: true });
-      renameSync(src, dest);
-      this.logger.info(t('agent.taskStoreMigrated', { count: 1 }), {
-        sessionId,
-        from: physicalDir,
-        to: destDir,
-      });
-    } catch (err) {
-      // 搬移失败保留原位：sessionFilePath 的磁盘扫描兜底仍可正确加载
-      this.logger.warn(t('agent.taskStoreCleanupFailed'), {
-        sessionId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  /** 全量加载（仅在真正需要遍历所有会话时触发：跨 session 检索 / MCP 列表 / 旧版兜底） */
+  private ensureAllLoaded(): void {
+    for (const sessionId of [...this.sessionFiles.keys()]) {
+      if (!this.sessions.has(sessionId)) this.loadFromDisk(sessionId);
     }
   }
 
@@ -289,6 +270,7 @@ export class SessionStore {
     try {
       mkdirSync(join(this.tasksDir, rel), { recursive: true });
       renameSync(join(this.tasksDir, diskDir, `${sid}.json`), dest);
+      this.sessionFiles.set(sid, { dir: rel, filePath: dest });
       this.logger.info(t('agent.taskStoreMigrated', { count: 1 }), {
         sessionId,
         from: diskDir,
@@ -313,16 +295,25 @@ export class SessionStore {
    */
   private sessionFilePath(sessionId: string): string {
     const sid = safeSessionId(sessionId);
+    // 启动索引命中：文件仍在原地则直接使用（避免每次 IO 都重新扫描目录）
+    const known = this.sessionFiles.get(sid);
+    if (known && existsSync(known.filePath)) return known.filePath;
     const indexedDir = this.resolveSessionDir(sessionId);
     if (indexedDir) {
       const rel = safeRelDir(indexedDir) || 'default';
       const indexed = join(this.tasksDir, rel, `${sid}.json`);
-      if (existsSync(indexed)) return indexed;
+      if (existsSync(indexed)) {
+        this.sessionFiles.set(sid, { dir: rel, filePath: indexed });
+        return indexed;
+      }
       this.relocate(sessionId);
+      this.sessionFiles.set(sid, { dir: rel, filePath: indexed });
       return indexed;
     }
     const diskDir = this.findDirOnDisk(sid);
-    return join(this.tasksDir, diskDir ?? 'default', `${sid}.json`);
+    const filePath = join(this.tasksDir, diskDir ?? 'default', `${sid}.json`);
+    this.sessionFiles.set(sid, { dir: diskDir ?? 'default', filePath });
+    return filePath;
   }
 
   /** 兜底扫描：在分组目录（一级 / 二级嵌套）定位 <sid>.json 既有文件，返回相对目录名；未找到返回 null */
@@ -347,7 +338,7 @@ export class SessionStore {
   }
 
   /**
-   * 从磁盘加载单个 session（启动 loadAll 与运行时冗余加载共用）。
+   * 从磁盘按需加载单个 session（懒加载与运行时冗余加载共用）。
    * 主动清理：检测到旧格式冗余（systemPrompt 字段 / activeSkill 固化全文 / skill-inject 全文消息）
    * 时先瘦身再立即原子重写文件，磁盘即时去除全量提示词。
    */
@@ -401,14 +392,22 @@ export class SessionStore {
             ? { msgSeq: parsed.msgSeq }
             : {}),
         };
+        // 存量修复：用户中断工具时旧实现把结果追加到用户消息之后，
+        // 形成 assistant(tool_calls) → user → tool 的错位（摘要请求会 HTTP 400）。
+        // 先把已有结果搬回所属 assistant 之后，再对仍缺失的结果补错误消息。
+        const reordered = repairToolPairOrder(session.messages);
         // 崩溃自愈：防抖落盘窗口内进程崩溃可能丢尾部 tool 结果——补错误结果
         // 恢复 tool_use/tool_result 配对（否则 session 复用时 provider 报 HTTP 400）
         const healedCount = healDanglingToolCalls(session.messages);
         if (healedCount > 0) {
           this.logger.warn(t('agent.healedDanglingToolCalls', { count: healedCount }), { sessionId });
         }
+        this.sessionFiles.set(session.id, {
+          dir: this.sessionFiles.get(session.id)?.dir ?? 'default',
+          filePath,
+        });
         this.sessions.set(session.id, session);
-        if (dirty || healedCount > 0) {
+        if (dirty || healedCount > 0 || reordered > 0) {
           // 重写瘦身：旧 systemPrompt 等废弃字段不再写入，自然消失；自愈结果同步落盘
           this.saveSessionNow(session);
         }
@@ -453,12 +452,16 @@ export class SessionStore {
   }
 
   list(): Session[] {
+    // 全量遍历才加载全部会话（跨 session 检索 / MCP 列表 / 旧版兜底）；
+    // 正常 UI 首屏不会走到这里，避免启动时 45MB JSON 解析。
+    this.ensureAllLoaded();
     return Array.from(this.sessions.values());
   }
 
   delete(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.dirtySessions.delete(sessionId);
+    this.sessionFiles.delete(safeSessionId(sessionId));
     try {
       const filePath = this.sessionFilePath(sessionId);
       if (existsSync(filePath)) {
@@ -646,7 +649,16 @@ export class SessionStore {
     this.markDirty(session);
   }
 
-  /** 添加工具结果消息 */
+  /**
+   * 添加工具结果消息。
+   *
+   * 必须紧跟所属 assistant（而不是无条件 append 到数组尾部）：
+   * 用户在长耗时工具执行中插话时，尾部 append 会形成
+   * `assistant(tool_calls) → user → tool` 的错位，导致：
+   *   - 发送视图 sanitize 丢弃该工具结果（模型看不到中止/结果）；
+   *   - 摘要请求缺少 tool_result 配对 → provider HTTP 400（压缩反复失败）。
+   * 插入点 = 所属 assistant 之后、其已有连续 tool 结果之后；找不到 owner 才回退 append。
+   */
   addToolMessage(
     session: Session,
     toolCallId: string,
@@ -655,7 +667,7 @@ export class SessionStore {
     extra?: { isError?: boolean; metadata?: Record<string, unknown>; images?: string[] },
   ): void {
     const images = extra?.images;
-    session.messages.push({
+    const toolMessage: AgentMessage = {
       role: 'tool',
       content,
       toolCallId,
@@ -664,7 +676,20 @@ export class SessionStore {
       metadata: extra?.metadata,
       ...(images && images.length > 0 ? { images } : {}),
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    let insertAt = -1;
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const m = session.messages[i];
+      if (m.role !== 'assistant' || !m.toolCalls?.some((tc) => tc.id === toolCallId)) continue;
+      let j = i + 1;
+      while (j < session.messages.length && session.messages[j].role === 'tool') j++;
+      insertAt = j;
+      break;
+    }
+    if (insertAt >= 0) session.messages.splice(insertAt, 0, toolMessage);
+    else session.messages.push(toolMessage);
+
     session.updatedAt = new Date().toISOString();
     this.markDirty(session);
   }
@@ -802,6 +827,56 @@ export class SessionStore {
       this.markDirty(session);
     }
   }
+}
+
+/**
+ * 存量修复：把已存在的 tool 结果移动到所属 assistant 之后（assistant → tool(s) → 其他）。
+ *
+ * 历史 bug（用户中断工具后结果被 append 到用户消息之后）会形成
+ * `assistant(tool_calls) → user → tool`：发送视图 sanitize 会丢弃该结果，
+ * 摘要请求会因缺少 tool_result 配对被 provider 拒绝（HTTP 400）。
+ * 本函数只做顺序修复，不增删消息；无配对 owner 的孤立 tool 结果保留在末尾。
+ * @returns 位置发生变化的 tool 消息数
+ */
+export function repairToolPairOrder(messages: AgentMessage[]): number {
+  const toolMessages = messages.filter((m) => m.role === 'tool');
+  if (toolMessages.length === 0) return 0;
+
+  const toolByCallId = new Map<string, AgentMessage[]>();
+  for (const m of toolMessages) {
+    if (!m.toolCallId) continue;
+    const list = toolByCallId.get(m.toolCallId) ?? [];
+    list.push(m);
+    toolByCallId.set(m.toolCallId, list);
+  }
+
+  const consumed = new Set<AgentMessage>();
+  const out: AgentMessage[] = [];
+  for (const m of messages) {
+    if (m.role === 'tool') continue;
+    out.push(m);
+    if (m.role !== 'assistant' || !m.toolCalls || m.toolCalls.length === 0) continue;
+    for (const tc of m.toolCalls) {
+      for (const result of toolByCallId.get(tc.id) ?? []) {
+        if (consumed.has(result)) continue;
+        consumed.add(result);
+        out.push(result);
+      }
+    }
+  }
+  // 无 owner 的孤立 tool 结果保持（放末尾），不静默删除用户可见消息
+  for (const m of toolMessages) if (!consumed.has(m)) out.push(m);
+
+  let moved = 0;
+  const previousIndex = new Map(messages.map((m, i) => [m, i]));
+  const changed = out.length !== messages.length || out.some((m, i) => messages[i] !== m);
+  if (changed) {
+    for (const m of toolMessages) {
+      if (previousIndex.get(m) !== out.indexOf(m)) moved++;
+    }
+    messages.splice(0, messages.length, ...out);
+  }
+  return moved;
 }
 
 /**

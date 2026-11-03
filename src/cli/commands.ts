@@ -168,6 +168,7 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
     process.on('SIGHUP', cleanup);
+    if (process.platform === 'win32') process.on('SIGBREAK', cleanup);
 
     // 保持进程运行
     return new Promise<number>(() => {

@@ -31,6 +31,12 @@ export class TokenCalibrator {
     return this.ratio ?? FALLBACK_TOK_PER_CHAR;
   }
 
+  /** 按已校准比率估算 token（用于治理器压力/压缩阈值；未校准时返回 fallback） */
+  estimateTokens(chars: number): number {
+    if (!Number.isFinite(chars) || chars <= 0) return 0;
+    return Math.max(0, Math.round(chars * this.getTokPerChar()));
+  }
+
   /** 是否已获得校准 */
   isCalibrated(): boolean {
     return this.ratio !== null;

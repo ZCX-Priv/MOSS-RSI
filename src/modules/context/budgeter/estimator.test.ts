@@ -2,7 +2,12 @@
 // 字节估算测试：UTF-8 口径（含多字节 CJK 与 emoji 代理对）、消息级文本字节构成。
 
 import { describe, test, expect } from 'bun:test';
-import { estimateTextBytes, estimateMessageBytes } from './estimator';
+import {
+  estimateTextBytes,
+  estimateMessageBytes,
+  estimateMessageTokens,
+  estimateMessagesTokens,
+} from './estimator';
 import type { ContextMessage } from '../types';
 
 describe('estimator（字节口径）', () => {
@@ -46,5 +51,22 @@ describe('estimator（字节口径）', () => {
     };
     const withoutImage: ContextMessage = { role: 'tool', content: 'x' };
     expect(estimateMessageBytes(withImage)).toBe(estimateMessageBytes(withoutImage));
+  });
+
+  test('thinking 默认不计入 token（provider 不回传时会虚高数倍）', () => {
+    const withThinking: ContextMessage = {
+      role: 'assistant',
+      content: 'short answer',
+      thinking: '很长的思考内容 '.repeat(1000),
+    };
+    const withoutThinking: ContextMessage = { role: 'assistant', content: 'short answer' };
+    expect(estimateMessageTokens(withThinking)).toBe(estimateMessageTokens(withoutThinking));
+    expect(estimateMessagesTokens([withThinking])).toBeLessThan(
+      estimateMessagesTokens([withThinking], true),
+    );
+    expect(estimateMessageBytes(withThinking)).toBe(estimateMessageBytes(withoutThinking));
+    expect(estimateMessageBytes(withThinking, true)).toBeGreaterThan(
+      estimateMessageBytes(withoutThinking),
+    );
   });
 });

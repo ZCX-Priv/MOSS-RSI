@@ -1,7 +1,7 @@
 {
   "name": "context",
-  "description": "上下文工具（action 分派）。action=compact：AI 自主压缩当前对话的上下文（把较早的消息折叠为结构化摘要，缓解上下文占用；运行中也可用）。action=search：检索历史上下文（BM25 智能检索）——scope=current 检索本对话原始上下文（含已被压缩折叠的原文，原文始终保存在会话中），scope=all 跨全部会话检索；可查证此前读过/讨论过的内容。",
-  "description_en": "Context tool (dispatched by action). action=compact: the AI proactively compacts the current conversation context (folds earlier messages into a structured summary to relieve context pressure; usable while running). action=search: retrieves historical context (BM25 smart search) — scope=current searches this conversation's original context (including messages already folded by compaction; the originals are always kept in the session), scope=all searches across all sessions; useful to recover previously read/discussed content.",
+  "description": "上下文工具（action 分派）。action=compact：AI 自主压缩当前对话的上下文（把较早的消息折叠为结构化摘要，缓解上下文占用；运行中也可用）。action=search：检索历史上下文（BM25 智能检索）——scope=current 检索本对话当前上下文，scope=all 跨全部会话检索；可查证此前读过/讨论过的内容。注意：压缩会物理移除被折叠消息，摘要中未记录的内容无法再检索到。",
+  "description_en": "Context tool (dispatched by action). action=compact: the AI proactively compacts the current conversation context (folds earlier messages into a structured summary to relieve context pressure; usable while running). action=search: retrieves historical context (BM25 smart search) — scope=current searches this conversation's current context, scope=all searches across all sessions; useful to recover previously read/discussed content. Note: compaction physically removes folded messages; content not captured in the summary is no longer searchable.",
   "icon": "layers",
   "annotations": {
     "readOnlyHint": false,
@@ -29,13 +29,13 @@
       "scope": {
         "type": "string",
         "enum": ["current", "all"],
-        "description": "search：检索范围。current=本对话原始上下文（含已压缩原文，默认）；all=跨全部会话",
-        "description_en": "search: scope. current=this conversation (including compacted originals, default); all=all sessions"
+        "description": "search：检索范围。current=本对话当前上下文（默认）；all=跨全部会话",
+        "description_en": "search: scope. current=this conversation's current context (default); all=all sessions"
       },
       "includeCompacted": {
         "type": "boolean",
-        "description": "search：是否包含已被压缩折叠的消息原文（默认 true）",
-        "description_en": "search: include messages folded by compaction (default true)"
+        "description": "search：兼容字段（当前压缩物理移除原文，已折叠内容不可检索；保留字段避免旧调用报错）",
+        "description_en": "search: compatibility field (compaction physically removes originals; folded content is not searchable)"
       },
       "includeTool": {
         "type": "boolean",

@@ -11,7 +11,8 @@ export type { MarkdownRendererProps } from './markdown/MarkdownRenderer';
 export { CodeBlock } from './code/CodeBlock';
 
 // Intelligent UI（run_code 生成的交互界面）
-export { GenUIRenderer } from './genui/GenUIRenderer';
+// 渲染器本身刻意不从这里 re-export：RunCodeCard 仅在展开时 dynamic import，
+// 若经 barrel 静态 re-export，catalog/chart 等重依赖会被并回首屏主包。
 export type {
   GenUISpec,
   GenUIDiagnostic,

@@ -99,6 +99,8 @@ export class ContextEngineServiceImpl {
   private readonly pendingImageMarks = new Map<string, ContextMessage[]>();
   /** 自动压缩冷却水位：sessionId → { at, tokens }（防反复徒劳压缩） */
   private readonly compactionGuard = new Map<string, { at: number; tokens: number }>();
+  /** 最近一次压缩失败：sessionId → { at, reason }（抑制压力提醒，防模型反复重试） */
+  private readonly compactionFailures = new Map<string, { at: number; reason: string }>();
   /** 压缩重入锁：sessionId 正在压缩（防 governor 自动压缩与模型自主压缩并发） */
   private readonly compactingSessions = new Set<string>();
   private sessionStore: SessionStoreBridge | null = null;
@@ -202,6 +204,7 @@ export class ContextEngineServiceImpl {
     await ensureEnvProbed(this.env);
     const windowTokens = opts.windowTokens ?? this.resolveWindowTokens(opts.model);
     this.noteCwd(opts.cwd);
+    const includeThinking = this.resolveIncludeThinking(opts.model);
     const deps = this.buildGovernorDeps();
     const prepared = await governorPrepare(deps, {
       session,
@@ -210,6 +213,7 @@ export class ContextEngineServiceImpl {
       modelDisplayName: opts.modelDisplayName,
       windowTokens,
       promptExtras: opts.promptExtras ?? null,
+      includeThinking,
     });
 
     // 图片「只发一次」：缓存本轮内联发送的图片消息引用（等待调用方确认/丢弃）
@@ -232,6 +236,7 @@ export class ContextEngineServiceImpl {
       prepared.messages.map(m => ({
         role: m.role,
         content: m.content,
+        ...(m.thinking !== undefined ? { thinking: m.thinking } : {}),
         ...(m.toolCallId !== undefined ? { toolCallId: m.toolCallId } : {}),
         ...(m.name !== undefined ? { name: m.name } : {}),
         ...(m.toolCalls
@@ -244,6 +249,7 @@ export class ContextEngineServiceImpl {
             }
           : {}),
       })),
+      includeThinking,
     );
     const t = this.ensureTelemetry(session.id);
     t.lastBreakdown = prepared.breakdown;
@@ -372,6 +378,7 @@ export class ContextEngineServiceImpl {
         windowTokens,
         ...(focus !== undefined ? { focus } : {}),
       });
+      this.noteCompactionOutcome(sessionId, outcome);
       return outcome.record
         ? { ok: true, compaction: outcome.record }
         : { ok: false, reason: outcome.reason ?? 'compaction not applicable' };
@@ -404,6 +411,7 @@ export class ContextEngineServiceImpl {
         windowTokens,
         ...(focus !== undefined ? { focus } : {}),
       });
+      this.noteCompactionOutcome(sessionId, outcome);
       if (outcome.record) {
         // 模型自主压缩完成后也记水位，避免 governor 紧接再来一轮自动压缩
         this.compactionGuard.set(sessionId, { at: Date.now(), tokens: outcome.record.afterTokens });
@@ -574,9 +582,27 @@ export class ContextEngineServiceImpl {
       setCompactionGuard: (sessionId: string, guard: { at: number; tokens: number }) => {
         this.compactionGuard.set(sessionId, guard);
       },
+      getCompactionFailure: (sessionId: string) => this.compactionFailures.get(sessionId),
+      estimateTokensForMessages: (messages) => {
+        if (!this.calibrator.isCalibrated()) return null;
+        let chars = 0;
+        for (const m of messages) {
+          chars += m.content.length;
+          if (m.name) chars += m.name.length;
+          if (m.toolCallId) chars += m.toolCallId.length;
+          for (const tc of m.toolCalls ?? []) {
+            chars += tc.id.length + tc.function.name.length + tc.function.arguments.length;
+          }
+        }
+        return this.calibrator.estimateTokens(chars);
+      },
       persistSession: session => this.sessionStore?.persist(session),
       emitWs: (sessionId, message) => this.emitWs(sessionId, message),
+      onCompactionFailure: (sessionId, reason) => {
+        this.compactionFailures.set(sessionId, { at: Date.now(), reason });
+      },
       onCompaction: sessionId => {
+        this.compactionFailures.delete(sessionId);
         // 压缩后立即刷新 stats 推送（全量：与 onTurnUsage / stats API 同一数据源 getStats，
         // 避免部分形状 payload 覆盖前端 store 导致渲染崩溃——白屏缺陷根治点）
         const stats = this.getStats(sessionId);
@@ -641,6 +667,7 @@ export class ContextEngineServiceImpl {
       );
       const view = buildRequestView(session, staticSystemPrompt, {
         toolPruning: this.getConfig().toolPruning,
+        includeThinking: this.resolveIncludeThinking(model),
         resolveSkillPrompt: name => this.resolveSkillPrompt(name),
       });
       t.lastBreakdown = view.breakdown;
@@ -670,6 +697,46 @@ export class ContextEngineServiceImpl {
       return { fingerprint: compiled.fingerprint, text };
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 记录压缩结果：失败写入冷却（governor 据此抑制压力提醒），成功清除。
+   * 这一步是「压缩失败后模型反复重试」的止损闸门。
+   */
+  private noteCompactionOutcome(
+    sessionId: string,
+    outcome: { record: import('../types').CompactionRecord | null; reason?: string },
+  ): void {
+    if (outcome.record) {
+      this.compactionFailures.delete(sessionId);
+      return;
+    }
+    this.compactionFailures.set(sessionId, {
+      at: Date.now(),
+      reason: outcome.reason ?? 'compaction not applicable',
+    });
+  }
+
+  /**
+   * provider 是否会把历史 thinking 回传给模型：
+   * - anthropic：带 thinkingSignature 时回传；
+   * - openai-chat / openai-responses：仅 context.thinking.replayOpenAICompat=true；
+   * - 其他格式默认不回传。
+   * 该标记决定构建视图/估算是否计入 thinking（避免未发送内容造成假性上下文压力）。
+   */
+  private resolveIncludeThinking(model: string): boolean {
+    try {
+      const models = flattenModels(this.config.getApiConfig());
+      const found = models.find(m => m.id === model || m.model === model);
+      if (!found) return false;
+      if (found.format === 'anthropic') return true;
+      const app = this.config.getAppConfig() as {
+        context?: { thinking?: { replayOpenAICompat?: boolean } };
+      };
+      return app.context?.thinking?.replayOpenAICompat === true;
+    } catch {
+      return false;
     }
   }
 

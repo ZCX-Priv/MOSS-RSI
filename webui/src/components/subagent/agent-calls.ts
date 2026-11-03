@@ -44,6 +44,8 @@ export function isAgentCall(tc: ToolCall): boolean {
 export interface ToolResultEntry {
   text: string;
   isError: boolean;
+  /** 分页历史轻量投影：展开卡片时需按 toolCallId 拉取完整结果 */
+  lazy?: boolean;
 }
 
 /**
@@ -63,7 +65,11 @@ export function buildToolResultIndex(
         .filter((c) => c.type === 'text')
         .map((c) => (c.type === 'text' ? c.text : ''))
         .join('\n');
-      index.set(entry.toolCallId, { text, isError: entry.result.isError === true });
+      index.set(entry.toolCallId, {
+        text,
+        isError: entry.result.isError === true,
+        ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
+      });
     }
   }
   return index;

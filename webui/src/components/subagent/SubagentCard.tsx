@@ -5,17 +5,22 @@
 // 行可展开查看该子代理的「微缩任务流」与最终报告。
 // 同一条 assistant 消息内的多个 agent 调用合并到这一张卡片里。
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { lazy, memo, Suspense, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bot, ChevronRight, CircleCheck, CircleX, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
 import { MarkdownRenderer } from '../../render';
 import { getSubagentSession, subscribeSubagentSession } from '../../lib/subagent-sessions';
+import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { fallbackAvatarSeed, templateAvatarSeed } from '../../lib/agent-avatars';
 import { HumationAvatar } from './HumationAvatar';
-import { AgentTaskFlow } from './AgentTaskFlow';
-import type { ToolCall } from '../../types/api';
+import type { ToolCall, ToolResult } from '../../types/api';
+
+/** 子代理任务流懒加载：只有行展开时才引入（避免每个子代理卡都加载事件渲染图） */
+const AgentTaskFlow = lazy(() =>
+  import('./AgentTaskFlow').then((m) => ({ default: m.AgentTaskFlow })),
+);
 
 /** 单条 agent 调用（一条消息内可有多条） */
 export interface SubagentCallItem {
@@ -25,6 +30,8 @@ export interface SubagentCallItem {
   status?: ToolCall['status'];
   resultText?: string;
   isError?: boolean;
+  /** 分页历史轻量投影：展开该行时才拉取完整报告 */
+  lazy?: boolean;
 }
 
 /** agent 结果文本固定前缀（中/英文构建都兼容），剥离后为最终报告正文 */
@@ -87,11 +94,33 @@ const SubagentRow = memo(function SubagentRow({
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
+  const activeSessionId = useStore((s) => s.activeSessionId);
   const status = rowStatusOf(call);
   const running = status === 'running';
   const boundSessionId = useSubagentSessionBinding(call.toolCallId);
-  const report = call.resultText?.replace(SUBAGENT_PREFIX, '') ?? '';
-  const resultSessionId = call.resultText?.match(SUBAGENT_SESSION)?.[1] ?? null;
+  // 轻量历史投影：行展开时才拉取完整报告（折叠态不请求、不解析长文本）
+  const lightResult = useMemo<ToolResult | undefined>(() => {
+    if (call.resultText === undefined && !call.lazy) return undefined;
+    return {
+      content: [{ type: 'text', text: call.resultText ?? '' }],
+      ...(call.isError ? { isError: true } : {}),
+      ...(call.lazy ? { metadata: { __mossLazy: true } } : {}),
+    };
+  }, [call.resultText, call.isError, call.lazy]);
+  const hydratedResult = useLazyToolResult(
+    activeSessionId,
+    call.toolCallId,
+    lightResult,
+    expanded,
+  );
+  const fullText = hydratedResult
+    ? hydratedResult.content
+        .filter((c) => c.type === 'text')
+        .map((c) => (c.type === 'text' ? c.text : ''))
+        .join('\n')
+    : call.resultText;
+  const report = fullText?.replace(SUBAGENT_PREFIX, '') ?? '';
+  const resultSessionId = fullText?.match(SUBAGENT_SESSION)?.[1] ?? null;
   // 过程会话 id：完成后结果文本里的 session 权威；运行中只认精确绑定
   const flowSessionId = resultSessionId ?? boundSessionId ?? null;
   const avatarSeed =
@@ -127,7 +156,9 @@ const SubagentRow = memo(function SubagentRow({
       </div>
       {expanded && (
         <div className="mt-2 flex flex-col gap-2">
-          <AgentTaskFlow sessionId={flowSessionId} running={running} />
+          <Suspense fallback={<div className="text-[11px] text-muted-foreground">…</div>}>
+            <AgentTaskFlow sessionId={flowSessionId} running={running} />
+          </Suspense>
           {!running && report && (
             <div className="flex flex-col gap-1">
               <span className={cn('text-[11px] text-muted-foreground', call.isError && 'text-destructive')}>

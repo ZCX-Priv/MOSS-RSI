@@ -52,52 +52,39 @@ const MODULE_INIT_TIMEOUT_MS = 30_000;
 const MODULE_DESTROY_TIMEOUT_MS = 10_000;
 
 /**
- * 静态模块注册表：固定初始化顺序满足依赖关系（被依赖者在前）。
- * - llm / server / update：无依赖。server 前移到第 2 位：其全部路由
- *   handler 均为请求时 tryResolve（运行时解析），health/静态页可秒级就绪，
- *   不必等待 tools 动态加载与 MCP 连接（启动性能关键路径）。
- * - remote → server（注入请求门卫 + 注册 /api/remote/* 路由 + 热重绑句柄；
- *   门卫未注入时 server 零开销直通，不阻塞端口可用）
- * - tools / mcp：加载与连接较慢（工具动态 import / MCP 子进程握手），
- *   排在 server 之后不阻塞端口可用；MCP 连接本身已后台化。
- * - filesys → 无服务依赖（agent 构造时订阅其事件总线，须先于 agent 注册）
- * - terminal → filesys（cwd 边界由调用方校验）；无其他依赖，须先于 agent/tools 使用前注册
- * - safety → 无服务依赖（agent 执行工具前统一权限决策，须先于 agent 注册）
- * - rules / hooks / memory → 无服务依赖（context/agent 经 tryResolve 消费，须先于二者注册）
- * - context → llm（压缩摘要调用 LLMRouter；agent 每轮请求经其流水线，须先于 agent 注册）
- * - agent → llm, tools, filesys, safety, context, rules, hooks, memory
- * - subagent → agent（子代理运行复用 AgentEngine；registry 部分无依赖，
- *   但模块整体须后于 agent 注册；server 的 /api/subagents/* 路由为请求时 tryResolve，不受影响）
- * - file-history → tools, filesys（终端快照回填运行时 tryResolve）
- * - daemon → server
- * - automation → agent, server
+ * 模块依赖声明（name → 必须先 active 的模块）。
+ * 初始化按拓扑波次并行执行：同波模块互不依赖，可同时初始化；
+ * 依赖失败/超时的模块仍会初始化（由各模块 tryResolve 降级），避免一处失败拖死全链路。
+ *
+ * 关键路径：server 无依赖 → 第一波立即监听端口；tools/filesys 等同波并行；
+ * agent 只依赖真正需要的服务模块，不再被 voice/browser/im 等慢模块串行拖累。
  */
-const MODULE_FACTORIES: Array<{ name: string; create: () => Module }> = [
-  { name: 'llm', create: llm },
-  { name: 'server', create: server },
-  { name: 'remote', create: remote },
-  { name: 'tools', create: tools },
-  { name: 'mcp', create: mcp },
-  { name: 'computer', create: computer },
-  { name: 'browser', create: browser },
-  { name: 'update', create: update },
-  { name: 'filesys', create: filesys },
-  { name: 'terminal', create: terminal },
-  { name: 'safety', create: safety },
-  { name: 'rules', create: rules },
-  { name: 'hooks', create: hooks },
-  { name: 'memory', create: memory },
-  { name: 'voice', create: voice },
-  { name: 'context', create: context },
-  { name: 'agent', create: agent },
-  { name: 'subagent', create: subagent },
-  // im → server / agent（路由注册在初始化时完成；消息到达时 tryResolve agent 执行）
-  { name: 'im', create: im },
-  { name: 'file-history', create: fileHistory },
-  { name: 'daemon', create: daemon },
-  { name: 'automation', create: automation },
-  // migration → agent（会话热写入经 tryResolve 运行时解析，故须排在 agent 之后）
-  { name: 'migration', create: migration },
+const MODULE_FACTORIES: Array<{ name: string; create: () => Module; deps: string[] }> = [
+  { name: 'llm', create: llm, deps: [] },
+  { name: 'server', create: server, deps: [] },
+  { name: 'remote', create: remote, deps: ['server'] },
+  { name: 'tools', create: tools, deps: [] },
+  { name: 'mcp', create: mcp, deps: [] },
+  { name: 'computer', create: computer, deps: [] },
+  { name: 'browser', create: browser, deps: [] },
+  { name: 'update', create: update, deps: [] },
+  { name: 'filesys', create: filesys, deps: [] },
+  { name: 'terminal', create: terminal, deps: ['filesys'] },
+  { name: 'safety', create: safety, deps: [] },
+  { name: 'rules', create: rules, deps: [] },
+  { name: 'hooks', create: hooks, deps: [] },
+  { name: 'memory', create: memory, deps: [] },
+  { name: 'voice', create: voice, deps: [] },
+  { name: 'context', create: context, deps: ['llm'] },
+  { name: 'agent', create: agent, deps: ['tools', 'filesys', 'safety', 'rules', 'hooks', 'memory', 'context'] },
+  { name: 'subagent', create: subagent, deps: ['agent', 'tools'] },
+  // im → server（路由注册在初始化时完成；消息到达时 tryResolve agent 执行，不阻塞 agent 初始化）
+  { name: 'im', create: im, deps: ['server'] },
+  { name: 'file-history', create: fileHistory, deps: ['tools', 'filesys'] },
+  { name: 'daemon', create: daemon, deps: ['server'] },
+  { name: 'automation', create: automation, deps: ['agent', 'server'] },
+  // migration → agent（会话热写入经 tryResolve 运行时解析）
+  { name: 'migration', create: migration, deps: ['agent', 'server'] },
 ];
 
 type ModuleState = 'loaded' | 'initializing' | 'active' | 'destroying' | 'shutdown' | 'error';
@@ -202,22 +189,45 @@ export class Microkernel {
       this.modules.push({ name: factory.name, instance: factory.create(), state: 'loaded' });
     }
 
-    for (const entry of this.modules) {
-      entry.state = 'initializing';
-      try {
-        await this.withTimeout(
-          entry.instance.initialize(moduleCtx),
-          MODULE_INIT_TIMEOUT_MS,
-          `initialize(module:${entry.name})`,
-        );
-        entry.state = 'active';
-        this.logger.info(t('kernel.moduleActivated', { name: entry.name }));
-      } catch (err) {
-        entry.state = 'error';
-        this.logger.error(t('kernel.moduleInitFailed', { name: entry.name }), {
-          error: err instanceof Error ? err.message : String(err),
-        });
+    // 拓扑波次并行初始化：同波模块无相互依赖，可同时初始化。
+    // settled 同时包含 active 与 error（失败模块视为“已结算”，避免依赖方永远等待）。
+    const depsByName = new Map(MODULE_FACTORIES.map((f) => [f.name, f.deps]));
+    const pending = [...this.modules];
+    const settled = new Set<string>();
+    while (pending.length > 0) {
+      const ready = pending.filter((entry) => {
+        const deps = depsByName.get(entry.name) ?? [];
+        return deps.every((dep) => disabled.has(dep) || !depsByName.has(dep) || settled.has(dep));
+      });
+      // 依赖成环/声明错误时兜底：剩余模块一次性并行初始化，绝不阻塞启动。
+      const wave = ready.length > 0 ? ready : pending.splice(0, pending.length);
+      if (ready.length > 0) {
+        for (const entry of ready) pending.splice(pending.indexOf(entry), 1);
       }
+      await Promise.all(
+        wave.map(async (entry) => {
+          entry.state = 'initializing';
+          const startedAt = performance.now();
+          try {
+            await this.withTimeout(
+              entry.instance.initialize(moduleCtx),
+              MODULE_INIT_TIMEOUT_MS,
+              `initialize(module:${entry.name})`,
+            );
+            entry.state = 'active';
+            moduleCtx.logger.info(t('kernel.moduleActivated', { name: entry.name }), {
+              durationMs: Math.round(performance.now() - startedAt),
+            });
+          } catch (err) {
+            entry.state = 'error';
+            moduleCtx.logger.error(t('kernel.moduleInitFailed', { name: entry.name }), {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          } finally {
+            settled.add(entry.name);
+          }
+        }),
+      );
     }
 
     // 暴露模块状态服务（供 health 路由使用）

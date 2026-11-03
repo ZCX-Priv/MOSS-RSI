@@ -6,6 +6,7 @@ import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Loader2, Package } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatDuration } from '@/lib/format-duration';
 import { Button } from '@/components/ui/button';
 import type { CompactionRecord } from '../../types/api';
 
@@ -67,7 +68,7 @@ export const CompactionCard = memo(function CompactionCard({
                 {t('context.compactedMessages')}: {compaction.compactedCount ?? 0}
               </span>
               <span>
-                {t('context.duration')}: {((compaction.durationMs ?? 0) / 1000).toFixed(1)}s
+                {t('context.duration')}: {formatDuration(compaction.durationMs ?? 0)}
               </span>
               <span>
                 {t('context.summaryModel')}: {compaction.summaryModel}

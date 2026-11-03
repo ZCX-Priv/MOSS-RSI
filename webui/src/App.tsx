@@ -1,49 +1,116 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, Plus, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, Plus, RefreshCw, Search, SlidersHorizontal, Loader2 } from 'lucide-react';
 import type { OverlayType } from './types';
 import { Sidebar } from './components/layout/Sidebar';
 import { TaskPage } from './components/pages/TaskPage';
-import { SystemMonitorPage } from './components/pages/SystemMonitorPage';
-import { PluginMarketPage } from './components/pages/PluginMarketPage';
-import { SkillMarketPage } from './components/pages/SkillMarketPage';
-import {
-  AutomationPage,
-  ConfiguredTab,
-  HistoryTab,
-} from './components/pages/AutomationPage';
-import {
-  SettingsPage,
-  GeneralSettings,
-  AgentSettings,
-  ProviderSettings,
-  ContextSettings,
-  ContextEngineSettings,
-  FileIndexSettings,
-  AppearanceSettings,
-  ToolsSettings,
-  SafetySettings,
-  LogsSettings,
-  AboutSettings,
-  CommandsSettings,
-  RenderSettingsSection,
-  AnimSettingsSection,
-  AppearanceSettingsSection,
-  RulesSettingsSection,
-  HooksSettingsSection,
-  MemorySettingsSection,
-  RemoteSettingsSection,
-  ImSettingsSection,
-  BrowserSettingsSection,
-  BrowserModeRedirect,
-  BrowserBuiltinSection,
-  BrowserExtensionSection,
-  BrowserCdpSection,
-  ComputerSettingsSection,
-  MigrationSettingsSection,
-} from './components/pages/SettingsPage';
 import { SearchModal } from './components/overlays/SearchModal';
+
+// 非任务页全部路由级懒加载：设置/插件/自动化/系统监控及其重依赖（全量 lucide 图标、
+// 各类表单与表格）只在进入对应页面时下载，首屏 main chunk 不再被它们撑大。
+const SystemMonitorPage = lazy(() =>
+  import('./components/pages/SystemMonitorPage').then((m) => ({ default: m.SystemMonitorPage })),
+);
+const PluginMarketPage = lazy(() =>
+  import('./components/pages/PluginMarketPage').then((m) => ({ default: m.PluginMarketPage })),
+);
+const SkillMarketPage = lazy(() =>
+  import('./components/pages/SkillMarketPage').then((m) => ({ default: m.SkillMarketPage })),
+);
+const AutomationPage = lazy(() =>
+  import('./components/pages/AutomationPage').then((m) => ({ default: m.AutomationPage })),
+);
+const ConfiguredTab = lazy(() =>
+  import('./components/pages/AutomationPage').then((m) => ({ default: m.ConfiguredTab })),
+);
+const HistoryTab = lazy(() =>
+  import('./components/pages/AutomationPage').then((m) => ({ default: m.HistoryTab })),
+);
+const SettingsPage = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })),
+);
+const GeneralSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.GeneralSettings })),
+);
+const AgentSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.AgentSettings })),
+);
+const ProviderSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ProviderSettings })),
+);
+const ContextSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ContextSettings })),
+);
+const ContextEngineSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ContextEngineSettings })),
+);
+const FileIndexSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.FileIndexSettings })),
+);
+const AppearanceSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.AppearanceSettings })),
+);
+const ToolsSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ToolsSettings })),
+);
+const SafetySettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.SafetySettings })),
+);
+const LogsSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.LogsSettings })),
+);
+const AboutSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.AboutSettings })),
+);
+const CommandsSettings = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.CommandsSettings })),
+);
+const RenderSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.RenderSettingsSection })),
+);
+const AnimSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.AnimSettingsSection })),
+);
+const AppearanceSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.AppearanceSettingsSection })),
+);
+const RulesSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.RulesSettingsSection })),
+);
+const HooksSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.HooksSettingsSection })),
+);
+const MemorySettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.MemorySettingsSection })),
+);
+const RemoteSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.RemoteSettingsSection })),
+);
+const ImSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ImSettingsSection })),
+);
+const BrowserSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.BrowserSettingsSection })),
+);
+const BrowserModeRedirect = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.BrowserModeRedirect })),
+);
+const BrowserBuiltinSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.BrowserBuiltinSection })),
+);
+const BrowserExtensionSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.BrowserExtensionSection })),
+);
+const BrowserCdpSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.BrowserCdpSection })),
+);
+const ComputerSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.ComputerSettingsSection })),
+);
+const MigrationSettingsSection = lazy(() =>
+  import('./components/pages/SettingsPage').then((m) => ({ default: m.MigrationSettingsSection })),
+);
 import { BrowserInstallConfirmDialog } from './components/overlays/BrowserInstallConfirmDialog';
 import { SplashScreen } from './components/shared/SplashScreen';
 import { FilePreviewDialog } from './render';
@@ -259,6 +326,7 @@ export default function App() {
             key={pathname === '/' ? 'task' : (pathname.split('/')[1] ?? 'task')}
             className="anim-route animate-in slide-in-from-bottom-1 duration-200 flex min-h-0 flex-1 flex-col"
           >
+            <Suspense fallback={<PageLoading />}>
             <Routes>
             {/* 欢迎页与任务页同一条路由（可选段）：`/` 重定向到 `/task`；发送消息后
                 URL 从 /task → /task/xxx 是**同一路由内参数切换，TaskPage 不卸载重挂**——
@@ -334,6 +402,7 @@ export default function App() {
             </Route>
             <Route path="*" element={<Navigate to="/task" replace />} />
             </Routes>
+            </Suspense>
           </div>
         </SidebarInset>
 
@@ -345,6 +414,16 @@ export default function App() {
       <BrowserInstallConfirmDialog />
       <Toaster position="top-center" />
     </TooltipProvider>
+  );
+}
+
+/** 懒加载页面占位（不阻塞 TaskPage 主路径；进入设置等页面时短暂显示） */
+function PageLoading() {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" />
+      <span>Loading…</span>
+    </div>
   );
 }
 

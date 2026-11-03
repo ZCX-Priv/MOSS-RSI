@@ -23,9 +23,27 @@ const ROOT = resolve(__dirname, '..');
 
 const isWin = process.platform === 'win32';
 
-// 后端端口：镜像 config/config.json 的 server.port（autoPort=false）。
-// dev 横幅与 vite.config.ts 代理目标均以此为准。
-const BACKEND_PORT = 7766;
+/**
+ * 读取配置端口：优先用户配置 ~/.moss/config/config.json（运行时实际加载的配置），
+ * 回退项目 config/config.json。后端若因占用漂移端口，这里会在启动后以 PID 文件为准。
+ */
+function readConfiguredPort() {
+  const candidates = [
+    resolve(homedir(), '.moss', 'config', 'config.json'),
+    resolve(ROOT, 'config', 'config.json'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (!existsSync(p)) continue;
+      const cfg = JSON.parse(readFileSync(p, 'utf8'));
+      const port = cfg?.server?.port;
+      if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+    } catch {
+      // 解析失败继续下一个候选
+    }
+  }
+  return 7766;
+}
 
 function log(tag, msg) {
   const time = new Date().toISOString().slice(11, 19);
@@ -293,8 +311,8 @@ function inspectPid(info) {
   return { pid, alive: true, isMoss: true, imageName, reason: 'ok' };
 }
 
-function startFrontend() {
-  log('ui', 'starting (vite in webui/)...');
+function startFrontend(backendPort) {
+  log('ui', `starting (vite in webui/)... backend=http://127.0.0.1:${backendPort}`);
   const uiDir = resolve(ROOT, 'webui');
   if (!existsSync(uiDir)) {
     log('ui', `ERROR: webui directory not found: ${uiDir}`);
@@ -313,7 +331,13 @@ function startFrontend() {
   const child = spawn(process.execPath, [viteJs], {
     stdio: ['inherit', 'inherit', 'inherit'],
     cwd: uiDir,
-    env: { ...process.env, FORCE_COLOR: '1', MOSS_DEV: '1' },
+    // 后端可能因端口占用自动漂移：把实际端口注入 Vite，代理/WS 自动跟随
+    env: {
+      ...process.env,
+      FORCE_COLOR: '1',
+      MOSS_DEV: '1',
+      MOSS_BACKEND_PORT: String(backendPort),
+    },
   });
   child.on('exit', (code, signal) => {
     log('ui', `exited (code=${code}, signal=${signal})`);
@@ -352,46 +376,86 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+/** 读取 PID 文件快照（pid + 实际端口） */
+function readPidSnapshot() {
+  try {
+    const pidFile = resolve(homedir(), '.moss', 'moss.pid');
+    if (!existsSync(pidFile)) return null;
+    const info = JSON.parse(readFileSync(pidFile, 'utf8'));
+    const pid = Number(info?.pid);
+    const port = Number(info?.port);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return {
+      pid,
+      port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 探测某个端口是否是已就绪的 MOSS（health 200） */
+async function isBackendReady(port) {
+  if (!port) return false;
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * 健康门控：轮询后端 /api/health 直到返回 200 或超时。
- * 解决启动竞态——Vite 秒级就绪而 Bun 后端加载模组较慢，
- * 若前端先起，浏览器 WS 客户端会在后端就绪前连 /ws，触发 ECONNRESET。
- * 后端 health 路由在 Bun.serve 绑定端口前注册，能响应即代表 HTTP+WS 均就绪。
+ * 健康门控并发现实际后端端口：
+ * 后端可能因 7766 被占用自动切换端口；这里以 PID 文件中的 port 为准探测，
+ * 避免 Vite 仍代理旧端口导致 WebUI 全白。
  */
-async function waitForBackend(port, timeoutMs = 20000) {
-  const url = `http://127.0.0.1:${port}/api/health`;
+async function discoverBackendPort(configuredPort, priorPid, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(2000) });
-      if (resp.ok) return true;
-    } catch {
-      // 后端尚未就绪（ECONNREFUSED / 中断 / 超时），继续轮询
+    const snapshot = readPidSnapshot();
+    const fresh = snapshot !== null && snapshot.pid !== priorPid;
+    if (fresh) {
+      // 本次启动新写出的 PID 记录：以其中的实际端口为准（可能已漂移）
+      if (snapshot.port && (await isBackendReady(snapshot.port))) return snapshot.port;
+      if (await isBackendReady(configuredPort)) return configuredPort;
+    } else if (!snapshot) {
+      // 无 PID 文件（残留已被清理或尚未写出）：探测配置端口
+      if (await isBackendReady(configuredPort)) return configuredPort;
     }
     await sleep(250);
   }
-  return false;
+  return null;
 }
 
 async function main() {
   ensureUtf8Console();
+  const configuredPort = readConfiguredPort();
   console.log('=========================================');
   console.log(' MOSS Dev');
-  console.log(`  Backend: http://127.0.0.1:${BACKEND_PORT}`);
+  console.log(`  Backend: http://127.0.0.1:${configuredPort}（若被占用会自动切换并同步代理）`);
   console.log(' UI: http://127.0.0.1:3000');
   console.log('  Tip: 用 "node scripts/dev.mjs" 启动可 0 弹窗（npm run dev 顶层无法消除）');
   console.log('  Tip: 若日志无 "using bun" 行，说明还在跑旧版，请重启 dev');
   console.log('  Note: dev 默认仅本机；开启远程访问后后端绑 0.0.0.0（手机可访问，页面为 dist 构建产物）');
   console.log('=========================================');
+  const priorPid = readPidSnapshot()?.pid ?? null;
   startBackend();
   log('dev', 'Waiting for backend to be ready...');
-  const ready = await waitForBackend(BACKEND_PORT, 20000);
-  if (ready) {
-    log('backend', `ready (health 200 on :${BACKEND_PORT})`);
+  const backendPort = await discoverBackendPort(configuredPort, priorPid, 30000);
+  if (backendPort) {
+    log(
+      'backend',
+      backendPort === configuredPort
+        ? `ready (health 200 on :${backendPort})`
+        : `ready on :${backendPort}（配置端口 ${configuredPort} 被占用，已同步 Vite 代理）`,
+    );
   } else {
-    log('backend', `WARNING: not ready after 20s, starting frontend anyway (WS proxy may error until backend is up)`);
+    log('backend', `WARNING: not ready after 30s, starting frontend anyway (WS proxy may error until backend is up)`);
   }
-  startFrontend();
+  startFrontend(backendPort ?? configuredPort);
   log('dev', 'Press Ctrl+C to stop both.');
 }
 

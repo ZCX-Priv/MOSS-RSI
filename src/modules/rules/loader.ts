@@ -13,29 +13,32 @@ import type { CompiledRuleSet, ScopedRuleRecord } from './types';
 
 interface LoaderCacheEntry {
   key: string;
-  mtime: number;
+  /** 目录 + 文件清单签名（名字/mtime/size；同毫秒内新增文件也能失效） */
+  mtime: string;
   set: CompiledRuleSet;
 }
 
 let cache: LoaderCacheEntry | null = null;
 
-/** 目录树 mtime 指纹（目录 + 顶层 .json 文件；变更即缓存失效） */
-function rulesDirMtime(dir: string): number {
-  let max = 0;
+/** 目录树签名（目录 mtime + 顶层 .json 文件名/mtime/size；变更即缓存失效） */
+function rulesDirMtime(dir: string): string {
   try {
-    max = Math.max(max, statSync(dir).mtimeMs);
-  } catch {
-    return -1;
-  }
-  try {
+    const dirMtime = statSync(dir).mtimeMs;
+    const files: string[] = [];
     for (const entry of readdirSync(dir)) {
       if (!entry.endsWith('.json')) continue;
-      max = Math.max(max, statSync(join(dir, entry)).mtimeMs);
+      try {
+        const st = statSync(join(dir, entry));
+        files.push(`${entry}:${st.mtimeMs}:${st.size}`);
+      } catch {
+        // 单文件失败忽略
+      }
     }
+    // 文件清单参与签名：同一毫秒内创建的新规则文件名变化，仍会使缓存失效
+    return `${dirMtime}|${files.sort().join('|')}`;
   } catch {
-    // 单文件失败忽略
+    return '-1';
   }
-  return max;
 }
 
 /**

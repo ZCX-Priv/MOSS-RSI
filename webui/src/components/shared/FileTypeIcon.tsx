@@ -5,12 +5,22 @@
 // 仅依赖 render/file 下的纯函数模块，避免把 markdown/katex 等重依赖带入首页包。
 
 import { useEffect, useMemo, useState, type ComponentType } from 'react';
-import { getFileIcon, getIconSvg, MaterialIcon } from 'react-material-icon-theme';
 import { Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { fetchFileObjectUrl, getCachedObjectUrl, mimeOfPath } from '../../render/file/fetcher';
 import { fileExtension } from '../../render/file/detector';
 import { useDarkMode } from '../../render/core/use-dark-mode';
+
+/**
+ * react-material-icon-theme 内含约 1.1MB 图标数据：改为按需动态 import，
+ * 不再进入首屏 main chunk。数据加载前用回形针兜底（通常一次会话内瞬间完成）。
+ */
+type MaterialIconLib = typeof import('react-material-icon-theme');
+let libPromise: Promise<MaterialIconLib> | null = null;
+function loadMaterialIconLib(): Promise<MaterialIconLib> {
+  if (!libPromise) libPromise = import('react-material-icon-theme');
+  return libPromise;
+}
 
 /**
  * 哨兵：库的图标清单里没有任何命中时返回该值（库默认 fallback 是 "file" 通用文档图标，
@@ -19,8 +29,8 @@ import { useDarkMode } from '../../render/core/use-dark-mode';
 const NO_ICON = '\u0000moss-no-icon';
 
 /** 库内是否真有该图标名对应的 SVG 数据（库清单存在「解析出名字但无数据」的条目） */
-function hasIconData(name: string): boolean {
-  return getIconSvg(name) !== null;
+function hasIconData(lib: MaterialIconLib, name: string): boolean {
+  return lib.getIconSvg(name) !== null;
 }
 
 export interface FileTypeIconProps {
@@ -33,27 +43,42 @@ export interface FileTypeIconProps {
 
 export function FileTypeIcon({ fileName, size = 22, className }: FileTypeIconProps) {
   const dark = useDarkMode();
+  const [lib, setLib] = useState<MaterialIconLib | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void loadMaterialIconLib()
+      .then((loaded) => {
+        if (alive) setLib(loaded);
+      })
+      .catch(() => {
+        // 图标库加载失败：保持回形针兜底，不影响消息渲染
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   // 扩展名（小写、不带点）；无扩展名 → ''（库内部按 falsy 跳过该校验）
   const ext = fileExtension(fileName);
   const iconName = useMemo(() => {
+    if (!lib) return NO_ICON;
     // 必须同时传 fileName 与 fileExtension：库的 fileName 匹配是「完整文件名精确相等」，
     // 只传 fileName 时普通扩展名文件会全部落到 fallback，表现为「所有文件同一个图标」。
-    const base = getFileIcon({ fileName, fileExtension: ext, fallback: NO_ICON });
+    const base = lib.getFileIcon({ fileName, fileExtension: ext, fallback: NO_ICON });
     if (base === NO_ICON) return NO_ICON;
     // 深色模式优先 _light 变体；再校验库内确有 SVG 数据（否则库会渲染 📄 错误态）
     const light = `${base}_light`;
-    if (dark && hasIconData(light)) return light;
-    if (hasIconData(base)) return base;
-    return hasIconData(light) ? light : NO_ICON;
-  }, [fileName, ext, dark]);
+    if (dark && hasIconData(lib, light)) return light;
+    if (hasIconData(lib, base)) return base;
+    return hasIconData(lib, light) ? light : NO_ICON;
+  }, [lib, fileName, ext, dark]);
 
-  // 无法识别 → 回退附件图标（中性色，与彩色类型图标区分）
-  if (iconName === NO_ICON) {
+  // 数据未加载 / 无法识别 → 回退附件图标（中性色，与彩色类型图标区分）
+  if (!lib || iconName === NO_ICON) {
     return <Paperclip size={size} className={cn('shrink-0 text-muted-foreground', className)} />;
   }
 
   // 用已解析（且已选定明暗变体）的图标名直接渲染，避免 FileIcon 二次解析落到 📄 错误态
-  return <MaterialIcon name={iconName} size={size} className={className} alt={fileName} />;
+  return <lib.MaterialIcon name={iconName} size={size} className={className} alt={fileName} />;
 }
 
 /**

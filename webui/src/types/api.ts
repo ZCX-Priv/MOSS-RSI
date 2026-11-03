@@ -47,8 +47,11 @@ export interface CodeRunMetadata {
   /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
   kind: 'text' | 'ui' | 'hybrid';
   description: string;
+  /** 轻量历史投影中为 []（完整日志在展开时按需加载） */
   logs: string[];
   calls: CodeRunCall[];
+  /** 轻量历史投影：是否含 IntelligentUI（真正 spec 展开后拉取） */
+  hasUi?: boolean;
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];
@@ -58,11 +61,22 @@ export interface CodeRunMetadata {
   truncated?: boolean;
 }
 
+/** run_code 执行中的实时嵌套调用（来自 run-code-progress 事件） */
+export interface CodeRunLiveCall extends CodeRunCall {
+  status: 'running' | 'done' | 'failed';
+}
+
 export interface ToolCall {
   id: string;
   name: string;
   arguments: string;
   status?: 'generating' | 'executing' | 'done';
+  /** run_code 实时进度（仅执行中/刚结束时存在；最终以 result.metadata.codeRun 为准） */
+  live?: {
+    calls: CodeRunLiveCall[];
+    logs: string[];
+    startedAtMs?: number;
+  };
 }
 
 export interface ToolResult {
@@ -131,6 +145,8 @@ export interface ToolResultMetadata {
   resources?: Array<{ uri: string; mimeType?: string; text?: string }>;
   /** 代码模式（run_code）结果：程序/日志/嵌套调用/Intelligent UI 规格 */
   codeRun?: CodeRunMetadata;
+  /** 分页历史轻量投影标记：展开卡片时按 toolCallId 拉取完整结果 */
+  __mossLazy?: boolean;
 }
 
 /** 右侧边栏标签页类型 */
@@ -1552,6 +1568,20 @@ export type AgentEvent =
   | { type: 'tool-call-delta'; sessionId: string; toolCallId: string; argumentsDelta: string; runId?: string }
   | { type: 'tool-call-executing'; sessionId: string; toolName: string; toolCallId: string; runId?: string }
   | { type: 'tool-call-end'; sessionId: string; toolName: string; toolCallId: string; result: ToolResult; runId?: string }
+  | {
+      type: 'run-code-progress';
+      sessionId: string;
+      toolCallId: string;
+      messageId?: string;
+      payload: {
+        phase: 'started' | 'log' | 'call-start' | 'call-end';
+        startedAtMs?: number;
+        elapsedMs?: number;
+        log?: string;
+        call?: CodeRunLiveCall;
+      };
+      runId?: string;
+    }
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string }

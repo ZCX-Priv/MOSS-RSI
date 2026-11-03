@@ -7,7 +7,7 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import type { Logger } from '../../../../core/types';
-import type { ToolResult } from '../../types';
+import type { RunCodeProgressEvent, ToolResult } from '../../types';
 import {
   byteLength,
   CALL_ID_RE,
@@ -53,6 +53,8 @@ export interface RunCodeHostOptions {
   invokeTool: (name: string, args: unknown, opts: { callId: string; signal: AbortSignal }) => Promise<ToolResult>;
   /** 保守并发判定：只有 readOnly 且非 destructive 的工具可重叠 */
   isConcurrencySafe: (name: string) => boolean;
+  /** 实时进度回调（执行开始 / 日志 / 嵌套调用开始与结束）；异常被吞掉，不影响程序执行 */
+  onProgress?: (event: RunCodeProgressEvent) => void;
   logger?: Logger;
 }
 
@@ -89,6 +91,10 @@ const MAX_CALL_RECORDS = 100;
 const STDERR_CAP_BYTES = 8_192;
 const EXIT_GRACE_MS = 150;
 const EXIT_HARD_WAIT_MS = 800;
+/** 流式进度帧预算：避免单条嵌套调用把 WS 撑爆（最终外层结果仍完整落库） */
+const MAX_PROGRESS_ARGS_BYTES = 16 * 1024;
+const MAX_PROGRESS_RESULT_TEXT_BYTES = 32 * 1024;
+const MAX_PROGRESS_RESULT_META_BYTES = 64 * 1024;
 
 /** 执行一段程序；程序失败作为 result.error 返回，不 reject。 */
 export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeHostResult> {
@@ -162,6 +168,41 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
   return await new Promise<RunCodeHostResult>((resolvePromise) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
+    /** 日志批量缓冲：避免每条 console.log 都单独发一帧 WS（80ms / 50 条） */
+    const logBuffer: string[] = [];
+    let logTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 程序开始执行的绝对时刻（epoch ms），供前端实时计时 */
+    let programStartedAtMs: number | null = null;
+
+    const emitProgress = (event: RunCodeProgressEvent): void => {
+      if (!opts.onProgress) return;
+      try {
+        opts.onProgress(event);
+      } catch (err) {
+        opts.logger?.debug('run_code: progress callback failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
+
+    const flushLogs = (): void => {
+      if (logTimer) {
+        clearTimeout(logTimer);
+        logTimer = null;
+      }
+      if (logBuffer.length === 0) return;
+      emitProgress({ phase: 'log', log: logBuffer.join('\n') });
+      logBuffer.length = 0;
+    };
+
+    const scheduleLog = (text: string): void => {
+      logBuffer.push(text);
+      if (logBuffer.length >= 50) {
+        flushLogs();
+        return;
+      }
+      if (!logTimer) logTimer = setTimeout(flushLogs, 80);
+    };
 
     const writeLine = (line: string): boolean => {
       if (finished) return false;
@@ -208,7 +249,9 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       if (finished) return;
       const oversized = byteLength(text) > MAX_LOG_ENTRY_BYTES;
       const clean = truncateToBytes(text, MAX_LOG_ENTRY_BYTES);
-      logs.push(oversized ? `${clean}\n…（单条日志过长，已截断）` : clean);
+      const entry = oversized ? `${clean}\n…（单条日志过长，已截断）` : clean;
+      logs.push(entry);
+      scheduleLog(entry);
     };
 
     const recordCall = (record: CodeRunCallRecord): void => {
@@ -237,6 +280,52 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       };
     };
 
+    /** 嵌套调用开始进度（参数超过预算时只给 preview，避免单帧过大） */
+    const emitCallStart = (call: { id: string; name: string; args: unknown }): void => {
+      const argsJson = jsonText(call.args);
+      emitProgress({
+        phase: 'call-start',
+        ...(programStartedAtMs ? { elapsedMs: Date.now() - programStartedAtMs } : {}),
+        call: {
+          id: call.id,
+          name: call.name,
+          argsPreview: previewJson(call.args),
+          ...(argsJson && byteLength(argsJson) <= MAX_PROGRESS_ARGS_BYTES
+            ? { argumentsJson: argsJson }
+            : {}),
+          status: 'running',
+        },
+      });
+    };
+
+    /** 嵌套调用结束进度（正文/metadata 超预算时省略，展开最终结果仍可拿到完整内容） */
+    const emitCallEnd = (record: CodeRunCallRecord): void => {
+      const resultText =
+        record.resultText && byteLength(record.resultText) <= MAX_PROGRESS_RESULT_TEXT_BYTES
+          ? record.resultText
+          : undefined;
+      let resultMetadata = record.resultMetadata;
+      if (resultMetadata && byteLength(jsonText(resultMetadata) ?? '') > MAX_PROGRESS_RESULT_META_BYTES) {
+        resultMetadata = undefined;
+      }
+      emitProgress({
+        phase: 'call-end',
+        ...(programStartedAtMs ? { elapsedMs: Date.now() - programStartedAtMs } : {}),
+        call: {
+          id: record.id,
+          name: record.name,
+          argsPreview: record.argsPreview,
+          ...(record.durationMs >= 0 ? { durationMs: record.durationMs } : {}),
+          ok: record.ok,
+          status: record.ok ? 'done' : 'failed',
+          ...(record.error ? { error: record.error } : {}),
+          ...(record.resultPreview ? { resultPreview: record.resultPreview } : {}),
+          ...(resultText ? { resultText } : {}),
+          ...(resultMetadata ? { resultMetadata } : {}),
+        },
+      });
+    };
+
     const handleLine = (line: string): void => {
       if (finished) return;
       if (byteLength(line) > MAX_FRAME_BYTES) {
@@ -263,6 +352,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           limits: opts.limits,
           uiEnabled: opts.uiEnabled,
         });
+        programStartedAtMs = Date.now();
+        emitProgress({ phase: 'started', startedAtMs: programStartedAtMs });
         return;
       }
       if (frame.type === 'log') {
@@ -370,6 +461,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     const runCall = async (call: QueuedCall): Promise<void> => {
       const started = performance.now();
+      emitCallStart(call);
       try {
         const result = await opts.invokeTool(call.name, call.args, {
           callId: call.id,
@@ -378,7 +470,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         const durationMs = Math.round(performance.now() - started);
         if (result.isError) {
           const message = toolResultErrorMessage(result, call.name);
-          recordCall({
+          const record: CodeRunCallRecord = {
             id: call.id,
             name: call.name,
             argsPreview: previewJson(call.args),
@@ -387,7 +479,9 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
             ok: false,
             error: truncateToBytes(message, 800),
             ...collectCallDetails(call.args, undefined, message),
-          });
+          };
+          recordCall(record);
+          emitCallEnd(record);
           writeFrame({
             v: 1,
             type: 'tool-result',
@@ -405,7 +499,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           const message =
             `${call.name} result exceeds protocol frame limit (${byteLength(line)} bytes > ${MAX_FRAME_BYTES}); ` +
             'narrow the query or request fewer fields';
-          recordCall({
+          const record: CodeRunCallRecord = {
             id: call.id,
             name: call.name,
             argsPreview: previewJson(call.args),
@@ -414,7 +508,9 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
             ok: false,
             error: truncateToBytes(message, 800),
             ...collectCallDetails(call.args, undefined, message),
-          });
+          };
+          recordCall(record);
+          emitCallEnd(record);
           writeFrame({
             v: 1,
             type: 'tool-result',
@@ -424,7 +520,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           });
           return;
         }
-        recordCall({
+        const record: CodeRunCallRecord = {
           id: call.id,
           name: call.name,
           argsPreview: previewJson(call.args),
@@ -432,12 +528,14 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           durationMs,
           ok: true,
           ...collectCallDetails(call.args, result),
-        });
+        };
+        recordCall(record);
+        emitCallEnd(record);
         writeLine(line);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const durationMs = Math.round(performance.now() - started);
-        recordCall({
+        const record: CodeRunCallRecord = {
           id: call.id,
           name: call.name,
           argsPreview: previewJson(call.args),
@@ -446,7 +544,9 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           ok: false,
           error: truncateToBytes(message, 800),
           ...collectCallDetails(call.args, undefined, message),
-        });
+        };
+        recordCall(record);
+        emitCallEnd(record);
         writeFrame({
           v: 1,
           type: 'tool-result',
@@ -483,6 +583,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       if (finished) return;
       finished = true;
       if (timer) clearTimeout(timer);
+      // 收尾前把缓冲日志发出去；结果帧随后由最终 tool-call-end 统一覆盖
+      flushLogs();
       opts.signal?.removeEventListener('abort', onAbort);
       runController.abort();
       try {

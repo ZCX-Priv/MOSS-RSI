@@ -25,6 +25,8 @@ import {
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { resolveToolIcon } from '@/lib/tool-icons';
+import { useLazyToolResult } from '../../lib/lazy-tool-results';
+import { useStore } from '../../store';
 import { wsClient } from '../../api/ws';
 import { copyText } from '../../lib/clipboard';
 import { fileNameOf } from '../../render/file/detector';
@@ -63,6 +65,12 @@ interface ToolCallDetailsProps {
   trailing?: ReactNode;
   /** 头部行类名覆盖（PTC 用更小的左内边距形成中间层级） */
   headerClassName?: string;
+  /** 受控展开（RunCodeCard 需要知道展开态以决定是否加载 IntelligentUI） */
+  expanded?: boolean;
+  /** 展开态变化回调（与受控 expanded 搭配） */
+  onExpandedChange?: (expanded: boolean) => void;
+  /** 非受控默认展开态 */
+  defaultExpanded?: boolean;
 }
 
 type CardMode = 'preview' | 'source';
@@ -558,13 +566,20 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   titleOverride,
   trailing,
   headerClassName,
+  expanded,
+  onExpandedChange,
+  defaultExpanded,
 }: ToolCallDetailsProps) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const [internalExpanded, setInternalExpanded] = useState(defaultExpanded === true);
+  const isOpen = expanded ?? internalExpanded;
   const [mode, setMode] = useState<CardMode>('preview');
   const [copied, setCopied] = useState(false);
   const [stopping, setStopping] = useState(false);
   const copyTimer = useRef<number | null>(null);
+  // 轻量历史结果：仅展开时拉取完整正文/metadata（折叠态零网络、零大对象解析）
+  const hydratedResult = useLazyToolResult(activeSessionId, toolCall.id, result, isOpen);
 
   useEffect(
     () => () => {
@@ -573,21 +588,25 @@ export const ToolCallDetails = memo(function ToolCallDetails({
     [],
   );
 
-  // 结果文本/错误标记：就近结果优先，全局索引兜底
+  // 结果文本只在展开时拼接（110KB 级工具结果折叠态不做 join）
   const resultText = useMemo(
     () =>
-      result
-        ? result.content
-            .map((c) => (c.type === 'text' ? c.text : ''))
-            .filter((text) => text.length > 0)
-            .join('\n')
-        : fallbackText,
-    [result, fallbackText],
+      isOpen
+        ? hydratedResult
+          ? hydratedResult.content
+              .map((c) => (c.type === 'text' ? c.text : ''))
+              .filter((text) => text.length > 0)
+              .join('\n')
+          : fallbackText
+        : undefined,
+    [isOpen, hydratedResult, fallbackText],
   );
-  const isError = result?.isError ?? fallbackIsError;
-  const hasResult = result !== undefined || fallbackText !== undefined;
+  const isError = hydratedResult?.isError ?? fallbackIsError;
+  const hasResult = hydratedResult !== undefined || fallbackText !== undefined;
 
+  // 参数解析：折叠态仅解析小参数；run_code / 超长 JSON 延迟到展开
   const parsedArgs = useMemo<Record<string, unknown> | null>(() => {
+    if (!isOpen && (toolCall.name === 'run_code' || toolCall.arguments.length > 4096)) return null;
     try {
       const value: unknown = JSON.parse(toolCall.arguments || '{}');
       if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -595,17 +614,17 @@ export const ToolCallDetails = memo(function ToolCallDetails({
     } catch {
       return null;
     }
-  }, [toolCall.arguments]);
+  }, [isOpen, toolCall.name, toolCall.arguments]);
 
   const prettyArgs = useMemo(() => {
-    if (!toolCall.arguments) return '';
+    if (!isOpen || !toolCall.arguments) return '';
     try {
       return JSON.stringify(JSON.parse(toolCall.arguments), null, 2);
     } catch {
       // 非 JSON，原样显示
       return toolCall.arguments;
     }
-  }, [toolCall.arguments]);
+  }, [isOpen, toolCall.arguments]);
 
   const summary = useMemo(() => summarizeToolCall(parsedArgs), [parsedArgs]);
 
@@ -628,19 +647,30 @@ export const ToolCallDetails = memo(function ToolCallDetails({
 
   const preview = useMemo(
     () =>
-      buildToolPreview({
-        toolName: toolCall.name,
-        args: parsedArgs,
-        metadata: result?.metadata,
-        resultText: displayResultText,
-        isError,
-        hasResult,
-      }),
-    [toolCall.name, parsedArgs, result?.metadata, displayResultText, isError, hasResult],
+      isOpen && previewOverride === undefined
+        ? buildToolPreview({
+            toolName: toolCall.name,
+            args: parsedArgs,
+            metadata: hydratedResult?.metadata,
+            resultText: displayResultText,
+            isError,
+            hasResult,
+          })
+        : null,
+    [
+      isOpen,
+      previewOverride,
+      toolCall.name,
+      parsedArgs,
+      hydratedResult?.metadata,
+      displayResultText,
+      isError,
+      hasResult,
+    ],
   );
 
   const diffStats = useMemo(() => {
-    if (preview.kind !== 'diff') return null;
+    if (!preview || preview.kind !== 'diff') return null;
     const added = preview.blocks.reduce((sum, block) => sum + block.added, 0);
     const removed = preview.blocks.reduce((sum, block) => sum + block.removed, 0);
     return added > 0 || removed > 0 ? { added, removed } : null;
@@ -651,16 +681,21 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   const ToolIcon = resolveToolIcon(toolCall.name, iconMap);
 
   const sourceText = useMemo(() => {
+    if (!isOpen) return '';
     if (copyTextOverride) return copyTextOverride;
     const parts: string[] = [];
     if (prettyArgs) parts.push(prettyArgs);
     if (displayResultText) parts.push(displayResultText);
-    const structured = result?.metadata?.structuredContent;
+    const structured = hydratedResult?.metadata?.structuredContent;
     if (structured) parts.push(JSON.stringify(structured, null, 2));
     return parts.join('\n\n');
-  }, [copyTextOverride, prettyArgs, displayResultText, result?.metadata?.structuredContent]);
+  }, [isOpen, copyTextOverride, prettyArgs, displayResultText, hydratedResult?.metadata?.structuredContent]);
 
-  const toggle = () => setExpanded((value) => !value);
+  const toggle = () => {
+    const next = !isOpen;
+    if (expanded === undefined) setInternalExpanded(next);
+    onExpandedChange?.(next);
+  };
 
   const canStopTerminal =
     toolCall.name === 'terminal' &&
@@ -699,7 +734,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
       {/* 折叠行：沿用美化前的原始工具行样式（左侧箭头 + 图标 + 工具名） */}
       <button
         type="button"
-        aria-expanded={expanded}
+        aria-expanded={isOpen}
         onClick={toggle}
         className={cn(
           'flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-xs text-muted-foreground',
@@ -707,7 +742,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         )}
       >
         <ChevronRight
-          className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')}
+          className={cn('size-3.5 shrink-0 transition-transform', isOpen && 'rotate-90')}
         />
         {running ? (
           <Loader2 className="size-3.5 shrink-0 animate-spin" />
@@ -738,7 +773,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         {trailing && <span className="ml-auto shrink-0 pl-2">{trailing}</span>}
       </button>
 
-      {expanded && (
+      {isOpen && (
         <div className="ml-5 flex flex-col gap-1">
           {/* 预览/源码胶囊 + 停止/复制：卡片外的工具栏 */}
           <div className="flex items-center gap-2 px-0.5">
@@ -785,14 +820,15 @@ export const ToolCallDetails = memo(function ToolCallDetails({
           >
             <div className="pb-1.5">
               {mode === 'preview'
-                ? (previewOverride ?? (
-                    <PreviewBody preview={preview} hasResult={hasResult} isError={isError} />
-                  ))
+                ? (previewOverride ??
+                    (preview ? (
+                      <PreviewBody preview={preview} hasResult={hasResult} isError={isError} />
+                    ) : null))
                 : (sourceOverride ?? (
                     <SourceBody
                       toolCall={toolCall}
                       prettyArgs={prettyArgs}
-                      result={result}
+                      result={hydratedResult}
                       resultText={displayResultText}
                       isError={isError}
                     />

@@ -460,6 +460,12 @@ export class AgentEngineImpl implements AgentEngine {
           onEvent({ ...event, ...(d ? { messageId: d.messageId } : {}) });
           return;
         }
+        case 'run-code-progress': {
+          // 执行中即时透传；不写草稿（嵌套调用由最终 result.metadata 权威落库）
+          const d = this.liveDraft.get(event.sessionId);
+          onEvent({ ...event, ...(d ? { messageId: d.messageId } : {}) });
+          return;
+        }
         default:
           onEvent(event);
       }
@@ -1211,6 +1217,27 @@ export class AgentEngineImpl implements AgentEngine {
     const { start, end } = computeHistorySlice(total, opts);
     const messages = all.slice(start, end).map((m, i) => ({ ...m, index: start + i }));
     return { messages, total, ...describeSlice(total, { start, end }) };
+  }
+
+  /**
+   * 按 toolCallId 取完整工具结果（WebUI 展开折叠卡片时按需加载）。
+   * 分页历史只返回轻量投影；完整 content/metadata（含 IntelligentUI spec、嵌套调用）由本方法提供。
+   */
+  getToolResult(
+    sessionId: string,
+    toolCallId: string,
+  ): { content: string; isError?: boolean; metadata?: Record<string, unknown> } | null {
+    const messages = this.sessions.get(sessionId)?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== 'tool' || m.toolCallId !== toolCallId) continue;
+      return {
+        content: m.content,
+        ...(m.isError ? { isError: true } : {}),
+        ...(m.metadata ? { metadata: m.metadata } : {}),
+      };
+    }
+    return null;
   }
 
   /** 进行中的流式草稿（刷新/重连后恢复半截回复；进程重启残留附 stale 标记） */
@@ -2016,14 +2043,14 @@ export class AgentEngineImpl implements AgentEngine {
       cwd: ctx.cwd,
       toolCallId: ctx.toolCallId,
       emit: (event) => {
-        // 工具进度事件通过 AgentEvent 转发
+        // 通用 progress 只记日志：旧实现错误地转发成 tool-call-start，
+        // 会在工具执行中把卡片状态重置回 generating（闪烁/假状态）。
+        // PTC 的实时进度走独立的 run-code-progress 通道。
         if (event.type === 'progress') {
-          ctx.onEvent({
-            type: 'tool-call-start',
+          this.logger.debug('tool: progress', {
             sessionId: ctx.sessionId,
             toolName: name,
-            toolCallId: ctx.toolCallId,
-            args: event.message,
+            message: event.message,
           });
         } else if (event.type === 'confirm-required') {
           ctx.onEvent({
@@ -2105,6 +2132,14 @@ export class AgentEngineImpl implements AgentEngine {
           },
           opts?.callId,
         ),
+      onRunCodeProgress: (progress) => {
+        ctx.onEvent({
+          type: 'run-code-progress',
+          sessionId: ctx.sessionId,
+          toolCallId: ctx.toolCallId,
+          payload: progress,
+        });
+      },
       permissionDecision,
     });
 

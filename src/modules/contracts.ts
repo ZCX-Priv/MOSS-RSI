@@ -8,7 +8,14 @@ import type {
   UnifiedResponse,
   StreamDelta,
 } from './llm/types';
-import type { Tool, ToolContext, ToolResult, AskOutcome, AskQuestion } from './tools/types';
+import type {
+  Tool,
+  ToolContext,
+  ToolResult,
+  AskOutcome,
+  AskQuestion,
+  RunCodeProgressEvent,
+} from './tools/types';
 import type { TodoItem } from './tools/todo/shared/store';
 import type {
   FileHistoryEntry,
@@ -449,6 +456,15 @@ export type AgentEvent =
   | ({ type: 'tool-call-delta'; sessionId: string; toolCallId: string; argumentsDelta: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'tool-call-executing'; sessionId: string; toolName: string; toolCallId: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'tool-call-end'; sessionId: string; toolName: string; toolCallId: string; result: ToolResult; runId?: string } & StreamChunkMeta)
+  | {
+      type: 'run-code-progress';
+      sessionId: string;
+      /** 外层 run_code 工具调用 id（进度挂在该卡片下） */
+      toolCallId: string;
+      payload: RunCodeProgressEvent;
+      messageId?: string;
+      runId?: string;
+    }
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string }

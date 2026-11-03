@@ -53,6 +53,16 @@ class DaemonModule implements Module {
   private registerShutdownHandlers(): void {
     const handle = async (signal: string) => {
       this.ctx.logger.info(t('daemon.receivedSignal', { signal }));
+      // 先关闭 HTTP/WS 监听（立即断开活跃连接），再广播关闭事件。
+      // 仅清理 PID 文件就退出会留下监听套接字/句柄，Windows 下可能形成僵尸端口。
+      try {
+        const server = this.ctx.services.tryResolve<{ stop?: () => Promise<void> }>(
+          'server.instance',
+        );
+        await server?.stop?.();
+      } catch {
+        // 服务端未就绪/已关闭：继续退出流程
+      }
       // 通知其他模块
       await this.ctx.eventBus.broadcast('kernel:shutdown', { signal });
       // 清理 PID 文件

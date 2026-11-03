@@ -224,7 +224,10 @@ export function getSystemSections(
   rulesSection?: RulesSectionInput | null,
   extras?: PromptExtraSection[] | null,
 ): SystemSection[] {
-  const segments = loadSystemPromptSegments(env, rulesSection);
+  // 必须复制缓存数组：loadSystemPromptSegments 返回的是 mtime 缓存的同一个数组引用，
+  // 旧实现直接 push skill/代码模式段，导致每轮请求/每次面板刷新都往缓存里追加一份
+  // 「代码模式 (PTC)」，长会话下重复几十份（面板显示十几条 ~4064 tokens 的根因）。
+  const segments = loadSystemPromptSegments(env, rulesSection).map((section) => ({ ...section }));
   if (skillName && resolveSkillPrompt) {
     const skillPrompt = resolveSkillPrompt(skillName);
     if (skillPrompt) {
