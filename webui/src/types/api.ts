@@ -24,10 +24,20 @@ export interface WebSearchItem {
   contentQuality?: 'high' | 'low';
 }
 
+/** 对话节点（右侧导航刻度）：全量用户提问，id 与消息 itemKey 同口径 */
+export interface ConversationNode {
+  id: string;
+  /** 服务端绝对消息下标（跳转到未加载页时按它取分页） */
+  index: number;
+  label: string;
+}
+
 /** run_code 单次嵌套工具调用记录（metadata.codeRun.calls） */
 export interface CodeRunCall {
   id: string;
   name: string;
+  /** 调用开始序号（从 1 递增）：排序唯一真源（代码调用顺序，而非完成顺序） */
+  seq?: number;
   argsPreview: string;
   resultPreview: string;
   durationMs: number;

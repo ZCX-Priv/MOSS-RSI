@@ -513,10 +513,23 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         if ((progress.phase === 'call-start' || progress.phase === 'call-end') && progress.call) {
           const call = progress.call;
           const idx = live.calls.findIndex((c) => c.id === call.id);
-          const calls =
+          const merged =
             idx >= 0
               ? live.calls.map((c, i) => (i === idx ? { ...c, ...call } : c))
               : [...live.calls, call];
+          // 并行调用会按完成顺序回传 call-end：统一按开始序号 seq 排序，
+          // 保证实时卡片与最终 metadata 都是「代码调用顺序」
+          const calls = merged
+            .map((c, i) => ({ c, i }))
+            .sort((a, b) => {
+              const sa = a.c.seq;
+              const sb = b.c.seq;
+              if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+              if (sa !== undefined && sb === undefined) return -1;
+              if (sa === undefined && sb !== undefined) return 1;
+              return a.i - b.i;
+            })
+            .map((x) => x.c);
           return { ...tc, status: 'executing', live: { ...live, calls } };
         }
         return tc;

@@ -4,8 +4,13 @@ import { useTranslation } from 'react-i18next';
 import { ArrowLeft, Plus, RefreshCw, Search, SlidersHorizontal, Loader2 } from 'lucide-react';
 import type { OverlayType } from './types';
 import { Sidebar } from './components/layout/Sidebar';
-import { TaskPage } from './components/pages/TaskPage';
 import { SearchModal } from './components/overlays/SearchModal';
+
+// 任务页路由级懒加载：主包不再携带 127KB 的 TaskPage + 消息渲染树，
+// 首屏可先渲染侧边栏/shell，TaskPage 分块与后端初始化并行加载 → 打开即见界面。
+const TaskPage = lazy(() =>
+  import('./components/pages/TaskPage').then((m) => ({ default: m.TaskPage })),
+);
 
 // 非任务页全部路由级懒加载：设置/插件/自动化/系统监控及其重依赖（全量 lucide 图标、
 // 各类表单与表格）只在进入对应页面时下载，首屏 main chunk 不再被它们撑大。
@@ -113,7 +118,11 @@ const MigrationSettingsSection = lazy(() =>
 );
 import { BrowserInstallConfirmDialog } from './components/overlays/BrowserInstallConfirmDialog';
 import { SplashScreen } from './components/shared/SplashScreen';
-import { FilePreviewDialog } from './render';
+// 文件预览弹层按需加载：它会把 markdown/katex/文件预览整条渲染链带进入口静态依赖，
+// 改为首次打开时才加载，入口 modulepreload 链进一步缩短。
+const FilePreviewDialog = lazy(() =>
+  import('./render/file/FilePreviewDialog').then((m) => ({ default: m.FilePreviewDialog })),
+);
 import { SidebarProvider, SidebarInset, SidebarTrigger } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -434,13 +443,21 @@ function PageLoading() {
 function GlobalFilePreviewDialog() {
   const path = useStore((s) => s.filePreviewDialogPath);
   const hideFilePreviewDialog = useStore((s) => s.hideFilePreviewDialog);
+  // 首次打开后保持挂载（关闭时走弹层自身动画，而不是直接卸载）
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    if (path !== null) setMounted(true);
+  }, [path]);
+  if (!mounted) return null;
   return (
-    <FilePreviewDialog
-      path={path ?? ''}
-      open={path !== null}
-      onOpenChange={(open) => {
-        if (!open) hideFilePreviewDialog();
-      }}
-    />
+    <Suspense fallback={null}>
+      <FilePreviewDialog
+        path={path ?? ''}
+        open={path !== null}
+        onOpenChange={(open) => {
+          if (!open) hideFilePreviewDialog();
+        }}
+      />
+    </Suspense>
   );
 }

@@ -40,8 +40,8 @@ import { buildPrefixSum, computeRange, findItemAt } from './prefix';
 
 /** 未测量条目的默认估算高度（px） */
 const DEFAULT_ITEM_HEIGHT = 96;
-/** scrollTop 低于该值视为「到达顶部」（触发加载更早一页） */
-const START_REACH_THRESHOLD = 120;
+/** scrollTop 低于该值视为「接近顶部」（触发加载更早一页；可由 startReachedThreshold 覆盖） */
+const DEFAULT_START_REACH_THRESHOLD = 600;
 /** anchorPrepend.apply 等待数据提交的重试帧数上限 */
 const PREPEND_APPLY_RETRIES = 10;
 /** 滚动后距底小于该值才恢复贴底跟随（比对外 atBottom 宽阈值严——真贴底才恢复） */
@@ -94,8 +94,9 @@ export interface VirtualListProps<T> {
   items: readonly T[];
   itemKey: (item: T) => string;
   /**
-   * 渲染单条。第三个参数 inViewport = 该条目是否落在**精确视口**内（不含 overscan）：
-   * 宿主据此让可见项首帧直接渲染终态，overscan 区条目才走占位→渐进水合（升级在视口外不可见）。
+   * 渲染单条。第三个参数 inViewport = 该条目是否**稳定落在**精确视口内（不含 overscan）：
+   * 新进入视口（或切换会话后的首帧）为 false → 宿主走「纯文本占位 → 下一帧水合」，
+   * 避免快速滚动时同步解析大量 Markdown 阻塞主线程；稳定可见条目为 true → 直接终态。
    */
   renderItem: (item: T, index: number, inViewport: boolean) => ReactNode;
   /** 附加到滚动容器的 className（默认已含 h-full overflow-y-auto） */
@@ -108,6 +109,13 @@ export interface VirtualListProps<T> {
   overscan?: number;
   /** 距底部多少 px 内视为「在底部」（对外 atBottom 回调判定，宽阈值） */
   atBottomThreshold?: number;
+  /** scrollTop 低于该值即触发 onStartReached（默认 600；接近顶部就静默预取） */
+  startReachedThreshold?: number;
+  /**
+   * 内容不足 1.5 屏时自动补页（最多连续 2 次/会话），用于打开会话即填满视口。
+   * 是否真的还有更早历史由宿主 onStartReached 内部 guard 决定。
+   */
+  autoFill?: boolean;
   /** 首次出现非空数据后定位到底部（一次） */
   initialBottom?: boolean;
   /** 贴底期间自动跟随内容追加/增高（sticky 状态机，用户主动上滑即脱离） */
@@ -131,8 +139,10 @@ export function VirtualList<T>({
   className,
   header,
   footer,
-  overscan = 600,
+  overscan = 400,
   atBottomThreshold = 100,
+  startReachedThreshold = DEFAULT_START_REACH_THRESHOLD,
+  autoFill = false,
   initialBottom = false,
   followOutput = false,
   sessionKey,
@@ -190,6 +200,19 @@ export function VirtualList<T>({
   startCbRef.current = onStartReached;
   const bottomCbRef = useRef(onAtBottomChange);
   bottomCbRef.current = onAtBottomChange;
+  const startThresholdRef = useRef(startReachedThreshold);
+  startThresholdRef.current = startReachedThreshold;
+  const autoFillRef = useRef(autoFill);
+  autoFillRef.current = autoFill;
+  /** 上一帧的可见 key 集合：用于「新进入视口的条目首帧只占位、下一帧水合」 */
+  const prevVisibleKeysRef = useRef<Set<string>>(new Set());
+  /** 已同步实测过的 key：避免每轮布局全量读 offsetHeight 强制回流 */
+  const measuredKeysRef = useRef<Set<string>>(new Set());
+  /** 连续自动补页计数：内容仍不足 1.5 屏时最多连续补 2 次 */
+  const autoFillDepthRef = useRef(0);
+  /** range/visibleRange 的镜像：layout 内同步比较，避免无意义的重渲染 */
+  const rangeStateRef = useRef({ start: 0, end: 0 });
+  const visibleStateRef = useRef({ start: 0, end: 0 });
   // registerScroller 同样入 ref：宿主常传内联箭头，若作为 useCallback 依赖会让
   // scroller ref 回调每次渲染重建（React 会先 cleanup 再重挂 → observe/unobserve 抖动）
   const registerScrollerRef = useRef(registerScroller);
@@ -242,7 +265,18 @@ export function VirtualList<T>({
     for (let i = 0; i < cur.length; i++) {
       hs[i] = heights.get(keyFn(cur[i])) ?? estimate;
     }
-    prefixRef.current = buildPrefixSum(hs);
+    const prevPrefix = prefixRef.current;
+    const nextPrefix = buildPrefixSum(hs);
+    prefixRef.current = nextPrefix;
+    let prefixChanged = prevPrefix.length !== nextPrefix.length;
+    if (!prefixChanged) {
+      for (let i = 0; i < nextPrefix.length; i++) {
+        if (prevPrefix[i] !== nextPrefix[i]) {
+          prefixChanged = true;
+          break;
+        }
+      }
+    }
 
     const sc = scrollerRef.current;
     if (sc) {
@@ -256,11 +290,24 @@ export function VirtualList<T>({
       const bottomIntent = followRef.current && stickyRef.current && !programmaticRef.current;
       const effectiveTop = bottomIntent ? Math.max(0, total - sc.clientHeight) : sc.scrollTop;
       const r = computeRange(prefixRef.current, effectiveTop, sc.clientHeight, overscanRef.current);
-      setRange((prev) => (prev.start === r.start && prev.end === r.end ? prev : r));
+      const prevRange = rangeStateRef.current;
+      const rangeChanged = prevRange.start !== r.start || prevRange.end !== r.end;
+      if (rangeChanged) {
+        rangeStateRef.current = r;
+        setRange(r);
+      }
       // range 与 visibleRange 必须同源（同一个 effectiveTop），否则「可见项首帧终态」会错位判定
       const vr = computeVisibleRange(prefixRef.current, effectiveTop, sc.clientHeight);
-      setVisibleRange((prev) => (prev.start === vr.start && prev.end === vr.end ? prev : vr));
-      setLayoutSeq((v) => v + 1);
+      const prevVisible = visibleStateRef.current;
+      const visibleChanged = prevVisible.start !== vr.start || prevVisible.end !== vr.end;
+      if (visibleChanged) {
+        visibleStateRef.current = vr;
+        setVisibleRange(vr);
+      }
+      // 只有前缀和/窗口真的变化才 bump：避免滚动、展开卡片等引发全列表无意义重渲
+      if (prefixChanged || rangeChanged || visibleChanged) {
+        setLayoutSeq((v) => v + 1);
+      }
       // 贴底跟随：sticky 期间每次布局后贴底（用实时 scrollHeight——估算→实测的
       // 收敛过程中每轮 RO→layout 都重贴，视觉上持续贴住最新消息不跳动）。
       // 双 rAF 等待本次渲染提交（新 spacer DOM）后再滚，避免互相打架。
@@ -411,8 +458,8 @@ export function VirtualList<T>({
 
   /**
    * 同步实测已挂载条目（在 layout effect 内、paint 之前执行）：
-   * 把 ResizeObserver 才会拿到的真实高度提前到首帧前写入 → 首帧几何即实测值，
-   * 消除「估算 96px → 实测」造成的可见位置偏移（「位置先偏后正」）。
+   * 只测「本轮新挂载、尚未实测」的条目（旧条目高度由 ResizeObserver 维护）。
+   * 改为增量实测后，滚动/展开卡片不再每轮对所有 cell 读 offsetHeight（强制回流）。
    */
   const syncMeasure = useCallback(() => {
     const sc = scrollerRef.current;
@@ -422,11 +469,15 @@ export function VirtualList<T>({
     for (const el of cells) {
       const key = el.dataset.vlKey;
       if (!key) continue;
+      // 已实测过：高度变化由 ResizeObserver 负责，避免重复强制回流
+      if (measuredKeysRef.current.has(key)) continue;
       const h = el.offsetHeight;
+      if (h <= 0) continue;
+      measuredKeysRef.current.add(key);
       const prev = heightsRef.current.get(key);
       // 容差 1px：RO 写入的是 contentRect.height（小数），此处是 offsetHeight（整数取整）。
       // 不做容差会让两者来回覆盖 → dirty 反复置位 → 持续重排（自激循环）。
-      if (h > 0 && (prev === undefined || Math.abs(prev - h) > 1)) {
+      if (prev === undefined || Math.abs(prev - h) > 1) {
         heightsRef.current.set(key, h);
         changed = true;
       }
@@ -495,9 +546,29 @@ export function VirtualList<T>({
     bottomCbRef.current?.(true);
     // 高度缓存按消息 key 索引，跨会话残留无引用且无限膨胀 → 清空重测
     heightsRef.current.clear();
+    measuredKeysRef.current.clear();
+    prevVisibleKeysRef.current.clear();
+    rangeStateRef.current = { start: 0, end: 0 };
+    visibleStateRef.current = { start: 0, end: 0 };
+    autoFillDepthRef.current = 0;
     dirtyRef.current = true;
     runLayout();
   }, [sessionKey, runLayout, closeProgrammatic]);
+
+  // ===== 自动补页：内容不足 1.5 屏时静默补页（最多连续 2 次/会话） =====
+  useEffect(() => {
+    if (!autoFillRef.current) return;
+    const sc = scrollerRef.current;
+    if (!sc || items.length === 0) return;
+    const total = prefixRef.current[prefixRef.current.length - 1] ?? 0;
+    if (total >= sc.clientHeight * 1.5) {
+      autoFillDepthRef.current = 0;
+      return;
+    }
+    if (autoFillDepthRef.current >= 2) return;
+    autoFillDepthRef.current += 1;
+    startCbRef.current?.();
+  }, [layoutSeq, items.length]);
 
   // ===== 键盘滚动：向上键退出贴底跟随（window 级，排除可编辑目标） =====
   useEffect(() => {
@@ -548,14 +619,22 @@ export function VirtualList<T>({
         }
       }
       lastScrollTopRef.current = top;
-      if (top > START_REACH_THRESHOLD) suppressStartRef.current = false;
+      if (top > startThresholdRef.current) suppressStartRef.current = false;
       if (prefixRef.current.length > 1) {
         const r = computeRange(prefixRef.current, sc.scrollTop, sc.clientHeight, overscanRef.current);
-        setRange((prev) => (prev.start === r.start && prev.end === r.end ? prev : r));
+        const prevRange = rangeStateRef.current;
+        if (prevRange.start !== r.start || prevRange.end !== r.end) {
+          rangeStateRef.current = r;
+          setRange(r);
+        }
         const vr = computeVisibleRange(prefixRef.current, sc.scrollTop, sc.clientHeight);
-        setVisibleRange((prev) => (prev.start === vr.start && prev.end === vr.end ? prev : vr));
+        const prevVisible = visibleStateRef.current;
+        if (prevVisible.start !== vr.start || prevVisible.end !== vr.end) {
+          visibleStateRef.current = vr;
+          setVisibleRange(vr);
+        }
       }
-      if (sc.scrollTop <= START_REACH_THRESHOLD && !suppressStartRef.current) {
+      if (sc.scrollTop <= startThresholdRef.current && !suppressStartRef.current) {
         startCbRef.current?.();
       }
     });
@@ -707,6 +786,17 @@ export function VirtualList<T>({
   const topSpacer = prefix[rangeStart] ?? 0;
   const bottomSpacer = Math.max(0, (prefix[prefix.length - 1] ?? 0) - (prefix[rangeEnd] ?? 0));
 
+  // 精确视口的 key 集合：提交后写入 prevVisibleKeysRef，下一帧这些条目才算「稳定可见」。
+  // 新进入视口的条目（含切换会话后的全部条目）首帧走宿主 defer 分支（纯文本占位），
+  // 下一帧再水合 —— 快速滚动/切换会话不再同步解析大量 Markdown 阻塞主线程。
+  const visibleKeys = new Set<string>();
+  for (let i = Math.max(0, visibleRange.start); i < Math.min(items.length, visibleRange.end); i++) {
+    visibleKeys.add(itemKey(items[i]));
+  }
+  useLayoutEffect(() => {
+    prevVisibleKeysRef.current = visibleKeys;
+  });
+
   return (
     <div
       ref={scrollerRefCb}
@@ -721,9 +811,10 @@ export function VirtualList<T>({
         const index = rangeStart + i;
         const key = itemKey(item);
         const inViewport = index >= visibleRange.start && index < visibleRange.end;
+        const stableVisible = inViewport && prevVisibleKeysRef.current.has(key);
         return (
-          <div key={key} data-vl-key={key} ref={cellRef}>
-            {renderItem(item, index, inViewport)}
+          <div key={key} data-vl-key={key} ref={cellRef} style={{ contain: 'layout style' }}>
+            {renderItem(item, index, stableVisible)}
           </div>
         );
       })}

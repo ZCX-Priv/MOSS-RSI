@@ -62,8 +62,15 @@ class RemoteModule implements Module {
     // 注册服务（供其他模块消费状态）
     ctx.services.register(ServiceNames.REMOTE_SERVICE, this.service, { scope: 'server' });
 
-    // 自动恢复上次开启的公网隧道（cloudflared 子进程随 MOSS 重启被杀）
-    await this.service.restoreTunnelIfNeeded();
+    // 自动恢复上次开启的公网隧道（cloudflared 子进程随 MOSS 重启被杀）。
+    // 后台执行：隧道启动可能包含网络探测/下载，绝不能阻塞内核就绪与首屏。
+    void this.service
+      .restoreTunnelIfNeeded()
+      .catch((err: unknown) => {
+        ctx.logger.warn(t('remote.started'), {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
 
     ctx.logger.info(t('remote.started'));
   }

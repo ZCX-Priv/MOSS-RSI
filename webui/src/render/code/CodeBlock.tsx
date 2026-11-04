@@ -22,12 +22,26 @@ export interface CodeBlockProps {
   variant?: 'default' | 'inline';
 }
 
+/** 高亮上限（字符）：超过不再生成逐 token span（数万节点会拖垮弱机浏览器） */
+const MAX_HIGHLIGHT_CHARS = 24_000;
+/** 直接渲染上限（行）：超过先只显示前 N 行，点击「显示全部」再展开 */
+const MAX_DISPLAY_LINES = 1_500;
+
+function exceedsLineLimit(code: string, limit: number): boolean {
+  let count = 0;
+  let idx = -1;
+  while ((idx = code.indexOf('\n', idx + 1)) !== -1) {
+    if (++count > limit) return true;
+  }
+  return false;
+}
+
 export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlockProps) {
   const settings = useRenderSettings();
   const normalizedLang = lang.trim().toLowerCase();
-  // 高亮结果连同「来源 code/lang」一起存：块内容变化（同 key 复用组件）时旧结果自动失效，
-  // 不会把上一段代码的高亮错贴到新代码上。
+  const tooLarge = code.length > MAX_HIGHLIGHT_CHARS;
   const [highlight, setHighlight] = useState<{ code: string; lang: string; html: string } | null>(() => {
+    if (tooLarge) return null;
     const cached = getCachedHighlight(code, normalizedLang);
     return cached !== null ? { code, lang: normalizedLang, html: cached } : null;
   });
@@ -38,6 +52,7 @@ export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlock
 
   useEffect(() => {
     if (!closed || !settings.codeHighlightEnabled || !normalizedLang) return;
+    if (tooLarge) return; // 超大代码只显示纯文本，避免生成数万 span
     if (cachedHtml !== null) return; // 缓存命中：首帧即终态，无需再高亮
     let cancelled = false;
     void highlightCode(code, normalizedLang).then((result) => {
@@ -49,6 +64,11 @@ export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlock
   }, [code, normalizedLang, closed, settings.codeHighlightEnabled, cachedHtml]);
 
   const html = cachedHtml;
+  // 行数超限：只渲染前 N 行（完整内容仍可通过复制按钮获取），避免超长代码生成巨型 DOM
+  const lineOverflow = exceedsLineLimit(code, MAX_DISPLAY_LINES);
+  const displayCode = lineOverflow
+    ? code.split('\n').slice(0, MAX_DISPLAY_LINES).join('\n')
+    : code;
 
   // mermaid 分流（仅在块闭合后成图，流式中显示源码 —— 无闪烁）
   if (normalizedLang === 'mermaid' && closed && settings.mermaidEnabled) {
@@ -95,7 +115,7 @@ export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlock
         <div
           className={cn(
             'shiki-wrap p-3 leading-relaxed',
-            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'overflow-x-auto text-[13px]',
+            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'max-h-[420px] overflow-auto text-[13px]',
           )}
           // Shiki 输出为受控 HTML（只含 span 着色节点）
           dangerouslySetInnerHTML={{ __html: html }}
@@ -104,14 +124,19 @@ export function CodeBlock({ code, lang, closed, variant = 'default' }: CodeBlock
         <pre
           className={cn(
             'p-3 font-mono leading-relaxed text-foreground',
-            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'overflow-x-auto text-[13px]',
+            variant === 'inline' ? 'max-h-[360px] overflow-auto text-[12px]' : 'max-h-[420px] overflow-auto text-[13px]',
           )}
         >
-          <code>{code}</code>
+          <code>{displayCode}</code>
           {!closed && (
             <span className="code-cursor ml-0.5 inline-block h-4 w-[2px] translate-y-[3px] animate-pulse bg-primary-strong" />
           )}
         </pre>
+      )}
+      {lineOverflow && (
+        <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
+          仅显示前 {MAX_DISPLAY_LINES} 行 · 复制按钮可获取完整代码
+        </div>
       )}
     </div>
   );

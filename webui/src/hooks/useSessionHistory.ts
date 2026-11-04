@@ -63,8 +63,12 @@ export function useSessionHistory(
 ): UseSessionHistoryResult {
   /** 已请求过首屏的会话（避免重复拉取；切换会话时重置） */
   const loadedRef = useRef<string | null>(null);
-  /** 会话级「尾部补齐」串行化：同一时刻只允许一次，避免并发覆盖游标 */
-  const catchupBusyRef = useRef(false);
+  /**
+   * 会话级「尾部补齐」串行化（按 sessionId 分组）。
+   * 之前是全局 boolean：上一会话的补齐在途时，新会话的 catchUpTail 直接 return，
+   * 导致切换后长时间等不到尾部对齐（「切换 session 加载半天」的根因之一）。
+   */
+  const catchupBusyRef = useRef<Set<string>>(new Set());
 
   const hasMoreBefore = useStore((s) => s.historyMetaBySession[taskId]?.hasMoreBefore ?? false);
   const loadingBefore = useStore((s) => s.historyMetaBySession[taskId]?.loadingBefore ?? false);
@@ -79,8 +83,9 @@ export function useSessionHistory(
   /** 尾部增量补齐：把本地流式草稿替换为服务端正式消息（一轮结束 / 重连后） */
   const catchUpTail = useCallback(
     async (sessionId: string, dropStreaming: boolean) => {
-      if (catchupBusyRef.current) return;
-      catchupBusyRef.current = true;
+      // 按会话串行：不同会话可并发补齐，互不阻塞
+      if (catchupBusyRef.current.has(sessionId)) return;
+      catchupBusyRef.current.add(sessionId);
       // 状态胶囊提示「正在同步最新消息…」（一轮结束 / 重连对齐期间可见）
       useStore.getState().setSyncing(sessionId, true);
       try {
@@ -107,6 +112,9 @@ export function useSessionHistory(
         const res = await fetchTailPages(sessionId, after);
         if (!res) return;
         if (res.newestIndex <= after && res.messages.length === 0) return;
+        // 会话已切走：丢弃迟到结果（避免把旧会话的大对象写回并触发无意义重渲染）
+        const stNow = useStore.getState();
+        if (stNow.activeSessionId && stNow.activeSessionId !== sessionId) return;
         useStore.getState().mergeHistory(
           sessionId,
           res.messages,
@@ -121,7 +129,7 @@ export function useSessionHistory(
         );
       } finally {
         useStore.getState().setSyncing(sessionId, false);
-        catchupBusyRef.current = false;
+        catchupBusyRef.current.delete(sessionId);
       }
     },
     [],

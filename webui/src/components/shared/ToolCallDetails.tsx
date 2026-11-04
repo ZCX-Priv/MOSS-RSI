@@ -44,6 +44,14 @@ import { sanitizeTerminalOutput } from '../../lib/terminal-output';
 import { FileTypeIcon } from './FileTypeIcon';
 import type { ToolCall, ToolResult } from '../../types/api';
 
+/** 单次渲染文本上限（字符）：超出只截断展示；复制按钮始终使用完整原文 */
+const MAX_RENDER_TEXT_CHARS = 200_000;
+
+function capRenderText(text: string): string {
+  if (!text || text.length <= MAX_RENDER_TEXT_CHARS) return text;
+  return `${text.slice(0, MAX_RENDER_TEXT_CHARS)}\n…（内容过长，仅显示前 ${MAX_RENDER_TEXT_CHARS} 字符；复制按钮可获取完整内容）`;
+}
+
 interface ToolCallDetailsProps {
   toolCall: ToolCall;
   /** 就近匹配到的完整结果（含 metadata：structuredContent / resources / diff） */
@@ -124,7 +132,7 @@ function DiffLineRow({ row }: { row: DiffRow }) {
   return (
     <div
       className={cn(
-        'grid grid-cols-[2.5rem_2.5rem_1rem_1fr] items-start px-1',
+        'diff-row grid grid-cols-[2.5rem_2.5rem_1rem_1fr] items-start px-1',
         row.kind === 'add' && 'bg-emerald-500/10 dark:bg-emerald-500/20',
         row.kind === 'del' && 'bg-red-500/10 dark:bg-red-500/20',
       )}
@@ -380,7 +388,11 @@ function PreviewBody({
       <div className="overflow-hidden">
         <div className="flex items-center gap-1.5 border-b border-border bg-muted/40 px-2 py-1 font-mono text-[11px]">
           <span className="select-none text-emerald-600 dark:text-emerald-400">$</span>
-          <span className="min-w-0 flex-1 truncate text-foreground" title={preview.command}>
+          {/* 命令行单行横向滚动：超长命令不再省略号截断（可左右拖动查看完整命令） */}
+          <span
+            className="min-w-0 flex-1 overflow-x-auto no-scrollbar whitespace-pre text-foreground"
+            title={preview.command}
+          >
             {preview.command}
           </span>
           {preview.cwd && (
@@ -398,7 +410,7 @@ function PreviewBody({
             isError ? 'text-destructive' : 'text-foreground',
           )}
         >
-          {preview.output || placeholder}
+          {capRenderText(preview.output) || placeholder}
         </pre>
       </div>
     );
@@ -440,7 +452,7 @@ function PreviewBody({
             isError ? 'text-destructive' : 'text-foreground',
           )}
         >
-          {preview.text || t('task.toolCard.emptyResult')}
+          {capRenderText(preview.text) || t('task.toolCard.emptyResult')}
         </pre>
       </div>
     );
@@ -454,7 +466,7 @@ function PreviewBody({
           preview.isError ? 'text-destructive' : 'text-foreground',
         )}
       >
-        {preview.text || t('task.toolCard.emptyResult')}
+        {capRenderText(preview.text) || t('task.toolCard.emptyResult')}
       </pre>
     );
   }
@@ -755,9 +767,19 @@ export const ToolCallDetails = memo(function ToolCallDetails({
           {titleOverride ?? toolCall.name}
         </span>
         {summary && (
-          <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={summary}>
-            {summary}
-          </span>
+          toolCall.name === 'terminal' ? (
+            /* 终端命令：折叠行也保持单行横向滚动，不省略任何字符 */
+            <span
+              className="min-w-0 max-w-[60%] overflow-x-auto no-scrollbar whitespace-pre text-muted-foreground/70"
+              title={summary}
+            >
+              {summary}
+            </span>
+          ) : (
+            <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={summary}>
+              {summary}
+            </span>
+          )
         )}
         {diffStats && (
           <span className="shrink-0 text-[10px] tabular-nums">

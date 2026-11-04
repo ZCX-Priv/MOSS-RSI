@@ -19,6 +19,8 @@ import { cn } from '@/lib/utils';
 export interface ConversationNodeItem {
   /** 节点对应用户消息的 id（同时是 VirtualList 的 itemKey） */
   id: string;
+  /** 服务端绝对消息下标（节点尚未加载时按它取分页再跳转） */
+  index: number;
   /** 详情卡片中的提问文本（已截断） */
   label: string;
 }
@@ -29,7 +31,8 @@ interface ConversationNodeRailProps {
   nodes: ConversationNodeItem[];
   /** 节点消息顶部偏移（相对滚动内容顶部；由 VirtualList.getItemOffset 提供） */
   getOffset: (id: string) => number | null;
-  onJump: (id: string) => void;
+  /** 跳转（节点未加载时宿主负责按 index 拉取分页） */
+  onJump: (node: ConversationNodeItem) => void;
 }
 
 /** 视口顶部下方多少 px 内的最后一个节点视为「当前节点」 */
@@ -40,8 +43,7 @@ const AT_BOTTOM_NODE_PX = 64;
 const DENSE_NODE_COUNT = 20;
 /** 鼠标离开刻度/卡片后的收起延迟（ms）：跨过刻度与卡片之间的空隙不闪烁 */
 const HIDE_DELAY_MS = 160;
-/** 卡片可用纵向空间：不超过视口高度的该比例，且不越过刻度列上下各 8px 的留白 */
-const CARD_MAX_VIEWPORT_RATIO = 0.7;
+/** 卡片距刻度列上下边缘的留白（px） */
 const CARD_GUTTER_INSET = 8;
 
 export function ConversationNodeRail({
@@ -144,8 +146,7 @@ export function ConversationNodeRail({
 
   const dense = nodes.length > DENSE_NODE_COUNT;
 
-  // ===== 卡片尺寸：先测行高定 maxHeight（整数行 + 半行），再定纵向位置 =====
-  // 两段式 useLayoutEffect：都在 paint 前完成 → 不出现「先超高再收缩」的跳动。
+  // ===== 卡片尺寸：先测行高定 maxHeight（用满刻度列可用高度） =====
   useLayoutEffect(() => {
     if (hoverIndex === null) return;
     const nav = navRef.current;
@@ -157,38 +158,26 @@ export function ConversationNodeRail({
     if (rowH <= 0) return;
     const gutterRect = nav.parentElement?.getBoundingClientRect();
     const gutterH = gutterRect?.height ?? nav.clientHeight;
-    // 行高随界面密度/字号缩放：这里全部实测，不写死 px
-    const available = Math.max(
-      rowH,
-      Math.min(window.innerHeight * CARD_MAX_VIEWPORT_RATIO, gutterH - CARD_GUTTER_INSET * 2),
-    );
+    // 列表用满刻度列可用高度（不再按 0.7 视口比例裁切）：节点很多时内部完整滚动
+    const available = Math.max(rowH, gutterH - CARD_GUTTER_INSET * 2);
     // 整数行 + 半行：滚动时底边正好切在下一行的水平中心线（半行露头提示可继续滚动）
     const maxRows = Math.max(1, Math.floor((available - rowH / 2) / rowH));
     const next = Math.round(maxRows * rowH + rowH / 2);
     setScrollMaxH((prev) => (prev === next ? prev : next));
   }, [hoverIndex, nodes, dense]);
 
+  // ===== 卡片固定位置（垂直居中，不随悬停刻度上下移动）+ 悬停行滚到中央 =====
   useLayoutEffect(() => {
     if (hoverIndex === null) return;
     const nav = navRef.current;
     const card = cardRef.current;
     const scroll = scrollRef.current;
     if (!nav || !card || !scroll) return;
-    const ticks = nav.querySelectorAll<HTMLButtonElement>(':scope > button');
-    const target = ticks[hoverIndex];
-    if (!target) return;
-    const navRect = nav.getBoundingClientRect();
-    const tickRect = target.getBoundingClientRect();
-    const tickCenter = tickRect.top - navRect.top + tickRect.height / 2;
-    const cardH = card.offsetHeight;
-    // 允许区间以刻度列（gutter）为界：卡片可高于刻度列，但不得越过其上下 8px 留白
     const gutterRect = nav.parentElement?.getBoundingClientRect();
-    const minTop = gutterRect ? gutterRect.top + CARD_GUTTER_INSET - navRect.top : 0;
-    const maxTop = gutterRect
-      ? gutterRect.bottom - CARD_GUTTER_INSET - navRect.top - cardH
-      : nav.clientHeight - cardH;
-    const lowerBound = Math.max(minTop, maxTop);
-    const nextTop = Math.round(Math.max(minTop, Math.min(lowerBound, tickCenter - cardH / 2)));
+    const gutterH = gutterRect?.height ?? nav.clientHeight;
+    const cardH = card.offsetHeight;
+    // 固定居中：悬停不同刻度只滚动列表内部，卡片本身纹丝不动
+    const nextTop = Math.round(Math.max(CARD_GUTTER_INSET, (gutterH - cardH) / 2));
     setCardTop((prev) => (prev === nextTop ? prev : nextTop));
 
     // 悬停行居中：长会话悬停靠后的刻度时，卡片直接定位到对应节点附近（否则永远从第 1 条开始）。
@@ -205,7 +194,7 @@ export function ConversationNodeRail({
       const snapped = Math.round(desired / rowH) * rowH;
       scroll.scrollTop = Math.max(0, Math.min(maxScroll, Math.round(snapped)));
     }
-  }, [hoverIndex, scrollMaxH, nodes]);
+  }, [hoverIndex, scrollMaxH, nodes, dense]);
 
   if (nodes.length < 2) return null;
 
@@ -215,43 +204,45 @@ export function ConversationNodeRail({
       aria-label={t('task.nodesAria')}
       className={cn(
         // right-4 + 28px 刻度按钮 ⇒ 与 header 的 size-7 + px-4 侧栏按钮同列（中心对齐）
-        'pointer-events-none absolute right-4 top-1/2 z-10 hidden -translate-y-1/2 flex-col py-2 md:flex',
-        dense ? 'gap-[2px]' : 'gap-1.5',
+        // inset-y-0：刻度列占满任务区高度，节点很多时内部可滚动，不再被裁切
+        'pointer-events-none absolute inset-y-0 right-4 z-10 hidden flex-col justify-center py-2 md:flex',
       )}
       onMouseEnter={cancelHide}
       onMouseLeave={scheduleHide}
     >
-      {nodes.map((node, index) => {
-        const active = node.id === activeId;
-        return (
-          <button
-            key={node.id}
-            type="button"
-            aria-label={node.label}
-            aria-current={active ? 'true' : undefined}
-            onMouseEnter={() => setHoverIndex(index)}
-            onClick={() => {
-              setHoverIndex(null);
-              onJump(node.id);
-            }}
-            className={cn(
-              'group/node pointer-events-auto flex items-center justify-center',
-              dense ? 'h-1.5 w-7' : 'h-2.5 w-7',
-            )}
-          >
-            <span
+      <div className={cn('no-scrollbar flex max-h-full flex-col overflow-y-auto', dense ? 'gap-[2px]' : 'gap-1.5')}>
+        {nodes.map((node, index) => {
+          const active = node.id === activeId;
+          return (
+            <button
+              key={node.id}
+              type="button"
+              aria-label={node.label}
+              aria-current={active ? 'true' : undefined}
+              onMouseEnter={() => setHoverIndex(index)}
+              onClick={() => {
+                setHoverIndex(null);
+                onJump(node);
+              }}
               className={cn(
-                'block h-[3px] rounded-full transition-all duration-150',
-                active
-                  ? 'w-4 bg-primary-strong'
-                  : 'w-2 bg-muted-foreground/30 group-hover/node:w-3 group-hover/node:bg-muted-foreground/70',
+                'group/node pointer-events-auto flex cursor-pointer items-center justify-center',
+                dense ? 'h-1.5 w-7' : 'h-2.5 w-7',
               )}
-            />
-          </button>
-        );
-      })}
+            >
+              <span
+                className={cn(
+                  'block h-[3px] rounded-full transition-all duration-150',
+                  active
+                    ? 'w-4 bg-primary-strong'
+                    : 'w-2 bg-muted-foreground/30 group-hover/node:w-3 group-hover/node:bg-muted-foreground/70',
+                )}
+              />
+            </button>
+          );
+        })}
+      </div>
 
-      {/* 悬浮详情卡片：位于刻度列左侧；内部滚动（隐藏滚动条），限高 = 整数行 + 半行 */}
+      {/* 悬浮详情卡片：固定垂直居中（不随悬停刻度上下移动）；列表用满高度内部滚动 */}
       {hoverIndex !== null && (
         <div
           ref={cardRef}
@@ -263,7 +254,7 @@ export function ConversationNodeRail({
         >
           <div
             ref={scrollRef}
-            className="no-scrollbar overflow-y-auto"
+            className="overflow-y-auto"
             style={scrollMaxH === null ? undefined : { maxHeight: `${scrollMaxH}px` }}
           >
             {nodes.map((node, index) => {
@@ -277,11 +268,11 @@ export function ConversationNodeRail({
                   aria-current={active ? 'true' : undefined}
                   onClick={() => {
                     setHoverIndex(null);
-                    onJump(node.id);
+                    onJump(node);
                   }}
                   // 行内不更新 hoverIndex：否则指针落在卡片上会让锚点跟着变，列表在指针下抖动
                   className={cn(
-                    'flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-right transition-colors',
+                    'flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-right transition-colors hover:bg-muted/60',
                     hovered && 'bg-muted/40',
                   )}
                 >

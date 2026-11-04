@@ -83,6 +83,7 @@ import type {
   ExternalSessionMeta,
   MigrationImportResult,
   BackupInspection,
+  ConversationNode,
 } from '../types/api';
 import i18n from '../i18n';
 
@@ -224,6 +225,14 @@ export const api = {
   /** 会话状态快照：运行态 + 半截流式草稿 + 待答/待确认（刷新/重连恢复的唯一入口） */
   getSessionState: (id: string) =>
     request<SessionState>('GET', `/api/session/${encodeURIComponent(id)}/state`),
+  /** 对话节点列表（全部用户提问，不受分页影响；右侧导航刻度用） */
+  getSessionNodes: async (id: string): Promise<{ nodes: ConversationNode[] }> => {
+    const resp = await request<{ sessionId: string; nodes: ConversationNode[] }>(
+      'GET',
+      `/api/session/${encodeURIComponent(id)}/nodes`,
+    );
+    return { nodes: Array.isArray(resp.nodes) ? resp.nodes : [] };
+  },
   /** 按 toolCallId 拉取完整工具结果（分页历史只返回轻量投影，展开卡片时调用） */
   getToolResult: async (sessionId: string, toolCallId: string): Promise<ToolResult> => {
     const resp = await request<{

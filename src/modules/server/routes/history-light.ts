@@ -27,6 +27,8 @@ function lightenCodeRun(codeRun: Record<string, unknown>): Record<string, unknow
     ? codeRun.calls.filter(isRecord).map((call) => ({
         id: call.id,
         name: call.name,
+        // seq 是调用开始序号：轻量投影必须保留，前端据此保持代码调用顺序
+        ...(typeof call.seq === 'number' ? { seq: call.seq } : {}),
         argsPreview: call.argsPreview,
         resultPreview: call.resultPreview,
         durationMs: call.durationMs,

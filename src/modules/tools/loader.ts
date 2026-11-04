@@ -32,6 +32,50 @@ interface ToolExecuteImpl {
 }
 type ToolExport = ToolExecuteImpl | ((env: Environment) => ToolExecuteImpl);
 
+/** 读取并校验 tool.json（失败返回 null 并记录日志） */
+function readToolManifest(dir: string, logger: Logger): ToolManifest | null {
+  const manifestPath = join(dir, 'tool.json');
+  if (!existsSync(manifestPath)) {
+    logger.warn(t('tools.skipNoManifest', { dir }));
+    return null;
+  }
+  try {
+    const raw = readFileSync(manifestPath, 'utf8');
+    const manifest = JSON.parse(raw) as ToolManifest;
+    if (!isValidManifest(manifest)) {
+      logger.warn(t('tools.skipMissingFields', { dir }));
+      return null;
+    }
+    return manifest;
+  } catch (err) {
+    logger.warn(t('tools.skipInvalidManifest', { dir }), {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** 由 manifest + 执行函数组装 Tool（注入 sourceDir/source） */
+function buildTool(
+  manifest: ToolManifest,
+  dir: string,
+  source: 'builtin' | 'custom',
+  execute: Tool['execute'],
+): Tool {
+  return {
+    name: manifest.name,
+    description: manifest.description,
+    descriptionEn: manifest.description_en,
+    inputSchema: manifest.inputSchema,
+    annotations: manifest.annotations,
+    icon: manifest.icon,
+    configManifest: manifest.config,
+    execute,
+    sourceDir: dir,
+    source,
+  };
+}
+
 /**
  * 从单个目录加载工具（tool.json + index.ts）。
  * 失败返回 null 并记录日志（错误隔离）。
@@ -46,30 +90,11 @@ export async function loadToolFromDir(
   logger: Logger,
   source: 'builtin' | 'custom',
 ): Promise<Tool | null> {
-  const manifestPath = join(dir, 'tool.json');
   const indexPath = join(dir, 'index.ts');
 
   // 1. 读取并校验 tool.json
-  if (!existsSync(manifestPath)) {
-    logger.warn(t('tools.skipNoManifest', { dir }));
-    return null;
-  }
-
-  let manifest: ToolManifest;
-  try {
-    const raw = readFileSync(manifestPath, 'utf8');
-    manifest = JSON.parse(raw) as ToolManifest;
-  } catch (err) {
-    logger.warn(t('tools.skipInvalidManifest', { dir }), {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-
-  if (!isValidManifest(manifest)) {
-    logger.warn(t('tools.skipMissingFields', { dir }));
-    return null;
-  }
+  const manifest = readToolManifest(dir, logger);
+  if (!manifest) return null;
 
   // 2. 动态 import index.ts
   let mod: { default?: ToolExport };
@@ -112,21 +137,89 @@ export async function loadToolFromDir(
   }
 
   // 4. 合并 tool.json 静态字段 + index.ts 的 execute，注入 sourceDir/source
-  const tool: Tool = {
-    name: manifest.name,
-    description: manifest.description,
-    descriptionEn: manifest.description_en,
-    inputSchema: manifest.inputSchema,
-    annotations: manifest.annotations,
-    icon: manifest.icon,
-    configManifest: manifest.config,
-    // bind(impl)：保留 this 绑定，防止工具实现采用对象方法模式时 this 丢失
-    execute: impl.execute.bind(impl),
-    sourceDir: dir,
-    source,
-  };
+  // bind(impl)：保留 this 绑定，防止工具实现采用对象方法模式时 this 丢失
+  return buildTool(manifest, dir, source, impl.execute.bind(impl));
+}
 
-  return tool;
+/** 单个工具实现的惰性加载器（首次 execute 时才 import index.ts，之后复用） */
+function createLazyImplLoader(
+  dir: string,
+  env: Environment,
+  logger: Logger,
+): () => Promise<ToolExecuteImpl> {
+  const indexPath = join(dir, 'index.ts');
+  let promise: Promise<ToolExecuteImpl> | null = null;
+  return () => {
+    if (promise) return promise;
+    promise = import(indexPath)
+      .then((mod: { default?: ToolExport }) => {
+        const exported = mod.default;
+        if (!exported) throw new Error(t('tools.skipNoDefaultExport', { dir }));
+        if (typeof exported === 'function') {
+          return (exported as (env: Environment) => ToolExecuteImpl)(env);
+        }
+        if (exported && typeof exported === 'object') {
+          return exported as ToolExecuteImpl;
+        }
+        throw new Error(t('tools.skipInvalidExport', { dir }));
+      })
+      .catch((err: unknown) => {
+        // 失败不缓存：下次调用可重试（与热重载语义一致）
+        promise = null;
+        logger.warn(t('tools.skipImportFailed', { dir }), {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      });
+    return promise;
+  };
+}
+
+/**
+ * 启动期工具描述符加载（启动性能关键路径）：
+ * 只读 tool.json（小文件），不 import index.ts；execute 首次调用时才动态加载实现。
+ * 这样 20 个工具（含 pdf/office/sharp/tree-sitter 等重依赖）不会阻塞内核启动，
+ * 也避免把事件循环堵住导致 server/context/remote 等模块激活延迟。
+ */
+export async function loadToolDescriptorsFromDir(
+  dir: string,
+  env: Environment,
+  logger: Logger,
+  source: 'builtin' | 'custom',
+): Promise<Tool[]> {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  const toolDirs: string[] = [];
+  for (const entry of entries) {
+    const full = join(dir, entry);
+    try {
+      if (!statSync(full).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (!existsSync(join(full, 'tool.json'))) continue;
+    toolDirs.push(full);
+  }
+  toolDirs.sort();
+
+  const loaded = toolDirs.map((full) => {
+    const manifest = readToolManifest(full, logger);
+    if (!manifest) return null;
+    const getImpl = createLazyImplLoader(full, env, logger);
+    return buildTool(manifest, full, source, async (params, ctx) => {
+      const impl = await getImpl();
+      if (typeof impl.execute !== 'function') {
+        throw new Error(t('tools.skipNoExecute', { dir: full }));
+      }
+      return impl.execute(params, ctx);
+    });
+  });
+  return loaded.filter((tool): tool is Tool => tool !== null);
 }
 
 // ============================================================================

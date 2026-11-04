@@ -97,6 +97,7 @@ import { ConversationNodeRail, type ConversationNodeItem } from '../shared/Conve
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
 import { VirtualList, type VirtualListApi } from '../../lib/virtual-list/VirtualList';
 import { useSessionHistory } from '../../hooks/useSessionHistory';
+import { useSessionNodes } from '../../hooks/useSessionNodes';
 import { useTabBarScroll } from '../../hooks/useTabBarScroll';
 import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
 import { AskPromptCard } from '../shared/AskPromptCard';
@@ -656,13 +657,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const scrollerElRef = useRef<HTMLDivElement | null>(null);
 
   /**
-   * 上滑到顶 → 加载更早的一页。
-   * 必须校验「当前是否真的在顶部」：虚拟列表在 prepend 后 scrollTop 仍可能很小，
-   * 不校验会把整段历史在用户停留顶部时级联全部加载（分页的意义被抵消）。
+   * 接近顶部 → 静默加载更早的一页（阈值由 VirtualList.startReachedThreshold 控制）。
+   * 不再手动判定 scrollTop：VirtualList 已按 800px 预取距离触发，观感是「无限流」。
    */
   const handleStartReached = useCallback(() => {
-    const el = scrollerElRef.current;
-    if (el && el.scrollTop > 120) return;
     loadOlder();
   }, [loadOlder]);
 
@@ -1268,18 +1266,28 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const { replyEndIds, lastReplyEndId } = useMemo(() => computeReplyEnds(messages), [messages]);
 
   /**
-   * 对话节点：每条用户提问（跳过压缩/触顶这类系统卡片）= 一个节点（含其后的整段回复）。
-   * label 取正文首段（附件块已剥离），供右侧刻度条的悬浮提示使用。
+   * 对话节点：来自后端全量用户提问（不受分页影响）。
+   * 之前由 messages 推导 → 懒加载只加载末页时，早期节点缺失（「节点显示不全」的根因）。
+   * 本地新发的用户消息先合并进来（服务端节点列表刷新前也能立即看到新节点）。
    */
-  const conversationNodes = useMemo<ConversationNodeItem[]>(() => {
+  const { nodes: sessionNodes } = useSessionNodes(taskId);
+  /** 本地用户消息 → 节点（按 messages.length 缓存，避免流式每 token 重建） */
+  const localNodeCacheRef = useRef<{ session: string; len: number; nodes: ConversationNodeItem[] }>({
+    session: '',
+    len: -1,
+    nodes: [],
+  });
+  const localNodes = useMemo<ConversationNodeItem[]>(() => {
+    const cache = localNodeCacheRef.current;
+    if (cache.session === taskId && cache.len === messages.length) return cache.nodes;
     const nodes: ConversationNodeItem[] = [];
     for (const msg of messages) {
       if (msg.role !== 'user') continue;
       if (msg.compaction || msg.maxTurnsNotice || msg.outputLimitNotice) continue;
-      // 与气泡渲染同一口径：先剥尾部命令注入块，再剥附件块
       const body = stripAttachmentBlock(stripInjectBlock(msg.content)).replace(/\s+/g, ' ').trim();
       nodes.push({
         id: msg.id,
+        index: typeof msg.historyIndex === 'number' ? msg.historyIndex : -1,
         label: body
           ? body.length > 120
             ? `${body.slice(0, 119)}…`
@@ -1287,8 +1295,50 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           : t('task.nodeAttachmentOnly'),
       });
     }
+    localNodeCacheRef.current = { session: taskId, len: messages.length, nodes };
     return nodes;
-  }, [messages, t]);
+  }, [taskId, messages, t]);
+
+  const conversationNodes = useMemo<ConversationNodeItem[]>(() => {
+    const seen = new Set(sessionNodes.map((node) => node.id));
+    const out: ConversationNodeItem[] = sessionNodes.map((node) => ({
+      id: node.id,
+      index: node.index,
+      label: node.label || t('task.nodeAttachmentOnly'),
+    }));
+    for (const node of localNodes) {
+      if (!seen.has(node.id)) out.push(node);
+    }
+    return out;
+  }, [sessionNodes, localNodes, t]);
+
+  /** 跳转节点：已加载 → 直接滚动；未加载 → 按绝对下标取一页并合并后滚动 */
+  const handleJumpNode = useCallback(
+    async (node: ConversationNodeItem): Promise<void> => {
+      const listApi = listApiRef.current;
+      if (listApi && listApi.getItemOffset(node.id) !== null) {
+        listApi.scrollToKey(node.id, 'smooth');
+        return;
+      }
+      // 本地乐观消息（尚未持久化）没有服务端下标：无法按页拉取，保持当前位置
+      if (node.index < 0) return;
+      try {
+        const resp = await api.getSessionHistory(taskId, { before: node.index + 1, limit: 30 });
+        const st = useStore.getState();
+        if (st.activeSessionId && st.activeSessionId !== taskId) return;
+        st.mergeHistory(taskId, resp.messages, 'prepend', resp.page);
+        // 双 rAF：等合并提交 + 虚拟列表前缀和重排后再定位
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            listApiRef.current?.scrollToKey(node.id, 'auto');
+          });
+        });
+      } catch {
+        // 拉取失败：保持当前位置（不阻塞导航）
+      }
+    },
+    [taskId],
+  );
 
   /**
    * 消息条目渲染（稳定引用）：避免 TaskPage 任意状态变化都让虚拟列表整片重渲。
@@ -1445,27 +1495,16 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               }}
               onStartReached={handleStartReached}
               initialBottom
+              // 接近顶部自动预取 + 内容不足 1.5 屏时自动补页（去掉任何「上滑加载」提示）
+              startReachedThreshold={800}
+              autoFill
               // 仅在「已在底部」时跟随追加：用户上滑看历史时绝不打扰
               followOutput
               atBottomThreshold={100}
               onAtBottomChange={handleAtBottomChange}
-              overscan={600}
+              overscan={400}
               renderItem={renderItem}
-              // 列表头：加载更早的指示（已到最早时不再显示任何提示）
-              header={
-                messages.length === 0 ? null : (
-                  <div className="flex items-center justify-center py-2 text-xs text-muted-foreground">
-                    {loadingBefore ? (
-                      <span className="flex items-center gap-1.5">
-                        <Loader2 className="size-3.5 animate-spin" />
-                        {t('task.loadingEarlier')}
-                      </span>
-                    ) : hasMoreBefore ? (
-                      <span>{t('task.scrollUpForEarlier')}</span>
-                    ) : null}
-                  </div>
-                )
-              }
+              header={null}
               footer={
                 showTailThinking ? (
                   <div className="flex items-center gap-2 px-4 pb-4 text-muted-foreground">
@@ -1876,7 +1915,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             scroller={scrollerEl}
             nodes={conversationNodes}
             getOffset={(id) => listApiRef.current?.getItemOffset(id) ?? null}
-            onJump={(id) => listApiRef.current?.scrollToKey(id, 'smooth')}
+            onJump={handleJumpNode}
           />
         </div>
         </div>

@@ -1042,11 +1042,16 @@ export const useStore = create<Store>((set, get) => ({
           loadingBefore: false,
         };
       } else if (page) {
+        // 任意页（含「节点跳转」拉取的中间页）都必须按区间取并集：
+        // 中间页的 newestIndex 可能小于当前已加载尾部，直接覆盖会让游标倒退 →
+        // catchUpTail 误判「有新增」而重复拉取；oldestIndex 同理只能取更小值。
+        const oldest = Math.min(prevMeta?.oldestIndex ?? page.oldestIndex, page.oldestIndex);
+        const newest = Math.max(prevMeta?.newestIndex ?? -1, page.newestIndex);
         meta = {
           total: page.total,
-          oldestIndex: mode === 'prepend' && prevMeta ? Math.min(prevMeta.oldestIndex, page.oldestIndex) : page.oldestIndex,
-          newestIndex: Math.max(page.newestIndex, mode === 'catchup' ? (prevMeta?.newestIndex ?? -1) : page.newestIndex),
-          hasMoreBefore: mode === 'prepend' && prevMeta ? page.hasMoreBefore || prevMeta.hasMoreBefore : page.hasMoreBefore,
+          oldestIndex: oldest,
+          newestIndex: newest,
+          hasMoreBefore: oldest > 0,
           loadingBefore: false,
           loaded: true,
         };

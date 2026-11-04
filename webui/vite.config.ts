@@ -47,7 +47,18 @@ export default defineConfig({
         // 导致 index.html 不在 precache，而 vite-plugin-pwa 仍注入
         // NavigationRoute(createHandlerBoundToURL('index.html'))，SW 启动求值时同步抛
         // non-precached-url → 新 SW 安装/更新必然失败 → 旧 SW 永久接管返回旧应用外壳。
-        globPatterns: ['**/*.{js,css,html,png,svg,ico,woff2}'],
+        //
+        // 预缓存只覆盖「应用外壳」：入口 JS/CSS + 少数核心 vendor chunk。
+        // 不再把 552 个懒加载 chunk（28.5MB）全部预缓存 —— 首次安装 SW 时下载/哈希
+        // 数十 MB 会与首屏争抢 CPU/IO，这是冷启动慢的重要来源。
+        globPatterns: [
+          '**/*.{html,ico,woff2}',
+          'assets/index-*.{js,css}',
+          'assets/vendor-react-*.js',
+          'assets/vendor-icons-*.js',
+          'assets/vendor-ui-*.js',
+          'assets/vendor-markdown-*.js',
+        ],
         navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
         // 主 chunk 含 @lobehub/icons 品牌图标（约 +0.8MB raw）+ react-material-icon-theme
         // 文件类型图标数据（约 +1.1MB minified，见 components/shared/FileTypeIcon），放宽预缓存上限
@@ -60,8 +71,9 @@ export default defineConfig({
         skipWaiting: false,
         clientsClaim: false,
       },
-      // dev 模式启用 SW：用于调试 PWA 安装/离线行为（生产同款 SW 逻辑）
-      devOptions: { enabled: true },
+      // dev 模式不再启用 SW：dev SW 会接管模块请求，更新/重载时造成「闪一下」与旧缓存假象。
+      // 生产构建仍生成完整 SW（PWA 安装/离线能力不变）。
+      devOptions: { enabled: false },
     }),
   ],
   // dev 预构建全部「懒加载重依赖」：避免运行中首次访问某依赖时触发重新预构建，
@@ -83,6 +95,10 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    // dev 首访预热：进入页面即开始转换这两个入口链，避免「先等 Vite 编译 → 再请求」的串行等待
+    warmup: {
+      clientFiles: ['./src/App.tsx', './src/components/pages/TaskPage.tsx'],
+    },
     // 仅绑定回环（IPv4 127.0.0.1）：开发服务器只对本机开放，局域网不可达。
     // 显式写 127.0.0.1（而非 Vite 默认的 'localhost'）：Windows 上 localhost 可能
     // 只解析到 IPv6 ::1，写死 IPv4 后 http://127.0.0.1:3000 与 http://localhost:3000
@@ -130,6 +146,31 @@ export default defineConfig({
     // 该阈值仅避免对「已知且有意为之」的入口体积重复告警，不改变产物结构。
     chunkSizeWarningLimit: 6000,
     rolldownOptions: {
+      output: {
+        // 显式分组：把「入口静态依赖」收成少量稳定大 chunk。
+        // 默认按模块拆分会让每个 lucide 图标/小组件各自成 chunk，入口挂 47 条 modulepreload，
+        // 冷启动要发几十个并行请求；分组后 preload 数量与主包解析成本显著下降。
+        codeSplitting: {
+          groups: [
+            {
+              name: 'vendor-react',
+              test: /node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom|zustand|sonner|i18next|react-i18next)[\\/]/,
+            },
+            {
+              name: 'vendor-icons',
+              test: /node_modules[\\/](lucide-react|@lobehub|@icons-pack)[\\/]/,
+            },
+            {
+              name: 'vendor-ui',
+              test: /node_modules[\\/](radix-ui|@radix-ui|@dnd-kit|cmdk)[\\/]/,
+            },
+            {
+              name: 'vendor-markdown',
+              test: /node_modules[\\/](markdown-it|katex)[\\/]/,
+            },
+          ],
+        },
+      },
       onwarn(warning, warn) {
         // @cornerstonejs/codec-openjpeg 为兼容 Node 静态 import 了 fs/path，
         // 浏览器分支不会执行这两条路径；仅屏蔽该模块的 externalize 提示，其它告警照常输出。

@@ -7,13 +7,15 @@ import { useStore } from '../store';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { applyPluginOrder, loadPluginOrder, SKILL_ORDER_KEY } from '../lib/plugin-order';
+import { withRetry } from '../lib/retry';
 
 export function useSkills() {
   const setSkills = useStore((s) => s.setSkills);
 
   const load = useCallback(async () => {
     try {
-      const { skills } = await api.listSkills();
+      // 首屏不再等待后端就绪：启动窗口内的 503 由退避重试自愈
+      const { skills } = await withRetry(() => api.listSkills());
       // 应用浏览器本地保存的自定义顺序（IndexedDB）
       const order = await loadPluginOrder(SKILL_ORDER_KEY);
       setSkills(applyPluginOrder(skills, order));

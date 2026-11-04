@@ -1220,6 +1220,38 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   /**
+   * 对话节点列表（右侧导航刻度用）：全部用户提问，不受分页影响。
+   * id 与 WebUI `adaptAgentMessages` 完全同口径（clientMessageId ?? `h<index>`），
+   * 保证懒加载/分页后节点仍能对应到虚拟列表的 itemKey。
+   */
+  getUserNodes(sessionId: string): Array<{ id: string; index: number; label: string }> {
+    const all = this.getHistory(sessionId);
+    const skipNames = new Set([
+      'compaction-summary',
+      'env-context',
+      'day-rollover',
+      'active-rules',
+      'memory-l1',
+    ]);
+    const nodes: Array<{ id: string; index: number; label: string }> = [];
+    for (let i = 0; i < all.length; i++) {
+      const m = all[i];
+      if (m.role !== 'user') continue;
+      if (m.name && skipNames.has(m.name)) continue;
+      const id =
+        typeof m.clientMessageId === 'string' && m.clientMessageId
+          ? m.clientMessageId
+          : `h${i}`;
+      nodes.push({
+        id,
+        index: i,
+        label: typeof m.content === 'string' ? m.content.slice(0, 400) : '',
+      });
+    }
+    return nodes;
+  }
+
+  /**
    * 按 toolCallId 取完整工具结果（WebUI 展开折叠卡片时按需加载）。
    * 分页历史只返回轻量投影；完整 content/metadata（含 IntelligentUI spec、嵌套调用）由本方法提供。
    */

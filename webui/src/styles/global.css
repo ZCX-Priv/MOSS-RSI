@@ -205,6 +205,12 @@ html[data-density='comfortable'] {
   scrollbar-width: none; /* Firefox */
 }
 
+/* diff 行：浏览器跳过视口外行的绘制（展开大 diff 时不再一次性绘制全部行） */
+.diff-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 18px;
+}
+
 /* 聊天消息区（消息 + AI 回复）：隐藏滚动条但保留滚动能力（与全局一致）。
    曾一度显式展示可交互滚动条，现按需求隐藏，避免滚动条遮挡消息内容。 */
 .task-scroll-area::-webkit-scrollbar {

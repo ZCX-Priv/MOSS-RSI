@@ -12,7 +12,7 @@ import { ToolRegistryImpl } from './registry';
 import { createSkillRegistry } from './shared/skill-registry';
 import { createCommandRegistry } from './use_command/registry';
 import { BUILTIN_TOOL_NAMES } from './manifest';
-import { loadToolsFromDir, loadToolFromDir, resolveBuiltinDir } from './loader';
+import { loadToolDescriptorsFromDir, loadToolFromDir, resolveBuiltinDir } from './loader';
 import type { Tool } from './types';
 
 class ToolsModule implements Module {
@@ -72,7 +72,8 @@ class ToolsModule implements Module {
     }
 
     ctx.logger.info(t('tools.loadingBuiltin'), { dir: builtinDir });
-    this.loadedBuiltinTools = await loadToolsFromDir(builtinDir, ctx.env, ctx.logger, 'builtin');
+    // 启动期只读 manifest（不 import 重依赖实现）：execute 首次调用才惰性加载 index.ts
+    this.loadedBuiltinTools = await loadToolDescriptorsFromDir(builtinDir, ctx.env, ctx.logger, 'builtin');
 
     // 注册全部内置工具（含 disabled 的）：启用状态由 registry.isEnabled 实时读取 config，
     // listSchemas() 据此过滤给 LLM。这样 config 变更无需增删注册，且前端可见全部工具。
@@ -106,7 +107,7 @@ class ToolsModule implements Module {
 
   /** 扫描目录并加载所有自定义工具子目录 */
   private async loadCustomToolsFromDir(dir: string, ctx: ModuleContext): Promise<void> {
-    const tools = await loadToolsFromDir(dir, ctx.env, ctx.logger, 'custom');
+    const tools = await loadToolDescriptorsFromDir(dir, ctx.env, ctx.logger, 'custom');
     for (const tool of tools) {
       // 不允许覆盖内置工具
       if (BUILTIN_TOOL_NAMES.has(tool.name)) {
@@ -367,7 +368,7 @@ class ToolsModule implements Module {
         }
       }
       // 重新加载
-      this.loadedBuiltinTools = await loadToolsFromDir(rootDir, ctx.env, ctx.logger, 'builtin');
+      this.loadedBuiltinTools = await loadToolDescriptorsFromDir(rootDir, ctx.env, ctx.logger, 'builtin');
       for (const tool of this.loadedBuiltinTools) {
         this.registry.register(tool);
       }

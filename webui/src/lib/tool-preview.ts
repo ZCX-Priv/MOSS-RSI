@@ -121,7 +121,7 @@ export interface BuildToolPreviewParams {
 }
 
 /** diff 默认展示预算（含折叠条本身） */
-export const MAX_DIFF_DISPLAY_ROWS = 2000;
+export const MAX_DIFF_DISPLAY_ROWS = 800;
 /** diff 解析/合成安全上限（避免极端数据卡死；后端单文件 diff 上限 5000 行） */
 const MAX_DIFF_PARSE_ROWS = 20000;
 /** 每段连续上下文保留的首尾行数 */

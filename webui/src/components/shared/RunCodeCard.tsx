@@ -46,12 +46,17 @@ export const RunCodeCard = memo(function RunCodeCard({
   const activeSessionId = useStore((s) => s.activeSessionId);
   const [open, setOpen] = useState(false);
   const [nestedOpenIds, setNestedOpenIds] = useState<Set<string>>(new Set());
+  // 历史轻量投影只保留 hasUi（不含 uiSpec）：折叠态也要按需补拉完整结果，
+  // 保证刷新后 IntelligentUI 仍显示在折叠代码卡下方（与对话流一致）。
+  const hasUiFromResult =
+    result?.metadata?.codeRun?.hasUi === true ||
+    result?.metadata?.codeRun?.uiSpec !== undefined;
   // 程序卡片或任一嵌套调用展开时，才按需拉取完整的 codeRun metadata（含 uiSpec/日志）
   const hydratedResult = useLazyToolResult(
     activeSessionId,
     toolCall.id,
     result,
-    open || nestedOpenIds.size > 0,
+    open || nestedOpenIds.size > 0 || hasUiFromResult,
   );
   // 大 JSON 源码只在展开时解析；折叠态不解析 20KB~ 的程序参数
   const parsed: ParsedArgs = useMemo(
@@ -66,7 +71,7 @@ export const RunCodeCard = memo(function RunCodeCard({
   const running = status === 'generating' || status === 'executing';
   const hasCode = typeof parsed.code === 'string' && parsed.code.trim().length > 0;
   const liveCalls = toolCall.live?.calls ?? [];
-  const calls = meta?.calls?.length ? meta.calls : liveCalls;
+  const calls = sortCallsBySeq(meta?.calls?.length ? meta.calls : liveCalls);
   const kindLabel =
     meta?.kind === 'ui'
       ? t('task.runCode.kindUi')
@@ -75,7 +80,7 @@ export const RunCodeCard = memo(function RunCodeCard({
         : meta?.kind === 'text'
           ? t('task.runCode.kindText')
           : '';
-  const hasUi = meta?.uiSpec !== undefined || meta?.hasUi === true;
+  const hasUi = hasUiFromResult || meta?.uiSpec !== undefined;
 
   // 执行中本地 ticker：仅运行中的卡片启动（避免每个历史卡片都挂定时器）
   const [, forceTick] = useState(0);
@@ -168,8 +173,9 @@ export const RunCodeCard = memo(function RunCodeCard({
         </div>
       )}
 
-      {/* IntelligentUI：只在程序卡片展开且确有 spec 时懒加载渲染（重进会话不再全量挂载） */}
-      {open && meta?.uiSpec && (
+      {/* IntelligentUI：折叠代码卡也常显（历史投影 hasUi=true 时自动补拉 spec）；
+          仅程序卡片展开时才懒加载渲染器属于旧行为，刷新后图表会被收进折叠区 */}
+      {meta?.uiSpec && !isError && (
         <div className="mt-0.5 ml-1 min-w-0">
           <Suspense
             fallback={
@@ -183,6 +189,22 @@ export const RunCodeCard = memo(function RunCodeCard({
     </div>
   );
 });
+
+/** 按调用开始序号 seq 排序（完成顺序会被并行调用打乱；旧历史无 seq 时保持原序） */
+function sortCallsBySeq<T extends { id: string; seq?: number }>(list: readonly T[]): T[] {
+  return list
+    .map((call, index) => ({ call, index }))
+    .sort((a, b) => {
+      const sa = a.call.seq;
+      const sb = b.call.seq;
+      if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+      if (sa !== undefined && sb === undefined) return -1;
+      if (sa === undefined && sb !== undefined) return 1;
+      // 两侧都无 seq（旧历史）→ 保持原数组顺序
+      return a.index - b.index;
+    })
+    .map((entry) => entry.call);
+}
 
 /** 合成普通 ToolCall/ToolResult：优先使用后端富数据，旧会话/执行中回退 preview 字段 */
 function nestedToolView(call: CodeRunCall & { status?: 'running' | 'done' | 'failed' }): {

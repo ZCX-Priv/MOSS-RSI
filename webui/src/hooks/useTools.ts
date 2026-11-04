@@ -8,6 +8,7 @@ import { useStore } from '../store';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { toast } from 'sonner';
+import { withRetry } from '../lib/retry';
 
 export function useTools() {
   const setTools = useStore((s) => s.setTools);
@@ -16,7 +17,8 @@ export function useTools() {
 
   const load = useCallback(async () => {
     try {
-      const { tools } = await api.listTools();
+      // 首屏不等待后端就绪：启动窗口 503 退避重试
+      const { tools } = await withRetry(() => api.listTools());
       setTools(tools);
       // 派生 iconMap（兼容工具调用卡片图标渲染）
       const map: Record<string, string> = {};

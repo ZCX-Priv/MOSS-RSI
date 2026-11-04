@@ -14,10 +14,10 @@
 import { api } from './http';
 
 /** 就绪标志：这些服务同时出现即代表首屏数据所需基础设施可用（agent 数据由请求重试兜底） */
-const READY_SERVICES = ['server.instance', 'tool.registry', 'context.engine'];
+const READY_SERVICES = ['server.instance'];
 const POLL_INTERVAL_MS = 250;
 /** 等待上限：超过则放行（由调用方自身的重试兜底），避免后端始终不可用时空转 */
-const MAX_WAIT_MS = 8_000;
+const MAX_WAIT_MS = 4_000;
 
 let knownReady = false;
 let pending: Promise<boolean> | null = null;

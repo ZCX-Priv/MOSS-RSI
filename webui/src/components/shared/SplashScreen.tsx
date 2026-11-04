@@ -13,10 +13,10 @@ import { wsClient } from '../../api/ws';
 
 /** 会话哨兵 key：存在即本会话已展示过 */
 const SPLASH_SESSION_KEY = 'moss-splash-shown';
-/** 最短展示时长：保证入场段完整（ms） */
-const MIN_DISPLAY_MS = 1600;
+/** 最短展示时长：保证入场段完整（ms）；首屏已就绪时不额外拖延 */
+const MIN_DISPLAY_MS = 600;
 /** 兜底放行：后端未启动时不卡死（ms） */
-const FALLBACK_MS = 4000;
+const FALLBACK_MS = 2_000;
 /** 淡出时长（ms），与 CSS transition duration 保持一致 */
 const EXIT_MS = 600;
 

@@ -128,6 +128,28 @@ const loadedLangs = new Set<string>();
  * 会话级内存缓存，不淘汰（与 fetcher 的 objectUrlCache 同策略，规模受会话内容限制）。
  */
 const htmlCache = new Map<string, string>();
+/** 高亮 HTML 缓存上限（条数 + 估算字符总量）：长会话不再无界增长 */
+const HTML_CACHE_MAX_ENTRIES = 40;
+const HTML_CACHE_MAX_CHARS = 8_000_000;
+let htmlCacheChars = 0;
+
+/** 写入高亮缓存（LRU 淘汰：超条数或超字符预算时丢最旧） */
+function setHighlightCache(key: string, html: string): void {
+  const prev = htmlCache.get(key);
+  if (prev !== undefined) {
+    htmlCacheChars -= prev.length;
+    htmlCache.delete(key);
+  }
+  htmlCache.set(key, html);
+  htmlCacheChars += html.length;
+  while (htmlCache.size > HTML_CACHE_MAX_ENTRIES || htmlCacheChars > HTML_CACHE_MAX_CHARS) {
+    const first = htmlCache.keys().next();
+    if (first.done) break;
+    const old = htmlCache.get(first.value);
+    htmlCache.delete(first.value);
+    if (old !== undefined) htmlCacheChars -= old.length;
+  }
+}
 
 function cacheKey(code: string, lang: string): string {
   // 语言名在 key 内统一归一（trim + 小写），保证写入端（highlightCode 的调用方）与读取端口径一致
@@ -182,6 +204,8 @@ async function resolveLang(lang: string): Promise<string | null> {
  */
 export async function highlightCode(code: string, lang: string): Promise<string | null> {
   try {
+    // 超大代码不做高亮：逐 token span 会生成数万节点，弱机直接卡死
+    if (code.length > 24_000) return null;
     const resolved = await resolveLang(lang);
     if (!resolved) return null;
     const highlighter = await getHighlighter();
@@ -197,7 +221,7 @@ export async function highlightCode(code: string, lang: string): Promise<string 
       defaultColor: false,
     });
     // 写缓存：同一 (lang, code) 再次出现时可由 getCachedHighlight 同步命中（首帧即高亮）
-    htmlCache.set(cacheKey(code, lang), html);
+    setHighlightCache(cacheKey(code, lang), html);
     return html;
   } catch {
     return null;

@@ -202,7 +202,18 @@
   font-size: 0.88em;
 }
 .math-failed {
-  color: var(--destructive);
+  /* 兼容旧类名：失败态不再染红（红色会让用户误判为错误），统一弱色 */
+  color: var(--muted-foreground);
+}
+/* 带框兜底：`\box` / `\boxed` 两个引擎都失败时，内部公式 + CSS 边框仍呈现「框起来」 */
+.math-boxed {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1em 0.45em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  line-height: 1.2;
 }
 
 /* KaTeX 尺寸微调（气泡内） */

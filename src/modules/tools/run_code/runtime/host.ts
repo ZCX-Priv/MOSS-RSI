@@ -29,6 +29,8 @@ import type { SanitizeWarning } from './sanitize';
 export interface CodeRunCallRecord {
   id: string;
   name: string;
+  /** 调用开始序号（从 1 递增）：顺序的唯一真源，保证与代码中的调用顺序一致 */
+  seq: number;
   argsPreview: string;
   resultPreview: string;
   durationMs: number;
@@ -133,6 +135,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   const runController = new AbortController();
   const logs: string[] = [];
   const calls: CodeRunCallRecord[] = [];
+  /** 调用开始序号：每次 runCall 开始时递增（与并行/完成顺序无关） */
+  let callSeq = 0;
   let callsTruncated = false;
   let stderr = '';
   let finished = false;
@@ -262,6 +266,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       calls.push(record);
     };
 
+    /** 调用快照：按开始序号 seq 排序（最终 metadata 与代码调用顺序一致，而非完成顺序） */
+    function snapshotCalls(): CodeRunCallRecord[] {
+      return [...calls].sort((a, b) => a.seq - b.seq);
+    }
+
     /**
      * 嵌套调用的富数据（前端复用普通工具卡渲染）。
      * 预览完全放开：入参、结果正文、metadata 都不按字节截断。
@@ -281,7 +290,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     };
 
     /** 嵌套调用开始进度（参数超过预算时只给 preview，避免单帧过大） */
-    const emitCallStart = (call: { id: string; name: string; args: unknown }): void => {
+    const emitCallStart = (call: { id: string; name: string; args: unknown }, seq: number): void => {
       const argsJson = jsonText(call.args);
       emitProgress({
         phase: 'call-start',
@@ -289,6 +298,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         call: {
           id: call.id,
           name: call.name,
+          seq,
           argsPreview: previewJson(call.args),
           ...(argsJson && byteLength(argsJson) <= MAX_PROGRESS_ARGS_BYTES
             ? { argumentsJson: argsJson }
@@ -314,6 +324,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         call: {
           id: record.id,
           name: record.name,
+          seq: record.seq,
           argsPreview: record.argsPreview,
           ...(record.durationMs >= 0 ? { durationMs: record.durationMs } : {}),
           ok: record.ok,
@@ -405,7 +416,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         const kind = isFailureKind(frame.kind) ? frame.kind : 'exception';
         void settle({
           logs: logs.slice(),
-          calls: calls.slice(),
+          calls: snapshotCalls(),
           callsTruncated,
           nestedCalls: calls.length,
           hasUi,
@@ -419,7 +430,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     const protocolError = (message: string): Omit<RunCodeHostResult, 'durationMs'> => ({
       logs: logs.slice(),
-      calls: calls.slice(),
+      calls: snapshotCalls(),
       callsTruncated,
       nestedCalls: calls.length,
       hasUi,
@@ -461,7 +472,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     const runCall = async (call: QueuedCall): Promise<void> => {
       const started = performance.now();
-      emitCallStart(call);
+      const seq = (callSeq += 1);
+      emitCallStart(call, seq);
       try {
         const result = await opts.invokeTool(call.name, call.args, {
           callId: call.id,
@@ -473,6 +485,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           const record: CodeRunCallRecord = {
             id: call.id,
             name: call.name,
+            seq,
             argsPreview: previewJson(call.args),
             resultPreview: truncateToBytes(message, 400),
             durationMs,
@@ -502,6 +515,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           const record: CodeRunCallRecord = {
             id: call.id,
             name: call.name,
+            seq,
             argsPreview: previewJson(call.args),
             resultPreview: truncateToBytes(message, 400),
             durationMs,
@@ -523,6 +537,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         const record: CodeRunCallRecord = {
           id: call.id,
           name: call.name,
+          seq,
           argsPreview: previewJson(call.args),
           resultPreview: previewJson(value),
           durationMs,
@@ -538,6 +553,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         const record: CodeRunCallRecord = {
           id: call.id,
           name: call.name,
+          seq,
           argsPreview: previewJson(call.args),
           resultPreview: truncateToBytes(message, 400),
           durationMs,
@@ -573,7 +589,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         ...(frame.uiDiagnostics !== undefined ? { uiDiagnostics: frame.uiDiagnostics } : {}),
         nestedCalls: Math.max(calls.length, typeof frame.nestedCalls === 'number' ? frame.nestedCalls : 0),
         hasUi,
-        calls: calls.slice(),
+        calls: snapshotCalls(),
         callsTruncated,
         truncated: callsTruncated,
       });
@@ -601,7 +617,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       writeFrame({ v: 1, type: 'abort' });
       void settle({
         logs: logs.slice(),
-        calls: calls.slice(),
+        calls: snapshotCalls(),
         callsTruncated,
         nestedCalls: calls.length,
         hasUi: false,
@@ -616,7 +632,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       runController.abort();
       void settle({
         logs: logs.slice(),
-        calls: calls.slice(),
+        calls: snapshotCalls(),
         callsTruncated,
         nestedCalls: calls.length,
         hasUi: false,
@@ -655,7 +671,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           await child.exited;
           await settle({
             logs: logs.slice(),
-            calls: calls.slice(),
+            calls: snapshotCalls(),
             callsTruncated,
             nestedCalls: calls.length,
             hasUi: false,

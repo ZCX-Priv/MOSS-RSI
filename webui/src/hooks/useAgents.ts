@@ -7,6 +7,7 @@ import { useStore } from '../store';
 import { api } from '../api/http';
 import type { AgentItem, AgentDetail } from '../types/api';
 import { toast } from 'sonner';
+import { withRetry } from '../lib/retry';
 
 export function useAgents() {
   const setAgents = useStore((s) => s.setAgents);
@@ -14,7 +15,8 @@ export function useAgents() {
 
   const load = useCallback(async () => {
     try {
-      const { agents, default: defaultId } = await api.listAgents();
+      // 首屏不等待后端就绪：启动窗口 503 退避重试
+      const { agents, default: defaultId } = await withRetry(() => api.listAgents());
       setAgents(agents);
       if (defaultId) setCurrentAgent(defaultId);
     } catch (err) {

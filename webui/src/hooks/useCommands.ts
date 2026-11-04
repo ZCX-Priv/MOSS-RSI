@@ -8,13 +8,15 @@ import { useStore } from '../store';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import type { CommandUpsertBody } from '../types/api';
+import { withRetry } from '../lib/retry';
 
 export function useCommands() {
   const setCommands = useStore((s) => s.setCommands);
 
   const load = useCallback(async () => {
     try {
-      const { commands } = await api.listCommands();
+      // 首屏不等待后端就绪：启动窗口 503 退避重试
+      const { commands } = await withRetry(() => api.listCommands());
       setCommands(commands);
     } catch (err) {
       console.warn('useCommands load failed:', err);

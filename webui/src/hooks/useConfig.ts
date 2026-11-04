@@ -9,6 +9,7 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import type { AppConfig, ApiConfig } from '../types/api';
 import { toast } from 'sonner';
+import { withRetry } from '../lib/retry';
 
 export function useConfig() {
   const setAppConfig = useStore((s) => s.setAppConfig);
@@ -17,7 +18,10 @@ export function useConfig() {
 
   const loadConfig = useCallback(async () => {
     try {
-      const [app, apiCfg] = await Promise.all([api.getAppConfig(), api.getApiConfig()]);
+      // 首屏不等待后端就绪：启动窗口 503 退避重试（后端监听后配置即就绪）
+      const [app, apiCfg] = await withRetry(() =>
+        Promise.all([api.getAppConfig(), api.getApiConfig()]),
+      );
       setAppConfig(app);
       setApiConfig(apiCfg);
       // 从 appConfig 同步默认模型到 store

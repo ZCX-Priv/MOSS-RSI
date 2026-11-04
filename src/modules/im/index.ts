@@ -67,8 +67,16 @@ class ImModule implements Module {
       { scope: 'im' },
     );
 
-    await controller.startAll();
+    // 机器人连接在后台进行：微信/QQ 网络握手可能数十秒（网络不可用时更久），
+    // 绝不能让 IM 模块初始化阻塞内核就绪（实测曾拖慢启动 16s+）。
     const bots = store.list();
+    void controller
+      .startAll()
+      .catch((err: unknown) => {
+        ctx.logger.warn(t('im.moduleInitialized', { bots: bots.length, enabled: 0 }), {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     ctx.logger.info(
       t('im.moduleInitialized', {
         bots: bots.length,

@@ -21,6 +21,7 @@ import {
   createDeleteSessionHandler,
   createSessionHistoryHandler,
   createSessionStateHandler,
+  createSessionNodesHandler,
   createSessionToolResultHandler,
 } from './routes/session';
 import {
@@ -355,6 +356,8 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id', handler: createSessionHistoryHandler(services), auth: true });
     // 会话状态快照（运行态 + 流式草稿 + 待答/待确认）：刷新/重连后「不丢状态」的唯一入口
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/state', handler: createSessionStateHandler(services), auth: true });
+    // 对话节点列表（全部用户提问，不受分页影响；右侧节点导航用）
+    this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/nodes', handler: createSessionNodesHandler(services), auth: true });
     // 工具结果按需加载（分页历史只返回轻量投影，展开卡片时才取完整正文/metadata）
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/tool-result', handler: createSessionToolResultHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/sessions/:id/context', handler: createSessionContextHandler(services, config), auth: true });

@@ -31,6 +31,8 @@ type AgentEngineExt = AgentEngine & {
     id: string,
     toolCallId: string,
   ) => { content: string; isError?: boolean; metadata?: Record<string, unknown> } | null;
+  /** 全量用户提问节点（对话导航；不受分页影响） */
+  getUserNodes?: (id: string) => Array<{ id: string; index: number; label: string }>;
   getPendingAsks?: (id: string) => Array<{
     toolCallId: string;
     sessionId: string;
@@ -149,6 +151,26 @@ export function createSessionHistoryHandler(services: ServiceRegistry): RouteHan
         ...(lastRunStats ? { lastRunStats } : {}),
       },
     };
+  };
+}
+
+/**
+ * 对话节点列表：GET /api/session/:id/nodes
+ * 返回全部用户提问（id 与前端消息 itemKey 同口径），供右侧节点导航使用；
+ * 不受分页影响 —— 懒加载只加载了末页时，早期节点仍完整可见并可跳转。
+ */
+export function createSessionNodesHandler(services: ServiceRegistry): RouteHandler {
+  return async (_req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
+    const sessionId = params?.id;
+    if (!sessionId) {
+      return { status: 400, body: { error: ErrorCode.SESSION_ID_REQUIRED } };
+    }
+    const agent = services.tryResolve<AgentEngineExt>('agent.engine');
+    if (!agent?.getUserNodes) {
+      // 与其它会话路由同约定：内核启动窗口返回可重试的 503
+      return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
+    }
+    return { status: 200, body: { sessionId, nodes: agent.getUserNodes(sessionId) } };
   };
 }
 

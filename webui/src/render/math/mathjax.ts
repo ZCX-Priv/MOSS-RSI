@@ -7,6 +7,8 @@
 //   3. startup.typeset:false —— 不自动扫描页面，只按需 tex2chtmlPromise
 //   4. chtml 样式表只注入一次
 
+import { normalizeTex } from './katex';
+
 interface MathJaxAdaptor {
   outerHTML(node: unknown): string;
 }
@@ -73,6 +75,12 @@ export async function mathjaxTypeset(tex: string, displayMode: boolean): Promise
       stylesheetInjected = true;
     }
   }
-  const node = await MJ.tex2chtmlPromise(tex, { display: displayMode });
-  return MJ.startup.adaptor.outerHTML(node);
+  const node = await MJ.tex2chtmlPromise(normalizeTex(tex), { display: displayMode });
+  const html = MJ.startup.adaptor.outerHTML(node);
+  // MathJax 的 TeX 错误不会 reject，而是渲染成红色 <mjx-merror>；
+  // 这里视为失败抛出，交给 MathSpan 走「带框兜底/原始文本」，绝不把红字交给用户。
+  if (html.includes('mjx-merror')) {
+    throw new Error('MathJax tex error');
+  }
+  return html;
 }

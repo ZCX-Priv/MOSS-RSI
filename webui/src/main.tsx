@@ -100,28 +100,31 @@ const PERSISTED_KEYS = [
 /**
  * 预填充 store 的持久化状态到 IndexedDB 内存缓存，并执行一次性迁移：
  * 仅当 IndexedDB 中该 key 无值而旧 localStorage 有值时，把旧值搬入 IndexedDB 并清除 localStorage。
+ * 所有 key 并发读取（15 个串行 await 会把首屏推迟数百毫秒）。
  */
 async function prefetchStoreState(): Promise<Record<string, unknown>> {
   const result: Record<string, unknown> = {};
-  for (const key of PERSISTED_KEYS) {
-    const current = await idbGet<unknown>(key);
-    if (current === undefined) {
-      const legacy = localStorage.getItem(key);
-      if (legacy !== null) {
-        let migrated: unknown = legacy;
-        try {
-          migrated = JSON.parse(legacy);
-        } catch {
-          // 非 JSON，按普通字符串处理
+  await Promise.all(
+    PERSISTED_KEYS.map(async (key) => {
+      const current = await idbGet<unknown>(key);
+      if (current === undefined) {
+        const legacy = localStorage.getItem(key);
+        if (legacy !== null) {
+          let migrated: unknown = legacy;
+          try {
+            migrated = JSON.parse(legacy);
+          } catch {
+            // 非 JSON，按普通字符串处理
+          }
+          await idbSet(key, migrated);
+          localStorage.removeItem(key);
+          result[key] = migrated;
         }
-        await idbSet(key, migrated);
-        localStorage.removeItem(key);
-        result[key] = migrated;
+        return;
       }
-    } else {
       result[key] = current;
-    }
-  }
+    }),
+  );
   // 存量迁移：旧默认工作目录（C:\）→ 本机 System 哨兵（覆盖 IndexedDB 与旧 localStorage 两来源）
   if (result['moss-working-directory'] === LEGACY_DEFAULT_WORKING_DIRECTORY) {
     result['moss-working-directory'] = DEFAULT_WORKING_DIRECTORY;
@@ -266,10 +269,12 @@ async function resetStaleServiceWorker(): Promise<void> {
 // 启动即执行（非阻塞，与主题/语言/持久化初始化并行）
 void resetStaleServiceWorker();
 
-// 后端就绪门控：内核按序初始化（server 早于 agent），若在 agent 引擎注册前渲染应用，
-// 首批列表/历史请求会拿到 503（未就绪）→ 首屏侧边栏与消息列表为空，需刷新才恢复。
-// 这里与其他初始化并行等待就绪（有 12s 上限，后端不可用时不无限阻塞；期间 #moss-boot 骨架可见）。
-Promise.all([initTheme(), initLocale(), initPersisted(), waitForBackendReady()]).then((results) => {
+// 后端就绪探测改为后台进行：**不再阻塞首帧渲染**。
+// 数据 hooks（useTasks / useSessionHistory 等）对启动窗口的 503 已有退避重试与 WS 快照兜底，
+// 页面可以先渲染 shell，后端模块随后就绪即自动补齐 —— 这是「打开即见界面」的关键。
+void waitForBackendReady();
+
+Promise.all([initTheme(), initLocale(), initPersisted()]).then((results) => {
   const persisted = results[2];
   useStore.getState().hydratePersisted(buildPersistedState(persisted));
   // 首帧前同步应用外观（主题色 / 字号 / 密度 / 圆角）：避免先渲染一帧默认外观再跳变

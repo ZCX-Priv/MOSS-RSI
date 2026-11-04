@@ -132,6 +132,8 @@ export type RunCodeCallStatus = 'running' | 'done' | 'failed';
 export interface RunCodeProgressCall {
   id: string;
   name: string;
+  /** 调用开始序号（从 1 递增）：前端据此保持代码调用顺序（而非完成顺序） */
+  seq?: number;
   argsPreview: string;
   argumentsJson?: string;
   status: RunCodeCallStatus;
