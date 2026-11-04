@@ -141,8 +141,14 @@ export class ComputerServiceImpl implements ComputerService {
 
   async initialize(): Promise<void> {
     ensureComputerDirs(this.dirs);
-    // 清理历史截图（失败不影响启动）
-    pruneComputerFiles(this.dirs);
+    // 清理历史截图是递归目录操作：延后到空闲，不占用内核启动关键路径
+    setTimeout(() => {
+      try {
+        pruneComputerFiles(this.dirs);
+      } catch {
+        // 清理失败不影响启动
+      }
+    }, 0);
 
     this.driverPath = resolveCuaDriverPath(this.env);
     if (!this.driverPath) {

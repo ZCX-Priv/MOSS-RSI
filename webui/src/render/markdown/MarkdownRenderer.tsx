@@ -58,6 +58,9 @@ export function MarkdownRenderer({
           raw={block.raw}
           closed={block.closed || !streaming}
           defer={defer}
+          // 流式活跃块：超长时按纯文本渲染（避免每个 token 全量 markdown 解析把主线程占满），
+          // 结束后 closed=true，自动升级为完整 markdown。
+          plain={streaming && !block.closed}
         />
       ))}
       {cursor !== undefined && <span className="md-cursor">{cursor}</span>}

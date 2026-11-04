@@ -87,6 +87,11 @@ export class ToolRegistryImpl implements ToolRegistry {
     return Array.from(this.tools.values());
   }
 
+  /** 该工具是否声明可同轮并行（仅只读工具；未声明/不存在均视为 false） */
+  isParallelSafe(name: string): boolean {
+    return this.tools.get(name)?.parallelSafe === true;
+  }
+
   listSchemas(): Array<{
     name: string;
     description: string;

@@ -91,6 +91,8 @@ export interface ToolRegistry {
   unregister(name: string): void;
   /** 获取工具 */
   get(name: string): Tool | null;
+  /** 该工具是否声明可同轮并行（只读、无副作用；缺省 false） */
+  isParallelSafe?(name: string): boolean;
   /** 列出所有工具 */
   list(): Tool[];
   /** 列出所有工具的 schema（供 LLM 注入） */

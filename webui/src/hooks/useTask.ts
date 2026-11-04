@@ -18,6 +18,7 @@ import { useStore } from '../store';
 import { wsClient } from '../api/ws';
 import { api } from '../api/http';
 import { pendingAssistant, pendingRunId } from '../lib/pending-assistant';
+import { flushPending, resetStreamBuffer } from '../lib/stream-buffer';
 import { resolveWorkingDirectoryName } from '../lib/utils';
 import { stripAttachmentBlock } from '../lib/attachment-block';
 import { stripInjectBlock } from '../lib/inject-block';
@@ -67,10 +68,9 @@ export function useTask() {
   const addMessage = useStore((s) => s.addMessage);
   const setActiveSession = useStore((s) => s.setActiveSession);
   const setActiveTaskId = useStore((s) => s.setActiveTaskId);
-  const setGenerating = useStore((s) => s.setGenerating);
+  const beginRun = useStore((s) => s.beginRun);
   const setSending = useStore((s) => s.setSending);
   const setStopping = useStore((s) => s.setStopping);
-  const finalizeStreamingMessages = useStore((s) => s.finalizeStreamingMessages);
   const touchTask = useStore((s) => s.touchTask);
   const removePendingAsk = useStore((s) => s.removePendingAsk);
   const removePendingConfirm = useStore((s) => s.removePendingConfirm);
@@ -165,7 +165,9 @@ export function useTask() {
         try {
           const guideRunId = genRunId();
           pendingRunId.set(sessionId, guideRunId);
-          finalizeStreamingMessages(sessionId);
+          // 引导模式：本地终止上一轮的流式展示，但不熄灭生成态（新的引导 run 即将开始）
+          useStore.getState().terminateRun(sessionId, undefined, { keepGenerating: true });
+          useStore.getState().beginRun(sessionId, guideRunId);
 
           // clientMessageId：本地乐观消息与服务端持久化副本同身份（尾部补齐时按 id 去重）
           const guideClientMessageId = genId();
@@ -218,7 +220,8 @@ export function useTask() {
           timestamp: new Date().toISOString(),
         };
         addMessage(sessionId, userMsg);
-        setGenerating(sessionId, true);
+        // 统一 run 入口：记录 runId/epoch + 点亮生成态 + 清除错误/停止态
+        beginRun(sessionId, runId);
 
         // 新建会话：消息与运行态已写入 store，此刻通知调用方立即导航到任务页
         //（同一同步栈内触发；配合 navigate 的 flushSync 实现零过渡帧）
@@ -282,28 +285,45 @@ export function useTask() {
         setSending(sessionId, false);
       }
     },
-    [addMessage, setActiveSession, setActiveTaskId, setGenerating, setSending, finalizeStreamingMessages, touchTask],
+    [addMessage, setActiveSession, setActiveTaskId, beginRun, setSending, touchTask],
   );
 
   const abort = useCallback(
     (sessionIdOverride?: string, opts?: { forSend?: boolean }) => {
       const sid = sessionIdOverride ?? useStore.getState().activeSessionId;
       if (!sid) return;
-      wsClient.send({ type: 'task.abort', sessionId: sid });
+      const st = useStore.getState();
+      const runId = st.activeRunBySession[sid]?.runId ?? pendingRunId.get(sid);
+
+      // 1) 本地立即终止：记入终止集合 + 定稿本轮消息（写入 streamEndedAt 屏障）。
+      //    不再删除 pendingRunId —— 删除会让 runId 过滤失效，旧 run 的迟到分片
+      //    反而被放行，表现为「点了停止还在输出」。
+      st.terminateRun(sid, runId);
+
+      // 2) 先冲刷再强制清空流缓冲：缓冲里尚未应用的分片随后会因 streamEndedAt 被丢弃，
+      //    force 绕过「生成中跳过清理」的保护（旧实现正是因此留下大量残片）。
+      flushPending();
+      resetStreamBuffer(sid, { force: true });
+
+      // 3) 流式身份清理（后续新一轮会重新建立）
+      pendingAssistant.delete(sid);
+
+      // 4) 控制消息：连接断开时只保留最后一条（不随业务消息无限排队）
+      wsClient.sendControl({ type: 'task.abort', sessionId: sid });
+
       if (opts?.forSend) {
-        // 中断发送：立即释放生成态，让随后的 sendMessage 走正常发送分支（不显示停止转圈）
-        setGenerating(sid, false);
+        // 中断发送：随后的 sendMessage 立即 beginRun，不显示停止转圈
         setStopping(sid, false);
       } else {
-        // 普通停止：保持生成态，仅置停止转圈；等后端终态确认后再切回发送
+        // 停止转圈最多 3s 自动复位（后端 task.aborted 会提前清除），杜绝「转圈不恢复」
         setStopping(sid, true);
+        window.setTimeout(() => {
+          const cur = useStore.getState();
+          if (cur.stoppingBySession[sid]) cur.setStopping(sid, false);
+        }, 3000);
       }
-      // 立即清理前端流式状态（按钮状态由 stopping 单独承载）
-      pendingAssistant.delete(sid);
-      pendingRunId.delete(sid);
-      finalizeStreamingMessages(sid);
     },
-    [setGenerating, setStopping, finalizeStreamingMessages],
+    [setStopping],
   );
 
   /** 编辑队列消息：移出队列并把内容（含附件）回填到消息发送框，供用户继续编辑后发送 */

@@ -5,6 +5,8 @@ import { t } from '../../core/i18n';
 import { flattenModels } from '../../core/provider-utils';
 import { statSync } from 'node:fs';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { totalmem } from 'node:os';
+import { Semaphore } from '../../utils/semaphore';
 import { buildTools } from './context';
 import { SessionStore, type ContextFile, type Session, type ActiveSkill } from './session';
 import { TaskStore, type TaskItem, type TaskGroup } from './task-store';
@@ -174,6 +176,9 @@ export class AgentEngineImpl implements AgentEngine {
   /** 代码模式嵌套调用的本地序号（仅用于生成稳定、可读的嵌套 toolCallId） */
   private nestedCodeCallSeq = 0;
 
+  /** 同时运行的 agent run 上限（低内存机器自适应，避免多会话并发把 1G 内存打爆） */
+  private readonly runLimiter: Semaphore;
+
   /** 标记/取消 headless（子代理与团队成员由 orchestrator 在启动时标记） */
   markSessionHeadless(sessionId: string, headless: boolean): void {
     if (!sessionId) return;
@@ -193,6 +198,18 @@ export class AgentEngineImpl implements AgentEngine {
     this.eventBus = deps.eventBus;
     this.logger = deps.logger;
     this.env = deps.env;
+    // 并发闸门：缺省按物理内存自适应（<2GB → 2；否则 4），并允许配置覆盖。
+    // 1 核低内存机器上并行是时间切片，限制并发可避免多会话同时持有大上下文导致 OOM。
+    {
+      const agentCfg = deps.config.getAppConfig().agent;
+      const memMb = totalmem() / (1024 * 1024);
+      const autoLimit = memMb < 2048 ? 2 : 4;
+      const configured = agentCfg.maxConcurrentRuns;
+      const limit = typeof configured === 'number' && Number.isFinite(configured)
+        ? Math.max(1, Math.min(8, Math.floor(configured)))
+        : autoLimit;
+      this.runLimiter = new Semaphore(limit);
+    }
     // TaskStore 先建：SessionStore 路径解析依赖总管索引（task↔session 归属目录）。
     // 不注入时 resolveSessionDir 恒 null，非 default 组的 session 文件指向无法解析
     this.tasks = new TaskStore(deps.env, deps.logger);
@@ -289,6 +306,17 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    // 全局并发闸门：超限的 run 排队等待（不阻塞事件循环），避免低配机器被并发会话拖垮
+    const release = await this.runLimiter.acquire();
+    try {
+      return await this.runUnlocked(input);
+    } finally {
+      release();
+    }
+  }
+
+  /** run 的实际实现（由 run() 包一层并发闸门；内部逻辑保持原样） */
+  private async runUnlocked(input: AgentRunInput): Promise<AgentRunResult> {
     const { sessionId, userMessage, cwd, onEvent, signal } = input;
 
     // 实时文件监控：run 期间（包括后台任务）注册工作目录，让外部/终端变更进入 file-history。
@@ -1009,18 +1037,30 @@ export class AgentEngineImpl implements AgentEngine {
         }
       };
 
-      // 并发语义（两组特殊工具）：
+      // 并发语义：
       // - `ask`：同一轮 ≥2 个 → 并发挂起，前端合并为多问题卡片；
-      // - `agent`（一次性子代理）：同一轮 ≥2 个 → 真并发（上限 4），避免后面的子代理
-      //   排在同一轮串行队尾、用户一停止就全部 `aborted`。
-      // 其余工具保持原有串行语义（依赖顺序 / abort 配对）。
+      // - `agent`（一次性子代理）：同一轮 ≥2 个 → 真并发（上限 4）；
+      // - 只读工具（tool.json 声明 parallelSafe：read/grep/glob/web）：
+      //   连续段并行（上限 agent.maxParallelTools，缺省 4；1 = 串行），
+      //   段结束后按 toolCalls 顺序重排工具结果，保证会话里的 tool_result 顺序稳定。
+      // - 其余（写工具/terminal/run_code 等）严格串行且保持调用顺序。
       const askCalls = toolCalls.filter((tc) => tc.name === 'ask');
       const subagentCalls = toolCalls.filter(isSubagentToolCall);
       const parallelAsks = askCalls.length >= 2;
       const parallelSubagents = subagentCalls.length >= 2;
+      const configuredParallel = cfg.maxParallelTools;
+      const maxParallelTools =
+        typeof configuredParallel === 'number' && Number.isFinite(configuredParallel)
+          ? Math.max(1, Math.min(4, Math.floor(configuredParallel)))
+          : 4;
+      const isParallelSafeCall = (tc: (typeof toolCalls)[number]): boolean => {
+        if (tc.name === 'ask' || isSubagentToolCall(tc)) return false;
+        return toolRegistry?.isParallelSafe?.(tc.name) === true;
+      };
       let asksLaunched = false;
       let subagentsLaunched = false;
-      for (const tc of toolCalls) {
+      for (let i = 0; i < toolCalls.length; i++) {
+        const tc = toolCalls[i];
         if (parallelAsks && tc.name === 'ask') {
           if (!asksLaunched) {
             asksLaunched = true;
@@ -1032,6 +1072,22 @@ export class AgentEngineImpl implements AgentEngine {
           if (!subagentsLaunched) {
             subagentsLaunched = true;
             await runWithLimit(subagentCalls, MAX_CONCURRENT_SUBAGENT_RUNS, runOne);
+          }
+          continue;
+        }
+        if (maxParallelTools > 1 && isParallelSafeCall(tc)) {
+          const segment: Array<NonNullable<AgentMessage['toolCalls']>[number]> = [];
+          while (i < toolCalls.length && isParallelSafeCall(toolCalls[i])) {
+            segment.push(toolCalls[i]);
+            i++;
+          }
+          i--;
+          if (segment.length > 1) {
+            await runWithLimit(segment, maxParallelTools, runOne);
+            // 并行完成顺序 ≠ 调用顺序；按 toolCalls 顺序重排结果，模型看到稳定的配对序列
+            this.reorderToolMessages(sessionId, segment);
+          } else if (segment.length === 1) {
+            await runOne(segment[0]);
           }
           continue;
         }
@@ -1682,6 +1738,50 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   // ========================================================================
+
+  /**
+   * 并行只读工具结束后，把本轮落入会话的 tool 结果按原始 toolCalls 顺序重排。
+   * 并行完成顺序与调用顺序不同；模型/历史回放需要稳定的 tool_result 序列
+   * （assistant.tool_calls 与 tool 消息一一对应，顺序一致最利于复用与排错）。
+   */
+  private reorderToolMessages(
+    sessionId: string,
+    orderedCalls: ReadonlyArray<{ id: string }>,
+  ): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const messages = session.messages;
+    const ids = new Set(orderedCalls.map((c) => c.id));
+    let anchor = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== 'assistant' || !m.toolCalls) continue;
+      if (m.toolCalls.some((tc) => ids.has(tc.id))) {
+        anchor = i;
+        break;
+      }
+    }
+    if (anchor < 0) return;
+    const toolMessages: AgentMessage[] = [];
+    let end = anchor + 1;
+    while (end < messages.length && messages[end].role === 'tool') {
+      toolMessages.push(messages[end]);
+      end++;
+    }
+    if (toolMessages.length <= 1) return;
+    const order = new Map(orderedCalls.map((c, index) => [c.id, index]));
+    const sorted = [...toolMessages].sort((a, b) => {
+      const oa = order.get(a.toolCallId ?? '') ?? Number.MAX_SAFE_INTEGER;
+      const ob = order.get(b.toolCallId ?? '') ?? Number.MAX_SAFE_INTEGER;
+      return oa - ob;
+    });
+    if (sorted.every((m, index) => m === toolMessages[index])) return;
+    messages.splice(anchor + 1, toolMessages.length, ...sorted);
+    this.logger.debug('agent: reordered parallel tool results', {
+      sessionId,
+      count: toolMessages.length,
+    });
+  }
 
   private async executeToolCall(
     tc: NonNullable<AgentMessage['toolCalls']>[number],

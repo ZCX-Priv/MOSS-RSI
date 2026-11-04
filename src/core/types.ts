@@ -218,6 +218,10 @@ export interface AppConfig {
     maxTurns: number;
     /** SSE 流空闲超时（ms）：推理型模型长思考/长程任务需放宽；缺省用内置默认（15 分钟） */
     llmStreamIdleTimeoutMs?: number;
+    /** 同轮只读工具的最大并行数（缺省 4；1 = 完全串行） */
+    maxParallelTools?: number;
+    /** 同时运行的 agent run 上限（缺省按内存自适应：<2GB 为 2，否则 4） */
+    maxConcurrentRuns?: number;
     workingDirectory: string;
     /** 代码模式（PTC + Intelligent UI）：run_code 限额（输出不设字节预算） */
     codeMode: {

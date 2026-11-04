@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, memo, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, memo, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -103,11 +103,7 @@ import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
 import { AskPromptCard } from '../shared/AskPromptCard';
 import { AskAttachmentStrip } from '../shared/AskAttachmentStrip';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
-import { TerminalPanel } from '../shared/TerminalPanel';
-import { ComputerPanel } from '../shared/ComputerPanel';
 import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
-import { FileBrowserPanel } from '../shared/FileBrowserPanel';
-import { FileChangesPanel } from '../shared/FileChangesPanel';
 import { SubagentCard, type SubagentCallItem } from '../subagent/SubagentCard';
 import { isAgentCall, parseAgentArgs, buildToolResultIndex, type ToolResultEntry } from '../subagent/agent-calls';
 import { MessageErrorBoundary } from '../shared/MessageErrorBoundary';
@@ -116,8 +112,29 @@ import { StatsBar } from '../shared/StatsBar';
 import { CompactionCard } from '../shared/CompactionCard';
 import { MaxTurnsNoticeCard } from '../shared/MaxTurnsNoticeCard';
 import { OutputLimitNoticeCard } from '../shared/OutputLimitNoticeCard';
-import { ToolCallDetails } from '../shared/ToolCallDetails';
-import { RunCodeCard } from '../shared/RunCodeCard';
+// 工具卡片/程序卡片按需加载：它们携带预览/源码/diff/高亮等重渲染链，
+// 拆出首屏 chunk 可显著降低 TaskPage 首包解析成本（打开会话更快可交互）。
+// 首次出现工具卡片时再下载（命中浏览器缓存后无额外成本），fallback 只占一行。
+const ToolCallDetails = lazy(() =>
+  import('../shared/ToolCallDetails').then((m) => ({ default: m.ToolCallDetails })),
+);
+const RunCodeCard = lazy(() =>
+  import('../shared/RunCodeCard').then((m) => ({ default: m.RunCodeCard })),
+);
+// 右侧面板（终端 xterm / 文件树 / 变更列表 / Computer）按需加载：
+// 它们各自携带大量子依赖，但只有打开对应标签页时才需要渲染。
+const TerminalPanel = lazy(() =>
+  import('../shared/TerminalPanel').then((m) => ({ default: m.TerminalPanel })),
+);
+const ComputerPanel = lazy(() =>
+  import('../shared/ComputerPanel').then((m) => ({ default: m.ComputerPanel })),
+);
+const FileBrowserPanel = lazy(() =>
+  import('../shared/FileBrowserPanel').then((m) => ({ default: m.FileBrowserPanel })),
+);
+const FileChangesPanel = lazy(() =>
+  import('../shared/FileChangesPanel').then((m) => ({ default: m.FileChangesPanel })),
+);
 import {
   useStore,
   DEFAULT_SIDEBAR_TABS,
@@ -337,6 +354,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const isGenerating = useStore((s) => s.generatingBySession[taskId] ?? false);
   const isSending = useStore((s) => s.sendingBySession[taskId] ?? false);
   const isStopping = useStore((s) => s.stoppingBySession[taskId] ?? false);
+  /** 会话恢复 / 尾部同步：与「空闲」是互斥展示态（不能同时显示两个矛盾状态） */
+  const isRestoring = useStore((s) => s.wsRestoringBySession[taskId] ?? false);
+  const isSyncing = useStore((s) => s.syncingBySession[taskId] ?? false);
   const task = useStore((s) => s.tasks.find((tk) => tk.id === taskId));
   // 隐藏会话（subagent 衍生任务）不在侧边栏列表，store.tasks 查不到 → 直连接口兜底标题
   const [fallbackTitle, setFallbackTitle] = useState<string | null>(null);
@@ -1231,19 +1251,29 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 : 'hidden'
             }
           >
-            <TerminalPanel
-              key={taskId}
-              sessionId={taskId || TERMINAL_SCRATCH_SCOPE}
-              active={activeTab?.type === 'terminal'}
-            />
+            <Suspense fallback={<div className="flex-1" />}>
+              <TerminalPanel
+                key={taskId}
+                sessionId={taskId || TERMINAL_SCRATCH_SCOPE}
+                active={activeTab?.type === 'terminal'}
+              />
+            </Suspense>
           </div>
         )}
-        {activeTab?.type === 'files' && <FileBrowserPanel key={taskId} sessionId={taskId} />}
+        {activeTab?.type === 'files' && (
+          <Suspense fallback={<div className="flex-1" />}>
+            <FileBrowserPanel key={taskId} sessionId={taskId} />
+          </Suspense>
+        )}
         {activeTab?.type === 'changes' && (
-          <FileChangesPanel key={taskId} sessionId={taskId} workingDirectory={workingDirectory} />
+          <Suspense fallback={<div className="flex-1" />}>
+            <FileChangesPanel key={taskId} sessionId={taskId} workingDirectory={workingDirectory} />
+          </Suspense>
         )}
         {activeTab?.type === 'computer' && (
-          <ComputerPanel key={taskId} sessionId={taskId} active />
+          <Suspense fallback={<div className="flex-1" />}>
+            <ComputerPanel key={taskId} sessionId={taskId} active />
+          </Suspense>
         )}
         {activeTab?.type === 'file' && (activeTab.filePath || activeTab.archiveEntry) && (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -1741,7 +1771,23 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           <ControlHub
             leading={<ConnectionStatusTag sessionId={taskId} />}
             status={
-              isGenerating ? (
+              // 单一派生状态（互斥优先级）：恢复 > 同步 > 停止中 > 运行中 > 空闲。
+              // 恢复/同步期间绝不能再显示「空闲」，否则与连接胶囊的「正在恢复会话状态…」自相矛盾。
+              isRestoring || isSyncing ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin text-primary-strong" />
+                  <span className="text-xs font-medium text-primary-strong">
+                    {isRestoring ? t('conn.restoringSession') : t('conn.syncing')}
+                  </span>
+                </>
+              ) : isStopping ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin text-primary-strong" />
+                  <span className="text-xs font-medium text-primary-strong">
+                    {t('hub.statusStopping')}
+                  </span>
+                </>
+              ) : isGenerating ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin text-primary-strong" />
                   <span className="text-xs font-medium text-primary-strong">{t('hub.statusRunning')}</span>
@@ -2788,14 +2834,15 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             const indexed = toolResults.get(tc.id);
             return (
-              <RunCodeCard
-                key={tc.id}
-                toolCall={tc}
-                result={matchedResult?.result}
-                fallbackText={indexed?.text}
-                fallbackIsError={indexed?.isError}
-                iconMap={toolIconMap}
-              />
+              <Suspense key={tc.id} fallback={<div className="h-5" />}>
+                <RunCodeCard
+                  toolCall={tc}
+                  result={matchedResult?.result}
+                  fallbackText={indexed?.text}
+                  fallbackIsError={indexed?.isError}
+                  iconMap={toolIconMap}
+                />
+              </Suspense>
             );
           })}
         </div>
@@ -2809,14 +2856,15 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
             // 结果文本/错误标记回退到全局索引：长耗时工具的结果消息可能不紧邻本消息
             const indexed = toolResults.get(tc.id);
             return (
-              <ToolCallDetails
-                key={tc.id}
-                toolCall={tc}
-                result={matchedResult?.result}
-                fallbackText={indexed?.text}
-                fallbackIsError={indexed?.isError}
-                iconMap={toolIconMap}
-              />
+              <Suspense key={tc.id} fallback={<div className="h-5" />}>
+                <ToolCallDetails
+                  toolCall={tc}
+                  result={matchedResult?.result}
+                  fallbackText={indexed?.text}
+                  fallbackIsError={indexed?.isError}
+                  iconMap={toolIconMap}
+                />
+              </Suspense>
             );
           })}
         </div>

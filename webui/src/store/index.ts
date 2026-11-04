@@ -38,6 +38,12 @@ import { DEFAULT_RENDER_SETTINGS, isValidRenderSettings, type RenderSettings } f
 import { fileNameOf } from '../render/file/detector';
 import { DEFAULT_ANIMATION_SETTINGS, isValidAnimationSettings, type AnimationSettings } from '../types/animation';
 import { diag } from '../lib/diag';
+import {
+  type ActiveRun,
+  appendTerminatedRunId,
+  finalizeMessage,
+  isRunTerminated,
+} from '../lib/run-state';
 
 // ============================================================================
 // State
@@ -142,6 +148,18 @@ interface UIState {
   historyMetaBySession: Record<string, HistoryMeta | undefined>;
   /** 是否正在生成（按 sessionId 索引；缺省视为 false）。写入只能来自权威信号（见 setRunning 注释） */
   generatingBySession: Record<string, boolean>;
+  /**
+   * 当前活跃 run（sessionId → runId/epoch/startedAt）。
+   * 与 generatingBySession 同时维护：生成态表示 UI，activeRun 表示「这一轮的身份」，
+   * 用于 runId 校验、只定稿本轮消息、以及停止后识别旧 run 的迟到事件。
+   */
+  activeRunBySession: Record<string, ActiveRun | undefined>;
+  /**
+   * 已本地终止的 runId 集合（sessionId → 最近 N 个）。
+   * 停止时不再删除当前 runId（删除会让过滤条件失效），而是记入此集合：
+   * 此后该 run 的任何迟到分片/终态事件都被丢弃。
+   */
+  terminatedRunIdsBySession: Record<string, string[] | undefined>;
   /** 发送流程进行中（按 sessionId 索引；发送按钮显示转圈，流程结束即清除） */
   sendingBySession: Record<string, boolean>;
   /** 停止流程进行中（按 sessionId 索引；停止按钮显示转圈，后端确认 run 结束后清除） */
@@ -400,8 +418,20 @@ interface UIActions {
   setStopping: (sessionId: string, v: boolean) => void;
   /** 标记/清除 session 的错误态（新流开始时由 setGenerating 自动清除） */
   setTaskError: (sessionId: string, v: boolean) => void;
-  /** 将指定 session 中所有 streaming 的消息标记为已完成 */
-  finalizeStreamingMessages: (sessionId: string) => void;
+  /**
+   * 将指定 session 中 streaming 的消息标记为已完成。
+   * runId 给定时只定稿归属该 run 的消息（无 runId 的旧消息仍兜底处理）。
+   */
+  finalizeStreamingMessages: (sessionId: string, runId?: string) => void;
+  /** 开始一轮 run：记录身份、点亮生成态、清除错误与停止态 */
+  beginRun: (sessionId: string, runId: string) => void;
+  /**
+   * 本地终止一轮 run：记入终止集合、定稿本轮消息、熄灭生成态（keepGenerating 例外）。
+   * 不删除当前 runId —— 过滤由终止集合负责，避免旧 run 迟到事件被放行。
+   */
+  terminateRun: (sessionId: string, runId?: string, opts?: { keepGenerating?: boolean }) => void;
+  /** 该 run 是否已被本地终止（ws-events 入口过滤用） */
+  isRunTerminated: (sessionId: string, runId?: string) => boolean;
 
   // 输入 / 工作目录
   setInput: (input: string) => void;
@@ -748,6 +778,44 @@ function persistSidebarTabs(map: Record<string, SessionSidebarTabs | undefined>)
 // Store 实现
 // ============================================================================
 
+/**
+ * 列表接口（GET /api/tasks 等）附带的后端权威运行态 → generatingBySession。
+ * - running=true：置位（发请求的瞬间列表可能尚未反映，但置位是安全的）。
+ * - running=false：仅在本地没有「刚发起、后端尚未注册 run」的活跃轮次时熄灭；
+ *   发送后 60s 内的活轮次不降，避免竞态把刚点亮的转圈立刻熄灭。
+ * 这样即使 task.updated 广播丢失，列表刷新/重连快照也能收敛永久转圈。
+ */
+const LIST_RUNNING_GRACE_MS = 60_000;
+
+function applyListRunning(
+  state: UIState,
+  tasks: TaskItem[],
+): { generatingBySession: Record<string, boolean>; changed: boolean } {
+  let generating = state.generatingBySession;
+  let changed = false;
+  const mut = (): Record<string, boolean> => {
+    if (!changed) {
+      generating = { ...generating };
+      changed = true;
+    }
+    return generating;
+  };
+  const now = Date.now();
+  for (const tk of tasks) {
+    const sid = tk.sessionId ?? tk.id;
+    const active = state.activeRunBySession[sid];
+    const hasFreshRun = !!active && now - active.startedAt < LIST_RUNNING_GRACE_MS;
+    if (tk.running === true) {
+      if (!generating[sid]) mut()[sid] = true;
+      continue;
+    }
+    if (generating[sid] && !hasFreshRun) {
+      mut()[sid] = false;
+    }
+  }
+  return { generatingBySession: generating, changed };
+}
+
 export const useStore = create<Store>((set, get) => ({
   // --- 会话 / 消息 ---
   activeSessionId: null,
@@ -755,6 +823,8 @@ export const useStore = create<Store>((set, get) => ({
   messagesBySession: {},
   historyMetaBySession: {},
   generatingBySession: {},
+  activeRunBySession: {},
+  terminatedRunIdsBySession: {},
   sendingBySession: {},
   stoppingBySession: {},
   errorBySession: {},
@@ -884,6 +954,8 @@ export const useStore = create<Store>((set, get) => ({
       const { [id]: _omitRestoring, ...restRestoring } = state.wsRestoringBySession;
       const { [id]: _omitSyncing, ...restSyncing } = state.syncingBySession;
       const { [id]: _omitGen, ...restGen } = state.generatingBySession;
+      const { [id]: _omitActiveRun, ...restActiveRuns } = state.activeRunBySession;
+      const { [id]: _omitTerminated, ...restTerminated } = state.terminatedRunIdsBySession;
       const { [id]: _omitSending, ...restSending } = state.sendingBySession;
       const { [id]: _omitStopping, ...restStopping } = state.stoppingBySession;
       const { [id]: _omitTodos, ...restTodos } = state.todosBySession;
@@ -902,6 +974,8 @@ export const useStore = create<Store>((set, get) => ({
         wsRestoringBySession: restRestoring,
         syncingBySession: restSyncing,
         generatingBySession: restGen,
+        activeRunBySession: restActiveRuns,
+        terminatedRunIdsBySession: restTerminated,
         sendingBySession: restSending,
         stoppingBySession: restStopping,
         todosBySession: restTodos,
@@ -1163,26 +1237,90 @@ export const useStore = create<Store>((set, get) => ({
     set((state) => ({
       errorBySession: { ...state.errorBySession, [sessionId]: v },
     })),
-  finalizeStreamingMessages: (sessionId) =>
-    set((state) => ({
-      messagesBySession: {
-        ...state.messagesBySession,
-        [sessionId]: (state.messagesBySession[sessionId] ?? []).map((m) => {
-          // 已 finalize（streaming=false）但 thinkingStreaming 被 rAF 迟到写入复活的消息也需清理
-          if (!m.streaming && !m.thinkingStreaming) return m;
-          const finalizedToolCalls = m.toolCalls?.map((tc) =>
-            tc.status === 'done' ? tc : { ...tc, status: 'done' as const },
-          );
-          return {
-            ...m,
-            streaming: false,
-            thinkingStreaming: false,
-            toolCalls: finalizedToolCalls,
-            ...stampThinkingTiming(m, false),
-          };
-        }),
-      },
-    })),
+  finalizeStreamingMessages: (sessionId, runId) =>
+    set((state) => {
+      const endedAt = new Date().toISOString();
+      let changed = false;
+      const next = (state.messagesBySession[sessionId] ?? []).map((m) => {
+        // 已 finalize（streaming=false）但 thinkingStreaming 被 rAF 迟到写入复活的消息也需清理。
+        // runId 给定时只定稿归属本轮的消息；无 runId 的旧消息仍兜底处理（它们本不应 streaming）。
+        if (runId && m.runId && m.runId !== runId) return m;
+        const finalized = finalizeMessage(m, endedAt);
+        if (finalized !== m) changed = true;
+        return finalized;
+      });
+      if (!changed) return {};
+      return {
+        messagesBySession: { ...state.messagesBySession, [sessionId]: next },
+      };
+    }),
+  beginRun: (sessionId, runId) =>
+    set((state) => {
+      const prev = state.activeRunBySession[sessionId];
+      return {
+        activeRunBySession: {
+          ...state.activeRunBySession,
+          [sessionId]: {
+            runId,
+            epoch: (prev?.epoch ?? 0) + 1,
+            startedAt: Date.now(),
+          },
+        },
+        generatingBySession: { ...state.generatingBySession, [sessionId]: true },
+        stoppingBySession: { ...state.stoppingBySession, [sessionId]: false },
+        errorBySession: { ...state.errorBySession, [sessionId]: false },
+      };
+    }),
+  terminateRun: (sessionId, runId, opts) =>
+    set((state) => {
+      const active = state.activeRunBySession[sessionId];
+      const target = runId ?? active?.runId;
+      const isCurrent = !active || target === undefined || active.runId === target;
+      const prevTerminated = state.terminatedRunIdsBySession[sessionId];
+      const terminated = appendTerminatedRunId(prevTerminated, target);
+
+      // 定稿：仅本轮消息（target 匹配）；target 缺失时兜底定稿全部 streaming。
+      const endedAt = new Date().toISOString();
+      let messagesChanged = false;
+      const nextMessages = (state.messagesBySession[sessionId] ?? []).map((m) => {
+        if (!m.streaming && !m.thinkingStreaming) return m;
+        if (target && m.runId && m.runId !== target) return m;
+        const finalized = finalizeMessage(m, endedAt);
+        if (finalized !== m) messagesChanged = true;
+        return finalized;
+      });
+
+      const nextState: Partial<UIState> = {
+        stoppingBySession: { ...state.stoppingBySession, [sessionId]: false },
+        ...(messagesChanged
+          ? {
+              messagesBySession: {
+                ...state.messagesBySession,
+                [sessionId]: nextMessages,
+              },
+            }
+          : {}),
+        ...(terminated !== prevTerminated
+          ? {
+              terminatedRunIdsBySession: {
+                ...state.terminatedRunIdsBySession,
+                [sessionId]: terminated,
+              },
+            }
+          : {}),
+      };
+      if (isCurrent) {
+        const { [sessionId]: _omit, ...restActive } = state.activeRunBySession;
+        nextState.activeRunBySession = restActive;
+        nextState.generatingBySession = {
+          ...state.generatingBySession,
+          [sessionId]: opts?.keepGenerating === true,
+        };
+      }
+      return nextState;
+    }),
+  isRunTerminated: (sessionId, runId) =>
+    isRunTerminated(get().terminatedRunIdsBySession, sessionId, runId),
 
   // --- Actions: 输入 / 工作目录 ---
   setInput: (input) => set({ input }),
@@ -1247,23 +1385,10 @@ export const useStore = create<Store>((set, get) => ({
   // --- Actions: 任务 + 分组 ---
   setTasks: (tasks) =>
     set((state) => {
-      // 列表载荷自带后端权威运行态（running）。此处只「置位」不「清除」：
-      // 列表请求可能在「本地已发送、后端尚未注册 run」的窗口内到达，
-      // 若允许降位会瞬间熄灭刚点亮的转圈。清除由状态快照 / 完成事件（权威源）负责。
-      let generating = state.generatingBySession;
-      let changed = false;
-      for (const tk of tasks) {
-        if (tk.running !== true) continue;
-        const sid = tk.sessionId ?? tk.id;
-        if (!generating[sid]) {
-          if (!changed) {
-            generating = { ...generating };
-            changed = true;
-          }
-          generating[sid] = true;
-        }
-      }
-      return { tasks, ...(changed ? { generatingBySession: generating } : {}) };
+      // 列表载荷自带后端权威运行态（running）：running=true 置位；running=false 在
+      // 「本地无刚发起的活轮次」时允许熄灭（防止广播丢失后永久转圈，见 applyListRunning）。
+      const { generatingBySession, changed } = applyListRunning(state, tasks);
+      return { tasks, ...(changed ? { generatingBySession } : {}) };
     }),
   setTaskGroups: (taskGroups) => set({ taskGroups }),
   addTask: (task) => set((state) => ({ tasks: [task, ...state.tasks] })),
@@ -1349,8 +1474,20 @@ export const useStore = create<Store>((set, get) => ({
         const seen = new Set(existing.map((t) => t.id));
         slice = [...existing, ...tasks.filter((t) => !seen.has(t.id))];
       } else {
-        // 首屏：以服务端本组页为准覆盖该组切片（乐观任务的短暂缺失由 task.created 广播 / updateTask 校正）
-        slice = tasks;
+        // 首屏 replace 保护：
+        // - 首次加载（meta.loaded=false）→ 以服务端本组页为准覆盖（权威首屏）；
+        // - 已加载过的组再次收到第一页（任何误触发/重复请求）→ 按 id 合并，
+        //   保留已续载的后续页，避免「另一组已展开的列表条目短暂消失再重新出现」。
+        const meta = state.groupTasksMeta[groupId];
+        if (meta?.loaded && existing.length > 0) {
+          const incomingIds = new Set(tasks.map((t) => t.id));
+          slice = [
+            ...tasks, // 服务端第一页（同 id 以服务端版本为准）
+            ...existing.filter((t) => !incomingIds.has(t.id)), // 本地已续载、第一页未覆盖的后续页
+          ];
+        } else {
+          slice = tasks;
+        }
       }
       return {
         tasks: [...others, ...slice],
@@ -1366,20 +1503,8 @@ export const useStore = create<Store>((set, get) => ({
   resetGroupTasks: () => set({ tasks: [], groupTasksMeta: {} }),
   applyFullTaskSnapshot: (tasks) =>
     set((state) => {
-      // 与 setTasks 同源的「运行态置位」：只置位不清除（清除由状态快照 / 完成事件负责）
-      let generating = state.generatingBySession;
-      let changed = false;
-      for (const tk of tasks) {
-        if (tk.running !== true) continue;
-        const sid = tk.sessionId ?? tk.id;
-        if (!generating[sid]) {
-          if (!changed) {
-            generating = { ...generating };
-            changed = true;
-          }
-          generating[sid] = true;
-        }
-      }
+      // 与 setTasks 同源的后端权威运行态（置位 + 受宽限期保护的熄灭）
+      const { generatingBySession, changed } = applyListRunning(state, tasks);
       // 全量快照：所有分组均为「已完整加载」（折叠分组由 Radix 卸载内容，不占 DOM）
       const groupTasksMeta: Record<string, GroupTasksMeta | undefined> = { ...state.groupTasksMeta };
       for (const g of state.taskGroups) {
@@ -1390,7 +1515,7 @@ export const useStore = create<Store>((set, get) => ({
           total: tasks.filter((t) => t.groupId === g.id).length,
         };
       }
-      return { tasks, groupTasksMeta, ...(changed ? { generatingBySession: generating } : {}) };
+      return { tasks, groupTasksMeta, ...(changed ? { generatingBySession } : {}) };
     }),
 
   // --- Actions: Todo / Context ---

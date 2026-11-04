@@ -13,7 +13,9 @@ const ROOT = resolve(__dirname, '..');
 
 const DIST = resolve(ROOT, 'dist');
 const WEBUI_DIST = resolve(DIST, 'webui');
-const BACKEND_OUT = resolve(DIST, 'server.js');
+// 入口产物：outdir + splitting 模式下 Bun 输出 dist/main.js（旧版单文件为 dist/server.js，
+// bin/moss.js 会做兼容读取）
+const BACKEND_OUT = resolve(DIST, 'main.js');
 
 function log(msg) {
   console.log(`[build] ${msg}`);
@@ -101,21 +103,22 @@ function buildBackend() {
     error(`Backend entry not found: ${entry}`);
     process.exit(1);
   }
-  // bun build src/main.ts --outfile dist/server.js --target bun
-  // --external sherpa-onnx-node：其原生 .node 绑定必须从磁盘加载；且这是必需项——
-  // 不 external 时 bun 会额外产出一个原生资产文件（sherpa-onnx-*.node），
-  // 而 --outfile 只允许单文件输出，构建会直接失败：
-  //   error: cannot write multiple output files without an output directory
+  // bun build src/main.ts --outdir dist --splitting --target bun
+  // 单文件产物 15MB+，Bun 必须解析并求值整棵 import 树后才能进入 CLI（低配机器冷启动慢）。
+  // 改为 outdir + splitting：动态 import 的模块（工具实现/重依赖）拆成独立 chunk，
+  // 启动只加载关键路径代码。入口产物为 dist/main.js（bin/moss.js 会优先读取它）。
+  // --external 保持：sherpa-onnx 原生绑定/IM CJS SDK/ sharp 必须运行时从 node_modules 加载。
   run(bun.cmd, [
     ...bun.args,
     'build',
     entry,
-    '--outfile', BACKEND_OUT,
+    '--outdir', DIST,
     '--target', 'bun',
     '--format', 'esm',
+    '--splitting',
     '--external', 'sherpa-onnx-node',
     '--external', 'sharp',
-    // IM SDK：均为 CJS/含动态 require，打包进单文件会破坏其运行时解析，运行时从 node_modules 加载
+    // IM SDK：均为 CJS/含动态 require，打包会破坏其运行时解析，运行时从 node_modules 加载
     '--external', '@tencent-connect/qqbot-nodejs',
     '--external', '@tencent-connect/qqbot-connector',
   ]);

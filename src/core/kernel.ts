@@ -59,32 +59,43 @@ const MODULE_DESTROY_TIMEOUT_MS = 10_000;
  * 关键路径：server 无依赖 → 第一波立即监听端口；tools/filesys 等同波并行；
  * agent 只依赖真正需要的服务模块，不再被 voice/browser/im 等慢模块串行拖累。
  */
-const MODULE_FACTORIES: Array<{ name: string; create: () => Module; deps: string[] }> = [
+const MODULE_FACTORIES: Array<{
+  name: string;
+  create: () => Module;
+  deps: string[];
+  /**
+   * 初始化档位：
+   * - critical（缺省）：阻塞 `kernel.start()`，健康接口/对话核心依赖它们；
+   * - deferred：critical 就绪、端口可用之后再空闲初始化，不拖慢启动。
+   * critical 模块若依赖 deferred，依赖闭包会自动把它提升为 critical。
+   */
+  phase?: 'critical' | 'deferred';
+}> = [
   { name: 'llm', create: llm, deps: [] },
   { name: 'server', create: server, deps: [] },
-  { name: 'remote', create: remote, deps: ['server'] },
+  { name: 'remote', create: remote, deps: ['server'], phase: 'deferred' },
   { name: 'tools', create: tools, deps: [] },
   { name: 'mcp', create: mcp, deps: [] },
-  { name: 'computer', create: computer, deps: [] },
-  { name: 'browser', create: browser, deps: [] },
-  { name: 'update', create: update, deps: [] },
+  { name: 'computer', create: computer, deps: [], phase: 'deferred' },
+  { name: 'browser', create: browser, deps: ['computer'], phase: 'deferred' },
+  { name: 'update', create: update, deps: [], phase: 'deferred' },
   { name: 'filesys', create: filesys, deps: [] },
   { name: 'terminal', create: terminal, deps: ['filesys'] },
   { name: 'safety', create: safety, deps: [] },
   { name: 'rules', create: rules, deps: [] },
   { name: 'hooks', create: hooks, deps: [] },
   { name: 'memory', create: memory, deps: [] },
-  { name: 'voice', create: voice, deps: [] },
+  { name: 'voice', create: voice, deps: [], phase: 'deferred' },
   { name: 'context', create: context, deps: ['llm'] },
   { name: 'agent', create: agent, deps: ['tools', 'filesys', 'safety', 'rules', 'hooks', 'memory', 'context'] },
-  { name: 'subagent', create: subagent, deps: ['agent', 'tools'] },
+  { name: 'subagent', create: subagent, deps: ['agent', 'tools'], phase: 'deferred' },
   // im → server（路由注册在初始化时完成；消息到达时 tryResolve agent 执行，不阻塞 agent 初始化）
-  { name: 'im', create: im, deps: ['server'] },
-  { name: 'file-history', create: fileHistory, deps: ['tools', 'filesys'] },
-  { name: 'daemon', create: daemon, deps: ['server'] },
-  { name: 'automation', create: automation, deps: ['agent', 'server'] },
+  { name: 'im', create: im, deps: ['server'], phase: 'deferred' },
+  { name: 'file-history', create: fileHistory, deps: ['tools', 'filesys'], phase: 'deferred' },
+  { name: 'daemon', create: daemon, deps: ['server'], phase: 'deferred' },
+  { name: 'automation', create: automation, deps: ['agent', 'server'], phase: 'deferred' },
   // migration → agent（会话热写入经 tryResolve 运行时解析）
-  { name: 'migration', create: migration, deps: ['agent', 'server'] },
+  { name: 'migration', create: migration, deps: ['agent', 'server'], phase: 'deferred' },
 ];
 
 type ModuleState = 'loaded' | 'initializing' | 'active' | 'destroying' | 'shutdown' | 'error';
@@ -149,8 +160,16 @@ export class Microkernel {
       // 应用配置中的日志级别与文件策略，并清理一次过期日志
       const logsCfg = this.config.getAppConfig().logs;
       this.applyLogsConfig(logsCfg);
-      const removed = this.rootLogger.writer.cleanupNow();
+      // 过期日志清理（文件扫描/删除）延后到端口可用后，不阻塞启动
+      const removed = 0;
       this.logger.info(t('kernel.configLoaded'), { logLevel: logsCfg.level, expiredLogsRemoved: removed });
+      setTimeout(() => {
+        try {
+          this.rootLogger?.writer.cleanupNow();
+        } catch {
+          // 清理失败不影响运行
+        }
+      }, 100);
     } catch (err) {
       this.logger.error(t('kernel.configLoadFailed'), {
         error: err instanceof Error ? err.message : String(err),
@@ -190,10 +209,90 @@ export class Microkernel {
     }
 
     // 拓扑波次并行初始化：同波模块无相互依赖，可同时初始化。
+    // 先初始化 critical 档（端口/对话核心），deferred 档在返回后再空闲初始化。
     // settled 同时包含 active 与 error（失败模块视为“已结算”，避免依赖方永远等待）。
     const depsByName = new Map(MODULE_FACTORIES.map((f) => [f.name, f.deps]));
-    const pending = [...this.modules];
     const settled = new Set<string>();
+
+    // critical 依赖闭包：critical 模块若依赖 deferred 模块，把该依赖一并提升为 critical，
+    // 保证「启动返回时核心链路所需服务都已注册」。
+    const criticalNames = new Set(
+      MODULE_FACTORIES.filter((f) => (f.phase ?? 'critical') === 'critical').map((f) => f.name),
+    );
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const name of Array.from(criticalNames)) {
+        for (const dep of depsByName.get(name) ?? []) {
+          if (!criticalNames.has(dep) && !disabled.has(dep) && depsByName.has(dep)) {
+            criticalNames.add(dep);
+            expanded = true;
+          }
+        }
+      }
+    }
+
+    const criticalEntries = this.modules.filter((m) => criticalNames.has(m.name));
+    const deferredEntries = this.modules.filter((m) => !criticalNames.has(m.name));
+    await this.initModuleWave(criticalEntries, depsByName, disabled, settled, moduleCtx);
+
+    // 暴露模块状态服务（供 health 路由使用）
+    this.services.register(
+      'kernel.modules',
+      {
+        getList: (): Array<{ name: string; state: ModuleState }> =>
+          this.modules.map((m) => ({ name: m.name, state: m.state })),
+      },
+      { scope: 'kernel' },
+    );
+
+    // 暴露日志服务（供 /api/logs 路由使用：文件枚举 / 查询过滤 / 清理 / 级别调整）
+    this.services.register(ServiceNames.LOGGER, this.rootLogger.service, { scope: 'kernel' });
+
+    this.started = true;
+    await this.eventBus.broadcast('kernel:ready', { pid: this.env.pid });
+
+    const activeCount = this.modules.filter((m) => m.state === 'active').length;
+    this.logger.info(t('kernel.ready'), {
+      activeModules: activeCount,
+      services: this.services.list(),
+      deferredModules: deferredEntries.length,
+    });
+
+    // deferred 档在端口可用、启动返回后再初始化（不阻塞 /api/health 与首屏）。
+    // 失败只记日志，不影响已就绪的核心功能；各模块自身对缺失服务有 tryResolve 降级。
+    if (deferredEntries.length > 0) {
+      setTimeout(() => {
+        void this.initModuleWave(deferredEntries, depsByName, disabled, settled, moduleCtx)
+          .then(() => {
+            this.logger?.info(t('kernel.ready'), {
+              activeModules: this.modules.filter((m) => m.state === 'active').length,
+              deferredCompleted: true,
+            });
+          })
+          .catch((err) => {
+            this.logger?.warn('kernel: deferred modules init failed', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }, 50);
+    }
+
+    return this.makeContext();
+  }
+
+  /**
+   * 按拓扑波次并行初始化一组模块。
+   * settled 跨批次共享：deferred 批次能看到 critical 已结算的模块，不必重复等待。
+   */
+  private async initModuleWave(
+    entries: ModuleEntry[],
+    depsByName: Map<string, string[]>,
+    disabled: Set<string>,
+    settled: Set<string>,
+    moduleCtx: ModuleContext,
+  ): Promise<void> {
+    const pending = [...entries];
     while (pending.length > 0) {
       const ready = pending.filter((entry) => {
         const deps = depsByName.get(entry.name) ?? [];
@@ -229,30 +328,6 @@ export class Microkernel {
         }),
       );
     }
-
-    // 暴露模块状态服务（供 health 路由使用）
-    this.services.register(
-      'kernel.modules',
-      {
-        getList: (): Array<{ name: string; state: ModuleState }> =>
-          this.modules.map((m) => ({ name: m.name, state: m.state })),
-      },
-      { scope: 'kernel' },
-    );
-
-    // 暴露日志服务（供 /api/logs 路由使用：文件枚举 / 查询过滤 / 清理 / 级别调整）
-    this.services.register(ServiceNames.LOGGER, this.rootLogger.service, { scope: 'kernel' });
-
-    this.started = true;
-    await this.eventBus.broadcast('kernel:ready', { pid: this.env.pid });
-
-    const activeCount = this.modules.filter((m) => m.state === 'active').length;
-    this.logger.info(t('kernel.ready'), {
-      activeModules: activeCount,
-      services: this.services.list(),
-    });
-
-    return this.makeContext();
   }
 
   async stop(): Promise<void> {

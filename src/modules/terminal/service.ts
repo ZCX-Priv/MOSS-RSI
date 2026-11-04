@@ -328,7 +328,9 @@ export class TerminalManager implements TerminalService {
     this.isWindows = deps.isWindows;
     this.dataDir = deps.dataDir;
     this.storage = new TerminalPersistence(deps.dataDir);
-    this.storage.loadAll();
+    // 终端历史全量同步读盘会显著拖慢内核启动（单条序列化历史可达 400KB）。
+    // 改为后台异步预热；打开单个会话时 list() 会惰性读取对应文件，功能不受影响。
+    void this.storage.loadAllAsync();
   }
 
   async create(opts: TerminalCreateOptions): Promise<TerminalInfo> {

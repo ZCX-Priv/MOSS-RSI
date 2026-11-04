@@ -46,6 +46,12 @@ export interface Tool {
   /** 显示图标（lucide 图标 kebab-case 名，如 'file-text'；前端白名单映射，缺失回退扳手） */
   icon?: string;
   execute(params: unknown, ctx: ToolContext): Promise<ToolResult>;
+  /**
+   * 是否可与其他只读工具在同一轮中并行执行（tool.json 显式声明，默认 false）。
+   * 仅对「无副作用、结果幂等、不共享可变资源」的只读工具开启；
+   * 写工具（edit/write/delete/terminal/run_code）必须保持串行与调用顺序。
+   */
+  parallelSafe?: boolean;
   /** 工具来源目录绝对路径（热重载增量定位用，由加载器注入） */
   sourceDir?: string;
   /** 工具来源类型（builtin=内置，custom=用户自定义，由加载器注入） */

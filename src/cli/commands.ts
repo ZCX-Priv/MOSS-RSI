@@ -211,7 +211,7 @@ async function startDaemon(): Promise<number> {
       console.log(t('cli.daemonStarted', { pid: info.pid }));
       return 0;
     }
-    await sleep(200);
+    await sleep(50);
   }
   console.error(t('cli.daemonPidFileMissing'));
   return 1;

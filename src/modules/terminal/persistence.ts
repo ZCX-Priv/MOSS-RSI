@@ -9,7 +9,7 @@
 // - 任何读写/解析失败均静默降级（不阻塞终端运行）。
 
 import { readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFileAsync } from '../../utils/fs-atomic';
 import { type TerminalInfo } from './types';
@@ -54,6 +54,10 @@ export class TerminalPersistence {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   /** 每会话的写链：串行化写盘，避免并发 rename 互相覆盖 */
   private readonly writes = new Map<string, Promise<void>>();
+  /** 已尝试惰性加载过的会话（避免每次 list 都读不存在的文件） */
+  private readonly sessionLoaded = new Set<string>();
+  /** 后台全量载入是否已完成（完成后按 terminalId 全局查找可用） */
+  private loadedAll = false;
 
   constructor(dataDir: string) {
     this.dir = join(dataDir, 'terminals');
@@ -64,20 +68,39 @@ export class TerminalPersistence {
     return join(this.dir, `${encodeURIComponent(sessionId)}.json`);
   }
 
-  /** 启动时全量载入（条目数量少；一次性读入便于按 terminalId 全局查找快照） */
+  /**
+   * 启动时全量载入（保留给同步调用/测试；**内核初始化不再调用**）。
+   * 终端历史单条可达 400KB×12，同步全量读盘是低配机器启动最大单点之一。
+   */
   loadAll(): void {
+    if (this.loadedAll) return;
+    this.loadedAll = true;
     try {
       if (!existsSync(this.dir)) return;
       for (const name of readdirSync(this.dir)) {
         if (!name.endsWith('.json')) continue;
+        this.loadOneFileSync(join(this.dir, name));
+      }
+    } catch {
+      // 目录不可读：忽略
+    }
+  }
+
+  /**
+   * 后台异步全量载入：不阻塞内核启动；完成后 getById 可按 terminalId 全局查找。
+   * 与惰性 list 同时发生时以「后写覆盖」也无害（文件内容一致）。
+   */
+  async loadAllAsync(): Promise<void> {
+    if (this.loadedAll) return;
+    this.loadedAll = true;
+    try {
+      if (!existsSync(this.dir)) return;
+      const names = await readdir(this.dir);
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
         try {
-          const raw = JSON.parse(readFileSync(join(this.dir, name), 'utf8')) as PersistedFile;
-          if (!raw || typeof raw.sessionId !== 'string' || !Array.isArray(raw.terminals)) continue;
-          const map = new Map<string, PersistedTerminal>();
-          for (const t of raw.terminals) {
-            if (t && t.info && typeof t.info.id === 'string') map.set(t.info.id, t);
-          }
-          this.cache.set(raw.sessionId, map);
+          const raw = JSON.parse(await readFile(join(this.dir, name), 'utf8')) as PersistedFile;
+          this.adoptParsed(raw);
         } catch {
           // 单文件损坏：忽略
         }
@@ -87,8 +110,39 @@ export class TerminalPersistence {
     }
   }
 
-  /** 某会话的条目（快照，按插入序） */
+  /**
+   * 惰性加载单个会话（list 首次访问；文件不存在则记一笔不再重试）。
+   * 即使后台全量载入尚未完成也必须读：否则打开任务会短暂看到空终端列表。
+   */
+  private ensureSessionLoaded(sessionId: string): void {
+    if (this.cache.has(sessionId) || this.sessionLoaded.has(sessionId)) return;
+    this.sessionLoaded.add(sessionId);
+    const file = this.fileOf(sessionId);
+    if (!existsSync(file)) return;
+    this.loadOneFileSync(file);
+  }
+
+  private loadOneFileSync(file: string): void {
+    try {
+      const raw = JSON.parse(readFileSync(file, 'utf8')) as PersistedFile;
+      this.adoptParsed(raw);
+    } catch {
+      // 单文件损坏：忽略
+    }
+  }
+
+  private adoptParsed(raw: PersistedFile): void {
+    if (!raw || typeof raw.sessionId !== 'string' || !Array.isArray(raw.terminals)) return;
+    const map = new Map<string, PersistedTerminal>();
+    for (const t of raw.terminals) {
+      if (t && t.info && typeof t.info.id === 'string') map.set(t.info.id, t);
+    }
+    this.cache.set(raw.sessionId, map);
+  }
+
+  /** 某会话的条目（快照，按插入序）；未全量载入时惰性读取该会话文件 */
   list(sessionId: string): PersistedTerminal[] {
+    this.ensureSessionLoaded(sessionId);
     return Array.from(this.cache.get(sessionId)?.values() ?? []);
   }
 

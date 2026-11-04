@@ -137,6 +137,10 @@ export interface RequestGuard {
 export interface WSConnection {
   id: string;
   sessionId?: string;
-  send(message: unknown): void;
+  /**
+   * 发送消息。返回 Bun 的发送结果：正数 = 字节数；-1 = 已入队但有背压；
+   * 0/undefined = 被丢弃或连接不可用（调用方据此做慢客户端保护）。
+   */
+  send(message: unknown): number | void;
   close(): void;
 }

@@ -21,7 +21,7 @@
     "postinstall": "node scripts/install-webui.mjs",
     "build": "node scripts/build.mjs",
     "build:ui": "cd webui && npm run build",
-    "build:backend": "bun build src/main.ts --outfile dist/server.js --target bun --external sherpa-onnx-node --external sharp --external @tencent-connect/qqbot-nodejs --external @tencent-connect/qqbot-connector",
+    "build:backend": "bun build src/main.ts --outdir dist --target bun --format esm --splitting --external sherpa-onnx-node --external sharp --external @tencent-connect/qqbot-nodejs --external @tencent-connect/qqbot-connector",
     "start": "bun src/main.ts start --foreground",
     "start:daemon": "bun src/main.ts start",
     "stop": "bun src/main.ts stop",

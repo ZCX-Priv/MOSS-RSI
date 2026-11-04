@@ -1185,6 +1185,7 @@ export const zh = {
   hub: {
     statusIdle: '空闲',
     statusRunning: '运行中',
+    statusStopping: '正在停止',
     todoModule: '待办',
     permissionModule: '权限',
     askModule: '提问',

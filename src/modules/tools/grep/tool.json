@@ -1,5 +1,6 @@
 {
   "name": "grep",
+  "parallelSafe": true,
   "description": "按正则表达式搜索文件内容。三种输出模式：content（匹配行+可选上下文，默认）、files_with_matches（仅文件路径，省 token）、count（每文件匹配计数）。支持 glob/type 文件过滤、上下文行、smartCase、fixedStrings 字面量、multiline 跨行匹配、offset 分页。默认尊重 .gitignore/.ignore 并跳过二进制文件与 node_modules/.git/dist/build。",
   "description_en": "Search file contents by regular expression. Three output modes: content (matching lines + optional context, default), files_with_matches (file paths only, token-saving), count (match count per file). Supports glob/type file filtering, context lines, smartCase, fixedStrings literal matching, multiline cross-line matching, offset pagination. Respects .gitignore/.ignore by default and skips binary files and node_modules/.git/dist/build.",
   "icon": "search",

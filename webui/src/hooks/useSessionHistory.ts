@@ -56,6 +56,11 @@ const WATCHDOG_INTERVAL_MS = 15_000;
 const WATCHDOG_GRACE_MS = 20_000;
 /** 连续 N 次读到后端「非运行」才判定终态事件丢失（防止单次抖动误收尾） */
 const WATCHDOG_FALSE_STREAK = 2;
+/**
+ * 本地 run 的「新鲜窗口」：超过该时长仍没有任何进展，才允许被旧快照/看门狗收敛。
+ * 覆盖「发送后后端注册 run 的竞态」与「长工具执行期间无流式分片」的两种情况。
+ */
+const RUN_STALE_GRACE_MS = 90_000;
 
 export function useSessionHistory(
   taskId: string,
@@ -380,19 +385,30 @@ export function useSessionHistory(
 
     const unsubSnapshot = onSessionSnapshot((sessionId, payload) => {
       if (sessionId !== taskId) return;
-      // 运行态：true 直接点亮（已在 ws-events 处理）；false 时若本地仍在生成 →
-      // 说明断线期间任务已结束（事件丢失），做尾部补齐后收尾，杜绝 spinner 永转。
+      // 运行态：true 直接点亮（已在 ws-events 处理）；false 时**不能无条件降级**——
+      // 刷新/切会话/重连期间的旧快照可能恰好落在「本地已发起、后端尚未注册 run」的窗口，
+      // 无条件 setGenerating(false) 会让发送/停止按钮来回跳。只有当快照确认是同一轮、
+      // 或本地本轮已超过 stale 窗口仍无进展时，才允许收敛。
       if (payload.running === false) {
-        const locallyGenerating = useStore.getState().generatingBySession[sessionId] ?? false;
-        // 本地流式草稿换成服务端正式消息；若本地确实处于「生成中」，一并收尾
+        const st0 = useStore.getState();
+        const active = st0.activeRunBySession[sessionId];
+        const locallyGenerating = st0.generatingBySession[sessionId] ?? false;
+        const sameRun =
+          !!active && payload.runId !== undefined && payload.runId === active.runId;
+        const stale = !active || Date.now() - active.startedAt > RUN_STALE_GRACE_MS;
+        if (!sameRun && !stale) {
+          // 本地有新鲜 run：只补齐尾部（若需要），绝不熄灭生成态
+          void catchUpTail(sessionId, false);
+          return;
+        }
+        // 本地流式草稿换成服务端正式消息；若本地确实处于「生成中」，统一收敛
         // （断线期间任务已完成 → done 事件丢失 → 这里兜底，杜绝 spinner 永转）
         void catchUpTail(sessionId, locallyGenerating).then(() => {
           if (!locallyGenerating) return;
           const st = useStore.getState();
-          st.finalizeStreamingMessages(sessionId);
-          st.setGenerating(sessionId, false);
-          st.setStopping(sessionId, false);
+          st.terminateRun(sessionId, payload.runId ?? active?.runId);
           pendingAssistant.delete(sessionId);
+          pendingRunId.delete(sessionId);
         });
       } else if (payload.running === true) {
         // 重连后仍在运行：对齐草稿（半截内容 / 工具卡片状态）
@@ -474,9 +490,8 @@ export function useSessionHistory(
       await catchUpTail(taskId, true);
       if (disposed) return;
       const st = useStore.getState();
-      st.finalizeStreamingMessages(taskId);
-      st.setGenerating(taskId, false);
-      st.setStopping(taskId, false);
+      const active = st.activeRunBySession[taskId];
+      st.terminateRun(taskId, active?.runId);
       pendingAssistant.delete(taskId);
       pendingRunId.delete(taskId);
     };

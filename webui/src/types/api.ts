@@ -239,6 +239,16 @@ export interface TaskMessage {
   historyIndex?: number;
   /** 上次进程中断遗留的未完成回复（来自 liveDraft.stale）：渲染为「已中断」的静态消息 */
   interrupted?: boolean;
+  /**
+   * 本条消息归属的 runId（前端运行时字段；流式事件创建消息时写入）。
+   * 用于「只定稿本轮消息」与停止后丢弃旧 run 的迟到分片。
+   */
+  runId?: string;
+  /**
+   * 流式结束屏障（ISO；前端运行时字段）。一旦写入，stream-buffer 不再向该消息追加，
+   * 也不允许把 streaming 重新置 true（根治「已停止但内容继续增长」）。
+   */
+  streamEndedAt?: string;
 }
 
 /** 会话历史分页元数据（与后端 page 字段对齐） */

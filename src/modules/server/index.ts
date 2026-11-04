@@ -223,7 +223,8 @@ interface BunServer {
 }
 
 interface BunWebSocket {
-  send(text: string): void;
+  /** Bun 的 send 返回发送字节数；-1 = 已入队但存在背压；0 = 连接异常被丢弃 */
+  send(text: string): number | void;
   close(): void;
   // 用户数据存储（upgrade 时传入的 data）
   __conn?: WSConnection;
@@ -757,6 +758,11 @@ class ServerModule implements Module {
         // 间隔被拉到 60s 也必须远小于本值，空闲挂后台才不会断连。
         // 注意：必须放在 websocket 块内，顶层放置会被 Bun 静默忽略
         idleTimeout: 300,
+        // 背压保护：慢客户端/弱网时避免后端 socket 缓冲无限增长（默认 1MB）。
+        // closeOnBackpressureLimit=false：由 WsHandler 根据 send 返回值累计丢帧并主动断开，
+        // 这样正常的高频流式仍能工作，只有持续消费不过来才断开。
+        backpressureLimit: 1_048_576,
+        closeOnBackpressureLimit: false,
         // 禁用 Bun 自动协议层 ping：与 idleTimeout 协同存在 bug
         // （oven-sh/bun#26554：ping 超时导致非优雅关闭 → 代理层 ECONNRESET）。
         // 探活由前端应用层心跳（15s ping / 30s timeout）全权负责
@@ -767,9 +773,10 @@ class ServerModule implements Module {
             id,
             send: (msg: unknown) => {
               try {
-                ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
+                return ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
               } catch {
                 // 连接已关闭，忽略
+                return 0;
               }
             },
             close: () => {

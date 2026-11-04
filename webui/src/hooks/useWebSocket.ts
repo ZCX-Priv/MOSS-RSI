@@ -39,7 +39,7 @@ function processQueueIfPending(sessionId: string): void {
     ...(next.attachments ? { attachments: next.attachments } : {}),
     timestamp: new Date().toISOString(),
   });
-  st.setGenerating(sessionId, true);
+  st.beginRun(sessionId, runId);
 
   wsClient.send({
     type: 'task.stream',

@@ -1,5 +1,6 @@
 {
   "name": "glob",
+  "parallelSafe": true,
   "description": "按 glob 模式查找文件。支持多 pattern 合并（数组）、{a,b} 大括号展开、! 否定模式、** 任意深度、? 单字符、[abc] 字符类；支持按文件类型过滤（type）、mtime 降序排序（最近修改优先）、offset 分页。默认尊重 .gitignore/.ignore 并跳过隐藏文件与 node_modules/dist/build 等目录。",
   "description_en": "Find files by glob pattern. Supports multiple patterns merged (array), {a,b} brace expansion, ! negation, ** any depth, ? single char, [abc] character classes; filter by file type (type), mtime descending sort (most recently modified first), offset pagination. Respects .gitignore/.ignore by default and skips hidden files and node_modules/dist/build directories.",
   "icon": "folder-search",

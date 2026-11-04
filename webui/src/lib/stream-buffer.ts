@@ -64,6 +64,43 @@ let rafId: number | null = null;
 /** 超时兜底冲刷定时器（后台标签页/节流环境下 rAF 可能长时间不触发） */
 let flushTimerId: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * 单次冲刷的时间预算：高频流式路径（rAF / 100ms 兜底）按预算分片处理，
+ * 处理不完的部分 setTimeout(0) 续跑，保证点击停止/键盘输入能插入事件循环。
+ * 同步事件（tool-call-start 等）仍调用无参 flushPending() 完整冲刷以保序。
+ */
+const FLUSH_BUDGET_MS = 8;
+/** 单会话待冲刷文本上限：超限丢弃最旧分片并触发一次 resync，避免延迟与内存无界增长 */
+const MAX_PENDING_CHARS_PER_SESSION = 256_000;
+
+/** 会话内待冲刷文本字符数（仅在接近/超过上限时计算，低频） */
+function pendingCharsFor(sessionId: string): number {
+  let total = 0;
+  for (const op of pendingTextMap.values()) {
+    if (op.sessionId === sessionId) total += op.text.length;
+  }
+  return total;
+}
+
+/**
+ * 上限保护：丢弃该会话最旧的待冲刷分片直到低于阈值，并请求一次 resync。
+ * 缺口由 reconcile（/state liveDraft 全量）补齐，宁可重新对齐也不让缓冲无限膨胀。
+ */
+function enforcePendingLimit(sessionId: string): void {
+  if (pendingCharsFor(sessionId) <= MAX_PENDING_CHARS_PER_SESSION) return;
+  const keys: string[] = [];
+  for (const [key, op] of pendingTextMap) {
+    if (op.sessionId === sessionId) keys.push(key);
+  }
+  for (const key of keys) {
+    if (pendingCharsFor(sessionId) <= MAX_PENDING_CHARS_PER_SESSION) break;
+    pendingTextMap.delete(key);
+    accountOf(sessionId).droppedGap++;
+  }
+  diagAlways('stream-pending-overflow', { sessionId, remaining: pendingCharsFor(sessionId) });
+  requestResync(sessionId);
+}
+
 /** 各流式字段的已知长度缓存（key = sessionId|messageId|field）：让每次分片的 offset 校验为 O(1) */
 const lengthCache = new Map<string, number>();
 /** resync 请求回调（由会话编排 hook 注册：触发一次尾部增量拉取） */
@@ -144,6 +181,11 @@ export function onStreamResyncNeeded(handler: ResyncHandler): () => void {
   return () => resyncHandlers.delete(handler);
 }
 
+/** 主动请求一次对齐（用于「无 messageId 的游离分片」被丢弃后的自愈） */
+export function requestStreamResync(sessionId: string): void {
+  requestResync(sessionId);
+}
+
 function requestResync(sessionId: string): void {
   const key = `${sessionId}|${pendingAssistant.get(sessionId)?.serverMessageId ?? ''}`;
   const last = resyncRequestedAt.get(key) ?? 0;
@@ -208,10 +250,15 @@ function lengthKey(sessionId: string, messageId: string, field: string): string 
  *   （其 catchUpTail 含网络往返）不会清掉新一轮已入缓冲的分片；
  *   而刚结束那一轮的消息此时已 streaming=false，仍会被正确清掉（语义不变）。
  */
-export function resetStreamBuffer(sessionId?: string, opts?: { preserveMessageIds?: string[] }): void {
+export function resetStreamBuffer(
+  sessionId?: string,
+  opts?: { preserveMessageIds?: string[]; force?: boolean },
+): void {
   if (sessionId) {
-    // 活跃 run 保护：会话仍在生成时，缓冲/长度缓存属于「当前轮」，整体跳过（最保守）
-    if (useStore.getState().generatingBySession[sessionId] === true) {
+    // 活跃 run 保护：会话仍在生成时，缓冲/长度缓存属于「当前轮」，整体跳过（最保守）。
+    // force=true 用于「用户主动停止」：此时本轮已本地终止，必须立刻丢弃全部残留分片，
+    // 否则停止后还会继续追加内容（旧实现因该保护跳过清理，是「停不下来」的根因之一）。
+    if (!opts?.force && useStore.getState().generatingBySession[sessionId] === true) {
       diagAlways('reset-stream-buffer-skip-active', { sessionId });
       return;
     }
@@ -277,6 +324,11 @@ function adoptOrCreateStreamingMessage(sessionId: string, messageId: string): Ta
   const st = useStore.getState();
   const list = st.messagesBySession[sessionId] ?? [];
 
+  // 终止屏障：消息已定稿（streamEndedAt 写入）→ 迟到分片一律丢弃，绝不复活 streaming。
+  // 「已停止但内容继续增长 / 状态跳回思考中」就是缺这道屏障。
+  const ended = list.find((m) => m.id === messageId);
+  if (ended?.streamEndedAt) return null;
+
   const pending = pendingAssistant.get(sessionId);
   if (pending && pending.serverMessageId !== messageId) {
     // 上一轮已结束（新的 messageId）：把旧消息定稿，避免 spinner 常转
@@ -287,12 +339,17 @@ function adoptOrCreateStreamingMessage(sessionId: string, messageId: string): Ta
 
   const existing = list.find((m) => m.id === messageId);
   if (existing) {
-    if (!existing.streaming) st.updateMessage(sessionId, messageId, { streaming: true });
+    // 已存在的消息若仍在流式则沿用；已定稿则保持定稿（不再强行置回 streaming）。
+    if (!existing.streaming) {
+      pendingAssistant.set(sessionId, existing);
+      return existing;
+    }
     pendingAssistant.set(sessionId, { ...existing, streaming: true });
     return existing;
   }
 
   diagCount('adopt-create', { sessionId, messageId });
+  const activeRun = st.activeRunBySession[sessionId];
   const msg: TaskMessage = {
     id: messageId,
     serverMessageId: messageId,
@@ -301,6 +358,7 @@ function adoptOrCreateStreamingMessage(sessionId: string, messageId: string): Ta
     timestamp: new Date().toISOString(),
     streaming: true,
     thinkingStreaming: false,
+    ...(activeRun?.runId ? { runId: activeRun.runId } : {}),
   };
   st.addMessage(sessionId, msg);
   pendingAssistant.set(sessionId, msg);
@@ -360,6 +418,7 @@ export function enqueueTextChunk(opts: {
     nextOffset: start + opts.text.length,
     thinkingStreaming: opts.field === 'thinking',
   });
+  enforcePendingLimit(opts.sessionId);
   scheduleFlush();
 }
 
@@ -392,11 +451,20 @@ export function enqueueToolArgsChunk(opts: {
   scheduleFlush();
 }
 
+/** 预算未用完时续跑：setTimeout(0) 把剩余分片让给下一个宏任务（点击/键盘优先） */
+function scheduleContinuation(): void {
+  if (flushTimerId !== null) return;
+  flushTimerId = setTimeout(() => {
+    flushTimerId = null;
+    flushPending({ budgetMs: FLUSH_BUDGET_MS });
+  }, 0);
+}
+
 function scheduleFlush(): void {
   if (rafId === null) {
     rafId = requestAnimationFrame(() => {
       rafId = null;
-      flushPending();
+      flushPending({ budgetMs: FLUSH_BUDGET_MS });
     });
   }
   // 超时兜底：后台标签页 / rAF 节流环境下，rAF 可能长时间（甚至到下一个非批处理事件）
@@ -409,13 +477,18 @@ function scheduleFlush(): void {
         cancelAnimationFrame(rafId);
         rafId = null;
       }
-      flushPending();
+      flushPending({ budgetMs: FLUSH_BUDGET_MS });
     }, 100);
   }
 }
 
-/** 冲刷全部缓冲（低频事件到达前调用，保证「文本先于工具事件写入」的顺序） */
-export function flushPending(): void {
+/**
+ * 冲刷缓冲。
+ * - 无参调用：完整冲刷（低频关键事件：tool-call-start/end、终态、停止、历史重载），保证保序。
+ * - budgetMs：高频流式路径的时间片模式，处理到预算即停，剩余 setTimeout(0) 续跑，
+ *   让浏览器有机会处理点击停止等输入事件（根治「渲染洪流把主线程占满」）。
+ */
+export function flushPending(opts?: { budgetMs?: number }): void {
   // 取消尚未触发的两路调度，避免冲刷后又触发一次空冲刷
   if (flushTimerId !== null) {
     clearTimeout(flushTimerId);
@@ -425,18 +498,28 @@ export function flushPending(): void {
     cancelAnimationFrame(rafId);
     rafId = null;
   }
-  if (pendingTextMap.size > 0) {
-    const entries = Array.from(pendingTextMap.values());
-    pendingTextMap.clear();
-    for (const op of entries) {
-      applyText(op);
+  const deadline =
+    opts?.budgetMs !== undefined ? performance.now() + Math.max(0, opts.budgetMs) : Infinity;
+  while (pendingTextMap.size > 0) {
+    const first = pendingTextMap.entries().next();
+    if (first.done) break;
+    const [key, op] = first.value;
+    pendingTextMap.delete(key);
+    applyText(op);
+    if (performance.now() >= deadline) {
+      scheduleContinuation();
+      return;
     }
   }
-  if (pendingToolArgsMap.size > 0) {
-    const entries = Array.from(pendingToolArgsMap.values());
-    pendingToolArgsMap.clear();
-    for (const op of entries) {
-      applyToolArgs(op);
+  while (pendingToolArgsMap.size > 0) {
+    const first = pendingToolArgsMap.entries().next();
+    if (first.done) break;
+    const [key, op] = first.value;
+    pendingToolArgsMap.delete(key);
+    applyToolArgs(op);
+    if (performance.now() >= deadline) {
+      scheduleContinuation();
+      return;
     }
   }
 }

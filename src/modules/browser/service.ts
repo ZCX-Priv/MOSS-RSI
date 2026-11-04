@@ -272,7 +272,14 @@ export class BrowserServiceImpl implements BrowserService {
 
   async initialize(): Promise<void> {
     ensureBrowserDirs(this.dirs);
-    pruneScreenshots(this.dirs);
+    // 截图清理是递归目录操作：延后到空闲，不占用内核启动关键路径
+    setTimeout(() => {
+      try {
+        pruneScreenshots(this.dirs);
+      } catch {
+        // 清理失败不影响启动
+      }
+    }, 0);
     this.extensionStatus = seedExtension(this.env, this.dirs);
     const cfg = this.getToolConfig();
     this.bridge.start(cfg.bridgePort);

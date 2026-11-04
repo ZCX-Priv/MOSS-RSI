@@ -27,6 +27,11 @@ export class WSClient {
   private messageHandlers = new Set<MessageHandler>();
   private statusHandlers = new Set<StatusHandler>();
   private pendingMessages: WSMessage[] = [];
+  /**
+   * 控制类消息（如 task.abort）：断连时不随业务消息队列无限积压，
+   * 按 `type+sessionId` 只保留最后一条；重连后优先补发。
+   */
+  private controlMessages = new Map<string, WSMessage>();
   /** 当前订阅的 session（重连后自动重订阅，防止 sendToSession 事件丢失） */
   private subscribedSessionId: string | null = null;
   /** 心跳定时器（主线程回退方案；首选 Web Worker，见 heartbeatWorker） */
@@ -117,7 +122,11 @@ export class WSClient {
       if (this.subscribedSessionId) {
         this.ws?.send(JSON.stringify({ type: 'session.subscribe', sessionId: this.subscribedSessionId }));
       }
-      // 发送积压消息
+      // 优先补发控制消息（每类只保留最后一条），再发送积压的业务消息
+      for (const msg of this.controlMessages.values()) {
+        this.ws?.send(JSON.stringify(msg));
+      }
+      this.controlMessages.clear();
       while (this.pendingMessages.length > 0) {
         const msg = this.pendingMessages.shift()!;
         this.ws?.send(JSON.stringify(msg));
@@ -184,6 +193,24 @@ export class WSClient {
       this.pendingMessages.push(msg);
       this.connect();
     }
+  }
+
+  /**
+   * 发送控制消息（abort 等）：连接已开则立即发送；断连时按类型去重排队，
+   * 只保留最后一次（避免弱网下大量过期控制指令排队并被顺序执行）。
+   */
+  sendControl(msg: WSMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(msg));
+      } catch {
+        // 发送失败：转存到控制队列，重连后补发
+        this.controlMessages.set(`${msg.type}|${msg.sessionId ?? ''}`, msg);
+      }
+      return;
+    }
+    this.controlMessages.set(`${msg.type}|${msg.sessionId ?? ''}`, msg);
+    this.connect();
   }
 
   /**

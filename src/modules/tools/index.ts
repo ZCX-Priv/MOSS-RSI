@@ -79,9 +79,9 @@ class ToolsModule implements Module {
     // listSchemas() 据此过滤给 LLM。这样 config 变更无需增删注册，且前端可见全部工具。
     for (const tool of this.loadedBuiltinTools) {
       this.registry!.register(tool);
-      // 预置内容签名：启动批量读取产生的 atime 变化在懒落盘触发 watcher 事件时会被守卫拦截
-      this.toolSignatures.set(tool.sourceDir!, this.buildDirSignature(tool.sourceDir!));
     }
+    // 内容签名不再在启动期全量 stat（1 核低主频机器上是明显启动开销）：
+    // 首次 watcher 事件时惰性建立基线，建立基线的那一次事件只记录不重载。
 
     // 启动内置工具目录热重载监听
     this.startBuiltinWatch(builtinDir, ctx);
@@ -115,8 +115,6 @@ class ToolsModule implements Module {
         continue;
       }
       this.registry!.register(tool);
-      // 预置内容签名（同内置工具：拦截 atime 幽灵事件）
-      this.toolSignatures.set(tool.sourceDir!, this.buildDirSignature(tool.sourceDir!));
       ctx.logger.info(t('tools.customLoaded', { name: tool.name }), { dir: tool.sourceDir });
     }
   }
@@ -310,7 +308,13 @@ class ToolsModule implements Module {
     // 且重载自身读取文件会再次刷新 atime，形成自维持重载循环。以 mtime/size 签名校验：内容未变则跳过。
     const currentSig = this.buildDirSignature(toolDir);
     const storedSig = this.toolSignatures.get(toolDir);
-    if (storedSig && this.signaturesEqual(storedSig, currentSig)) {
+    if (!storedSig) {
+      // 启动期不再全量预置签名：第一次事件只建立基线（无法判断内容是否变化），
+      // 避免启动读取自身的 atime 变化触发一轮无意义重载。
+      this.toolSignatures.set(toolDir, currentSig);
+      return;
+    }
+    if (this.signaturesEqual(storedSig, currentSig)) {
       ctx.logger.debug(t('tools.reloadSkippedUnchanged', { name: toolName }), { dir: toolDir });
       return;
     }

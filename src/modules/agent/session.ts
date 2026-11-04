@@ -6,8 +6,9 @@
 
 import { t } from '../../core/i18n';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { safeSessionId, writeJsonStore } from '../filesys/store-io';
+import { atomicWriteFileAsync } from '../../utils/fs-atomic';
 import type { AgentMessage, RunStats } from '../contracts';
 import type { TodoItem } from '../tools/todo/shared/store';
 import type { PermissionMode } from '../safety/types';
@@ -134,6 +135,12 @@ export class SessionStore {
   private static readonly FLUSH_DELAY_MS = 2000;
   /** 脏期间新增消息数硬上限（超限立即刷，限制崩溃丢失窗口） */
   private static readonly FLUSH_MSG_THRESHOLD = 10;
+  /**
+   * 异步落盘队列（按文件路径串行）。
+   * 旧实现 writeFileSync 写整份 session：大会话（数 MB）会阻塞事件循环，
+   * 导致其他会话的流式/停止/WS 心跳一起卡住（1 核低主频机器尤其明显）。
+   */
+  private readonly writeQueues = new Map<string, Promise<void>>();
 
   constructor(
     env: Environment,
@@ -220,7 +227,7 @@ export class SessionStore {
       cur.msgCount++;
       if (cur.msgCount >= SessionStore.FLUSH_MSG_THRESHOLD) {
         this.dirtySessions.delete(session.id);
-        this.saveSessionNow(session);
+        this.enqueueSave(session);
         return;
       }
     } else {
@@ -234,23 +241,31 @@ export class SessionStore {
     }
   }
 
-  /** 批量刷盘：遍历所有脏 session 立即写盘（saveSessionNow 内部捕获错误） */
+  /** 批量刷盘：遍历所有脏 session 入异步队列（不阻塞事件循环） */
   private flushAllDirty(): void {
     if (this.dirtySessions.size === 0) return;
     for (const [id, entry] of Array.from(this.dirtySessions.entries())) {
       this.dirtySessions.delete(id);
-      this.saveSessionNow(entry.session);
+      this.enqueueSave(entry.session);
     }
   }
 
-  /** 释放资源（engine.destroy 调用链）：停定时器并强制刷盘全部脏 session */
+  /**
+   * 释放资源（engine.destroy 调用链）：停定时器并**同步**刷盘全部脏 session。
+   * 进程退出路径不能用异步（事件循环即将结束），这里的同步写是最后兜底；
+   * 运行期高频落盘已全部走 enqueueSave。
+   */
   dispose(): void {
     this.disposed = true;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    this.flushAllDirty();
+    // 先把队列里尚未开写的数据也同步落盘（避免退出时丢最近 2s 的更新）
+    for (const [id, entry] of Array.from(this.dirtySessions.entries())) {
+      this.dirtySessions.delete(id);
+      this.saveSessionNow(entry.session);
+    }
   }
 
   /**
@@ -800,9 +815,46 @@ export class SessionStore {
     return restored;
   }
 
-  /** 公共持久化入口（供 engine 在 run 结束/截断后写入；立即落盘保证关键状态持久） */
+  /**
+   * 公共持久化入口（供 engine 在 run 结束/截断后写入）。
+   * 保持**同步**语义：关键状态（最后一轮回复/截断/恢复）必须立即落盘，
+   * 调用方与测试都依赖「返回后文件已更新」。高频防抖路径（markDirty）才走异步队列。
+   */
   persistSession(session: Session): void {
     this.saveSessionNow(session);
+  }
+
+  /**
+   * 入队异步落盘：同一路径串行（避免并发 rename 覆盖），JSON 序列化在队列内完成。
+   * 失败只记日志（下一次防抖/关键路径会重试）。
+   */
+  private enqueueSave(session: Session): void {
+    const filePath = this.sessionFilePath(session.id);
+    // 目录创建是幂等的小操作（首次落盘时保证父目录存在；异步写本身不建目录）
+    try {
+      mkdirSync(dirname(filePath), { recursive: true });
+    } catch {
+      // 创建失败交由异步写报错（超时/权限等）
+    }
+    const prev = this.writeQueues.get(filePath) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {
+        // 上一次失败已记录，继续下一次
+      })
+      .then(async () => {
+        const data = JSON.stringify(session, null, 2);
+        await atomicWriteFileAsync(filePath, data);
+      })
+      .catch((err) => {
+        this.logger.error(t('agent.saveSessionFailed'), {
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        if (this.writeQueues.get(filePath) === next) this.writeQueues.delete(filePath);
+      });
+    this.writeQueues.set(filePath, next);
   }
 
   /**

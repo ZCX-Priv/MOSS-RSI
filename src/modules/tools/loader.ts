@@ -24,6 +24,8 @@ export interface ToolManifest {
   annotations?: ToolAnnotations;
   inputSchema: JSONSchema;
   config?: ToolConfigManifest;
+  /** 是否允许同轮并行（仅只读、无副作用工具可声明；缺省 false） */
+  parallelSafe?: boolean;
 }
 
 /** index.ts 默认导出的两种形式 */
@@ -70,6 +72,7 @@ function buildTool(
     annotations: manifest.annotations,
     icon: manifest.icon,
     configManifest: manifest.config,
+    parallelSafe: manifest.parallelSafe === true,
     execute,
     sourceDir: dir,
     source,

@@ -24,6 +24,11 @@ interface ConnectionState {
   sessionId?: string;
   /** 该连接订阅的全部 session：agent 事件按 sessionId 路由到所有订阅连接 */
   subscribedSessions: Set<string>;
+  /** 慢客户端保护：当前统计窗口的起始时刻与已发送字节数 */
+  bytesWindowStart: number;
+  bytesSent: number;
+  /** 连续背压/丢帧计数（超过阈值主动断开，避免后端无限缓冲） */
+  backpressureStreak: number;
 }
 
 /**
@@ -127,6 +132,17 @@ class EventBatcher {
     }
   }
 
+  /**
+   * 丢弃某会话的全部缓冲（不发送）。
+   * 用户停止/中断时必须调用：否则 30ms 合帧窗口内的残流会在 finally 被 flush 出去，
+   * 前端表现为「点了停止，内容还在继续吐」。
+   */
+  discard(sessionId: string): void {
+    for (const key of Array.from(this.buffer.keys())) {
+      if (key.startsWith(`${sessionId}|`)) this.buffer.delete(key);
+    }
+  }
+
   /** 冲刷全部缓冲（保序：按插入顺序发送） */
   flush(): void {
     if (this.timer !== null) {
@@ -187,6 +203,14 @@ export class WsHandler {
   private readonly activeRuns = new Map<string, AbortController>();
   /** 运行中的 runId（sessionId → runId）：session.subscribe 快照回复用（前端事件隔离对齐） */
   private readonly activeRunIds = new Map<string, string>();
+  /**
+   * 已被显式中止的 runId（sessionId → 最近 N 个）。
+   * abort 之后到达的该 run 事件一律丢弃（除 task.aborted 本身），
+   * 避免 engine 收尾/合帧窗口里的残流继续发往前端。
+   */
+  private readonly abortedRunIds = new Map<string, Set<string>>();
+  /** 每个 session 保留的已中止 runId 上限 */
+  private static readonly MAX_ABORTED_RUN_IDS = 4;
   /** 引导消息数组（可变引用，传给 engine.run；handleTaskGuide 在运行期间向其 push 消息） */
   private readonly guideMessageArrays = new Map<string, GuidanceMessage[]>();
   /** 引导消息对应的 runId 队列（前端为每条引导消息生成 runId，用于新 run 的事件隔离） */
@@ -213,7 +237,13 @@ export class WsHandler {
 
   /** 注册新连接 */
   registerConnection(conn: WSConnection): void {
-    this.states.set(conn.id, { conn, subscribedSessions: new Set() });
+    this.states.set(conn.id, {
+      conn,
+      subscribedSessions: new Set(),
+      bytesWindowStart: Date.now(),
+      bytesSent: 0,
+      backpressureStreak: 0,
+    });
     this.logger.debug(t('server.wsConnected', { id: conn.id }));
   }
 
@@ -380,26 +410,93 @@ export class WsHandler {
     }
   }
 
+  /** 每个连接每秒的发送字节预算：超过后丢弃流式文本帧（缺口由前端 resync 补齐） */
+  private static readonly SLOW_CLIENT_BYTES_PER_SEC = 512 * 1024;
+  /** 连续背压阈值：超过即主动断开慢客户端，避免后端内存无界增长 */
+  private static readonly MAX_BACKPRESSURE_STREAK = 64;
+
   /** 发送消息到订阅该 session 的所有活跃连接（无订阅者时静默丢弃） */
   private sendToSubscribers(sessionId: string, message: unknown): void {
     const text = JSON.stringify(message);
+    const bytes = text.length;
+    const now = Date.now();
+    const isStreamChunk =
+      (message as { type?: string }).type === 'assistant-text' ||
+      (message as { type?: string }).type === 'assistant-thinking' ||
+      (message as { type?: string }).type === 'tool-call-delta';
     for (const state of this.states.values()) {
-      if (state.subscribedSessions.has(sessionId)) {
-        state.conn.send(text);
+      if (!state.subscribedSessions.has(sessionId)) continue;
+      // 慢客户端预算窗口（1s）：超预算时丢弃流式分片，避免把浏览器/内核缓冲无限塞满
+      if (now - state.bytesWindowStart >= 1000) {
+        state.bytesWindowStart = now;
+        state.bytesSent = 0;
+      }
+      if (isStreamChunk && state.bytesSent > this.slowClientBudget()) {
+        state.backpressureStreak++;
+        if (state.backpressureStreak > WsHandler.MAX_BACKPRESSURE_STREAK) {
+          try {
+            state.conn.close();
+          } catch {
+            // 已关闭
+          }
+        }
+        continue;
+      }
+      state.bytesSent += bytes;
+      const result = state.conn.send(text);
+      // Bun 的 send 返回 -1（已入队但有背压）/0（连接异常被丢弃）；连续出现说明客户端消费不过来
+      if (typeof result === 'number' && result <= 0) {
+        state.backpressureStreak++;
+        if (state.backpressureStreak > WsHandler.MAX_BACKPRESSURE_STREAK) {
+          try {
+            state.conn.close();
+          } catch {
+            // 已关闭
+          }
+        }
+      } else {
+        state.backpressureStreak = 0;
       }
     }
   }
 
+  /** 慢客户端预算（实例方法便于未来按配置调整；当前固定） */
+  private slowClientBudget(): number {
+    return WsHandler.SLOW_CLIENT_BYTES_PER_SEC;
+  }
+
   /**
    * 发送 agent 事件：高频流式类型进合帧缓冲，其余类型先冲刷缓冲再发（保序）。
+   * 已中止 run 的事件直接丢弃（task.aborted 自身除外），杜绝停止后的残流。
    */
   private sendEvent(sessionId: string, msg: { type: string; sessionId: string; payload: Record<string, unknown> }): void {
+    const runId = typeof msg.payload.runId === 'string' ? msg.payload.runId : undefined;
+    if (runId && this.isRunAborted(sessionId, runId) && msg.type !== 'task.aborted') {
+      return;
+    }
     if (this.batcher.isBatchable(msg.type)) {
       this.batcher.push(msg);
     } else {
       this.batcher.flush();
       this.sendToSubscribers(sessionId, msg);
     }
+  }
+
+  /** 标记 run 为已中止（FIFO 截断；无需变更时保持原集合） */
+  private markRunAborted(sessionId: string, runId: string | undefined): void {
+    if (!sessionId || !runId) return;
+    const cur = this.abortedRunIds.get(sessionId) ?? new Set<string>();
+    if (!cur.has(runId)) cur.add(runId);
+    while (cur.size > WsHandler.MAX_ABORTED_RUN_IDS) {
+      const first = cur.values().next().value as string | undefined;
+      if (first === undefined) break;
+      cur.delete(first);
+    }
+    this.abortedRunIds.set(sessionId, cur);
+  }
+
+  private isRunAborted(sessionId: string, runId: string): boolean {
+    return this.abortedRunIds.get(sessionId)?.has(runId) === true;
   }
 
   // ========================================================================
@@ -462,6 +559,9 @@ export class WsHandler {
       if (!wasRunning) this.broadcastTaskRunning(sessionId, true);
 
       const onEvent = (event: AgentEvent) => {
+        // 用户已停止：不再把 engine 收尾阶段的分片/工具事件发往前端。
+        // （终态由外层统一发送 task.aborted；即使这里漏掉，sendEvent 也会按 runId 过滤）
+        if (abortController.signal.aborted) return;
         this.sendEvent(sessionId, {
           type: event.type,
           sessionId: event.sessionId,
@@ -567,8 +667,13 @@ export class WsHandler {
           // 返回已结束的旧 runId（前端事件隔离对齐被污染）
           this.activeRunIds.delete(sessionId);
         }
-        // 冲净残余缓冲（保序收尾）
-        this.batcher.flush();
+        // 收尾：正常完成冲净残余缓冲（保序）；用户中止则直接丢弃缓冲，
+        // 否则 30ms 合帧窗口里的残流会在停止后一次性吐给前端。
+        if (abortController.signal.aborted) {
+          this.batcher.discard(sessionId);
+        } else {
+          this.batcher.flush();
+        }
       }
     }
 
@@ -617,11 +722,26 @@ export class WsHandler {
   }
 
   private handleTaskAbort(_state: ConnectionState, msg: WSMessage): void {
-    const controller = this.activeRuns.get(msg.sessionId ?? '');
-    if (controller) {
-      controller.abort();
-      this.logger.info(t('server.taskAborted', { sessionId: msg.sessionId ?? '' }));
-    }
+    const sid = msg.sessionId ?? '';
+    const controller = this.activeRuns.get(sid);
+    const runId = this.activeRunIds.get(sid);
+    if (!controller) return; // 没有活跃 run：幂等空操作（避免误发终态终止新一轮）
+
+    // 1) 先标记 run 已中止：此后该 run 的任何事件（含 engine 收尾）都不会发往前端
+    this.markRunAborted(sid, runId);
+    // 2) 丢弃合帧缓冲中的残流
+    this.batcher.discard(sid);
+    // 3) 中断后端 run
+    controller.abort();
+    this.logger.info(t('server.taskAborted', { sessionId: sid }));
+
+    // 4) 立即向前端确认停止（不等 engine 收尾），避免「停止转圈永远不恢复」。
+    //    直接发送（不进合帧），保证先于任何残留事件到达。
+    this.sendToSubscribers(sid, {
+      type: 'task.aborted',
+      sessionId: sid,
+      payload: { runId },
+    });
   }
 
   /**

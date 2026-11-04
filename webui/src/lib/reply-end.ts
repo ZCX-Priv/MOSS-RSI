@@ -33,15 +33,28 @@ export interface ReplyEnds {
   lastReplyEndId: string | null;
 }
 
-/** 一次性 O(n) 预计算所有回复结尾及其中的最新一条 */
+/**
+ * 一次性 O(n) 预计算所有回复结尾及其中的最新一条。
+ *
+ * 旧实现是「每条 assistant 向后扫描找下一条非系统消息」的最坏 O(n²)：
+ * 流式期间每次 store 追加（每 rAF/100ms）都会重算，长会话会把主线程占满
+ * （UI 卡死、停止按钮点不动的直接诱因之一）。
+ * 从后往前维护 nextRole 即可单遍完成，语义与 isReplyEnd 完全一致。
+ */
 export function computeReplyEnds(messages: TaskMessage[]): ReplyEnds {
   const replyEndIds = new Set<string>();
   let lastReplyEndId: string | null = null;
-  for (let i = 0; i < messages.length; i++) {
-    if (isReplyEnd(messages, i)) {
-      replyEndIds.add(messages[i].id);
-      lastReplyEndId = messages[i].id;
+  /** 下一条「非系统卡片」消息的角色；null = 列表末尾 */
+  let nextRole: TaskMessage['role'] | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (isSystemCard(m)) continue; // 系统卡片不属于任何一段回复，跳过且不改变 nextRole
+    if (m.role === 'assistant' && (nextRole === null || nextRole === 'user')) {
+      replyEndIds.add(m.id);
+      // 从后往前遇到的第一个回复结尾 = 列表顺序中最后一段回复
+      if (lastReplyEndId === null) lastReplyEndId = m.id;
     }
+    nextRole = m.role;
   }
   return { replyEndIds, lastReplyEndId };
 }

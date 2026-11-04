@@ -24,6 +24,7 @@ import {
   noteStreamReceived,
   noteStreamRunIdDrop,
   replayPendingAfterResync,
+  requestStreamResync,
   seedStreamLength,
 } from './stream-buffer';
 import { diag, diagAlways } from './diag';
@@ -203,10 +204,12 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
   }
   const existing = (st.messagesBySession[sessionId] ?? []).find((m) => m.id === draft.messageId);
   const streaming = !draft.stale;
+  const activeRunId = st.activeRunBySession[sessionId]?.runId;
   const msg: TaskMessage = {
     id: draft.messageId,
     serverMessageId: draft.messageId,
     role: 'assistant',
+    ...(activeRunId ? { runId: activeRunId } : {}),
     content: draft.content,
     thinking: draft.thinking,
     ...(draft.toolCalls.length > 0
@@ -236,6 +239,9 @@ export function attachLiveDraft(draft: LiveDraftPayload): void {
       toolCalls: msg.toolCalls,
       streaming,
       thinkingStreaming: false,
+      // 服务端草稿代表「新一轮仍在进行」：清除上一次本地定稿留下的屏障
+      streamEndedAt: undefined,
+      ...(activeRunId ? { runId: activeRunId } : {}),
       ...(draft.thinkingStartedAt ? { thinkingStartedAt: draft.thinkingStartedAt } : {}),
       ...(draft.stale ? { interrupted: true } : {}),
     });
@@ -263,13 +269,18 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
 
   const sessionId = msg.sessionId ?? s.activeSessionId ?? '';
 
-  // runId 过滤（仅流式事件）：丢弃旧 run 的分片，防止「打断发送」时旧流污染新流状态。
-  // 终态事件不丢弃（收敛点不可丢），但若确属已被顶替的旧 run（runId 不一致），
-  // 则只打点观测、不做状态变更（否则会把新 run 的 pending 清掉）；
-  // 真正的兜底收敛由生成态看门狗按后端权威态完成（useGenerationWatchdog）。
+  // runId 过滤：丢弃旧 run 的分片，防止「打断发送/停止」时旧流污染新流状态。
+  // 停止语义的关键：abort 不再删除当前 runId，而是把 runId 记入 terminated 集合；
+  // 该 run 的任何事件（含终态）在本地都已无意义，入口直接丢弃 —— 否则会出现
+  // 「停止后内容继续增长 / 已停止又跳回运行中」。
+  const eventRunId = eventRunIdOf(msg);
+  if (sessionId && s.isRunTerminated(sessionId, eventRunId)) {
+    noteStreamRunIdDrop(sessionId);
+    diagAlways('stream-terminated-drop', { type: msg.type, eventRunId, sessionId });
+    return;
+  }
   if (sessionId && AGENT_STREAM_EVENT_TYPES.has(msg.type)) {
-    const eventRunId = eventRunIdOf(msg);
-    const currentRunId = pendingRunId.get(sessionId);
+    const currentRunId = s.activeRunBySession[sessionId]?.runId ?? pendingRunId.get(sessionId);
     if (eventRunId && currentRunId && eventRunId !== currentRunId) {
       noteStreamRunIdDrop(sessionId);
       diagAlways('stream-runid-drop', { type: msg.type, eventRunId, currentRunId, sessionId });
@@ -282,8 +293,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     sessionId !== '' &&
     AGENT_TERMINAL_EVENT_TYPES.has(msg.type) &&
     (() => {
-      const eventRunId = eventRunIdOf(msg);
-      const currentRunId = pendingRunId.get(sessionId);
+      const currentRunId = s.activeRunBySession[sessionId]?.runId ?? pendingRunId.get(sessionId);
       return Boolean(eventRunId && currentRunId && eventRunId !== currentRunId);
     })();
   if (terminalRunIdMismatch) {
@@ -338,7 +348,13 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         messageId?: string;
         offset?: number;
       };
-      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id ?? genId();
+      // 无身份分片不再用 genId 造「游离消息」（会产生多条同时 streaming 的消息，
+      // 让 finalize 与状态判定全部失真）；丢弃并请求一次 /state 对齐。
+      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id;
+      if (!messageId) {
+        requestStreamResync(sessionId);
+        break;
+      }
       enqueueTextChunk({
         sessionId,
         messageId,
@@ -354,7 +370,11 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         messageId?: string;
         offset?: number;
       };
-      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id ?? genId();
+      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id;
+      if (!messageId) {
+        requestStreamResync(sessionId);
+        break;
+      }
       enqueueTextChunk({
         sessionId,
         messageId,
@@ -377,10 +397,17 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         status: 'generating',
       };
       const existing = pending.toolCalls ?? [];
-      // 幂等：同 id 已存在（重连重放 / 草稿已含该调用）时不重复追加
+      // 幂等：同 id 已存在（重连重放 / 草稿已含该调用）时不重复追加。
+      // 状态单向：已 done 的工具不能被迟到的 start 事件回退为 generating（条目状态回跳的根因）。
       const merged = existing.some((tc) => tc.id === event.toolCallId)
         ? existing.map((tc) =>
-            tc.id === event.toolCallId ? { ...tc, name: event.toolName, status: 'generating' as const } : tc,
+            tc.id === event.toolCallId
+              ? {
+                  ...tc,
+                  name: event.toolName,
+                  status: tc.status === 'done' ? tc.status : ('generating' as const),
+                }
+              : tc,
           )
         : [...existing, newToolCall];
       s.updateMessage(sessionId, pending.id, { toolCalls: merged, thinkingStreaming: false });
@@ -415,7 +442,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         const target = msgs.find((m) => m.id === targetId) ?? findMessageByToolCallId(sessionId, event.toolCallId);
         if (target?.toolCalls) {
           const updatedToolCalls = target.toolCalls.map((tc) =>
-            tc.id === event.toolCallId ? { ...tc, status: 'executing' as const } : tc,
+            tc.id === event.toolCallId && tc.status !== 'done'
+              ? { ...tc, status: 'executing' as const }
+              : tc,
           );
           s.updateMessage(sessionId, target.id, { toolCalls: updatedToolCalls });
           if (pending && pending.id === target.id) {
@@ -451,10 +480,11 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
             ? { ...tc, name: event.toolName, status: 'done' as const }
             : tc,
         );
-        const updatedToolResults = [
-          ...(target.toolResults ?? []),
-          { toolCallId: event.toolCallId, result: event.result },
-        ];
+        // 结果按 toolCallId 去重覆盖：重复投递/重连重放时不会出现重复结果条目
+        const prevResults = target.toolResults ?? [];
+        const resultMap = new Map(prevResults.map((tr) => [tr.toolCallId, tr]));
+        resultMap.set(event.toolCallId, { toolCallId: event.toolCallId, result: event.result });
+        const updatedToolResults = Array.from(resultMap.values());
         s.updateMessage(sessionId, target.id, {
           toolCalls: updatedToolCalls,
           toolResults: updatedToolResults,
@@ -644,8 +674,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           errorDetail,
           timestamp: new Date().toISOString(),
         });
-        s.setGenerating(sessionId, false);
-        s.setStopping(sessionId, false);
+        s.terminateRun(sessionId, eventRunId);
         s.setTaskError(sessionId, true);
         pendingAssistant.delete(sessionId);
         // 防御：终态同步清理 runId，防残留值误杀未来带 runId 的外部 run 事件
@@ -675,8 +704,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           pendingAssistant.delete(sessionId);
         }
         pendingRunId.delete(sessionId);
-        s.setGenerating(sessionId, false);
-        s.setStopping(sessionId, false);
+        // 统一收敛点：记入终止集合 + 定稿本轮消息 + 熄灭生成态（不再裸写 generating）
+        s.terminateRun(sessionId, doneEvent.runId ?? eventRunId);
         useStore.getState().clearPendingAsksBySession(sessionId);
         useStore.getState().clearPendingConfirmsBySession(sessionId);
         // 轮数触顶：插入提示卡（幂等防重）
@@ -732,8 +761,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           pendingAssistant.delete(sessionId);
         }
         pendingRunId.delete(sessionId);
-        s.setGenerating(sessionId, false);
-        s.setStopping(sessionId, false);
+        s.terminateRun(sessionId, eventRunId);
         emitSettled(sessionId, 'done');
       }
       break;
@@ -757,8 +785,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           pendingAssistant.delete(sessionId);
         }
         pendingRunId.delete(sessionId);
-        s.setGenerating(sessionId, false);
-        s.setStopping(sessionId, false);
+        s.terminateRun(sessionId, eventRunId);
         emitSettled(sessionId, 'aborted');
       }
       break;
@@ -1009,11 +1036,14 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       const st = useStore.getState();
       if (typeof payload.running === 'boolean') {
         const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
-        // 运行态是权威信号（后端 run 生命周期广播）：可升可降
+        // 运行态是权威信号（后端 run 生命周期广播）：升只补位、降统一走 terminateRun
+        // （终止集合 + 定稿本轮消息），避免只熄灭一个 UI 标志而留下流式草稿继续增长。
         if (sid) {
-          st.setGenerating(sid, payload.running);
-          // 后端确认已非运行 → 结束停止转圈（覆盖 task.stream 与外部 run）
-          if (!payload.running) st.setStopping(sid, false);
+          if (payload.running) {
+            if (!st.activeRunBySession[sid]) st.setGenerating(sid, true);
+          } else {
+            st.terminateRun(sid);
+          }
         }
       }
       if (payload.task) st.updateTask(payload.task.id, payload.task);
@@ -1148,6 +1178,8 @@ function ensureStreamingMessage(sessionId: string, messageId?: string): TaskMess
   if (messageId) {
     const found = msgs.find((m) => m.id === messageId);
     if (found) {
+      // 已定稿消息不再复活（停止后的迟到 tool 事件不得让它重新进入流式态）
+      if (found.streamEndedAt) return null;
       if (!found.streaming) st.updateMessage(sessionId, messageId, { streaming: true });
       const revived: TaskMessage = { ...found, streaming: true };
       pendingAssistant.set(sessionId, revived);

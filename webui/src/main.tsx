@@ -274,12 +274,11 @@ void resetStaleServiceWorker();
 // 页面可以先渲染 shell，后端模块随后就绪即自动补齐 —— 这是「打开即见界面」的关键。
 void waitForBackendReady();
 
-Promise.all([initTheme(), initLocale(), initPersisted()]).then((results) => {
-  const persisted = results[2];
-  useStore.getState().hydratePersisted(buildPersistedState(persisted));
-  // 首帧前同步应用外观（主题色 / 字号 / 密度 / 圆角）：避免先渲染一帧默认外观再跳变
-  applyAppearanceToDom(useStore.getState());
-  createRoot(document.getElementById('root')!).render(
+const root = createRoot(document.getElementById('root')!);
+
+/** 渲染应用外壳（可重复调用；React root 幂等） */
+function renderApp(): void {
+  root.render(
     <StrictMode>
       <ErrorBoundary>
         <ThemeProvider>
@@ -292,7 +291,22 @@ Promise.all([initTheme(), initLocale(), initPersisted()]).then((results) => {
       </ErrorBoundary>
     </StrictMode>,
   );
-}).catch((err: unknown) => {
+}
+
+// 首帧立即渲染：不再等 IndexedDB（主题/语言/15 个持久化键）读完。
+// 主题由 index.html 的 boot 快照提供；语言/外观在异步读取完成后注入 store 并触发重渲染。
+// 这是「WebUI 首屏 3s 可交互」的关键：IndexedDB 在低配机器上可能占用数百毫秒。
+applyAppearanceToDom(useStore.getState());
+renderApp();
+
+void Promise.all([initTheme(), initLocale(), initPersisted()])
+  .then((results) => {
+    const persisted = results[2];
+    useStore.getState().hydratePersisted(buildPersistedState(persisted));
+    // 持久化外观注入后同步到 DOM（首帧已用默认值渲染，这里修正为主题色/字号/密度/圆角）
+    applyAppearanceToDom(useStore.getState());
+  })
+  .catch((err: unknown) => {
   // 启动链路最后兜底：任何未预期异常也要给用户可见反馈，而非白屏
   console.error('App bootstrap failed:', err);
   const root = document.getElementById('root');

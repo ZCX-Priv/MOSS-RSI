@@ -17,7 +17,9 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const BUILT = path.join(ROOT, 'dist', 'server.js');
+// 新构建产物为 dist/main.js（outdir + splitting）；兼容旧版单文件 dist/server.js
+const BUILT = path.join(ROOT, 'dist', 'main.js');
+const LEGACY_BUILT = path.join(ROOT, 'dist', 'server.js');
 const SRC = path.join(ROOT, 'src', 'main.ts');
 
 function fail(msg) {
@@ -28,8 +30,9 @@ function fail(msg) {
 // 选择入口文件
 function resolveEntry() {
   if (fs.existsSync(BUILT)) return BUILT;
+  if (fs.existsSync(LEGACY_BUILT)) return LEGACY_BUILT;
   if (fs.existsSync(SRC)) return SRC;
-  fail(`No entry found. Looked for:\n  ${BUILT}\n  ${SRC}`);
+  fail(`No entry found. Looked for:\n  ${BUILT}\n  ${LEGACY_BUILT}\n  ${SRC}`);
 }
 
 // 选择运行时：优先 bun，否则 node（仅对构建产物有效）

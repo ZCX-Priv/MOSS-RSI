@@ -6,7 +6,7 @@
 //   全量快照（WS tasks.changed / tasks.reordered、PUT reorder 响应、无参 GET /api/tasks）→ applyFullTaskSnapshot。
 // 重连后的兜底刷新由 useWebSocket 负责（restored 时全量快照）。
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { withRetry } from '../lib/retry';
@@ -14,6 +14,8 @@ import type { TaskItem } from '../types/api';
 
 /** 分组内每页条数（组内分页；典型分组远小于此值，一页即加载完） */
 const TASKS_PAGE_SIZE = 100;
+/** 分组首屏加载失败后的自动重试冷却（ms）：避免「关别的组」顺带触发失败组反复请求 */
+const GROUP_RETRY_COOLDOWN_MS = 30_000;
 
 export function useTasks() {
   const setTaskGroups = useStore((s) => s.setTaskGroups);
@@ -22,30 +24,51 @@ export function useTasks() {
   const setGroupTasks = useStore((s) => s.setGroupTasks);
   const applyFullTaskSnapshot = useStore((s) => s.applyFullTaskSnapshot);
 
-  /** 加载某分组第 1 页（已加载或加载中则跳过） */
+  /** 分组加载 in-flight 去重（同一组并发调用只发一个请求） */
+  const groupInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
+  /** 分组最近一次失败时刻（冷却期内不再自动重试） */
+  const groupFailedAtRef = useRef<Map<string, number>>(new Map());
+  /** 是否已完成一次首载（决定 reload 是否允许清空已物化任务） */
+  const loadedOnceRef = useRef(false);
+  /** 全量分组请求 in-flight 单例 */
+  const loadInFlightRef = useRef<Promise<void> | null>(null);
+
+  /** 加载某分组第 1 页（已加载/加载中/in-flight/冷却中则跳过） */
   const ensureGroupLoaded = useCallback(
     async (groupId: string): Promise<void> => {
+      const inFlight = groupInFlightRef.current.get(groupId);
+      if (inFlight) return inFlight;
       const meta = useStore.getState().groupTasksMeta[groupId];
       if (meta?.loaded || meta?.loading) return;
-      patchGroupTasksMeta(groupId, { loading: true });
-      try {
-        const { tasks, page } = await api.listTasksInGroup(groupId, { limit: TASKS_PAGE_SIZE });
-        setGroupTasks(
-          groupId,
-          tasks,
-          {
-            loaded: true,
-            loading: false,
-            hasMore: page?.hasMore ?? false,
-            total: page?.total ?? tasks.length,
-          },
-          'replace',
-        );
-      } catch (err) {
-        console.warn('ensureGroupLoaded failed:', err);
-        // 保留未加载态，下次展开/重载可重试
-        patchGroupTasksMeta(groupId, { loading: false });
-      }
+      const failedAt = groupFailedAtRef.current.get(groupId);
+      if (failedAt !== undefined && Date.now() - failedAt < GROUP_RETRY_COOLDOWN_MS) return;
+
+      const task = (async (): Promise<void> => {
+        patchGroupTasksMeta(groupId, { loading: true });
+        try {
+          const { tasks, page } = await api.listTasksInGroup(groupId, { limit: TASKS_PAGE_SIZE });
+          groupFailedAtRef.current.delete(groupId);
+          setGroupTasks(
+            groupId,
+            tasks,
+            {
+              loaded: true,
+              loading: false,
+              hasMore: page?.hasMore ?? false,
+              total: page?.total ?? tasks.length,
+            },
+            'replace',
+          );
+        } catch (err) {
+          console.warn('ensureGroupLoaded failed:', err);
+          groupFailedAtRef.current.set(groupId, Date.now());
+          patchGroupTasksMeta(groupId, { loading: false });
+        } finally {
+          groupInFlightRef.current.delete(groupId);
+        }
+      })();
+      groupInFlightRef.current.set(groupId, task);
+      return task;
     },
     [patchGroupTasksMeta, setGroupTasks],
   );
@@ -98,41 +121,55 @@ export function useTasks() {
     );
   }, [ensureGroupLoaded, loadMoreGroup]);
 
-  const load = useCallback(async () => {
-    // 首载：分组全量 + 展开中的分组任务按需预载。
-    // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503，退避重试后无需刷新即可自愈。
-    try {
-      const { groups } = await withRetry(() => api.listTaskGroups());
-      setTaskGroups(groups);
-      resetGroupTasks();
-      const expanded = useStore.getState().taskGroupExpanded;
-      void Promise.all(
-        groups
-          .filter((g) => (expanded[g.id] ?? true) && (g.taskCount ?? 0) > 0)
-          .map((g) => ensureGroupLoaded(g.id)),
-      );
-      return;
-    } catch {
-      // 后端 tasks 路由未就绪，降级到 session 适配
-    }
+  const load = useCallback(async (opts?: { preserveTasks?: boolean }): Promise<void> => {
+    // 并发调用（挂载 + WS 断开兜底 + 拖拽失败）只保留一个请求
+    if (loadInFlightRef.current) return loadInFlightRef.current;
+    const runner = (async (): Promise<void> => {
+      // 首载：分组全量 + 展开中的分组任务按需预载。
+      // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503，退避重试后无需刷新即可自愈。
+      try {
+        const { groups } = await withRetry(() => api.listTaskGroups());
+        setTaskGroups(groups);
+        // 关键：只有真正的首次加载才清空已物化任务。
+        // 后续 reload（WS 断开兜底、移组失败等）必须保留数据 —— 否则用户会看到
+        // 所有分组条目瞬间消失再重新加载（「关一个组，另一个组重新加载」的放大来源）。
+        if (!opts?.preserveTasks && !loadedOnceRef.current) resetGroupTasks();
+        loadedOnceRef.current = true;
+        const expanded = useStore.getState().taskGroupExpanded;
+        void Promise.all(
+          groups
+            .filter((g) => (expanded[g.id] ?? true) && (g.taskCount ?? 0) > 0)
+            .map((g) => ensureGroupLoaded(g.id)),
+        );
+        return;
+      } catch {
+        // 后端 tasks 路由未就绪，降级到 session 适配
+      }
 
-    // 降级：api.listSessions() 适配为 TaskItem[]（attempts 取小值：到达此处多为路由缺失而非瞬时故障）
+      // 降级：api.listSessions() 适配为 TaskItem[]（attempts 取小值：到达此处多为路由缺失而非瞬时故障）
+      try {
+        const { sessions } = await withRetry(() => api.listSessions(), { attempts: 2 });
+        const tasks: TaskItem[] = sessions.map((s) => ({
+          id: s.id,
+          title: `任务 ${s.id.slice(-6)}`,
+          groupId: 'default',
+          createdAt: s.createdAt,
+          updatedAt: s.updatedAt,
+          sessionId: s.id,
+        }));
+        // 默认分组
+        setTaskGroups([{ id: 'default', name: '默认', expanded: true }]);
+        applyFullTaskSnapshot(tasks);
+      } catch (err) {
+        // 后端未启动，静默
+        console.warn('useTasks load failed:', err);
+      }
+    })();
+    loadInFlightRef.current = runner;
     try {
-      const { sessions } = await withRetry(() => api.listSessions(), { attempts: 2 });
-      const tasks: TaskItem[] = sessions.map((s) => ({
-        id: s.id,
-        title: `任务 ${s.id.slice(-6)}`,
-        groupId: 'default',
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-        sessionId: s.id,
-      }));
-      // 默认分组
-      setTaskGroups([{ id: 'default', name: '默认', expanded: true }]);
-      applyFullTaskSnapshot(tasks);
-    } catch (err) {
-      // 后端未启动，静默
-      console.warn('useTasks load failed:', err);
+      await runner;
+    } finally {
+      loadInFlightRef.current = null;
     }
   }, [setTaskGroups, resetGroupTasks, ensureGroupLoaded, applyFullTaskSnapshot]);
 
@@ -163,7 +200,7 @@ export function useTasks() {
       // 移组后源组可能作为空文件夹分组被后端销毁：后端已广播最新分组列表，
       // 广播不可用（WS 未连接）时才兜底重拉
       if (patch.groupId !== undefined && sourceGroupId && sourceGroupId !== task.groupId) {
-        if (useStore.getState().wsStatus !== 'open') await load();
+        if (useStore.getState().wsStatus !== 'open') await load({ preserveTasks: true });
       }
       return task;
     } catch (err) {
@@ -178,7 +215,7 @@ export function useTasks() {
       useStore.getState().removeTask(id);
       // 后端已广播 task.deleted + task-groups.changed（含空分组自动销毁）→ 无需重拉；
       // 仅在广播不可用（WS 未连接）时兜底刷新，避免列表与后端漂移
-      if (useStore.getState().wsStatus !== 'open') await load();
+      if (useStore.getState().wsStatus !== 'open') await load({ preserveTasks: true });
     } catch (err) {
       console.warn('deleteTask failed:', err);
     }
@@ -225,7 +262,7 @@ export function useTasks() {
       await api.deleteTaskGroup(id, moveTasksTo, deleteTasks);
       useStore.getState().removeTaskGroup(id);
       // 组内任务可能被迁移/批量删除：后端已广播完整任务+分组快照；WS 不可用时兜底重拉
-      if (useStore.getState().wsStatus !== 'open') await load();
+      if (useStore.getState().wsStatus !== 'open') await load({ preserveTasks: true });
     } catch (err) {
       console.warn('deleteTaskGroup failed:', err);
     }

@@ -162,12 +162,27 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   // 删除分组时是否连同组内所有任务一并删除（否则任务迁回默认分组）
   const [deleteGroupAlsoTasks, setDeleteGroupAlsoTasks] = useState(false);
 
-  const toggleGroup = (groupId: string) => {
-    setTaskGroupExpanded(groupId, !(groupExpanded[groupId] ?? true));
-  };
+  /**
+   * 展开/收起分组。
+   * 关键：只在「本次变为展开」时加载该组，绝不因为其他分组 toggle 而遍历所有展开组——
+   * 旧实现每次 groupExpanded 变化都对所有展开组调 ensureGroupLoaded，
+   * 任何一组处于未加载/失败态就会被顺带重新请求（表现为「关一个组，另一个组重新加载」）。
+   */
+  const toggleGroup = useCallback(
+    (groupId: string) => {
+      const next = !(groupExpanded[groupId] ?? true);
+      setTaskGroupExpanded(groupId, next);
+      if (next) void ensureGroupLoaded(groupId);
+    },
+    [groupExpanded, setTaskGroupExpanded, ensureGroupLoaded],
+  );
 
-  // 按需加载：展开中的分组（含初始默认展开）自动加载其任务（幂等，已加载/加载中会跳过）
+  // 首载预载：仅在分组列表首次就绪时，对「默认展开且非空」的组各加载一次。
+  // seededRef 保证后续任何 toggle / 广播刷新都不会再次触发全量预载。
+  const seededRef = useRef(false);
   useEffect(() => {
+    if (seededRef.current || taskGroups.length === 0) return;
+    seededRef.current = true;
     for (const g of taskGroups) {
       if ((groupExpanded[g.id] ?? true) && (g.taskCount ?? 0) > 0) void ensureGroupLoaded(g.id);
     }
@@ -243,14 +258,16 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const visibleTaskIds = tasks.map((t) => t.id);
   const allSelected = visibleTaskIds.length > 0 && visibleTaskIds.every((id) => selectedIds.has(id));
 
-  const toggleSelect = (id: string) => {
+  // 稳定引用：TaskRow 是 memo 组件；分组展开/收起导致 Sidebar 重渲染时，
+  // 内联箭头会让所有行的 props 变化 → 整个列表重渲染（观感上的「列表重新加载」）。
+  const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }, []);
 
   const toggleSelectAll = () => {
     setSelectedIds(allSelected ? new Set() : new Set(visibleTaskIds));
@@ -270,7 +287,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
     setSelectedIds(new Set());
     setBatchDeleteOpen(false);
     // 删除广播已实时同步侧边栏；仅在广播不可用（WS 未连接）时兜底全量刷新
-    if (useStore.getState().wsStatus !== 'open') await reload();
+    if (useStore.getState().wsStatus !== 'open') await reload({ preserveTasks: true });
     goHomeIfTaskGone(activeBefore);
   };
 
@@ -450,13 +467,13 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
         // 跨组：先移组（后端搬移 session 文件），再把目标组完整序列写入精确位置
         const moved = await updateTask(activeId, { groupId: movedTask.groupId });
         if (!moved) {
-          await reload(); // 持久化失败：全量刷新校正
+          await reload({ preserveTasks: true }); // 持久化失败：全量刷新校正（保留已物化任务）
           return;
         }
       }
       const targetIds = final.filter((t) => t.groupId === movedTask.groupId).map((t) => t.id);
       const reordered = await reorderTasks(targetIds);
-      if (!reordered) await reload(); // 持久化失败：全量刷新校正
+      if (!reordered) await reload({ preserveTasks: true }); // 持久化失败：全量刷新校正
     })();
   };
 
@@ -798,6 +815,9 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                           <ListLoadMoreSentinel
                             onVisible={() => void loadMoreGroup(group.id)}
                             loading={meta.loading}
+                            // 仅在该组展开时观察：关闭其他分组改变布局时，
+                            // 不能让本组底部哨兵因视口变化而误触发续载。
+                            enabled={expanded}
                           />
                         )}
                       </CollapsibleContent>
@@ -1177,25 +1197,64 @@ function GroupHeaderDrop({ groupId, children }: { groupId: string; children: Rea
   );
 }
 
+/** 向上查找最近的滚动祖先（IntersectionObserver 的 root 必须是目标祖先） */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const style = window.getComputedStyle(node);
+    if (/(auto|scroll|overlay)/.test(style.overflowY)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 /**
  * 滚动加载哨兵：进入视口（列表滚到底部附近）即触发追加下一页。
- * IntersectionObserver 不依赖具体滚动容器（滚动发生在 shadcn Sidebar 内层）；
- * rootMargin 提前 300px 触发，滚动到底前页面已在加载。
+ *
+ * 重要修正：
+ * - root 固定为侧边栏滚动容器（旧实现用默认视口：关闭任一分组改变布局时，
+ *   其他组的哨兵会被动进入视口 → 自动续载 → 用户看到「另一个组重新加载」）。
+ * - enabled 仅在该组展开时为 true。
+ * - onVisible 放 ref（调用处是内联箭头，每次 Sidebar 重渲染都会变；
+ *   作为 effect 依赖会不断重建 observer，造成抖动/重复触发）。
+ * - 2s 去抖：同一哨兵短时间只触发一次。
  */
-function ListLoadMoreSentinel({ onVisible, loading }: { onVisible: () => void; loading: boolean }) {
+function ListLoadMoreSentinel({
+  onVisible,
+  loading,
+  enabled = true,
+}: {
+  onVisible: () => void;
+  loading: boolean;
+  enabled?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  const onVisibleRef = useRef(onVisible);
+  onVisibleRef.current = onVisible;
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+  /** 上次触发时刻（去抖） */
+  const lastTriggerRef = useRef(0);
+
   useEffect(() => {
+    if (!enabled) return;
     const el = ref.current;
     if (!el || typeof IntersectionObserver === 'undefined') return;
+    const root = findScrollParent(el);
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting) && !loading) onVisible();
+        if (!entries.some((e) => e.isIntersecting) || loadingRef.current) return;
+        const now = Date.now();
+        if (now - lastTriggerRef.current < 2000) return;
+        lastTriggerRef.current = now;
+        onVisibleRef.current();
       },
-      { rootMargin: '300px' },
+      { root, rootMargin: '120px' },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [onVisible, loading]);
+  }, [enabled]);
+
   return (
     <div ref={ref} className="flex items-center justify-center py-2 text-xs text-muted-foreground">
       <Loader2 className="size-3.5 animate-spin" />

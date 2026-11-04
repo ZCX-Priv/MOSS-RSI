@@ -1184,6 +1184,7 @@ export const en = {
   hub: {
     statusIdle: 'Idle',
     statusRunning: 'Running',
+    statusStopping: 'Stopping',
     todoModule: 'Todo',
     permissionModule: 'Permissions',
     askModule: 'Ask',
