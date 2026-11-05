@@ -1,12 +1,21 @@
 // webui/src/components/shared/ConfirmPromptCard.tsx
-// 确认卡片：渲染 safety 模块决策为 ask 的工具调用（terminal/write/edit/delete/MCP 等），
-// 提供「允许 / 始终允许(本会话|全局) / 拒绝」三级按钮，调用 replyConfirm 打通链路。
-// confirm 不进入 message.toolCalls（走独立 WS 事件 → store.pendingConfirms），故需独立渲染。
+// 权限确认向导：把一个 session 内全部 pending confirm 合并为一张卡，逐条（一屏一项）处理，
+// 支持左右切换顺序（1 / N）。三级操作（允许 / 始终允许(本会话|全局) / 拒绝）不变。
 // 样式与 AskPromptCard 一致，保证视觉统一。
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShieldAlert, Check, X, Loader2, ChevronDown, Infinity as InfinityIcon, Clock3 } from 'lucide-react';
+import {
+  ShieldAlert,
+  Check,
+  X,
+  Loader2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Infinity as InfinityIcon,
+  Clock3,
+} from 'lucide-react';
 import type { PendingConfirm } from '../../types/api';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -19,7 +28,8 @@ import {
 import { useTask } from '../../hooks/useTask';
 
 interface ConfirmPromptCardProps {
-  confirm: PendingConfirm;
+  /** 同一 session 的全部待确认权限（按 createdAt 升序合并为一张向导） */
+  confirms: PendingConfirm[];
   className?: string;
 }
 
@@ -44,20 +54,37 @@ function formatDetails(toolName: string, details: unknown): string {
   }
 }
 
-export function ConfirmPromptCard({ confirm, className }: ConfirmPromptCardProps) {
+export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProps) {
   const { t } = useTranslation();
   const { replyConfirm } = useTask();
   const [sending, setSending] = useState(false);
+  const [step, setStep] = useState(0);
+
+  // 合并向导：固定按收到时间升序，步进顺序稳定
+  const sorted = useMemo(
+    () => [...confirms].sort((a, b) => a.createdAt - b.createdAt),
+    [confirms],
+  );
+
+  // 当前项被处理（confirms 收缩）→ 收敛步进并复位提交态
+  useEffect(() => {
+    setSending(false);
+    if (step > sorted.length - 1) setStep(Math.max(0, sorted.length - 1));
+  }, [sorted.length, step]);
+
+  const current = sorted[Math.min(step, Math.max(0, sorted.length - 1))];
+  if (!current) return null;
 
   const handle = (ok: boolean, remember?: 'session' | 'global') => {
     if (sending) return;
     setSending(true);
-    // replyConfirm 同步发送 WS tool.confirm.reply（含 remember 级别）并 removePendingConfirm，
-    // 本组件随 store 变化自动卸载，无需额外清理
-    replyConfirm(confirm.sessionId, confirm.toolCallId, ok, remember);
+    replyConfirm(current.sessionId, current.toolCallId, ok, remember);
   };
 
-  const detailsText = formatDetails(confirm.toolName, confirm.details);
+  const detailsText = formatDetails(current.toolName, current.details);
+  const total = sorted.length;
+  const isFirst = step <= 0;
+  const isLast = step >= total - 1;
 
   return (
     <div
@@ -66,16 +93,45 @@ export function ConfirmPromptCard({ confirm, className }: ConfirmPromptCardProps
         className,
       )}
     >
-      {/* 头部 */}
+      {/* 头部：标题 + 步骤进度 + 顺序切换 */}
       <div className="flex items-center gap-1.5">
         <ShieldAlert className="size-3.5 text-amber-600" />
         <span className="text-xs font-medium text-foreground">
           {t('task.confirmTitle')}
-          {confirm.toolName ? ` · ${confirm.toolName}` : ''}
+          {current.toolName ? ` · ${current.toolName}` : ''}
         </span>
+        {total > 1 && (
+          <span className="text-[11px] text-muted-foreground">
+            {t('task.askStepOf', { current: step + 1, total })}
+          </span>
+        )}
+        {total > 1 && (
+          <div className="ml-auto flex shrink-0 items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => setStep((s) => Math.max(0, s - 1))}
+              disabled={isFirst || sending}
+              title={t('task.askPrev')}
+              aria-label={t('task.askPrev')}
+            >
+              <ChevronLeft className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => setStep((s) => Math.min(total - 1, s + 1))}
+              disabled={isLast || sending}
+              title={t('task.askNext')}
+              aria-label={t('task.askNext')}
+            >
+              <ChevronRight className="size-3.5" />
+            </Button>
+          </div>
+        )}
       </div>
       {/* 提示文案 */}
-      <p className="whitespace-pre-wrap text-sm text-foreground">{confirm.question}</p>
+      <p className="whitespace-pre-wrap text-sm text-foreground">{current.question}</p>
       {/* 参数详情 */}
       {detailsText && (
         <div className="rounded-md bg-muted/60 p-2">
@@ -88,14 +144,14 @@ export function ConfirmPromptCard({ confirm, className }: ConfirmPromptCardProps
         </div>
       )}
       {/* 「始终允许」规则预览（safety 模块生成的建议规则） */}
-      {confirm.ruleSuggestion && (
+      {current.ruleSuggestion && (
         <div className="rounded-md border border-border bg-muted/40 px-2 py-1.5">
           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <Clock3 className="size-3 shrink-0" />
             <span>
               {t('task.confirmRulePreview')}
               <code className="ml-1 rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">
-                {confirm.ruleSuggestion}
+                {current.ruleSuggestion}
               </code>
             </span>
           </div>
@@ -113,7 +169,7 @@ export function ConfirmPromptCard({ confirm, className }: ConfirmPromptCardProps
           {sending ? <Loader2 className="size-3.5 animate-spin" /> : <X className="size-3.5" />}
           <span>{t('task.confirmCancel')}</span>
         </Button>
-        {confirm.ruleSuggestion && (
+        {current.ruleSuggestion && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button

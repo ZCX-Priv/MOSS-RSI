@@ -535,7 +535,7 @@ export const api = {
   listTaskGroups: () => request<{ groups: TaskGroup[] }>('GET', '/api/task-groups'),
   createTaskGroup: (name: string, source?: 'folder' | 'manual') =>
     request<TaskGroup>('POST', '/api/task-groups', { name, source }),
-  updateTaskGroup: (id: string, patch: { name?: string }) =>
+  updateTaskGroup: (id: string, patch: { name?: string; expanded?: boolean }) =>
     request<TaskGroup>('PATCH', `/api/task-groups/${id}`, patch),
   deleteTaskGroup: (id: string, moveTasksTo?: string, deleteTasks?: boolean) =>
     request<{ deleted: boolean }>('DELETE', `/api/task-groups/${id}`, { moveTasksTo, deleteTasks }),

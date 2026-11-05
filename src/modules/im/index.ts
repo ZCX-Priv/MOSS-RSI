@@ -1,6 +1,9 @@
 // src/modules/im/index.ts
 // IM 连接模块入口：加载配置 → 注册 /api/im/* 路由 → 注册 im.service → 启动已启用机器人。
 // 依赖：server（路由/WS 广播）、agent（消息到达时 run）；均为运行期 tryResolve，不阻塞初始化。
+//
+// 启动性能：store/state 的磁盘读取与机器人网络握手全部在 warmup 中完成，
+// initialize 只做控制器/路由/服务注册（毫秒级）。
 
 import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
@@ -23,13 +26,15 @@ class ImModule implements Module {
   private ctx!: ModuleContext;
   private controller: ImController | null = null;
   private provisioning: ImProvisioningManager | null = null;
+  private store: ImBotStore | null = null;
+  private state: ImStateStore | null = null;
 
   async initialize(ctx: ModuleContext): Promise<void> {
     this.ctx = ctx;
     const store = new ImBotStore(ctx.env.dataDir, ctx.logger);
     const state = new ImStateStore(ctx.env.dataDir, ctx.logger);
-    await store.load();
-    await state.load();
+    this.store = store;
+    this.state = state;
 
     const server = ctx.services.tryResolve<ServerInstance>(ServiceNames.SERVER_INSTANCE);
     const controller = new ImController({
@@ -67,11 +72,22 @@ class ImModule implements Module {
       { scope: 'im' },
     );
 
-    // 机器人连接在后台进行：微信/QQ 网络握手可能数十秒（网络不可用时更久），
-    // 绝不能让 IM 模块初始化阻塞内核就绪（实测曾拖慢启动 16s+）。
-    const bots = store.list();
-    void controller
-      .startAll()
+    ctx.logger.info('im: module initialized (data load deferred to warmup)');
+  }
+
+  /** 后台预热：读取机器人与状态存储，然后连接已启用机器人（网络握手可能数十秒） */
+  async warmup(ctx: ModuleContext): Promise<void> {
+    try {
+      await this.store?.load();
+      await this.state?.load();
+    } catch (err) {
+      ctx.logger.warn('im: store load failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const bots = this.store?.list() ?? [];
+    void this.controller
+      ?.startAll()
       .catch((err: unknown) => {
         ctx.logger.warn(t('im.moduleInitialized', { bots: bots.length, enabled: 0 }), {
           error: err instanceof Error ? err.message : String(err),
@@ -80,7 +96,7 @@ class ImModule implements Module {
     ctx.logger.info(
       t('im.moduleInitialized', {
         bots: bots.length,
-        enabled: bots.filter(bot => bot.enabled).length,
+        enabled: bots.filter((bot) => bot.enabled).length,
       }),
     );
   }

@@ -180,8 +180,9 @@ export interface ServiceRegistry {
 // ============================================================================
 
 // type-only import：编译时擦除，无运行时循环依赖
-// ToolsConfig 从 manifest 的 Zod schema 推导，保持类型与 schema 永远一致
-import type { ToolsConfig } from '../modules/tools/manifest';
+// 工具配置是动态键（内置 19 个 + 自定义），启动路径不做 zod 推导，这里用宽松映射，
+// 具体字段约束由 src/core/config-schema.ts 在写入/变更时校验。
+export type ToolsConfig = Record<string, Record<string, unknown>>;
 import type { FileHistoryConfig } from '../modules/file-history/types';
 import type { FilesysConfig } from '../modules/filesys/types';
 import type { SafetyConfig } from '../modules/safety/types';
@@ -474,6 +475,12 @@ export interface ModuleContext {
 /** 模块主接口 */
 export interface Module {
   initialize(context: ModuleContext): Promise<void>;
+  /**
+   * 后台预热（可选）：在 kernel:ready 之后运行，不参与启动 3s 验收。
+   * 用于技能播种、会话索引、文件历史迁移、扩展播种等重活；
+   * 实现方必须分片让出事件循环，避免阻塞首条消息。
+   */
+  warmup?(context: ModuleContext): Promise<void>;
   destroy?(): Promise<void>;
 }
 

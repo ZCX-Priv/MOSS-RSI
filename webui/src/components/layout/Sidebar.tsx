@@ -151,9 +151,6 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteTaskId, setDeleteTaskId] = useState<string | null>(null);
 
-  // 分组展开/收起状态：来自全局 store（IndexedDB 持久化，刷新后保持）
-  const groupExpanded = useStore((s) => s.taskGroupExpanded);
-  const setTaskGroupExpanded = useStore((s) => s.setTaskGroupExpanded);
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [renameGroup, setRenameGroup] = useState<TaskGroup | null>(null);
@@ -164,29 +161,26 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
 
   /**
    * 展开/收起分组。
-   * 关键：只在「本次变为展开」时加载该组，绝不因为其他分组 toggle 而遍历所有展开组——
-   * 旧实现每次 groupExpanded 变化都对所有展开组调 ensureGroupLoaded，
-   * 任何一组处于未加载/失败态就会被顺带重新请求（表现为「关一个组，另一个组重新加载」）。
+   * - 展开状态以后端 `TaskGroup.expanded` 为唯一真相（task.json 持久化，跨端一致）；
+   * - 先本地乐观更新（列表立即响应），再 PATCH 后端；失败回滚。
+   * - 只在「本次变为展开」时加载该组，绝不因其他分组 toggle 而遍历所有组。
    */
   const toggleGroup = useCallback(
     (groupId: string) => {
-      const next = !(groupExpanded[groupId] ?? true);
-      setTaskGroupExpanded(groupId, next);
+      const group = useStore.getState().taskGroups.find((g) => g.id === groupId);
+      if (!group) return;
+      const next = !(group.expanded ?? (group.id === 'default'));
+      useStore.getState().updateTaskGroup(groupId, { expanded: next });
       if (next) void ensureGroupLoaded(groupId);
+      void updateTaskGroup(groupId, { expanded: next }).then((updated) => {
+        if (!updated) {
+          // 持久化失败：回滚本地乐观状态（下次 reload 也会以服务端为准校正）
+          useStore.getState().updateTaskGroup(groupId, { expanded: !next });
+        }
+      });
     },
-    [groupExpanded, setTaskGroupExpanded, ensureGroupLoaded],
+    [ensureGroupLoaded, updateTaskGroup],
   );
-
-  // 首载预载：仅在分组列表首次就绪时，对「默认展开且非空」的组各加载一次。
-  // seededRef 保证后续任何 toggle / 广播刷新都不会再次触发全量预载。
-  const seededRef = useRef(false);
-  useEffect(() => {
-    if (seededRef.current || taskGroups.length === 0) return;
-    seededRef.current = true;
-    for (const g of taskGroups) {
-      if ((groupExpanded[g.id] ?? true) && (g.taskCount ?? 0) > 0) void ensureGroupLoaded(g.id);
-    }
-  }, [taskGroups, groupExpanded, ensureGroupLoaded]);
 
   const handleCreateGroup = async () => {
     if (newGroupName.trim()) {
@@ -375,9 +369,12 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
     // 悬停折叠组标题：短延时自动展开（防闪烁），展开后即可落入组内精确位置
     if (overId.startsWith('group-header:')) {
       const groupId = overId.slice('group-header:'.length);
-      if (!(groupExpanded[groupId] ?? true) && expandTimerRef.current === null) {
+      const target = useStore.getState().taskGroups.find((g) => g.id === groupId);
+      const isExpanded = target?.expanded ?? (groupId === 'default');
+      if (!isExpanded && expandTimerRef.current === null) {
         expandTimerRef.current = setTimeout(() => {
-          setTaskGroupExpanded(groupId, true);
+          // 拖拽进折叠组：与手动展开同一路径（乐观更新 + 后端持久化 + 懒加载）
+          toggleGroup(groupId);
           expandTimerRef.current = null;
         }, 350);
       }
@@ -736,7 +733,8 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 .map((group) => {
                 const groupTasks = displayTasks.filter((task) => task.groupId === group.id);
                 const groupTaskIds = groupTasks.map((t) => t.id);
-                const expanded = groupExpanded[group.id] ?? true;
+                // 展开状态以后端 group.expanded 为准（默认分组缺省展开，其余缺省折叠）
+                const expanded = group.expanded ?? (group.id === 'default');
                 const meta = groupTasksMeta[group.id];
                 const GroupIcon = expanded ? FolderOpen : Folder;
                 // 默认分组为常驻分组：文案固定且随语言本地化
@@ -792,6 +790,13 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                       <CollapsibleContent>
                         {/* 组级 droppable：拖入组内任意位置（含空白/空组）即移入该组 */}
                         <GroupDropZone groupId={group.id} empty={groupTasks.length === 0}>
+                          {/* 分组首次加载占位：只在拉取第 1 页时出现（标题行不再转圈） */}
+                          {meta?.loading && !meta?.loaded && (
+                            <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground">
+                              <Loader2 className="size-3.5 animate-spin" />
+                              <span>{t('common.loading')}</span>
+                            </div>
+                          )}
                           <SidebarMenuSub className="mr-0 pr-0">
                             <SortableContext items={groupTaskIds} strategy={verticalListSortingStrategy}>
                               {groupTasks.map((task) => (
@@ -810,8 +815,8 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                             </SortableContext>
                           </SidebarMenuSub>
                         </GroupDropZone>
-                        {/* 组内续载哨兵：该组仍有下一页（或正在加载）时置于组内底部，进入视口即续载 */}
-                        {meta && (meta.hasMore || meta.loading) && (
+                        {/* 组内续载哨兵：仅在该组仍有下一页时置于组内底部，进入视口即续载 */}
+                        {meta?.hasMore && (
                           <ListLoadMoreSentinel
                             onVisible={() => void loadMoreGroup(group.id)}
                             loading={meta.loading}
@@ -1257,7 +1262,13 @@ function ListLoadMoreSentinel({
 
   return (
     <div ref={ref} className="flex items-center justify-center py-2 text-xs text-muted-foreground">
-      <Loader2 className="size-3.5 animate-spin" />
+      {loading ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        // 有下一页但当前未在加载：保留静态占位供 IntersectionObserver 观察，
+        // 不旋转（否则看起来像永久加载中）
+        <span className="h-1 w-6 rounded-full bg-muted-foreground/20" aria-hidden="true" />
+      )}
     </div>
   );
 }

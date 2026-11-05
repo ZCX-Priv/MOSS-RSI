@@ -11,13 +11,20 @@ import { existsSync, statSync, watch, mkdirSync, readdirSync, type FSWatcher } f
 import { ToolRegistryImpl } from './registry';
 import { createSkillRegistry } from './shared/skill-registry';
 import { createCommandRegistry } from './use_command/registry';
-import { BUILTIN_TOOL_NAMES } from './manifest';
-import { loadToolDescriptorsFromDir, loadToolFromDir, resolveBuiltinDir } from './loader';
+import { builtinToolNames } from './manifest';
+import {
+  loadToolDescriptorsFromDir,
+  loadToolDescriptorsFromPrebuilt,
+  loadToolFromDir,
+  resolveBuiltinDir,
+} from './loader';
 import type { Tool } from './types';
+import type { SkillRegistry } from './shared/skill-registry';
 
 class ToolsModule implements Module {
 
   private registry: ToolRegistryImpl | null = null;
+  private skillRegistry: SkillRegistry | null = null;
   private ctx: ModuleContext | null = null;
   /** 已加载的内置工具（含 disabled 的，供 config 热重载启用时直接注册） */
   private loadedBuiltinTools: Tool[] = [];
@@ -29,16 +36,15 @@ class ToolsModule implements Module {
   async initialize(ctx: ModuleContext): Promise<void> {
     this.ctx = ctx;
     this.registry = new ToolRegistryImpl(ctx.logger, ctx.config);
+    // 技能/命令注册表立即返回：技能播种与文件扫描在 warmup 后台执行
     const skillRegistry = createSkillRegistry(ctx.env, ctx.logger, ctx.eventBus, ctx.config);
+    this.skillRegistry = skillRegistry;
     const commandRegistry = createCommandRegistry(ctx.env, ctx.logger, ctx.eventBus);
 
-    // 1. 加载并注册内置工具（从 tools 目录，按 config 过滤）
+    // 1. 加载并注册内置工具（生产读预生成清单，一次 IO；按 config 过滤启用状态）
     await this.loadAndRegisterBuiltinTools(ctx);
 
-    // 2. 加载自定义工具（~/.moss/tools/）
-    await this.loadCustomTools(ctx);
-
-    // 3. 注册服务（受保护服务名，由模块注册）
+    // 2. 注册服务（受保护服务名，由模块注册）
     ctx.services.register(ServiceNames.TOOL_REGISTRY, this.registry, {
       scope: 'tools',
     });
@@ -49,12 +55,31 @@ class ToolsModule implements Module {
       scope: 'tools',
     });
 
-    // 4. 热重载：工具启用/禁用由 registry.isEnabled 实时读取 config，
-    //    listSchemas()/execute() 据此过滤，无需在此监听 config 变更做增删注册。
-    //    文件级热重载（tool.json/index.ts 变更）由下方 startBuiltinWatch/startCustomWatch 处理。
-
     ctx.logger.info(t('tools.moduleInitialized'), {
       tools: this.registry.list().length,
+    });
+  }
+
+  /**
+   * 后台预热（kernel:ready 之后）：技能播种/加载、自定义工具扫描、目录 watcher。
+   * 这些操作与首条对话无关，必须移出启动关键路径。
+   */
+  async warmup(ctx: ModuleContext): Promise<void> {
+    // 1. 等待技能后台加载完成（失败已在内部记录，不阻断工具使用）
+    try {
+      await this.skillRegistry?.whenReady();
+    } catch {
+      // 技能加载失败不影响工具
+    }
+    // 2. 扫描自定义工具
+    await this.loadCustomTools(ctx);
+    // 3. 内置工具目录热重载监听（延迟启动，避免启动期 watcher 开销）
+    const builtinDir = resolveBuiltinDir(ctx.env);
+    if (builtinDir) setTimeout(() => this.startBuiltinWatch(builtinDir, ctx), 1000);
+    // 4. 通知前端刷新资源列表
+    void ctx.eventBus.broadcast('resources:changed', { kind: 'skill', name: '*' });
+    ctx.logger.info('tools: warmup completed', {
+      tools: this.registry?.list().length ?? 0,
     });
   }
 
@@ -71,20 +96,18 @@ class ToolsModule implements Module {
       return;
     }
 
-    ctx.logger.info(t('tools.loadingBuiltin'), { dir: builtinDir });
-    // 启动期只读 manifest（不 import 重依赖实现）：execute 首次调用才惰性加载 index.ts
-    this.loadedBuiltinTools = await loadToolDescriptorsFromDir(builtinDir, ctx.env, ctx.logger, 'builtin');
+    // 生产：只读 build 预生成的 _tools.json（一次 IO）；
+    // 开发态清单缺失时回退逐目录扫描（仅开发模式承担）。
+    const prebuilt = loadToolDescriptorsFromPrebuilt(builtinDir, ctx.env, ctx.logger);
+    this.loadedBuiltinTools =
+      prebuilt ?? (await loadToolDescriptorsFromDir(builtinDir, ctx.env, ctx.logger, 'builtin'));
 
     // 注册全部内置工具（含 disabled 的）：启用状态由 registry.isEnabled 实时读取 config，
     // listSchemas() 据此过滤给 LLM。这样 config 变更无需增删注册，且前端可见全部工具。
     for (const tool of this.loadedBuiltinTools) {
       this.registry!.register(tool);
     }
-    // 内容签名不再在启动期全量 stat（1 核低主频机器上是明显启动开销）：
-    // 首次 watcher 事件时惰性建立基线，建立基线的那一次事件只记录不重载。
-
-    // 启动内置工具目录热重载监听
-    this.startBuiltinWatch(builtinDir, ctx);
+    // 内容签名与 watcher 都在 warmup 中惰性建立/启动（1 核低主频机器上启动期 stat 是明显开销）。
   }
 
   /** 从 ~/.moss/tools/ 加载自定义工具（错误隔离，单个失败不影响其他） */
@@ -110,7 +133,7 @@ class ToolsModule implements Module {
     const tools = await loadToolDescriptorsFromDir(dir, ctx.env, ctx.logger, 'custom');
     for (const tool of tools) {
       // 不允许覆盖内置工具
-      if (BUILTIN_TOOL_NAMES.has(tool.name)) {
+      if (builtinToolNames().has(tool.name)) {
         ctx.logger.warn(t('tools.customConflictsBuiltin', { name: tool.name, dir: tool.sourceDir ?? '' }));
         continue;
       }
@@ -331,7 +354,7 @@ class ToolsModule implements Module {
     }
 
     // 自定义工具不允许覆盖内置工具
-    if (source === 'custom' && BUILTIN_TOOL_NAMES.has(tool.name)) {
+    if (source === 'custom' && builtinToolNames().has(tool.name)) {
       this.registry.removeBySourceDir(toolDir);
       ctx.logger.warn(t('tools.customConflictsBuiltinRemoved', { name: tool.name }), { dir: toolDir });
       this.notifyToolChanged(ctx, tool.name);

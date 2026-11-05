@@ -3,7 +3,15 @@
 // 解决 Windows 中文环境下 GBK/CP936 输出被强制按 UTF-8 解码导致的乱码，
 // 以及 BOM 文件读取异常、二进制检测误判中文等问题。
 
-import iconv from 'iconv-lite';
+// 说明：不使用 iconv-lite 顶层 import —— 它会拉入 readable-stream/string_decoder 等
+// 约 944KB 的 node polyfill，进入启动静态闭包。Bun/Node 内置 TextDecoder 已支持 gbk。
+let gbkDecoder: TextDecoder | null = null;
+
+/** GBK 解码（懒创建 TextDecoder；解码失败由调用方回退 UTF-8） */
+function decodeGbk(buf: Buffer): string {
+  if (!gbkDecoder) gbkDecoder = new TextDecoder('gbk');
+  return gbkDecoder.decode(buf);
+}
 
 /**
  * 严格验证字节流是否为合法 UTF-8。
@@ -164,7 +172,7 @@ export function decodeTerminalOutput(buf: Buffer): string {
   //    （如 é = 0xC3 0xA9 在 GBK 中恰为「茅」）应回退 UTF-8
   if (stats.valid && stats.twoByteSeqCount > 0 && stats.cjkSeqCount === 0) {
     try {
-      const gbkDecoded = iconv.decode(buf, 'gbk');
+      const gbkDecoded = decodeGbk(buf);
       const cjkCount = (gbkDecoded.match(/[\u4e00-\u9fff]/g) || []).length;
       if (cjkCount >= 2) {
         return gbkDecoded;
@@ -183,7 +191,7 @@ export function decodeTerminalOutput(buf: Buffer): string {
 
   // 4. 有非法 UTF-8 字节 → GBK 回退
   try {
-    return iconv.decode(buf, 'gbk');
+    return decodeGbk(buf);
   } catch {
     return buf.toString('utf8');
   }

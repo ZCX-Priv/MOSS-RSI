@@ -55,12 +55,16 @@ function toIndex(raw: string | undefined): number | undefined {
 
 export function createListSessionsHandler(services: ServiceRegistry): RouteHandler {
   return async (): Promise<HttpResponse> => {
-    const agent = services.tryResolve<AgentEngine & { listSessions?: () => unknown[] }>('agent.engine');
+    const agent = services.tryResolve<
+      AgentEngine & { listSessions?: () => unknown[]; whenReady?: () => Promise<void> }
+    >('agent.engine');
     if (!agent?.listSessions) {
       // 503 语义：agent 模块晚于 server 初始化，启动窗口内引擎可能尚未注册。
       // 返回可重试错误而非 200 空列表，避免前端把「未就绪」当成「无会话」而不再重试。
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
+    // 磁盘索引在后台异步构建：列表请求等待就绪，绝不返回「不完整的空列表」
+    await agent.whenReady?.();
     return { status: 200, body: { sessions: agent.listSessions() } };
   };
 }

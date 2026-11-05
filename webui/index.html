@@ -36,9 +36,31 @@
         <div class="moss-boot-wordmark">
           <span class="moss-boot-word">MOSS</span>
         </div>
-        <div class="moss-boot-status">正在加载 / Loading…</div>
+        <div class="moss-boot-status" id="moss-boot-status">Loading…</div>
       </div>
     </div>
+    <script>
+      /* 启动骨架文案按语言显示：优先 localStorage 快照（moss-locale-fast，由 main.tsx
+         的 initLocale 写入），其次旧值 moss-locale，最后跟随浏览器语言。
+         须在骨架渲染前同步执行，避免中文界面出现英文 Loading。 */
+      (function () {
+        var lang = 'zh';
+        try {
+          var fast = localStorage.getItem('moss-locale-fast');
+          var legacy = localStorage.getItem('moss-locale');
+          var choice = fast === 'zh' || fast === 'en' ? fast : legacy;
+          if (choice === 'zh' || choice === 'en') lang = choice;
+          else
+            lang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+        } catch (e) {
+          /* localStorage 不可用：按浏览器语言 */
+          lang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+        }
+        document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+        var el = document.getElementById('moss-boot-status');
+        if (el) el.textContent = lang === 'zh' ? '正在加载' : 'Loading…';
+      })();
+    </script>
     <style>
       /* 全局重置与背景兜底：preflight 尚未加载的窗口期内消除 body 默认 margin 白边；
          html 背景始终为主题色，任何瞬间都不露白底。

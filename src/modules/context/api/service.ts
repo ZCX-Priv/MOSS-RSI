@@ -123,13 +123,17 @@ export class ContextEngineServiceImpl {
     });
   }
 
-  /** 模块初始化：补充播种 compact/heal 提示词目录 */
+  /** 模块初始化：只记录状态；提示词播种移到 onWarmup（启动路径零成本） */
   onInitialize(): void {
-    ensureContextPrompts(this.env);
     this.logger.info('context: engine initialized', {
       compaction: this.getConfig().compaction.enabled ? 'enabled' : 'disabled',
       fileIndex: this.getConfig().fileIndex.indexing.enabled ? 'enabled' : 'disabled',
     });
+  }
+
+  /** 后台预热：补充播种 compact/heal 提示词目录（幂等，仅缺失时复制） */
+  onWarmup(): void {
+    ensureContextPrompts(this.env);
   }
 
   /** 模块销毁：停用文件索引（保数据） */

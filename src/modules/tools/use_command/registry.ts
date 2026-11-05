@@ -222,15 +222,15 @@ export function createCommandRegistry(
     return reg;
   }
 
-  // 同步加载
-  loadCommandsFromDirSync(reg, dir, logger);
-
-  // 热重载监听
-  startWatch(reg, dir, logger, eventBus).catch(err => {
-    logger.debug(t('tools.commandDirWatchUnavailable'), {
-      error: err instanceof Error ? err.message : String(err),
+  // 加载与热重载监听延迟到空闲（启动路径只返回空注册表；斜杠命令不影响首条对话）
+  setTimeout(() => {
+    loadCommandsFromDirSync(reg, dir, logger);
+    startWatch(reg, dir, logger, eventBus).catch(err => {
+      logger.debug(t('tools.commandDirWatchUnavailable'), {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-  });
+  }, 500);
 
   return reg;
 }

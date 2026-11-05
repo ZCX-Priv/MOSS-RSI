@@ -48,7 +48,10 @@ export interface TaskGroup {
 
 /** 总管 task.json 结构 */
 interface TaskRootStore {
-  /** 数据版本：4 = 分散存储体系（总管 + 按组目录） */
+  /**
+   * 数据版本：4 = 分散存储体系（总管 + 按组目录）；
+   * 5 = 分组 expanded 状态后端化（默认分组展开、其余折叠，之后由前端 PATCH 持久化）
+   */
   version?: number;
   groups: TaskGroup[];
   /** taskId → { groupId, sessionId }（调度索引：不读组文件即可解析归属） */
@@ -98,6 +101,8 @@ export class TaskStore {
   private index!: Record<string, { groupId: string; sessionId: string }>;
   /** groupId → 该组任务列表 */
   private readonly tasksByGroup = new Map<string, TaskItem[]>();
+  /** 后台分组加载 promise（惰性启动） */
+  private readyPromise: Promise<void> | null = null;
 
   constructor(env: Environment, logger: Logger) {
     this.rootPath = join(env.dataDir, 'task.json');
@@ -106,7 +111,93 @@ export class TaskStore {
     this.legacySessionsDir = join(env.dataDir, 'sessions');
     this.logger = logger;
     this.migrateFromLegacy();
-    this.load();
+    // 启动只同步读总管 task.json（小文件）；分组扫描与自愈加到 whenReady() 后台执行
+    this.loadRootOnly();
+  }
+
+  /** 分组索引就绪（后台异步扫描；agent warmup / 任务列表路由触发） */
+  whenReady(): Promise<void> {
+    if (!this.readyPromise) this.readyPromise = this.loadGroupsAsync();
+    return this.readyPromise;
+  }
+
+  /** 只读总管：分组定义 + task↔session 索引；各分组任务列表留空待后台填充 */
+  private loadRootOnly(): void {
+    const root = readJsonStore<Partial<TaskRootStore>>(this.rootPath, {} as Partial<TaskRootStore>, this.logger);
+    this.groups = Array.isArray(root.groups) ? [...root.groups] : [];
+    if (!this.groups.find(g => g.id === DEFAULT_GROUP_ID)) {
+      this.groups.unshift({ id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, expanded: true });
+    }
+    // 一次性迁移（v4 → v5）：此前 expanded 从未被前端读写，旧数据里的 true 只是默认值。
+    // 规范化为「默认分组展开、其余折叠」，之后展开/收起由前端 PATCH 持久化，
+    // 跨浏览器/多端以 task.json 为唯一真相。
+    if (root.version !== 5) {
+      this.groups = this.groups.map(g => ({
+        ...g,
+        expanded: g.id === DEFAULT_GROUP_ID,
+      }));
+    }
+    this.index = root.index && typeof root.index === 'object' ? { ...root.index } : {};
+    this.tasksByGroup.clear();
+    for (const g of this.groups) {
+      if (!this.tasksByGroup.has(g.id)) this.tasksByGroup.set(g.id, []);
+    }
+    // 迁移结果落盘（saveRoot 内部写 version: 5）；仅在版本不符时触发，后续启动零开销
+    if (root.version !== 5) this.saveRoot();
+  }
+
+  /**
+   * 后台加载各分组 task.json + 以文件为真相源自愈索引。
+   * 每个一级分组扫描后让出事件循环，避免阻塞首条消息。
+   */
+  private async loadGroupsAsync(): Promise<void> {
+    try {
+      if (existsSync(this.tasksDir)) {
+        for (const entry of readdirSync(this.tasksDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const d1 = safeGroupId(entry.name);
+          if (!d1) continue;
+          this.loadGroupDir(d1);
+          for (const sub of readdirSync(join(this.tasksDir, entry.name), { withFileTypes: true })) {
+            if (!sub.isDirectory()) continue;
+            const d2 = safeGroupId(sub.name);
+            if (!d2) continue;
+            this.loadGroupDir(`${d1}/${d2}`);
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+      // 确保每个分组都有任务列表
+      for (const g of this.groups) {
+        if (!this.tasksByGroup.has(g.id)) this.tasksByGroup.set(g.id, []);
+      }
+      this.rebuildIndexFromDisk();
+    } catch (err) {
+      this.logger.warn('agent: task store background load failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 以磁盘任务为准自愈索引（有变化回写总管），并清理空文件夹分组 */
+  private rebuildIndexFromDisk(): void {
+    let dirty = false;
+    for (const [gid, tasks] of this.tasksByGroup) {
+      for (const tk of tasks) {
+        if (!this.index[tk.id] || this.index[tk.id].groupId !== gid) {
+          this.index[tk.id] = { groupId: gid, sessionId: tk.sessionId ?? tk.id };
+          dirty = true;
+        }
+      }
+    }
+    for (const id of Object.keys(this.index)) {
+      if (!this.findTask(id)) {
+        delete this.index[id];
+        dirty = true;
+      }
+    }
+    if (dirty) this.saveRoot();
+    this.pruneEmptyFolderGroups();
   }
 
   // ==========================================================================
@@ -347,7 +438,8 @@ export class TaskStore {
     const group: TaskGroup = {
       id,
       name: name || '新分组',
-      expanded: true,
+      // 默认折叠：新建分组不触发任务加载，用户首次点击展开时才懒加载
+      expanded: false,
       ...(source ? { source } : {}),
       ...(opts?.dir ? { dir: opts.dir } : {}),
       ...(opts?.hidden ? { hidden: true } : {}),
@@ -358,10 +450,11 @@ export class TaskStore {
     return { ...group, taskCount: 0 };
   }
 
-  updateGroup(id: string, patch: { name?: string }): TaskGroup | null {
+  updateGroup(id: string, patch: { name?: string; expanded?: boolean }): TaskGroup | null {
     const group = this.groups.find(g => g.id === id);
     if (!group) return null;
     if (patch.name !== undefined) group.name = patch.name;
+    if (typeof patch.expanded === 'boolean') group.expanded = patch.expanded;
     this.saveRoot();
     return { ...group, taskCount: (this.tasksByGroup.get(id) ?? []).length };
   }
@@ -540,7 +633,12 @@ export class TaskStore {
               index[task.id] = { groupId: gid, sessionId: task.sessionId ?? task.id };
             }
           }
-          const root: TaskRootStore = { version: 4, groups, index };
+          // 与 v5 迁移口径一致：旧版 expanded 只是默认值，迁移时统一规范化为默认折叠
+          const v5Groups = groups.map(g => ({
+            ...g,
+            expanded: g.id === DEFAULT_GROUP_ID,
+          }));
+          const root: TaskRootStore = { version: 5, groups: v5Groups, index };
           writeJsonStore(this.rootPath, root);
           this.logger.info(t('agent.taskStoreMigrated', { count: legacy.tasks.length }));
         }
@@ -691,7 +789,8 @@ export class TaskStore {
     const placeholder: TaskGroup = {
       id: safeGroupId(relDir) || relDir,
       name: relDir,
-      expanded: true,
+      // 占位分组与普通分组一致：默认折叠（展开时才拉任务）
+      expanded: false,
       dir: relDir,
     };
     this.groups.push(placeholder);
@@ -701,7 +800,7 @@ export class TaskStore {
   /** 写总管 task.json（分组定义 + task↔session 索引） */
   private saveRoot(): void {
     try {
-      const root: TaskRootStore = { version: 4, groups: this.groups, index: this.index };
+      const root: TaskRootStore = { version: 5, groups: this.groups, index: this.index };
       writeJsonStore(this.rootPath, root);
     } catch (err) {
       this.logger.error(t('agent.saveTasksFailed'), {

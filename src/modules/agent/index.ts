@@ -40,6 +40,11 @@ class AgentModule implements Module {
     });
   }
 
+  /** 后台预热：会话/任务磁盘索引（首条对话不依赖索引） */
+  async warmup(): Promise<void> {
+    await this.engine?.whenReady();
+  }
+
   async destroy(): Promise<void> {
     // 取消 filesys 事件订阅（由 engine.dispose 统一处理）
     this.engine?.dispose();

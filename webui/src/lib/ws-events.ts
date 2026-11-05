@@ -1212,27 +1212,39 @@ function ensureStreamingMessage(sessionId: string, messageId?: string): TaskMess
 }
 
 /**
- * 尾部增量补齐（分页循环拉取 after 之后的全部消息）。
+ * 尾部增量补齐（分页循环拉取 after 之后的消息）。
  * 用途：一轮结束 / WS 重连后的「本地流式草稿 → 服务端正式消息」对齐。
  * 循环上限兜底，避免异常游标导致死循环。
+ *
+ * 性能约束（首屏卡顿根因修复）：
+ * - 游标缺失（after < 0）时**不再把全部历史当成增量**：改为只取末页 pageSize 条。
+ *   旧行为在「WS 快照先于 HTTP 首屏返回」时会请求 limit=200&after=-1，
+ *   把三千万级字符的长会话（实测 2.29MB / 92 条）一次性拉回，直接拖垮启动。
+ * - 页大小 200 → 50、最多 4 页（200 条）：断线补齐仍够用，单次解析量可控。
  */
 export async function fetchTailPages(
   sessionId: string,
   after: number,
-  pageSize = 200,
+  pageSize = 50,
 ): Promise<{ messages: TaskMessage[]; newestIndex: number; total: number } | null> {
   const collected: TaskMessage[] = [];
   let cursor = after;
-  let total = after + 1;
-  for (let guard = 0; guard < 50; guard++) {
+  let total = Math.max(0, after + 1);
+  for (let guard = 0; guard < 4; guard++) {
     let resp: Awaited<ReturnType<typeof api.getSessionHistory>>;
     try {
-      resp = await api.getSessionHistory(sessionId, { limit: pageSize, after: cursor });
+      // 游标缺失：只拉末页（首屏历史由 useSessionHistory 负责，不在这里全量重拉）
+      resp =
+        cursor >= 0
+          ? await api.getSessionHistory(sessionId, { limit: pageSize, after: cursor })
+          : await api.getSessionHistory(sessionId, { limit: pageSize });
     } catch {
       return collected.length > 0 ? { messages: collected, newestIndex: cursor, total } : null;
     }
     collected.push(...resp.messages);
-    if (!resp.page) return { messages: collected, newestIndex: cursor, total };
+    if (!resp.page) {
+      return { messages: collected, newestIndex: Math.max(cursor, after), total };
+    }
     total = resp.page.total;
     const next = resp.page.newestIndex;
     if (next <= cursor || resp.messages.length < pageSize) {

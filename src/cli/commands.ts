@@ -139,7 +139,6 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
       foreground: true,
       logLevel: parsed.logLevel,
     });
-
     // 进程级异常兜底（守护进程保活）必须在服务对外可用后立即生效：
     // 长程任务（小时级 / 数千轮工具调用）期间任意一处逃逸异常都不应让整台机器上
     // 所有任务一起丢。仅常驻服务路径注册，`moss mcp`（stdio，客户端托管）保持默认行为。

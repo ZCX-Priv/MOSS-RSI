@@ -16,6 +16,14 @@ const FRAME_BUDGET_MS = 8;
 
 const queue: QueueEntry[] = [];
 let rafId: number | null = null;
+/** 滚动期间暂停水合：避免 Markdown 解析与滚动抢主线程（停止滚动后恢复） */
+let paused = false;
+
+/** 暂停/恢复水合（宿主在滚动开始/停止时调用） */
+export function setHydrationPaused(value: boolean): void {
+  paused = value;
+  if (!value) scheduleDrain();
+}
 
 const drainedCallbacks = new Set<() => void>();
 
@@ -36,6 +44,8 @@ function scheduleDrain(): void {
 }
 
 function drain(): void {
+  // 暂停期间保留队列原样；恢复时由 setHydrationPaused(false) 重新调度
+  if (paused) return;
   const deadline = performance.now() + FRAME_BUDGET_MS;
   while (queue.length > 0 && performance.now() < deadline) {
     const entry = queue.pop()!;

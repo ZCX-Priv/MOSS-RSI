@@ -23,6 +23,11 @@ class BrowserModule implements Module {
     await service.initialize();
   }
 
+  /** 后台预热：扩展播种等重活（kernel:ready 之后） */
+  async warmup(): Promise<void> {
+    await this.service?.warmup();
+  }
+
   async destroy(): Promise<void> {
     if (this.service) {
       await this.service.destroy();

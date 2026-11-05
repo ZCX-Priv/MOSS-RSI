@@ -8,6 +8,7 @@ import { api } from '../api/http';
 import type { AgentItem, AgentDetail } from '../types/api';
 import { toast } from 'sonner';
 import { withRetry } from '../lib/retry';
+import { runWhenIdle } from '../lib/idle';
 
 export function useAgents() {
   const setAgents = useStore((s) => s.setAgents);
@@ -25,7 +26,8 @@ export function useAgents() {
   }, [setAgents, setCurrentAgent]);
 
   useEffect(() => {
-    void load();
+    // 首屏非关键：/@ 菜单数据空闲时再拉
+    runWhenIdle(() => void load());
   }, [load]);
 
   const createAgent = useCallback(

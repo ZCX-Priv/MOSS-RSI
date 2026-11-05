@@ -9,6 +9,7 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import type { CommandUpsertBody } from '../types/api';
 import { withRetry } from '../lib/retry';
+import { runWhenIdle } from '../lib/idle';
 
 export function useCommands() {
   const setCommands = useStore((s) => s.setCommands);
@@ -24,7 +25,8 @@ export function useCommands() {
   }, [setCommands]);
 
   useEffect(() => {
-    void load();
+    // 首屏非关键：/@ 菜单数据空闲时再拉
+    runWhenIdle(() => void load());
     // 订阅后端资源热重载，自动刷新
     const unsub = wsClient.onMessage((msg) => {
       if (msg.type === 'resources.changed') {

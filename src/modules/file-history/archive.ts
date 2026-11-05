@@ -4,7 +4,7 @@
 
 import { mkdirSync, existsSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import * as tar from 'tar';
+// 注意：tar 必须动态 import —— 静态 import 会把 node polyfill（约 944KB）拉进启动闭包。
 
 export interface ArchiveResult {
   /** 归档文件路径（~/.moss/file-history/backups/<entryId>.tar.gz） */
@@ -29,6 +29,7 @@ export async function archiveDirectory(
 
   const parent = dirname(absPath);
   const name = basename(absPath);
+  const tar = await import('tar');
 
   await tar.create(
     {
@@ -58,6 +59,7 @@ export async function extractArchive(
     throw new Error(`archive not found: ${archivePath}`);
   }
   mkdirSync(destDir, { recursive: true });
+  const tar = await import('tar');
   await tar.extract({
     file: archivePath,
     cwd: destDir,

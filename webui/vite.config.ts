@@ -1,7 +1,7 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { VitePWA } from 'vite-plugin-pwa'
+import { VitePWA, type ManifestOptions } from 'vite-plugin-pwa'
 import path from 'node:path'
 
 // https://vite.dev/config/
@@ -11,10 +11,50 @@ const backendPort = process.env.MOSS_BACKEND_PORT ?? '7766';
 const backendHttp = `http://127.0.0.1:${backendPort}`;
 const backendWs = `ws://127.0.0.1:${backendPort}`;
 
+/** PWA manifest（生产由 vite-plugin-pwa 生成文件；dev 由下面的中间件直接返回） */
+const pwaManifest: Partial<ManifestOptions> = {
+  name: 'MOSS',
+  short_name: 'MOSS',
+  description: 'MOSS - AI 工作台',
+  start_url: '/',
+  scope: '/',
+  display: 'standalone',
+  background_color: '#09090b',
+  theme_color: '#18181b',
+  icons: [
+    { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: 'icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+  ],
+};
+
+/**
+ * dev 兜底：站点若曾被旧 dev Service Worker 接管，页面仍可能带着
+ * /manifest.webmanifest 的 link 请求。Vite SPA fallback 会返回 index.html
+ * （HTML 不是合法 JSON → Chrome 报 Manifest Syntax error）。
+ * 这里在 dev server 直接返回合法 manifest，保证控制台干净。
+ */
+function mossDevManifest(): Plugin {
+  return {
+    name: 'moss-dev-manifest',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if ((req.url ?? '').split('?')[0] !== '/manifest.webmanifest') {
+          next();
+          return;
+        }
+        res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+        res.end(JSON.stringify(pwaManifest));
+      });
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    mossDevManifest(),
     // PWA：manifest + service worker（autoUpdate 静默更新）。
     // 预缓存全部静态资源（hashed 文件名长缓存）；/api 与 /ws 永不缓存；
     // dev 模式（devOptions.enabled）提供 manifest + 空壳 SW，支持安装调试。
@@ -26,21 +66,7 @@ export default defineConfig({
       // 显式声明后跳过强制覆盖，注入形态与之前完全一致（index.html 引 registerSW.js）
       injectRegister: 'script',
       includeAssets: ['MOSS.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'],
-      manifest: {
-        name: 'MOSS',
-        short_name: 'MOSS',
-        description: 'MOSS - AI 工作台',
-        start_url: '/',
-        scope: '/',
-        display: 'standalone',
-        background_color: '#09090b',
-        theme_color: '#18181b',
-        icons: [
-          { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: 'icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
-        ],
-      },
+      manifest: pwaManifest,
       workbox: {
         // 含 html：保证 index.html 进入 precache。
         // 这是此前「硬刷新/更新拿不到新版本」的致命根因修复——旧配置漏了 html，
@@ -97,7 +123,15 @@ export default defineConfig({
     port: 3000,
     // dev 首访预热：进入页面即开始转换这两个入口链，避免「先等 Vite 编译 → 再请求」的串行等待
     warmup: {
-      clientFiles: ['./src/App.tsx', './src/components/pages/TaskPage.tsx'],
+      // 首屏核心入口链：预热 App / TaskPage 及其首屏立即挂载的重组件，
+      // 减少 dev 首访时「先等 Vite 编译 → 再请求」的串行等待。
+      clientFiles: [
+        './src/App.tsx',
+        './src/components/pages/TaskPage.tsx',
+        './src/components/shared/TaskInput.tsx',
+        './src/components/layout/Sidebar.tsx',
+        './src/render/markdown/MarkdownRenderer.tsx',
+      ],
     },
     // 仅绑定回环（IPv4 127.0.0.1）：开发服务器只对本机开放，局域网不可达。
     // 显式写 127.0.0.1（而非 Vite 默认的 'localhost'）：Windows 上 localhost 可能

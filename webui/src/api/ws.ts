@@ -18,6 +18,9 @@ export interface WsStatusInfo {
 
 type StatusHandler = (info: WsStatusInfo) => void;
 
+/** Page Lifecycle 的 resume 事件（TS DOM 事件表未收录，运行时字符串不变） */
+const RESUME_EVENT = 'resume' as keyof DocumentEventMap;
+
 export class WSClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -63,13 +66,27 @@ export class WSClient {
     // 可能延迟数分钟；回前台主动补连把恢复时间拉回秒级）
     this.onVisibilityChange = this.onVisibilityChange.bind(this);
     document.addEventListener('visibilitychange', this.onVisibilityChange);
+    document.addEventListener(RESUME_EVENT, this.onVisibilityChange);
     window.addEventListener('focus', this.onVisibilityChange);
   }
 
-  /** 页面可见/聚焦兜底：连接存活则刷新探活基准；在等退避重连则立即重试 */
+  /**
+   * 页面可见/聚焦/从冻结恢复：连接存活则刷新探活基准；在等退避重连则立即重试。
+   * 切后台期间连接可能已被后端 idleTimeout 关闭，因此不能无条件刷新 lastPong
+   * （那会掩盖死链，导致要等下一次 30s 心跳超时才重连）。
+   */
   private onVisibilityChange(): void {
     if (document.visibilityState !== 'visible') return;
     if (this.ws?.readyState === WebSocket.OPEN) {
+      if (Date.now() - this.lastPong > WSClient.HEARTBEAT_TIMEOUT) {
+        // 僵死连接：立即关闭交给 onclose → 退避重连，不刷新探活基准
+        try {
+          this.ws.close();
+        } catch {
+          // 已关闭则忽略
+        }
+        return;
+      }
       this.lastPong = Date.now();
       try {
         this.ws.send(JSON.stringify({ type: 'ping' }));
@@ -94,10 +111,22 @@ export class WSClient {
       old.onmessage = null;
       old.onerror = null;
       old.onclose = null;
-      try {
-        old.close();
-      } catch {
-        // 已关闭则忽略
+      if (old.readyState === WebSocket.CONNECTING) {
+        // 握手中不能提前 close（Chrome 会报 closed before the connection is established）；
+        // 等 open 后立即关闭，回调已清空不会污染新连接状态
+        old.onopen = () => {
+          try {
+            old.close();
+          } catch {
+            // 已关闭则忽略
+          }
+        };
+      } else {
+        try {
+          old.close();
+        } catch {
+          // 已关闭则忽略
+        }
       }
     }
     this.notifyStatus('connecting');
@@ -169,9 +198,33 @@ export class WSClient {
     this.stopHeartbeat();
     this.clearReconnectTimer();
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    document.removeEventListener(RESUME_EVENT, this.onVisibilityChange);
     window.removeEventListener('focus', this.onVisibilityChange);
-    this.ws?.close();
+    const ws = this.ws;
     this.ws = null;
+    if (!ws) return;
+    // 清空回调：握手迟到的 open/close 不得再影响后续连接
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    if (ws.readyState === WebSocket.CONNECTING) {
+      // StrictMode 双挂载会在 CONNECTING 阶段卸载：等握手完成再关闭，
+      // 消除控制台 "WebSocket is closed before the connection is established"
+      ws.onopen = () => {
+        try {
+          ws.close();
+        } catch {
+          // 已关闭则忽略
+        }
+      };
+      return;
+    }
+    try {
+      ws.close();
+    } catch {
+      // 已关闭则忽略
+    }
   }
 
   /** 立即重试：取消退避等待并马上发起连接（状态条的「立即重试」按钮） */

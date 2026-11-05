@@ -140,16 +140,6 @@ export class ComputerServiceImpl implements ComputerService {
   }
 
   async initialize(): Promise<void> {
-    ensureComputerDirs(this.dirs);
-    // 清理历史截图是递归目录操作：延后到空闲，不占用内核启动关键路径
-    setTimeout(() => {
-      try {
-        pruneComputerFiles(this.dirs);
-      } catch {
-        // 清理失败不影响启动
-      }
-    }, 0);
-
     this.driverPath = resolveCuaDriverPath(this.env);
     if (!this.driverPath) {
       this.connection = 'disconnected';
@@ -157,10 +147,21 @@ export class ComputerServiceImpl implements ComputerService {
       this.logger.info(t('computer.moduleInitializedWithoutDriver'));
       return;
     }
-
-    // 后台探测版本并连接，不阻塞内核模块初始化链
-    void this.bootstrapDriver();
+    // 目录准备、截图清理、版本探测与连接全部移到 warmup
     this.logger.info(t('computer.moduleInitialized'), { driverPath: this.driverPath });
+  }
+
+  /** 后台预热：目录创建 + 历史截图清理 + 驱动探测/连接 */
+  async warmup(): Promise<void> {
+    ensureComputerDirs(this.dirs);
+    try {
+      pruneComputerFiles(this.dirs);
+    } catch {
+      // 清理失败不影响功能
+    }
+    if (!this.driverPath) return;
+    await this.bootstrapDriver();
+    this.logger.info('computer: warmup completed', { driverPath: this.driverPath });
   }
 
   async destroy(): Promise<void> {

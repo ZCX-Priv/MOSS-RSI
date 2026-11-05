@@ -22,6 +22,8 @@ export const zh = {
     copiedApiTemplate: '从包内复制 api.json 模板',
     createdDefaultApi: '已创建默认 api.json',
     fallbackToDefaults: '配置回退到默认值（仅内存，磁盘文件未变更）',
+    backgroundValidationPassed: '配置后台校验通过',
+    backgroundValidationFailed: '配置后台校验失败',
     reloadedFromDisk: '配置已从磁盘重新加载',
     appConfigUpdated: '应用配置已更新（写入 config.json）: {{keys}}',
     changeHandlerFailed: '配置变更处理器执行失败',

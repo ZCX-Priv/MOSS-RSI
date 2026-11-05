@@ -23,6 +23,11 @@ class ContextModule implements Module {
     this.engine.onInitialize();
   }
 
+  /** 后台预热：提示词播种（文件复制，不阻塞启动） */
+  async warmup(): Promise<void> {
+    this.engine?.onWarmup();
+  }
+
   async destroy(): Promise<void> {
     this.engine = null;
   }

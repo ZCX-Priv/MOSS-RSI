@@ -16,6 +16,7 @@ import {
   statSync,
   unlinkSync,
 } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   Environment,
@@ -60,6 +61,13 @@ const LOG_FILE_RE = /^moss-\d{4}-\d{2}-\d{2}(?:-\d+)?\.log$/;
 const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_RETENTION_DAYS = 14;
 
+// 日志落盘策略：内存聚合 + 50ms 防抖批量异步写。
+// 原实现每行 appendFileSync（open/write/close），在 Windows 低配机 + 杀毒软件下
+// 单行可达 80~130ms，启动阶段 40+ 行日志就是数秒的同步阻塞。
+const FLUSH_DELAY_MS = 50;
+/** 单批写入硬上限：超过立即 flush，防内存无界增长 */
+const FLUSH_MAX_BYTES = 256 * 1024;
+
 /** 本地日期 YYYY-MM-DD（文件名与行内时间戳统一本地时区，字典序可排序） */
 function localDate(d: Date = new Date()): string {
   const y = d.getFullYear();
@@ -96,6 +104,11 @@ export class FileLogWriter {
   private currentFile = '';
   private currentSize = 0;
   private failureReported = false;
+  /** 待写日志行（内存聚合） */
+  private pending = '';
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 异步写串行链：保证同一文件的行序不被打乱 */
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(logsDir: string, policy: Partial<LogPolicy> = {}) {
     this.logsDir = logsDir;
@@ -104,7 +117,8 @@ export class FileLogWriter {
       retentionDays: policy.retentionDays ?? DEFAULT_RETENTION_DAYS,
     };
     try {
-      mkdirSync(this.logsDir, { recursive: true });
+      // 目录通常已存在：避免每次启动无条件 mkdirSync 的系统调用
+      if (!existsSync(this.logsDir)) mkdirSync(this.logsDir, { recursive: true });
     } catch (err) {
       this.reportFailure('mkdir', err);
     }
@@ -126,25 +140,87 @@ export class FileLogWriter {
     return this.policy.retentionDays;
   }
 
-  /** 追加一行日志（同步，含跨天/超限滚动检测） */
+  /** 追加一行日志（内存聚合，50ms 防抖批量异步落盘；不再逐行同步 open/write/close） */
   append(line: string): void {
+    this.pending += line;
+    if (Buffer.byteLength(this.pending, 'utf8') >= FLUSH_MAX_BYTES) {
+      this.flushAsync();
+      return;
+    }
+    if (this.flushTimer === null) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.flushAsync();
+      }, FLUSH_DELAY_MS);
+    }
+  }
+
+  /** 异步批量刷盘：单条串行链保证日志行序 */
+  flushAsync(): void {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    const chunk = this.pending;
+    this.pending = '';
+    if (!chunk) return;
+    this.writeChain = this.writeChain
+      .then(() => this.writeChunk(chunk))
+      .catch((err) => {
+        this.reportFailure('append', err);
+      });
+  }
+
+  private async writeChunk(chunk: string): Promise<void> {
+    const bytes = Buffer.byteLength(chunk, 'utf8');
     const today = localDate();
     if (today !== this.currentDate) {
-      // 跨天：切换新文件 + 懒清理过期日志
+      // 跨天：切换新文件；过期日志清理延后到空闲，避免阻塞写盘
       this.currentDate = today;
       this.openFile();
-      this.cleanup(this.policy.retentionDays);
-    } else {
-      const bytes = Buffer.byteLength(line, 'utf8');
-      if (this.currentSize + bytes > this.policy.maxFileBytes) {
-        // 超限：滚动到下一序号文件
+      setTimeout(() => {
+        try {
+          this.cleanup(this.policy.retentionDays);
+        } catch {
+          // 清理失败不影响写日志
+        }
+      }, 0);
+    } else if (this.currentSize + bytes > this.policy.maxFileBytes) {
+      // 超限：滚动到下一序号文件
+      this.currentSeq += 1;
+      this.openFile();
+    }
+    await appendFile(this.currentFile, chunk, 'utf8');
+    this.currentSize += bytes;
+  }
+
+  /** 等待已排队日志全部落盘（优雅停机用） */
+  async flush(): Promise<void> {
+    this.flushAsync();
+    await this.writeChain;
+  }
+
+  /** 退出路径同步刷盘（进程即将结束，不能 await） */
+  flushSync(): void {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    const chunk = this.pending;
+    this.pending = '';
+    if (!chunk) return;
+    try {
+      const bytes = Buffer.byteLength(chunk, 'utf8');
+      const today = localDate();
+      if (today !== this.currentDate) {
+        this.currentDate = today;
+        this.openFile();
+      } else if (this.currentSize + bytes > this.policy.maxFileBytes) {
         this.currentSeq += 1;
         this.openFile();
       }
-    }
-    try {
-      appendFileSync(this.currentFile, line, 'utf8');
-      this.currentSize += Buffer.byteLength(line, 'utf8');
+      appendFileSync(this.currentFile, chunk, 'utf8');
+      this.currentSize += bytes;
     } catch (err) {
       this.reportFailure('append', err);
     }
@@ -289,6 +365,67 @@ export class FileLogWriter {
 }
 
 // ============================================================================
+// ConsoleSink：控制台输出降载
+// ============================================================================
+
+/**
+ * 控制台输出策略：
+ * - 启动阶段（kernel 显式 startBuffering）先缓存 info/debug，ready 后一次性输出，
+ *   避免 Windows 控制台逐行同步输出拖慢启动；
+ * - 非 TTY（后台守护进程 stdio=ignore）默认丢弃 info/debug，只保留 warn/error；
+ * - MOSS_STARTUP_QUIET=1 时只输出 warn/error/fatal。
+ */
+export class ConsoleSink {
+  private buffered = false;
+  private buffer: string[] = [];
+  private readonly nonTty: boolean;
+  private readonly quiet: boolean;
+  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    this.nonTty = !process.stdout.isTTY;
+    this.quiet = process.env.MOSS_STARTUP_QUIET === '1';
+  }
+
+  startBuffering(): void {
+    if (this.buffered) return;
+    this.buffered = true;
+    // 兜底：即便 kernel 未走到 ready 也不会永久吞掉启动日志
+    this.safetyTimer = setTimeout(() => this.flush(), 2000);
+  }
+
+  flush(): void {
+    if (this.safetyTimer !== null) {
+      clearTimeout(this.safetyTimer);
+      this.safetyTimer = null;
+    }
+    if (!this.buffered && this.buffer.length === 0) return;
+    this.buffered = false;
+    if (this.buffer.length === 0) return;
+    const lines = this.buffer;
+    this.buffer = [];
+    try {
+      process.stdout.write(lines.join('\n') + '\n');
+    } catch {
+      // 控制台不可用（无 stdout）时静默
+    }
+  }
+
+  write(line: string, level: LogLevel): void {
+    const important = level === 'warn' || level === 'error' || level === 'fatal';
+    if (this.quiet && !important) return;
+    if (this.buffered) {
+      this.buffer.push(line);
+      return;
+    }
+    if (this.nonTty && !important) return;
+    if (level === 'error' || level === 'fatal') console.error(line);
+    else if (level === 'warn') console.warn(line);
+    else console.log(line);
+  }
+}
+
+// ============================================================================
 // LoggerImpl
 // ============================================================================
 
@@ -298,6 +435,7 @@ class LoggerImpl implements Logger {
   private readonly env: Environment;
   private readonly fileWriter: FileLogWriter;
   private readonly colorize: boolean;
+  private readonly consoleSink: ConsoleSink;
 
   constructor(
     env: Environment,
@@ -305,12 +443,14 @@ class LoggerImpl implements Logger {
     level: LogLevel,
     fileWriter: FileLogWriter,
     colorize: boolean,
+    consoleSink: ConsoleSink,
   ) {
     this.env = env;
     this.scope = scope;
     this.level = level;
     this.fileWriter = fileWriter;
     this.colorize = colorize;
+    this.consoleSink = consoleSink;
   }
 
   setLevel(level: LogLevel): void {
@@ -329,6 +469,7 @@ class LoggerImpl implements Logger {
       this.level,
       this.fileWriter,
       this.colorize,
+      this.consoleSink,
     );
   }
 
@@ -355,13 +496,7 @@ class LoggerImpl implements Logger {
     const scopeStr = entry.scope ? `[${entry.scope}]` : '';
     const ctxStr = entry.context ? ' ' + JSON.stringify(entry.context) : '';
     const line = `${color}${entry.ts}${reset} ${color}${entry.level.toUpperCase().padEnd(5)}${reset} ${scopeStr} ${entry.message}${ctxStr}`;
-    if (entry.level === 'error' || entry.level === 'fatal') {
-      console.error(line);
-    } else if (entry.level === 'warn') {
-      console.warn(line);
-    } else {
-      console.log(line);
-    }
+    this.consoleSink.write(line, entry.level);
   }
 
   private writeToFile(entry: LogEntry): void {
@@ -433,10 +568,15 @@ export interface RootLogger {
   service: LogService;
   /** 供 kernel 应用 config.logs 策略（保留天数 / 大小上限） */
   writer: FileLogWriter;
+  /** 控制台输出缓冲（启动阶段缓存、ready 后一次性输出） */
+  console: ConsoleSink;
 }
 
+/** 进程退出兜底：确保已产生的日志不丢（只注册一次） */
+let exitFlushRegisteredWriter: FileLogWriter | null = null;
+
 /**
- * 创建根日志器：控制台彩色输出 + 同步追加文件（按天/大小滚动）。
+ * 创建根日志器：控制台彩色输出 + 内存聚合异步追加文件（按天/大小滚动）。
  */
 export function createRootLogger(
   env: Environment,
@@ -444,6 +584,17 @@ export function createRootLogger(
 ): RootLogger {
   const writer = new FileLogWriter(env.logsDir);
   const colorize = env.isWindows ? process.stdout.isTTY ?? false : true;
-  const logger = new LoggerImpl(env, '', initialLevel, writer, colorize);
-  return { logger, service: new LogServiceImpl(writer, logger), writer };
+  const consoleSink = new ConsoleSink();
+  const logger = new LoggerImpl(env, '', initialLevel, writer, colorize, consoleSink);
+  if (exitFlushRegisteredWriter !== writer) {
+    exitFlushRegisteredWriter = writer;
+    process.on('exit', () => {
+      try {
+        writer.flushSync();
+      } catch {
+        // 退出路径不再抛错
+      }
+    });
+  }
+  return { logger, service: new LogServiceImpl(writer, logger), writer, console: consoleSink };
 }

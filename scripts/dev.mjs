@@ -311,6 +311,24 @@ function inspectPid(info) {
   return { pid, alive: true, isMoss: true, imageName, reason: 'ok' };
 }
 
+/** 读取并确认「活着的 MOSS 后端」：返回 { pid, port }，否则 null（stale 清理仍由 checkStalePid 负责） */
+function readLiveBackend() {
+  const pidFile = resolve(homedir(), '.moss', 'moss.pid');
+  if (!existsSync(pidFile)) return null;
+  let info;
+  try {
+    info = JSON.parse(readFileSync(pidFile, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!info || typeof info.pid !== 'number') return null;
+  const inspection = inspectPid(info);
+  if (!inspection.isMoss) return null;
+  const rawPort = Number(info.port);
+  const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : null;
+  return { pid: info.pid, port };
+}
+
 function startFrontend(backendPort) {
   log('ui', `starting (vite in webui/)... backend=http://127.0.0.1:${backendPort}`);
   const uiDir = resolve(ROOT, 'webui');
@@ -411,23 +429,34 @@ async function isBackendReady(port) {
  * 健康门控并发现实际后端端口：
  * 后端可能因 7766 被占用自动切换端口；这里以 PID 文件中的 port 为准探测，
  * 避免 Vite 仍代理旧端口导致 WebUI 全白。
+ * backendChild 退出后立即结束等待（单实例冲突等场景不再空等 30 秒）。
  */
-async function discoverBackendPort(configuredPort, priorPid, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const snapshot = readPidSnapshot();
-    const fresh = snapshot !== null && snapshot.pid !== priorPid;
-    if (fresh) {
-      // 本次启动新写出的 PID 记录：以其中的实际端口为准（可能已漂移）
-      if (snapshot.port && (await isBackendReady(snapshot.port))) return snapshot.port;
-      if (await isBackendReady(configuredPort)) return configuredPort;
-    } else if (!snapshot) {
-      // 无 PID 文件（残留已被清理或尚未写出）：探测配置端口
-      if (await isBackendReady(configuredPort)) return configuredPort;
+async function discoverBackendPort(configuredPort, priorPid, timeoutMs = 30000, backendChild = null) {
+  let exited = false;
+  const onExit = () => {
+    exited = true;
+  };
+  backendChild?.once('exit', onExit);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (exited) return null;
+      const snapshot = readPidSnapshot();
+      const fresh = snapshot !== null && snapshot.pid !== priorPid;
+      if (fresh) {
+        // 本次启动新写出的 PID 记录：以其中的实际端口为准（可能已漂移）
+        if (snapshot.port && (await isBackendReady(snapshot.port))) return snapshot.port;
+        if (await isBackendReady(configuredPort)) return configuredPort;
+      } else if (!snapshot) {
+        // 无 PID 文件（残留已被清理或尚未写出）：探测配置端口
+        if (await isBackendReady(configuredPort)) return configuredPort;
+      }
+      await sleep(250);
     }
-    await sleep(250);
+    return null;
+  } finally {
+    backendChild?.off('exit', onExit);
   }
-  return null;
 }
 
 async function main() {
@@ -441,10 +470,26 @@ async function main() {
   console.log('  Tip: 若日志无 "using bun" 行，说明还在跑旧版，请重启 dev');
   console.log('  Note: dev 默认仅本机；开启远程访问后后端绑 0.0.0.0（手机可访问，页面为 dist 构建产物）');
   console.log('=========================================');
+  // 已有活着的 MOSS 后端：直接复用它，不再 spawn 新后端（新后端会因单实例检查退出，
+  // 且 discoverBackendPort 在 pid 未变化时会空等 30 秒才启动前端）。
+  const live = readLiveBackend();
+  if (live) {
+    const port = live.port ?? configuredPort;
+    const ready = await isBackendReady(port);
+    log(
+      'backend',
+      `reusing running MOSS (PID ${live.pid}) on :${port}${ready ? ' (health 200)' : ' (health not ready; frontend will retry)'}`,
+    );
+    log('dev', 'Backend reused; code changes require "moss restart" to take effect.');
+    startFrontend(port);
+    log('dev', 'Press Ctrl+C to stop the frontend (backend keeps running).');
+    return;
+  }
+
   const priorPid = readPidSnapshot()?.pid ?? null;
-  startBackend();
+  const backendChild = startBackend();
   log('dev', 'Waiting for backend to be ready...');
-  const backendPort = await discoverBackendPort(configuredPort, priorPid, 30000);
+  const backendPort = await discoverBackendPort(configuredPort, priorPid, 30000, backendChild);
   if (backendPort) {
     log(
       'backend',
@@ -452,6 +497,8 @@ async function main() {
         ? `ready (health 200 on :${backendPort})`
         : `ready on :${backendPort}（配置端口 ${configuredPort} 被占用，已同步 Vite 代理）`,
     );
+  } else if (backendChild?.exitCode !== null && backendChild?.exitCode !== undefined) {
+    log('backend', 'backend exited before becoming ready; starting frontend anyway (WS proxy may error until backend is up)');
   } else {
     log('backend', `WARNING: not ready after 30s, starting frontend anyway (WS proxy may error until backend is up)`);
   }

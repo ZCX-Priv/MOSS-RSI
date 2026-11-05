@@ -33,7 +33,9 @@ class RemoteModule implements Module {
     const remoteDir = `${ctx.env.dataDir}/remote`;
 
     this.auth = new RemoteAuth(remoteDir);
-    await this.auth.loadOrInit();
+    // 密码/令牌读取与隧道恢复移到 warmup：启动路径只注册门卫与路由，
+    // 远程关闭（默认）时无任何请求依赖已加载的密码。
+
 
     // server 模块先于 remote 初始化（kernel 固定顺序），直接 resolve
     this.server = ctx.services.resolve<ServerInstance>(ServiceNames.SERVER_INSTANCE);
@@ -62,8 +64,19 @@ class RemoteModule implements Module {
     // 注册服务（供其他模块消费状态）
     ctx.services.register(ServiceNames.REMOTE_SERVICE, this.service, { scope: 'server' });
 
-    // 自动恢复上次开启的公网隧道（cloudflared 子进程随 MOSS 重启被杀）。
-    // 后台执行：隧道启动可能包含网络探测/下载，绝不能阻塞内核就绪与首屏。
+    ctx.logger.info(t('remote.started'));
+  }
+
+  /** 后台预热：认证文件加载 + 公网隧道恢复（不阻塞启动） */
+  async warmup(ctx: ModuleContext): Promise<void> {
+    try {
+      await this.auth.loadOrInit();
+    } catch (err) {
+      ctx.logger.warn('remote: auth load failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // cloudflared 子进程随 MOSS 重启被杀：恢复上次开启的隧道（网络探测/下载放后台）
     void this.service
       .restoreTunnelIfNeeded()
       .catch((err: unknown) => {
@@ -71,8 +84,6 @@ class RemoteModule implements Module {
           error: err instanceof Error ? err.message : String(err),
         });
       });
-
-    ctx.logger.info(t('remote.started'));
   }
 
   async destroy(): Promise<void> {

@@ -336,6 +336,9 @@ export default function App() {
             className="anim-route animate-in slide-in-from-bottom-1 duration-200 flex min-h-0 flex-1 flex-col"
           >
             <Suspense fallback={<PageLoading />}>
+            {/* 路由就绪信号：挂载即说明 Suspense 子树（懒加载页面 chunk）已真正渲染，
+                此时才把 Splash 的 page 里程碑置为完成（Loading 期间不会误报 100%）。 */}
+            <RouteReadySignal />
             <Routes>
             {/* 欢迎页与任务页同一条路由（可选段）：`/` 重定向到 `/task`；发送消息后
                 URL 从 /task → /task/xxx 是**同一路由内参数切换，TaskPage 不卸载重挂**——
@@ -426,12 +429,28 @@ export default function App() {
   );
 }
 
+/**
+ * 路由就绪信号（Splash 里程碑）。
+ * 放在 Suspense 内部：页面 chunk 加载中时整个子树被 fallback 替换，本组件不渲染；
+ * 只有真正渲染出页面内容后才标记 pageReady。
+ * 初始 `'/'` 会重定向到 `/task`，这一帧不标记（避免在重定向前误报页面就绪）。
+ */
+function RouteReadySignal() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    if (pathname === '/') return;
+    useStore.getState().markPageReady();
+  }, [pathname]);
+  return null;
+}
+
 /** 懒加载页面占位（不阻塞 TaskPage 主路径；进入设置等页面时短暂显示） */
 function PageLoading() {
+  const { t } = useTranslation();
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
       <Loader2 className="size-4 animate-spin" />
-      <span>Loading…</span>
+      <span>{t('common.loading')}</span>
     </div>
   );
 }

@@ -11,7 +11,7 @@ import { ErrorCode } from '../../../core/error-codes';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import JSZip from 'jszip';
+// JSZip 只在安装技能时使用：动态 import，避免把 readable-stream 等 polyfill 拉进启动闭包。
 
 const SKILLHUB_BASE = 'https://api.skillhub.cn';
 /** 上游请求超时（列表/分类 与 zip 下载共用） */
@@ -269,9 +269,13 @@ export function createInstallMarketSkillHandler(
       return { status: 413, body: { error: 'SKILL_ZIP_TOO_LARGE' } };
     }
 
-    let zip: JSZip;
+    const JSZipModule = await import('jszip').catch(() => null);
+    if (!JSZipModule) {
+      return { status: 502, body: { error: 'SKILLHUB_DOWNLOAD_FAILED' } };
+    }
+    let zip: Awaited<ReturnType<typeof JSZipModule.default.loadAsync>>;
     try {
-      zip = await JSZip.loadAsync(buffer);
+      zip = await JSZipModule.default.loadAsync(buffer);
     } catch {
       return { status: 502, body: { error: 'SKILLHUB_DOWNLOAD_FAILED' } };
     }

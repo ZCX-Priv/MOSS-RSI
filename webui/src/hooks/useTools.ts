@@ -9,6 +9,7 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { toast } from 'sonner';
 import { withRetry } from '../lib/retry';
+import { runWhenIdle } from '../lib/idle';
 
 export function useTools() {
   const setTools = useStore((s) => s.setTools);
@@ -30,8 +31,9 @@ export function useTools() {
   }, [setTools, setToolIconMap]);
 
   useEffect(() => {
-    void load();
-    // 订阅资源热重载自动刷新
+    // 首屏非关键：工具图标映射只在渲染工具卡片时需要，空闲时再拉
+    runWhenIdle(() => void load());
+    // 订阅资源热重载自动刷新（热重载本身已避让首屏，立即刷新即可）
     const unsub = wsClient.onMessage((msg) => {
       if (msg.type === 'resources.changed') {
         void load();

@@ -2,7 +2,7 @@
 // 环境检测：平台、架构、路径解析。
 
 import { homedir, platform, arch } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Environment, Platform } from './types';
 
 /**
@@ -29,9 +29,13 @@ export function detectEnvironment(): Environment {
   else if (nodePlatform === 'linux') p = 'linux';
 
   const home = homedir();
-  const dataDir = join(home, '.moss');
-  // 一次性迁移：旧目录 .moss → .moss（仅当新目录不存在且旧目录存在时）
-  migrateLegacyDataDir(join(home, '.moss'), dataDir);
+  // MOSS_DATA_DIR：测试/基准隔离用的数据目录覆盖（绝不迁移用户真实数据）
+  const overriddenDataDir = process.env.MOSS_DATA_DIR?.trim();
+  const dataDir = overriddenDataDir ? resolve(overriddenDataDir) : join(home, '.moss');
+  if (!overriddenDataDir) {
+    // 一次性迁移：旧目录 .moss → .moss（仅当新目录不存在且旧目录存在时）
+    migrateLegacyDataDir(join(home, '.moss'), dataDir);
+  }
   const configDir = join(dataDir, 'config');
   const logsDir = join(dataDir, 'logs');
   const pidFile = join(dataDir, 'moss.pid');
@@ -56,7 +60,11 @@ export function detectEnvironment(): Environment {
   };
 }
 
+/** 包根解析结果缓存：一次进程内只解析一次（启动路径上的重复同步读 package.json 是纯浪费） */
+let cachedPackageRoot: string | null = null;
+
 function resolvePackageRoot(): string {
+  if (cachedPackageRoot) return cachedPackageRoot;
   // 优先：从当前文件位置向上查找 package.json
   // 当前文件位于 src/core/env.ts，开发模式下回退 3 层到包根
   // 编译后位于 dist/server.js，回退 1 层到包根
@@ -72,9 +80,13 @@ function resolvePackageRoot(): string {
 
   for (const candidate of candidates) {
     const root = findUpPackageJson(candidate);
-    if (root) return root;
+    if (root) {
+      cachedPackageRoot = root;
+      return root;
+    }
   }
-  return process.cwd();
+  cachedPackageRoot = process.cwd();
+  return cachedPackageRoot;
 }
 
 function findUpPackageJson(start: string): string | null {

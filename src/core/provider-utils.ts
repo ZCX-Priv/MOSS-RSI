@@ -2,7 +2,8 @@
 // 服务商层工具：扁平视图（flattenModels）、模型查找、id 生成、旧版配置迁移。
 // ModelConfig 作为运行时扁平视图类型，由本文件从 providers 结构合成。
 
-import { z } from 'zod';
+// 注意：迁移校验不使用 zod —— core/provider-utils 在启动静态闭包内（llm/context 模块
+// 直接 import flattenModels），zod 会因此进入启动路径。旧版迁移只需结构校验，手写即可。
 import type { ApiConfig, ModelConfig, ProviderConfig, ProviderModelConfig } from './types';
 
 /** 生成服务商 id：provider_{timestamp}_{random} */
@@ -73,27 +74,40 @@ export function findModelInProviders(
 // 旧版配置迁移（扁平 models → providers）
 // ============================================================================
 
-/** 旧版扁平 ModelConfig 的 Zod schema（迁移校验用） */
-const legacyModelSchema = z.object({
-  id: z.string().min(1),
-  name: z.string(),
-  model: z.string(),
-  format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini']),
-  endpoint: z.string(),
-  apiKey: z.string(),
-  thinking: z.object({
-    enabled: z.boolean(),
-    effort: z.string().optional(),
-    label: z.string().optional(),
-    budgetTokens: z.number().int().positive().optional(),
-  }),
-  contextWindow: z.string().optional(),
-  inputTokens: z.number().int().positive().optional(),
-  outputTokens: z.number().int().positive().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  topP: z.number().min(0).max(1).optional(),
-  topK: z.number().int().min(0).max(100).optional(),
-});
+/** 旧版模型合法格式（迁移仅接受这四种；voice 是 v2 引入的） */
+const LEGACY_MODEL_FORMATS = new Set(['openai-chat', 'openai-responses', 'anthropic', 'gemini']);
+
+/**
+ * 旧版扁平模型的结构校验（迁移用，宽松跳过脏条目）。
+ * 等价于原 zod schema 的关键约束，不引入 zod 依赖。
+ */
+function parseLegacyModel(item: unknown): ModelConfig | null {
+  if (!item || typeof item !== 'object') return null;
+  const m = item as Record<string, unknown>;
+  if (typeof m.id !== 'string' || m.id.length === 0) return null;
+  if (typeof m.name !== 'string' || typeof m.model !== 'string') return null;
+  if (typeof m.format !== 'string' || !LEGACY_MODEL_FORMATS.has(m.format)) return null;
+  if (typeof m.endpoint !== 'string' || typeof m.apiKey !== 'string') return null;
+  const thinking = m.thinking;
+  if (!thinking || typeof thinking !== 'object' || Array.isArray(thinking)) return null;
+  const t = thinking as Record<string, unknown>;
+  if (typeof t.enabled !== 'boolean') return null;
+  for (const key of ['effort', 'label', 'contextWindow'] as const) {
+    if (m[key] !== undefined && typeof m[key] !== 'string') return null;
+  }
+  for (const key of ['budgetTokens', 'inputTokens', 'outputTokens', 'topK'] as const) {
+    if (m[key] !== undefined && !isPositiveInt(m[key])) return null;
+  }
+  for (const key of ['temperature', 'topP'] as const) {
+    if (m[key] !== undefined && !(typeof m[key] === 'number' && Number.isFinite(m[key]))) return null;
+  }
+  return m as unknown as ModelConfig;
+}
+
+/** 正整数判定（旧版迁移的 token 数约束） */
+function isPositiveInt(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
 
 /** 从 endpoint URL 提取 host 作为默认服务商名（如 https://api.openai.com/v1 → api.openai.com） */
 function hostFromEndpoint(endpoint: string): string {
@@ -128,8 +142,8 @@ export function migrateLegacyApiConfig(raw: Record<string, unknown> | null): boo
   // 逐个校验旧模型（宽松：跳过非法条目，避免单条脏数据阻断整体迁移）
   const valid: ModelConfig[] = [];
   for (const item of legacyModels) {
-    const parsed = legacyModelSchema.safeParse(item);
-    if (parsed.success) valid.push(parsed.data as ModelConfig);
+    const parsed = parseLegacyModel(item);
+    if (parsed) valid.push(parsed);
   }
 
   // 按 format|endpoint|apiKey 分组

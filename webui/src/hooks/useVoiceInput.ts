@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
+import { runWhenIdle } from '../lib/idle';
 import { createLocalAsrEngine, isLocalAsrSupported, type LocalAsrSession } from '../lib/asr-local';
 import type { VoiceModelStatus, VoiceStatus } from '../types/api';
 
@@ -196,8 +197,9 @@ export function useVoiceStatus(): UseVoiceStatusResult {
     }
   }, []);
 
+  // 首屏非关键请求：空闲时再拉（避免与消息/任务列表争抢主线程与后端）
   useEffect(() => {
-    void refresh();
+    runWhenIdle(() => void refresh());
   }, [refresh]);
 
   return { status, refresh };
@@ -221,8 +223,9 @@ export function useVoiceModels(): UseVoiceModelsResult {
     }
   }, []);
 
+  // 首屏非关键请求：空闲时再拉（模型列表只在语音功能启用/设置页需要）
   useEffect(() => {
-    void refresh();
+    runWhenIdle(() => void refresh());
   }, [refresh]);
 
   // 存在下载中的模型时轮询进度

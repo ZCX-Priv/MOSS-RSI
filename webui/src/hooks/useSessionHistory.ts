@@ -28,11 +28,22 @@ import {
 } from '../lib/ws-events';
 import { diag, diagAlways } from '../lib/diag';
 import { withRetry } from '../lib/retry';
+import { runWhenIdle } from '../lib/idle';
 import type { VirtualListApi } from '../lib/virtual-list/VirtualList';
 import type { SessionState, TaskMessage } from '../types/api';
 
 /** 首屏与每页条数：30 条约占一屏多，JSON 体积可控（超长会话首屏不再传全量） */
 export const HISTORY_PAGE_SIZE = 30;
+/**
+ * 预取页条数：20 条 ≈ 1.5~2 屏。
+ * 该会话（长思考型）平均约 42KB/条，20 条约 0.8MB JSON —— 解析+适配可在一次事件循环内完成；
+ * 60 条约 2.5MB，已越过卡顿阈值（快速上滑黑屏的直接来源）。
+ */
+const HISTORY_PREFETCH_PAGE_SIZE = 20;
+/** 每个会话始终保持的预取页数（滚动停止后补足 1 页，避免上滑断档） */
+const HISTORY_PREFETCH_PAGES = 1;
+/** 速度感知预取的触发冷却（ms）：同一会话至少间隔这么久才允许再发一次预取 */
+const PREFETCH_TRIGGER_COOLDOWN_MS = 300;
 
 export interface UseSessionHistoryResult {
   /** 加载更早的一页（列表到达顶部时回调） */
@@ -45,6 +56,8 @@ export interface UseSessionHistoryResult {
   loaded: boolean;
   /** 整体重载末页（撤回/恢复后游标失效、外部需要强制刷新时使用） */
   reload: () => Promise<void>;
+  /** 高速滚动时主动补页（预取更多） */
+  prefetchMore: () => void;
 }
 
 /** 首屏空结果重试间隔：等待后端把 task.stream 的 user 消息持久化到内存会话 */
@@ -74,6 +87,13 @@ export function useSessionHistory(
    * 导致切换后长时间等不到尾部对齐（「切换 session 加载半天」的根因之一）。
    */
   const catchupBusyRef = useRef<Set<string>>(new Set());
+  /** 预取串行化（按会话）与游标 */
+  const prefetchBusyRef = useRef<Set<string>>(new Set());
+  const prefetchCursorRef = useRef<Map<string, number>>(new Map());
+  /** 预取触发冷却（按会话）：速度感知预取至少间隔 300ms，避免滚动中连续请求 */
+  const prefetchLastAtRef = useRef<Map<string, number>>(new Map());
+  /** loadOlder 同步防重入（按会话）：一次只合并一页，避免同一帧连续消费多页缓存 */
+  const loadOlderBusyRef = useRef<Set<string>>(new Set());
 
   const hasMoreBefore = useStore((s) => s.historyMetaBySession[taskId]?.hasMoreBefore ?? false);
   const loadingBefore = useStore((s) => s.historyMetaBySession[taskId]?.loadingBefore ?? false);
@@ -103,17 +123,15 @@ export function useSessionHistory(
           .filter((m) => m.streaming)
           .map((m) => m.id);
         const meta = st.historyMetaBySession[sessionId];
-        let after = meta?.newestIndex ?? -1;
-        if (!meta) {
-          // 游标尚未建立（首屏竞态）：用本地已有消息的最大服务端下标兜底，
-          // 避免 after=-1 把「全部历史」当成增量再拉回一次（与本地已有消息拼接会破坏顺序，
-          // 也是「最新先到就显示在最前」的诱因之一）。
-          let maxIdx = -1;
-          for (const m of st.messagesBySession[sessionId] ?? []) {
-            if (typeof m.historyIndex === 'number' && m.historyIndex > maxIdx) maxIdx = m.historyIndex;
-          }
-          after = maxIdx;
-        }
+        // 首屏历史尚未建立有效游标（meta 缺失或 newestIndex 仍为 -1）：HTTP 首屏
+        // （含空结果重试）负责加载末页，这里必须直接跳过。
+        // 否则 WS 快照先于首屏返回时（首屏 effect 已 patch 出 newestIndex=-1 的占位 meta），
+        // after=-1 会把整段历史当成增量重拉——实测长会话一次请求 1.68~2.29MB，
+        // 与首屏 1.09MB 叠加，正是「打开 WebUI 卡爆」的直接来源之一。
+        // 首屏仍在进行中（loaded=false 且游标未建立）时跳过；首屏失败后
+        // 会 patch loaded=true，此时允许这里以末页兜底恢复（不影响异常恢复路径）。
+        if (!meta || (!meta.loaded && meta.newestIndex < 0)) return;
+        const after = meta.newestIndex;
         const res = await fetchTailPages(sessionId, after);
         if (!res) return;
         if (res.newestIndex <= after && res.messages.length === 0) return;
@@ -140,11 +158,71 @@ export function useSessionHistory(
     [],
   );
 
+  /**
+   * 后台预取更早历史：始终保持缓存里至少有 pages 页。
+   * 预取只写缓存（不并入可见列表），loadOlder 命中缓存时零网络等待。
+   */
+  const prefetchOlder = useCallback((sessionId: string, pages = HISTORY_PREFETCH_PAGES) => {
+    if (!sessionId) return;
+    if (prefetchBusyRef.current.has(sessionId)) return;
+    // 与实时加载互斥：同一游标的实时请求在途时不重复预取（避免两个请求拉同一区间）
+    if (loadOlderBusyRef.current.has(sessionId)) return;
+    const st = useStore.getState();
+    const meta = st.historyMetaBySession[sessionId];
+    if (!meta || !meta.hasMoreBefore) return;
+    // 会话已切走：不为非活跃会话消耗带宽与内存
+    if (st.activeSessionId && st.activeSessionId !== sessionId) return;
+    // 缓存已满足目标页数：不重复请求（滚动速度预测只补一页预算）
+    const cachedCount = st.historyCacheBySession[sessionId]?.length ?? 0;
+    if (cachedCount >= pages) return;
+    // 冷却：滚动过程中最多每 300ms 触发一次，避免每帧请求
+    const lastAt = prefetchLastAtRef.current.get(sessionId) ?? 0;
+    if (Date.now() - lastAt < PREFETCH_TRIGGER_COOLDOWN_MS) return;
+    prefetchLastAtRef.current.set(sessionId, Date.now());
+
+    prefetchBusyRef.current.add(sessionId);
+    void (async () => {
+      try {
+        const cached = useStore.getState().historyCacheBySession[sessionId] ?? [];
+        // 缓存为空时从当前顶部游标开始；否则沿用已取到的最旧游标继续向前
+        const cursor =
+          cached.length > 0
+            ? prefetchCursorRef.current.get(sessionId) ?? meta.oldestIndex
+            : meta.oldestIndex;
+        if (cursor <= 0) return;
+        // 一次只请求一页（20 条）：预算是硬上限，绝不再退化成多页批量拉取
+        const resp = await api.getSessionHistory(sessionId, {
+          limit: HISTORY_PREFETCH_PAGE_SIZE,
+          before: cursor,
+        });
+        const cur = useStore.getState();
+        if (cur.activeSessionId && cur.activeSessionId !== sessionId) return;
+        if (!resp.page || resp.messages.length === 0) {
+          cur.patchHistoryMeta(sessionId, { hasMoreBefore: false });
+          return;
+        }
+        cur.cacheHistoryPage(sessionId, {
+          before: cursor,
+          messages: resp.messages,
+          page: resp.page,
+        });
+        prefetchCursorRef.current.set(sessionId, resp.page.oldestIndex);
+      } catch {
+        // 预取失败静默：下次上滑会走实时请求
+      } finally {
+        prefetchBusyRef.current.delete(sessionId);
+      }
+    })();
+  }, []);
+
   /** 整体重载末页：撤回了消息 / 恢复后下标变化 → 旧游标不可用，必须重新取最新一页 */
   const reload = useCallback(async (): Promise<void> => {
     if (!taskId) return;
     flushPending();
     useStore.getState().resetHistory(taskId);
+    useStore.getState().clearHistoryCache(taskId);
+    prefetchCursorRef.current.delete(taskId);
+    prefetchLastAtRef.current.delete(taskId);
     try {
       // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503（可重试）
       const resp = await withRetry(() => api.getSessionHistory(taskId, { limit: HISTORY_PAGE_SIZE }));
@@ -290,6 +368,8 @@ export function useSessionHistory(
           .finally(() => {
             useStore.getState().setWsRestoring(taskId, false);
           });
+        // 延迟预取：给 catchUpTail 让路，避免同一游标并发两个请求
+        window.setTimeout(() => prefetchOlder(taskId, HISTORY_PREFETCH_PAGES), 500);
       } else {
         st0.patchHistoryMeta(taskId, { loaded: false, loadingBefore: false });
         // ① 首屏历史（分页，仅末页；空结果重试等待持久化可见）+ 压缩卡：
@@ -329,6 +409,10 @@ export function useSessionHistory(
             );
             if (resp.permissionMode) useStore.getState().setPermissionMode(resp.permissionMode, taskId);
             if (resp.lastRunStats) useStore.getState().setRunStats(taskId, resp.lastRunStats);
+            // 首屏就绪后延迟预取更早历史：首屏渲染阶段可能已有一次实时 loadOlder 在途，
+            // 立即预取会用同一 before 游标重复拉取（实测并发两个请求 0.6+0.8MB）。
+            // 500ms 后 meta.oldestIndex 已被那次加载推进，预取自然落到更早的一页。
+            window.setTimeout(() => prefetchOlder(taskId, HISTORY_PREFETCH_PAGES), 500);
           })
           .catch(() => {
             // 后端未就绪 / 会话不存在：静默（保持空态）
@@ -344,29 +428,36 @@ export function useSessionHistory(
         useStore.getState().setWsRestoring(taskId, false);
       });
 
-    // ③ 附属数据（todos / 上下文文件 / 上下文统计 / 压缩历史）：刷新后侧边面板恢复
-    void api
-      .listTodos(taskId)
-      .then((resp) => {
-        if (resp.todos) useStore.getState().setTodos(taskId, resp.todos);
-      })
-      .catch(() => {});
-    void api
-      .getSessionContext(taskId)
-      .then((ctx) => {
-        useStore.getState().setContext(taskId, {
-          files: ctx.files,
-          totalTokens: ctx.totalTokens,
-          maxTokens: ctx.maxTokens,
-        });
-      })
-      .catch(() => {});
-    void api
-      .getContextStats(taskId)
-      .then((stats) => {
-        useStore.getState().setContextStats(taskId, stats);
-      })
-      .catch(() => {});
+    // ③ 附属数据（todos / 上下文文件 / 上下文统计）：右侧面板默认收起、消息流优先用
+    // todoSnapshot，故延后到浏览器空闲时再拉，避免与首屏历史/渲染争抢主线程与后端。
+    runWhenIdle(() => {
+      void api
+        .listTodos(taskId)
+        .then((resp) => {
+          if (resp.todos) useStore.getState().setTodos(taskId, resp.todos);
+        })
+        .catch(() => {});
+    });
+    runWhenIdle(() => {
+      void api
+        .getSessionContext(taskId)
+        .then((ctx) => {
+          useStore.getState().setContext(taskId, {
+            files: ctx.files,
+            totalTokens: ctx.totalTokens,
+            maxTokens: ctx.maxTokens,
+          });
+        })
+        .catch(() => {});
+    });
+    runWhenIdle(() => {
+      void api
+        .getContextStats(taskId)
+        .then((stats) => {
+          useStore.getState().setContextStats(taskId, stats);
+        })
+        .catch(() => {});
+    });
 
     return () => {
       // 卸载时若 activeSessionId 仍指向自己则清除（防 useWebSocket 误用旧 session）。
@@ -375,7 +466,7 @@ export function useSessionHistory(
       const cur = useStore.getState().activeSessionId;
       if (cur === taskId) useStore.getState().setActiveSession(null);
     };
-  }, [taskId, reconcileFromState, catchUpTail, fetchFirstPage]);
+  }, [taskId, reconcileFromState, catchUpTail, fetchFirstPage, prefetchOlder]);
 
   // ==========================================================================
   // 编排信号：快照对齐 / 一轮结束补齐 / offset 缺口自愈
@@ -539,9 +630,25 @@ export function useSessionHistory(
   // ==========================================================================
   const loadOlder = useCallback(() => {
     if (!taskId) return;
+    // 同步防重入：同一帧内滚动事件可能多次进入（缓存命中路径没有 loadingBefore 异步窗口），
+    // 这里保证一次只合并一页、只 apply 一次 prepend 锚定。
+    if (loadOlderBusyRef.current.has(taskId)) return;
     const st = useStore.getState();
     const meta = st.historyMetaBySession[taskId];
     if (!meta || !meta.hasMoreBefore || meta.loadingBefore) return;
+
+    // 缓存优先：命中时同步合并（无网络等待，毫秒级跟手）
+    const cached = st.takeCachedHistoryPage(taskId);
+    if (cached) {
+      const anchor = apiRef?.current?.anchorPrepend();
+      useStore.getState().mergeHistory(taskId, cached.messages, 'prepend', cached.page);
+      anchor?.apply();
+      // 消费一页后再补足缓冲（有冷却与「缓存已满」判定，不会连环请求）
+      prefetchOlder(taskId, HISTORY_PREFETCH_PAGES);
+      return;
+    }
+
+    loadOlderBusyRef.current.add(taskId);
     st.patchHistoryMeta(taskId, { loadingBefore: true });
     void api
       .getSessionHistory(taskId, { limit: HISTORY_PAGE_SIZE, before: meta.oldestIndex })
@@ -560,11 +667,24 @@ export function useSessionHistory(
         const anchor = apiRef?.current?.anchorPrepend();
         cur.mergeHistory(taskId, resp.messages, 'prepend', resp.page);
         anchor?.apply();
+        // 实时请求成功后继续预取，恢复缓冲
+        prefetchOlder(taskId, HISTORY_PREFETCH_PAGES);
       })
       .catch(() => {
         useStore.getState().patchHistoryMeta(taskId, { loadingBefore: false });
+      })
+      .finally(() => {
+        loadOlderBusyRef.current.delete(taskId);
       });
-  }, [taskId, apiRef]);
+  }, [taskId, apiRef, prefetchOlder]);
 
-  return { loadOlder, hasMoreBefore, loadingBefore, loaded, reload };
+  return {
+    loadOlder,
+    hasMoreBefore,
+    loadingBefore,
+    loaded,
+    reload,
+    /** 滚动速度超阈值 / 停止滚动时主动补一页（由 VirtualList 的两个滚动回调触发） */
+    prefetchMore: () => prefetchOlder(taskId, HISTORY_PREFETCH_PAGES),
+  };
 }

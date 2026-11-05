@@ -8,6 +8,7 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { applyPluginOrder, loadPluginOrder, SKILL_ORDER_KEY } from '../lib/plugin-order';
 import { withRetry } from '../lib/retry';
+import { runWhenIdle } from '../lib/idle';
 
 export function useSkills() {
   const setSkills = useStore((s) => s.setSkills);
@@ -25,7 +26,8 @@ export function useSkills() {
   }, [setSkills]);
 
   useEffect(() => {
-    void load();
+    // 首屏非关键：/@ 菜单数据空闲时再拉，避免与消息/任务列表争抢
+    runWhenIdle(() => void load());
     // 订阅后端资源热重载，自动刷新
     const unsub = wsClient.onMessage((msg) => {
       if (msg.type === 'resources.changed') {

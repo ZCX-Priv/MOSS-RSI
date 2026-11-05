@@ -128,7 +128,7 @@ type AgentEngineWithTasks = AgentEngine & {
     dir?: string;
     hidden?: boolean;
   };
-  updateTaskGroup?: (id: string, patch: { name?: string }) => {
+  updateTaskGroup?: (id: string, patch: { name?: string; expanded?: boolean }) => {
     id: string;
     name: string;
     expanded?: boolean;
@@ -160,8 +160,12 @@ function hiddenGroupIds(engine: AgentEngineWithTasks): Set<string> {
 }
 
 export function createListTasksHandler(services: ServiceRegistry): RouteHandler {
-  return (req): HttpResponse => {
+  return async (req): Promise<HttpResponse> => {
     const engine = resolveEngine(services);
+    if (engine) {
+      // 分组索引后台构建：列表前等待就绪，避免首屏拿到不完整列表
+      await (engine as unknown as { whenReady?: () => Promise<void> }).whenReady?.();
+    }
     if (!engine) {
       // 503 语义：内核按序初始化，server 早于 agent 注册，启动窗口内引擎可能尚未就绪。
       // 此时必须返回可重试错误而非 200 空列表——否则前端会把「未就绪」当成「确实为空」，
@@ -388,6 +392,7 @@ export function createListTaskGroupsHandler(services: ServiceRegistry): RouteHan
       // 同 createListTasksHandler：引擎未就绪时返回可重试错误
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
+    await (engine as unknown as { whenReady?: () => Promise<void> }).whenReady?.();
     const groups = (engine.listTaskGroups?.() ?? []).filter((g) => g.hidden !== true);
     return { status: 200, body: { groups } };
   };
@@ -419,7 +424,7 @@ export function createUpdateTaskGroupHandler(services: ServiceRegistry): RouteHa
     if (!engine?.updateTaskGroup) {
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
-    const body = (req.body ?? {}) as { name?: string };
+    const body = (req.body ?? {}) as { name?: string; expanded?: boolean };
     const group = engine.updateTaskGroup(id, body);
     if (!group) {
       return { status: 404, body: { error: ErrorCode.GROUP_NOT_FOUND } };

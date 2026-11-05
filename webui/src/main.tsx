@@ -66,6 +66,12 @@ async function initLocale() {
     const resolved = resolveLocale(locale);
     await i18n.changeLanguage(resolved);
     document.documentElement.lang = resolved;
+    // 快照：供 index.html 启动骨架首帧判定语言（与 moss-theme-fast 同模式）
+    try {
+      localStorage.setItem('moss-locale-fast', resolved);
+    } catch {
+      // 快照写失败不影响本次启动
+    }
   } catch (err) {
     // 启动兜底：语言初始化失败按默认语言继续，不阻塞应用启动
     console.warn('initLocale failed, fallback to default locale:', err);
@@ -93,8 +99,6 @@ const PERSISTED_KEYS = [
   'moss-right-panel-ratio',
   // 右侧面板宽度是否为手动拖拽产生（true → 设置项显示「自定义」）
   'moss-right-panel-custom',
-  // 任务分组（左侧边栏文件夹）展开/收起状态：刷新后保持
-  'moss-task-group-expanded',
 ] as const;
 
 /**
@@ -234,10 +238,6 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
       data['moss-message-queues'] && typeof data['moss-message-queues'] === 'object'
         ? (data['moss-message-queues'] as PersistedState['messageQueues'])
         : undefined,
-    taskGroupExpanded:
-      data['moss-task-group-expanded'] && typeof data['moss-task-group-expanded'] === 'object'
-        ? (data['moss-task-group-expanded'] as PersistedState['taskGroupExpanded'])
-        : undefined,
   };
 }
 
@@ -247,15 +247,17 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
  * 抛错，SW 安装/更新必然失败；叠加 skipWaiting:false，旧坏 SW 会长期接管并返回旧应用外壳，
  * 表现为「硬刷新/普通刷新拿不到新版本」。此处主动注销一次并清空 Cache Storage，
  * 让修复后的新 SW 立即生效，无需用户手清站点数据。
- * 用 localStorage 哨兵保证只执行一次、且不触发刷新（幂等、无刷新循环）。
- * dev 不执行：dev 的 /dev-sw.js 是用于调试 PWA 的，不能被清理。
+ * 用 localStorage 哨兵保证生产只执行一次（幂等、无刷新循环）。
+ * dev 也执行：清掉曾启用 devOptions 时残留的 dev SW（devOptions 已关闭，不再需要它）。
  */
 async function resetStaleServiceWorker(): Promise<void> {
-  if (!import.meta.env.PROD) return;
   if (!('serviceWorker' in navigator)) return;
-  const KEY = 'moss-sw-reset-2026-10';
+  const KEY = import.meta.env.PROD ? 'moss-sw-reset-2026-10' : 'moss-dev-sw-reset-2026-11';
   try {
-    if (localStorage.getItem(KEY)) return;
+    // 生产：一次性清理历史坏 SW；dev：每次都清掉曾启用 devOptions 时残留的 dev SW。
+    // 否则旧 SW 会接管 :3000 返回旧应用外壳（旧 hashed chunk 已不存在 → 白屏 / 重载循环，
+    // 且旧 index.html 携带的 manifest link 会让 Chrome 报 Syntax error）。
+    if (import.meta.env.PROD && localStorage.getItem(KEY)) return;
     localStorage.setItem(KEY, '1');
     const regs = await navigator.serviceWorker.getRegistrations();
     await Promise.all(regs.map((r) => r.unregister()));
@@ -298,6 +300,10 @@ function renderApp(): void {
 // 这是「WebUI 首屏 3s 可交互」的关键：IndexedDB 在低配机器上可能占用数百毫秒。
 applyAppearanceToDom(useStore.getState());
 renderApp();
+
+// 路由 chunk 预热：Splash 展示期间并行加载 TaskPage（与 App.tsx 的 lazy() 同一模块说明符，
+// 命中同一请求）。避免「Splash 结束 → 页面仍是 PageLoading」的断层，也让消息渲染更早开始。
+void import('./components/pages/TaskPage');
 
 void Promise.all([initTheme(), initLocale(), initPersisted()])
   .then((results) => {

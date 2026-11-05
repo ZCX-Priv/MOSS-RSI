@@ -22,6 +22,8 @@ export const en = {
     copiedApiTemplate: 'Copied api.json template from package',
     createdDefaultApi: 'Created default api.json',
     fallbackToDefaults: 'Config fallback to defaults (in-memory only, disk file unchanged)',
+    backgroundValidationPassed: 'Config background validation passed',
+    backgroundValidationFailed: 'Config background validation failed',
     reloadedFromDisk: 'Config reloaded from disk',
     appConfigUpdated: 'App config updated (written to config.json): {{keys}}',
     changeHandlerFailed: 'Config change handler failed',

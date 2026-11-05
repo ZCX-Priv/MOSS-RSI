@@ -136,6 +136,8 @@ export class AgentEngineImpl implements AgentEngine {
   private readonly tasks: TaskStore;
   /** 流式草稿（刷新/重连后恢复半截回复 + offset 续接的持久化载体） */
   private readonly liveDraft: LiveDraftStore;
+  /** 会话/任务磁盘索引就绪 promise（惰性启动；路由与 warmup 共用） */
+  private readiness: Promise<void> | null = null;
   private readonly services: ServiceRegistry;
   private readonly config: ConfigService;
   private readonly eventBus: EventBus;
@@ -225,6 +227,17 @@ export class AgentEngineImpl implements AgentEngine {
     if (filesys) {
       this.unsubFilesys = filesys.onFileChange((e) => this.onFilesysChange(e));
     }
+  }
+
+  /**
+   * 等待会话/任务磁盘索引就绪。
+   * 索引扫描在后台异步执行，不参与启动关键路径；列表类路由与 warmup 调用本方法。
+   */
+  whenReady(): Promise<void> {
+    if (!this.readiness) {
+      this.readiness = Promise.all([this.tasks.whenReady(), this.sessions.whenIndexed()]).then(() => undefined);
+    }
+    return this.readiness;
   }
 
   /** 释放资源（模块 destroy 时调用）：取消 filesys 事件订阅 + 强制刷盘脏 session（写盘降载兜底） */
@@ -1239,7 +1252,10 @@ export class AgentEngineImpl implements AgentEngine {
 
   /** 获取会话历史（不含已撤回的软删除消息） */
   getHistory(sessionId: string): AgentMessage[] {
-    return (this.sessions.get(sessionId)?.messages ?? []).filter(m => !m.deletedAt);
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    // 可见消息缓存：避免每次分页请求都对全量消息 filter 一遍
+    return this.sessions.getVisibleMessages(session);
   }
 
   /**
@@ -1656,7 +1672,7 @@ export class AgentEngineImpl implements AgentEngine {
     return this.tasks.createGroup(name, source, opts);
   }
 
-  updateTaskGroup(id: string, patch: { name?: string }): TaskGroup | null {
+  updateTaskGroup(id: string, patch: { name?: string; expanded?: boolean }): TaskGroup | null {
     return this.tasks.updateGroup(id, patch);
   }
 

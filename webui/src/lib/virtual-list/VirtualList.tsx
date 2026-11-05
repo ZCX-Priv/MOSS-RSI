@@ -40,6 +40,24 @@ import { buildPrefixSum, computeRange, findItemAt } from './prefix';
 
 /** 未测量条目的默认估算高度（px） */
 const DEFAULT_ITEM_HEIGHT = 96;
+/** 估算高度的采样上限（超过后仍用中位数，避免全量排序开销） */
+const ESTIMATE_SAMPLE_LIMIT = 64;
+/** 估算高度的夹取区间（px）：防止单条超长消息（展开思考/大工具卡）把估算值拉爆，
+ *  导致可视区间只剩 1 条、其余视口变成巨大 spacer（上滑黑屏的直接来源） */
+const ESTIMATE_MIN_HEIGHT = 40;
+const ESTIMATE_MAX_HEIGHT = 4000;
+/** 单次渲染的条目上限（安全阀）：极快滚动 + 估算偏低时避免一帧挂载上百条 */
+const MAX_RENDER_ITEMS = 48;
+/**
+ * 动态 overscan 上限（px）：速度预测 / 单帧跳变只用于填满视口前方，不无限扩大挂载范围。
+ * 6000px 覆盖「拖动滚动条一步到位」的极端跳变（真实拖拽连续像素远小于此值），
+ * 实际挂载量仍由 MAX_RENDER_ITEMS=48 兜底。
+ */
+const MAX_DYNAMIC_OVERSCAN_PX = 6000;
+/** 速度 → overscan 系数（px per px/ms）。滚动事件到提交约 2~3 帧，系数留 3~4 倍余量 */
+const VELOCITY_OVERSCAN_FACTOR = 250;
+/** onScrollMetrics 节流间隔（ms）：滚动中最多 10 次/秒通知宿主 */
+const SCROLL_METRICS_THROTTLE_MS = 100;
 /** scrollTop 低于该值视为「接近顶部」（触发加载更早一页；可由 startReachedThreshold 覆盖） */
 const DEFAULT_START_REACH_THRESHOLD = 600;
 /** anchorPrepend.apply 等待数据提交的重试帧数上限 */
@@ -50,6 +68,24 @@ const STICKY_RESUME_PX = 32;
 const INSTANT_SCROLL_DISTANCE_PX = 3000;
 /** 程序滚动窗口期兜底时长（ms）：scrollend 不可用时据此关闭窗口 */
 const PROGRAMMATIC_FALLBACK_MS = 700;
+
+/**
+ * 未测条目高度估算：取已测高度的中位数并夹取到安全区间。
+ * 用中位数而非平均值——单条超长消息（展开思考/大工具卡）不应把其余未测条目
+ * 全部估算成几万 px，否则可视区间会塌缩成 1 条、其余视口变成巨大 spacer（黑屏）。
+ */
+function estimateItemHeight(heights: ReadonlyMap<string, number>): number {
+  const samples: number[] = [];
+  for (const h of heights.values()) {
+    if (samples.length >= ESTIMATE_SAMPLE_LIMIT) break;
+    if (!Number.isFinite(h) || h <= 0) continue;
+    samples.push(h);
+  }
+  if (samples.length < 4) return DEFAULT_ITEM_HEIGHT;
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+  return Math.min(ESTIMATE_MAX_HEIGHT, Math.max(ESTIMATE_MIN_HEIGHT, median));
+}
 
 /**
  * 精确视口区间 [start, end)（不含 overscan）：
@@ -65,6 +101,48 @@ function computeVisibleRange(
   if (n <= 0) return { start: 0, end: 0 };
   const start = findItemAt(prefix, scrollTop);
   const end = Math.min(n, findItemAt(prefix, scrollTop + viewport) + 1);
+  return { start, end };
+}
+
+/**
+ * 渲染区间兜底与安全阀：
+ * - 必须覆盖精确可见区间（避免估算偏差导致视口内没有已挂载条目）；
+ * - 已挂载高度不足以覆盖「视口 + overscan」时向后扩展（防黑屏）；
+ * - 单次最多 MAX_RENDER_ITEMS 条（快速滚动时不至于一帧挂载上百条）；
+ * - 上限裁剪时优先保留可见区间，并尽量对称保留上下缓冲。
+ */
+function clampRenderRange(
+  r: { start: number; end: number },
+  prefix: readonly number[],
+  scrollTop: number,
+  viewport: number,
+): { start: number; end: number } {
+  const n = prefix.length - 1;
+  if (n <= 0) return { start: 0, end: 0 };
+  const visibleStart = findItemAt(prefix, scrollTop);
+  const visibleEnd = Math.min(n, findItemAt(prefix, scrollTop + viewport) + 1);
+  let start = Math.min(r.start, visibleStart);
+  let end = Math.max(r.end, visibleEnd);
+  // 填充兜底：已挂载条目的估算高度不足以覆盖视口时向后扩展（最多到安全阀）
+  while (
+    end < n &&
+    prefix[end] - prefix[start] < viewport &&
+    end - start < MAX_RENDER_ITEMS
+  ) {
+    end++;
+  }
+  // 安全阀：可见区本身不超过上限时，围绕可见区保留上下缓冲后裁剪
+  if (end - start > MAX_RENDER_ITEMS && visibleEnd - visibleStart < MAX_RENDER_ITEMS) {
+    const visibleCount = visibleEnd - visibleStart;
+    const budget = MAX_RENDER_ITEMS - visibleCount;
+    const before = Math.min(visibleStart - start, Math.ceil(budget / 2));
+    start = Math.max(start, visibleStart - before);
+    end = Math.min(end, start + MAX_RENDER_ITEMS);
+    if (end < visibleEnd) {
+      end = visibleEnd;
+      start = Math.max(0, end - MAX_RENDER_ITEMS);
+    }
+  }
   return { start, end };
 }
 
@@ -130,6 +208,10 @@ export interface VirtualListProps<T> {
   registerScroller?: (el: HTMLDivElement | null) => void;
   /** 宿主持有的 api ref（挂载后写入，卸载清空） */
   apiRef?: RefObject<VirtualListApi | null>;
+  /** 滚动速度回调（px/ms）：宿主持此做速度感知的预取 */
+  onScrollMetrics?: (metrics: { velocity: number; direction: 1 | -1; scrollTop: number }) => void;
+  /** 滚动状态回调：true=正在滚动，false=停止 120ms；宿主可据此暂停重内容水合 */
+  onScrollingChange?: (scrolling: boolean) => void;
 }
 
 export function VirtualList<T>({
@@ -150,6 +232,8 @@ export function VirtualList<T>({
   onAtBottomChange,
   registerScroller,
   apiRef,
+  onScrollMetrics,
+  onScrollingChange,
 }: VirtualListProps<T>) {
   // ===== 状态与引用 =====
   const [range, setRange] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
@@ -220,6 +304,30 @@ export function VirtualList<T>({
 
   const rafLayoutRef = useRef<number | null>(null);
   const rafScrollRef = useRef<number | null>(null);
+  /** 滚动速度（px/ms）：用于方向感知的动态 overscan（快速滚动时多挂载内容，避免空窗） */
+  const velocityRef = useRef(0);
+  /** 上一次滚动事件处理时刻（速度计算用） */
+  const lastScrollAtRef = useRef(0);
+  /** 上一次布局使用的 items 快照：prefix 实测修正时按「视口顶部消息 key」锚定 scrollTop */
+  const layoutItemsRef = useRef(items);
+  /** prepend 锚定合并：同一帧多次 anchorPrepend 复用同一个 apply（只修正一次 scrollTop） */
+  const pendingAnchorRef = useRef<{ apply: () => void } | null>(null);
+  /** onScrollMetrics 上次回调时刻（节流：滚动中最多 10 次/秒通知宿主） */
+  const lastMetricsAtRef = useRef(0);
+  /** 上一帧滚动位移（px）：用于把「单帧跳变」计入 overscan，避免拖动滚动条一步到位时空窗 */
+  const lastScrollDeltaRef = useRef(0);
+  /**
+   * startReached 武装时刻：首屏挂载 / 切换会话后 400ms 内不触发加载更早历史。
+   * 初始化阶段的「贴底 + 估算→实测收敛」会让 scrollTop 被浏览器被动钳制（表现为负 delta），
+   * 若不加窗口会被误判为用户上滑，与预取并发拉取同一区间（实测重复请求 0.6+0.8MB）。
+   */
+  const startArmedAtRef = useRef(Date.now() + 400);
+  /** 滚动停止去抖定时器（通知宿主恢复水合） */
+  const scrollIdleTimerRef = useRef<number | null>(null);
+  const metricsCbRef = useRef(onScrollMetrics);
+  metricsCbRef.current = onScrollMetrics;
+  const scrollingCbRef = useRef(onScrollingChange);
+  scrollingCbRef.current = onScrollingChange;
 
   /**
    * 以几何为准校准「在底部」与贴底意图，并在变化时回调宿主。
@@ -252,14 +360,8 @@ export function VirtualList<T>({
 
     const cur = itemsRef.current;
     const heights = heightsRef.current;
-    // 估算基准：已测高度的平均值（样本不足 4 条时用默认值）
-    let sum = 0;
-    let cnt = 0;
-    for (const h of heights.values()) {
-      sum += h;
-      if (++cnt >= 16) break;
-    }
-    const estimate = cnt >= 4 ? sum / cnt : DEFAULT_ITEM_HEIGHT;
+    // 估算基准：已测高度的中位数（夹取安全区间；样本不足 4 条时用默认值）
+    const estimate = estimateItemHeight(heights);
     const keyFn = itemKeyRef.current;
     const hs = new Array<number>(cur.length);
     for (let i = 0; i < cur.length; i++) {
@@ -267,7 +369,6 @@ export function VirtualList<T>({
     }
     const prevPrefix = prefixRef.current;
     const nextPrefix = buildPrefixSum(hs);
-    prefixRef.current = nextPrefix;
     let prefixChanged = prevPrefix.length !== nextPrefix.length;
     if (!prefixChanged) {
       for (let i = 0; i < nextPrefix.length; i++) {
@@ -278,8 +379,57 @@ export function VirtualList<T>({
       }
     }
 
+    // 估算 → 实测收敛时的位置锚定：prefix 大幅变化（实测修正 / prepend）后，
+    // 用「变化前视口顶部所在消息 key + 该条内偏移」恢复 scrollTop，
+    // 避免新 prefix 与旧 scrollTop 对不上导致视口落入 spacer（黑屏的另一来源）。
+    // 贴底跟随期间不做（由 sticky 贴底逻辑接管）；程序滚动期间也不做（避免打断平滑滚动）。
     const sc = scrollerRef.current;
+    const prevItems = layoutItemsRef.current;
+    if (
+      prefixChanged &&
+      !stickyRef.current &&
+      !programmaticRef.current &&
+      sc &&
+      prevItems.length > 0 &&
+      prevPrefix.length > 1
+    ) {
+      const prevTopIdx = findItemAt(prevPrefix, sc.scrollTop);
+      if (prevTopIdx >= 0 && prevTopIdx < prevItems.length) {
+        const anchorKey = keyFn(prevItems[prevTopIdx]);
+        const offsetInItem = sc.scrollTop - prevPrefix[prevTopIdx];
+        let newIdx = -1;
+        for (let i = 0; i < cur.length; i++) {
+          if (keyFn(cur[i]) === anchorKey) {
+            newIdx = i;
+            break;
+          }
+        }
+        if (newIdx >= 0) {
+          const itemBottom = nextPrefix[Math.min(newIdx + 1, cur.length)];
+          const newTop = Math.min(
+            nextPrefix[newIdx] + offsetInItem,
+            Math.max(nextPrefix[newIdx], itemBottom - 1),
+          );
+          if (Math.abs(newTop - sc.scrollTop) > 4) {
+            // 记录自身程序滚动的预期值，避免 handleScroll 把这次修正误判为「用户上滑」而脱离跟随
+            selfScrollTopRef.current = newTop;
+            lastScrollTopRef.current = newTop;
+            sc.scrollTop = newTop;
+          }
+        }
+      }
+    }
+
+    prefixRef.current = nextPrefix;
+    layoutItemsRef.current = cur;
+
     if (sc) {
+      // 容器高度尚未就绪（布局塌陷 / 首帧）：不更新区间，等 ResizeObserver 报告后重排，
+      // 避免用 clientHeight=0 算出「空区间」导致整屏无内容。
+      if (sc.clientHeight <= 0) {
+        dirtyRef.current = true;
+        return;
+      }
       // 贴底意图下 `sc.scrollTop` 不可信：DOM 尚未反映本次 prefix（首帧 prefix 仍是 [0]、
       // 无任何 cell，scrollHeight 只等于 header+footer，scrollTop 近似 0）。若照它算区间，
       // 会渲染「顶部条目 + 巨大底部 spacer」而视口又在底部 → 可见区只剩空 spacer（错位），
@@ -289,7 +439,23 @@ export function VirtualList<T>({
       const total = prefixRef.current[prefixRef.current.length - 1] ?? 0;
       const bottomIntent = followRef.current && stickyRef.current && !programmaticRef.current;
       const effectiveTop = bottomIntent ? Math.max(0, total - sc.clientHeight) : sc.scrollTop;
-      const r = computeRange(prefixRef.current, effectiveTop, sc.clientHeight, overscanRef.current);
+      // 速度预测 + 单帧跳变：跳变幅度直接计入 overscan（覆盖拖动滚动条一步到位），
+      // 由 MAX_DYNAMIC_OVERSCAN_PX 与 MAX_RENDER_ITEMS 双重兜底，不会无限挂载。
+      const jumpPx = Math.max(
+        velocityRef.current * VELOCITY_OVERSCAN_FACTOR,
+        Math.abs(lastScrollDeltaRef.current),
+      );
+      const dynamicOverscan = Math.max(
+        overscanRef.current,
+        Math.min(MAX_DYNAMIC_OVERSCAN_PX, overscanRef.current + jumpPx),
+      );
+      // computeRange 给出带缓冲的区间，再由 clampRenderRange 做「覆盖可见区 + 填充兜底 + 条数安全阀」
+      const r = clampRenderRange(
+        computeRange(prefixRef.current, effectiveTop, sc.clientHeight, dynamicOverscan),
+        prefixRef.current,
+        effectiveTop,
+        sc.clientHeight,
+      );
       const prevRange = rangeStateRef.current;
       const rangeChanged = prevRange.start !== r.start || prevRange.end !== r.end;
       if (rangeChanged) {
@@ -380,6 +546,12 @@ export function VirtualList<T>({
         window.clearTimeout(programmaticTimerRef.current);
         programmaticTimerRef.current = null;
       }
+      if (scrollIdleTimerRef.current !== null) {
+        window.clearTimeout(scrollIdleTimerRef.current);
+        scrollIdleTimerRef.current = null;
+      }
+      // 卸载时若仍处于「滚动中」，必须恢复水合暂停（否则后续消息永远不再升级 Markdown）
+      scrollingCbRef.current?.(false);
     },
     [],
   );
@@ -497,6 +669,9 @@ export function VirtualList<T>({
         bottomDoneRef.current = true;
         // 只置「贴底意图」：sticky 让后续每轮布局都贴底，实测收敛期间持续贴住不跳动
         stickyRef.current = true;
+        // 首屏数据刚到达：接下来 600ms 是「估算→实测」收敛窗口，期间的负 delta
+        // 是浏览器被动钳制 scrollTop 造成的，不能当作「用户上滑」去加载更早历史。
+        startArmedAtRef.current = Date.now() + 600;
       }
     } else {
       bottomDoneRef.current = false;
@@ -551,6 +726,8 @@ export function VirtualList<T>({
     rangeStateRef.current = { start: 0, end: 0 };
     visibleStateRef.current = { start: 0, end: 0 };
     autoFillDepthRef.current = 0;
+    // 新会话初始化窗口：贴底与实测收敛期间不触发 startReached
+    startArmedAtRef.current = Date.now() + 400;
     dirtyRef.current = true;
     runLayout();
   }, [sessionKey, runLayout, closeProgrammatic]);
@@ -596,6 +773,40 @@ export function VirtualList<T>({
       if (!sc) return;
       const top = sc.scrollTop;
       const dist = sc.scrollHeight - top - sc.clientHeight;
+      // 速度感知：px/ms。快速滚动时扩大 overscan，保证视口前方始终有已挂载内容
+      const nowMs = performance.now();
+      const dt = Math.max(1, nowMs - lastScrollAtRef.current);
+      const delta = top - lastScrollTopRef.current;
+      lastScrollAtRef.current = nowMs;
+      velocityRef.current = Math.abs(delta) / dt;
+      lastScrollDeltaRef.current = delta;
+      // 速度预测只服务于「向上补历史」：向下滚动不通知宿主预取；
+      // 100ms 节流把回调频率限制在 10 次/秒（避免每帧触发请求判定）。
+      if (delta < 0 && nowMs - lastMetricsAtRef.current >= SCROLL_METRICS_THROTTLE_MS) {
+        lastMetricsAtRef.current = nowMs;
+        metricsCbRef.current?.({
+          velocity: velocityRef.current,
+          direction: -1,
+          scrollTop: top,
+        });
+      }
+      scrollingCbRef.current?.(true);
+      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        scrollIdleTimerRef.current = null;
+        velocityRef.current = 0;
+        // 停止滚动后清空跳变记忆：避免后续布局继续按极端 overscan 过度挂载
+        lastScrollDeltaRef.current = 0;
+        scrollingCbRef.current?.(false);
+      }, 120);
+      const dynamicOverscan = Math.max(
+        overscanRef.current,
+        Math.min(
+          MAX_DYNAMIC_OVERSCAN_PX,
+          overscanRef.current +
+            Math.max(velocityRef.current * VELOCITY_OVERSCAN_FACTOR, Math.abs(delta)),
+        ),
+      );
       // 识别「自身程序滚动」（贴底 / scrollToBottom('auto')）触发的 scroll 事件：
       // 与预期 scrollTop 对齐则视为自身滚动，跳过 atBottom/sticky 改写。
       // 不做这层识别时，「滚动后内容继续增长」会让距离读成增长值 → 跟随态被误关、按钮误显。
@@ -621,7 +832,12 @@ export function VirtualList<T>({
       lastScrollTopRef.current = top;
       if (top > startThresholdRef.current) suppressStartRef.current = false;
       if (prefixRef.current.length > 1) {
-        const r = computeRange(prefixRef.current, sc.scrollTop, sc.clientHeight, overscanRef.current);
+        const r = clampRenderRange(
+          computeRange(prefixRef.current, sc.scrollTop, sc.clientHeight, dynamicOverscan),
+          prefixRef.current,
+          sc.scrollTop,
+          sc.clientHeight,
+        );
         const prevRange = rangeStateRef.current;
         if (prevRange.start !== r.start || prevRange.end !== r.end) {
           rangeStateRef.current = r;
@@ -634,7 +850,15 @@ export function VirtualList<T>({
           setVisibleRange(vr);
         }
       }
-      if (sc.scrollTop <= startThresholdRef.current && !suppressStartRef.current) {
+      // 仅在「向上滚动」且接近顶部时触发加载：初始贴底/首帧布局期间的 scroll 事件
+      // （scrollTop 从 0 被程序化拉到底前后）不应被误判为「用户上滑」，
+      // 否则首屏会额外拉一页历史，与后台预取重复请求同一区间。
+      if (
+        delta < 0 &&
+        Date.now() >= startArmedAtRef.current &&
+        sc.scrollTop <= startThresholdRef.current &&
+        !suppressStartRef.current
+      ) {
         startCbRef.current?.();
       }
     });
@@ -693,28 +917,36 @@ export function VirtualList<T>({
 
   const api = useMemo<VirtualListApi>(() => ({
     anchorPrepend: () => {
+      // 同一帧内多次 prepend（缓存页连消费 / 多来源合并）复用同一个锚点：
+      // 若每次重新捕获 h0 并各自加 delta，scrollTop 会被重复累加 → 位置错乱。
+      const pending = pendingAnchorRef.current;
+      if (pending) return { apply: pending.apply };
       const h0 = scrollerRef.current?.scrollHeight ?? 0;
-      return {
-        apply: () => {
-          const tryOnce = (retries: number): void => {
-            const s = scrollerRef.current;
-            if (!s) return;
-            const delta = s.scrollHeight - h0;
-            // 数据尚未提交（增量仍为 0）：等待下一帧再试
-            if (delta === 0 && retries > 0) {
-              requestAnimationFrame(() => tryOnce(retries - 1));
-              return;
-            }
-            if (delta > 0) {
-              s.scrollTop += delta;
-              suppressStartRef.current = true;
-              dirtyRef.current = true;
-              scheduleLayout();
-            }
-          };
-          requestAnimationFrame(() => tryOnce(PREPEND_APPLY_RETRIES));
-        },
+      let applied = false;
+      const apply = (): void => {
+        if (applied) return;
+        applied = true;
+        pendingAnchorRef.current = null;
+        const tryOnce = (retries: number): void => {
+          const s = scrollerRef.current;
+          if (!s) return;
+          const delta = s.scrollHeight - h0;
+          // 数据尚未提交（增量仍为 0）：等待下一帧再试
+          if (delta === 0 && retries > 0) {
+            requestAnimationFrame(() => tryOnce(retries - 1));
+            return;
+          }
+          if (delta > 0) {
+            s.scrollTop += delta;
+            suppressStartRef.current = true;
+            dirtyRef.current = true;
+            scheduleLayout();
+          }
+        };
+        requestAnimationFrame(() => tryOnce(PREPEND_APPLY_RETRIES));
       };
+      pendingAnchorRef.current = { apply };
+      return { apply };
     },
     scrollToBottom: (behavior: ScrollBehavior = 'auto') => {
       const sc = scrollerRef.current;
@@ -781,8 +1013,13 @@ export function VirtualList<T>({
   const prefix = prefixRef.current;
   // 钳制渲染区间：items 缩短（会话切换 / 数据回退）时 range 可能残留上一轮的旧值，
   // 直接 slice 会切到错误区间（错位/空白）。统一夹紧到 [0, items.length]，并保证 start ≤ end。
-  const rangeStart = Math.max(0, Math.min(range.start, items.length));
-  const rangeEnd = Math.max(rangeStart, Math.min(range.end, items.length));
+  let rangeStart = Math.max(0, Math.min(range.start, items.length));
+  let rangeEnd = Math.max(rangeStart, Math.min(range.end, items.length));
+  // 空区间保护：非空列表绝不渲染 0 条（容器高度/区间计算异常时至少保留 1 条，杜绝整屏黑）
+  if (items.length > 0 && rangeEnd <= rangeStart) {
+    rangeStart = Math.min(rangeStart, items.length - 1);
+    rangeEnd = rangeStart + 1;
+  }
   const topSpacer = prefix[rangeStart] ?? 0;
   const bottomSpacer = Math.max(0, (prefix[prefix.length - 1] ?? 0) - (prefix[rangeEnd] ?? 0));
 

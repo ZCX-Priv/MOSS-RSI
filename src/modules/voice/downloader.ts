@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import unbzip2 from 'unbzip2-stream';
-import * as tar from 'tar';
+// 注意：tar 必须动态 import —— 静态 import 会把 node polyfill（约 944KB）拉进启动闭包。
 import type { VoiceModelDef } from './types';
 import { githubAssetCandidates, cachedRankMirrors } from '../../utils/mirror';
 
@@ -161,6 +161,7 @@ async function downloadWithFallback(
 async function extractTarBz2(archive: string, destDir: string): Promise<void> {
   const src = createReadStream(archive);
   const inflate = unbzip2();
+  const tar = await import('tar');
   const unpack = tar.x({ cwd: destDir, preservePaths: false });
 
   await new Promise<void>((resolve, reject) => {

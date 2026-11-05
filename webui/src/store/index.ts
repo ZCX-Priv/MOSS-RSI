@@ -136,11 +136,20 @@ export interface GroupTasksMeta {
   total: number;
 }
 
+/** 预取的历史页缓存条目（before = 请求时的 oldestIndex 游标） */
+interface CachedHistoryPage {
+  before: number;
+  messages: TaskMessage[];
+  page: { total: number; oldestIndex: number; newestIndex: number; hasMoreBefore: boolean };
+}
+
 interface UIState {
   // --- 会话 / 消息 ---
   activeSessionId: string | null;
   sessions: Session[];
   messagesBySession: Record<string, TaskMessage[]>;
+  /** 会话历史预取缓存（按会话；仅内存，不改存储格式） */
+  historyCacheBySession: Record<string, CachedHistoryPage[] | undefined>;
   /**
    * 历史分页元数据（按 sessionId 索引）：游标 = 服务端「过滤软删除后的消息下标」。
    * 上滑加载更早用 oldestIndex 作 before，断线/完成后补齐用 newestIndex 作 after。
@@ -200,9 +209,10 @@ interface UIState {
   tasks: TaskItem[];
   taskGroups: TaskGroup[];
   activeTaskId: string | null;
-  /** 任务分组（文件夹）展开/收起状态：groupId → expanded（缺省视为展开）。
-   *  仅持久化「被用户改动过」的分组项，未出现的分组运行时回退 true。 */
-  taskGroupExpanded: Record<string, boolean>;
+  /** 启动里程碑：当前路由页面（Suspense 内）是否已真正挂载 */
+  bootPageReady: boolean;
+  /** 启动里程碑：已就绪的会话 id（有 taskId 的路由据此判定首屏消息是否加载完） */
+  bootSessionId: string | null;
   /** 分组任务加载态（按需加载 + 组内分页）：groupId → { loaded, loading, hasMore, total } */
   groupTasksMeta: Record<string, GroupTasksMeta | undefined>;
 
@@ -352,8 +362,6 @@ export interface PersistedState {
   messageQueues?: Record<string, QueuedMessage[]>;
   /** 最近使用目录的自定义显示名（path → alias） */
   recentDirectoryAliases?: Record<string, string>;
-  /** 任务分组展开/收起（groupId → expanded；仅存被改动过的项） */
-  taskGroupExpanded?: Record<string, boolean>;
 }
 
 // ============================================================================
@@ -388,6 +396,12 @@ interface UIActions {
   ) => void;
   /** 仅更新分页元数据（加载态 / 游标推进，不动消息） */
   patchHistoryMeta: (sessionId: string, patch: Partial<HistoryMeta>) => void;
+  /** 缓存一页更早历史（预取；不并入可见列表） */
+  cacheHistoryPage: (sessionId: string, entry: CachedHistoryPage) => void;
+  /** 取缓存中离当前顶部最近的一页（无则 null） */
+  takeCachedHistoryPage: (sessionId: string) => CachedHistoryPage | null;
+  /** 清空某会话的预取缓存 */
+  clearHistoryCache: (sessionId: string) => void;
   /** 清空分页元数据（截断/恢复后需重新按 tail 加载） */
   resetHistory: (sessionId: string) => void;
   /** 移除本地流式消息（服务端以正式历史消息重新给出时调用，避免重复渲染） */
@@ -461,10 +475,15 @@ interface UIActions {
   removeTask: (id: string) => void;
   setActiveTaskId: (id: string | null) => void;
   addTaskGroup: (group: TaskGroup) => void;
+  /** 更新分组（本地乐观更新；名称/展开状态均以后端 PATCH 为真相） */
   updateTaskGroup: (id: string, patch: Partial<TaskGroup>) => void;
   removeTaskGroup: (id: string) => void;
-  /** 设置某分组的展开/收起并持久化到 IndexedDB（groupId → expanded 全量落盘） */
-  setTaskGroupExpanded: (groupId: string, expanded: boolean) => void;
+  /** 标记当前路由页面已挂载（Splash 进度里程碑） */
+  markPageReady: () => void;
+  /** 标记某会话首屏历史已就绪（Splash 进度里程碑） */
+  markSessionReady: (sessionId: string) => void;
+  /** 会话切换时清除就绪标记 */
+  resetBootSession: () => void;
   /** 局部更新某分组任务加载态（发起请求前置 loading 等） */
   patchGroupTasksMeta: (groupId: string, patch: Partial<GroupTasksMeta>) => void;
   /**
@@ -822,6 +841,7 @@ export const useStore = create<Store>((set, get) => ({
   sessions: [],
   messagesBySession: {},
   historyMetaBySession: {},
+  historyCacheBySession: {},
   generatingBySession: {},
   activeRunBySession: {},
   terminatedRunIdsBySession: {},
@@ -851,7 +871,8 @@ export const useStore = create<Store>((set, get) => ({
   tasks: [],
   taskGroups: [],
   activeTaskId: null,
-  taskGroupExpanded: {},
+  bootPageReady: false,
+  bootSessionId: null,
   groupTasksMeta: {},
 
   // --- Todo / Context ---
@@ -1119,7 +1140,14 @@ export const useStore = create<Store>((set, get) => ({
         // 任意页（含「节点跳转」拉取的中间页）都必须按区间取并集：
         // 中间页的 newestIndex 可能小于当前已加载尾部，直接覆盖会让游标倒退 →
         // catchUpTail 误判「有新增」而重复拉取；oldestIndex 同理只能取更小值。
-        const oldest = Math.min(prevMeta?.oldestIndex ?? page.oldestIndex, page.oldestIndex);
+        //
+        // 关键：首屏开始前 patchHistoryMeta 会留下「占位 meta」（loaded=false / newestIndex=-1，
+        // 但 oldestIndex 默认 0）。若把它当作有效游标取 min，oldestIndex 会被永久钉在 0 →
+        // hasMoreBefore 恒为 false → 上滑永远不加载更早历史（长会话「翻不上去」的根因）。
+        const prevCursorValid = prevMeta !== undefined && prevMeta.newestIndex >= 0;
+        const oldest = prevCursorValid
+          ? Math.min(prevMeta.oldestIndex, page.oldestIndex)
+          : page.oldestIndex;
         const newest = Math.max(prevMeta?.newestIndex ?? -1, page.newestIndex);
         meta = {
           total: page.total,
@@ -1160,6 +1188,35 @@ export const useStore = create<Store>((set, get) => ({
       return {
         historyMetaBySession: { ...state.historyMetaBySession, [sessionId]: { ...base, ...patch } },
       };
+    }),
+
+  cacheHistoryPage: (sessionId, entry) =>
+    set((state) => {
+      const prev = state.historyCacheBySession[sessionId] ?? [];
+      // 同一 before 游标只保留最新一份；最近邻优先，最多 4 页防内存膨胀
+      // （预取预算已收敛到「1 页 × 20 条」，4 页足够兜住快速上滑，不再堆积 20 页）
+      const next = [...prev.filter((p) => p.before !== entry.before), entry]
+        .sort((a, b) => b.before - a.before)
+        .slice(0, 4);
+      return {
+        historyCacheBySession: { ...state.historyCacheBySession, [sessionId]: next },
+      };
+    }),
+
+  takeCachedHistoryPage: (sessionId) => {
+    const list = get().historyCacheBySession[sessionId];
+    if (!list || list.length === 0) return null;
+    const first = list[0];
+    set((state) => ({
+      historyCacheBySession: { ...state.historyCacheBySession, [sessionId]: list.slice(1) },
+    }));
+    return first;
+  },
+
+  clearHistoryCache: (sessionId) =>
+    set((state) => {
+      const { [sessionId]: _omit, ...rest } = state.historyCacheBySession;
+      return { historyCacheBySession: rest };
     }),
 
   resetHistory: (sessionId) =>
@@ -1445,14 +1502,10 @@ export const useStore = create<Store>((set, get) => ({
         groupTasksMeta: restMeta,
       };
     }),
-  // 展开/收起持久化：缺省视为展开（undefined → true），同值不重复写盘
-  setTaskGroupExpanded: (groupId, expanded) =>
-    set((state) => {
-      if ((state.taskGroupExpanded[groupId] ?? true) === expanded) return {};
-      const taskGroupExpanded = { ...state.taskGroupExpanded, [groupId]: expanded };
-      void idbSet('moss-task-group-expanded', taskGroupExpanded);
-      return { taskGroupExpanded };
-    }),
+  // --- 启动里程碑（Splash 真实进度） ---
+  markPageReady: () => set({ bootPageReady: true }),
+  markSessionReady: (sessionId) => set({ bootSessionId: sessionId }),
+  resetBootSession: () => set({ bootSessionId: null }),
   // --- 分组任务按需加载 / 组内分页 ---
   patchGroupTasksMeta: (groupId, patch) =>
     set((state) => ({
@@ -2200,14 +2253,6 @@ export const useStore = create<Store>((set, get) => ({
           if (items.length > 0) queues[sid] = [items[0]];
         }
         next.messageQueueBySession = queues;
-      }
-      // 任务分组展开/收起（groupId → expanded）：仅收布尔值，非法项丢弃
-      if (patch.taskGroupExpanded && typeof patch.taskGroupExpanded === 'object') {
-        const clean: Record<string, boolean> = {};
-        for (const [k, v] of Object.entries(patch.taskGroupExpanded)) {
-          if (k && typeof v === 'boolean') clean[k] = v;
-        }
-        next.taskGroupExpanded = clean;
       }
       return next;
     }),

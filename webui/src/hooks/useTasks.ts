@@ -12,8 +12,8 @@ import { api } from '../api/http';
 import { withRetry } from '../lib/retry';
 import type { TaskItem } from '../types/api';
 
-/** 分组内每页条数（组内分页；典型分组远小于此值，一页即加载完） */
-const TASKS_PAGE_SIZE = 100;
+/** 分组内每页条数（组内分页）：首屏更轻，滚动哨兵续载；不再一次拉 100 条 */
+const TASKS_PAGE_SIZE = 30;
 /** 分组首屏加载失败后的自动重试冷却（ms）：避免「关别的组」顺带触发失败组反复请求 */
 const GROUP_RETRY_COOLDOWN_MS = 30_000;
 
@@ -135,10 +135,14 @@ export function useTasks() {
         // 所有分组条目瞬间消失再重新加载（「关一个组，另一个组重新加载」的放大来源）。
         if (!opts?.preserveTasks && !loadedOnceRef.current) resetGroupTasks();
         loadedOnceRef.current = true;
-        const expanded = useStore.getState().taskGroupExpanded;
+        // 只加载「展开且非空」的分组：折叠分组默认零请求（首次点击展开时才懒加载）。
+        // 展开状态来自后端 TaskGroup.expanded（默认分组缺省展开，其余缺省折叠）。
         void Promise.all(
           groups
-            .filter((g) => (expanded[g.id] ?? true) && (g.taskCount ?? 0) > 0)
+            .filter(
+              (g) =>
+                (g.expanded ?? (g.id === 'default')) && (g.taskCount ?? 0) > 0,
+            )
             .map((g) => ensureGroupLoaded(g.id)),
         );
         return;
@@ -244,7 +248,7 @@ export function useTasks() {
     }
   }, []);
 
-  const updateTaskGroup = useCallback(async (id: string, patch: { name?: string }) => {
+  const updateTaskGroup = useCallback(async (id: string, patch: { name?: string; expanded?: boolean }) => {
     try {
       const group = await api.updateTaskGroup(id, patch);
       if (group) {

@@ -145,7 +145,7 @@ export async function loadToolFromDir(
 }
 
 /** 单个工具实现的惰性加载器（首次 execute 时才 import index.ts，之后复用） */
-function createLazyImplLoader(
+export function createLazyImplLoader(
   dir: string,
   env: Environment,
   logger: Logger,
@@ -176,6 +176,52 @@ function createLazyImplLoader(
       });
     return promise;
   };
+}
+
+/**
+ * 启动期工具描述符加载（预生成清单优先）：
+ * 生产构建会在 dist/modules/tools/_tools.json 预合并所有 tool.json，
+ * 启动只读一个文件；清单缺失（开发态）时回退逐目录扫描。
+ * 两种情况都不 import index.ts（execute 首次调用才动态加载实现）。
+ */
+export function loadToolDescriptorsFromPrebuilt(
+  dir: string,
+  env: Environment,
+  logger: Logger,
+): Tool[] | null {
+  const file = join(dir, '_tools.json');
+  if (!existsSync(file)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
+      tools?: Array<{ dir?: string; manifest?: ToolManifest }>;
+    };
+    if (!Array.isArray(raw.tools)) return null;
+    const tools: Tool[] = [];
+    for (const item of raw.tools) {
+      if (!item || typeof item.dir !== 'string' || !item.manifest) continue;
+      if (!isValidManifest(item.manifest)) {
+        logger.warn(t('tools.skipMissingFields', { dir: join(dir, item.dir) }));
+        continue;
+      }
+      const fullDir = join(dir, item.dir);
+      const getImpl = createLazyImplLoader(fullDir, env, logger);
+      tools.push(
+        buildTool(item.manifest, fullDir, 'builtin', async (params, ctx) => {
+          const impl = await getImpl();
+          if (typeof impl.execute !== 'function') {
+            throw new Error(t('tools.skipNoExecute', { dir: fullDir }));
+          }
+          return impl.execute(params, ctx);
+        }),
+      );
+    }
+    return tools;
+  } catch (err) {
+    logger.warn(t('tools.skipInvalidManifest', { dir }), {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /**

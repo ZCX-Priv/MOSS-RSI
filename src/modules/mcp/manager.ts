@@ -123,8 +123,8 @@ export class MCPManagerImpl implements MCPManager {
       });
     }
 
-    // 监听用户 mcps 目录配置变更，实现热重载（仅首次启动时设置）
-    this.startWatch();
+    // 监听用户 mcps 目录配置变更，实现热重载（延迟启动，避免启动期 watcher 开销）
+    setTimeout(() => this.startWatch(), 1000);
   }
 
   /**

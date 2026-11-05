@@ -46,7 +46,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { FilePreviewPane, archiveEntrySource, fileNameOf, MarkdownRenderer } from '../../render';
-import { subscribeDrained } from '../../render/core/hydration-scheduler';
+import { setHydrationPaused, subscribeDrained } from '../../render/core/hydration-scheduler';
 import type { OverlayType } from '../../types';
 import { cn } from '@/lib/utils';
 import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-block';
@@ -345,6 +345,40 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         return index;
       }
     }
+    // prepend（上滑加载更早历史）：旧数组是新数组的「后缀」——复用旧索引（浅拷贝），
+    // 只扫描新增的前缀并覆盖同 toolCallId（prepend 的新消息在时间序更早，first-wins 语义下优先）。
+    // 避免每次上滑都全量重建 Map 并重复 join 全部工具结果文本（长会话下是上滑卡顿的来源之一）。
+    if (messages.length > prev.length) {
+      const offset = messages.length - prev.length;
+      let suffixSame = true;
+      for (let i = 0; i < prev.length; i++) {
+        if (messages[offset + i] !== prev[i]) {
+          suffixSame = false;
+          break;
+        }
+      }
+      if (suffixSame) {
+        const index = new Map(cache.index);
+        for (let i = 0; i < offset; i++) {
+          const results = messages[i].toolResults;
+          if (!results) continue;
+          for (const entry of results) {
+            if (!entry.toolCallId) continue;
+            const text = entry.result.content
+              .filter((c) => c.type === 'text')
+              .map((c) => (c.type === 'text' ? c.text : ''))
+              .join('\n');
+            index.set(entry.toolCallId, {
+              text,
+              isError: entry.result.isError === true,
+              ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
+            });
+          }
+        }
+        toolResultCacheRef.current = { messages, index };
+        return index;
+      }
+    }
     const index = buildToolResultIndex(messages);
     toolResultCacheRef.current = { messages, index };
     return index;
@@ -371,89 +405,40 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const setHubActiveModule = useStore((s) => s.setHubActiveModule);
 
   // ===== 中控岛自动展开/折叠 =====
-  // 竞态防护：用户手动操作（chips/折叠按钮）经 handleHubModuleChange 记录时间戳并取消
-  // 自动折叠定时器；程序化 setHubActiveModule 不经过包装，不会误标为用户操作
+  // 仅「新提问 / 新权限确认」到达时自动展开对应模块；处理完成后自动折叠。
+  // Todo 不再自动展开（只随 chip 手动切换，面板内容仍随 store 实时刷新）。
   const prevAskCountRef = useRef(0);
   const prevConfirmCountRef = useRef(0);
-  /** todo 签名（id:status 列表）；null = 未初始化（首次跳过，防挂载误触发） */
-  const prevTodoSigRef = useRef<string | null>(null);
-  /** 上一次 todo 是否处于「全部完成」态（进入沿检测基准） */
-  const prevAllDoneRef = useRef(false);
-  /** 本次生成（run）内是否已执行过 todo「首次展开」；isGenerating 上升沿重置 */
-  const runTodoExpandedRef = useRef(false);
-  /** 上一次 isGenerating（上升沿检测基准） */
-  const prevGeneratingRef = useRef(false);
   /** 上一次处理的会话 id（切换会话时重置基准，防跨会话比较误触发） */
   const lastHubTaskIdRef = useRef('');
-  /** todo 自动折叠定时器（变更后展示 3s） */
-  const todoCollapseTimerRef = useRef<number | null>(null);
-  /** 用户最近一次手动操作时间（自动折叠前校验，防止与用户操作打架） */
-  const lastUserActionAtRef = useRef(0);
-  /** 最近一次自动展开时间 */
-  const autoExpandAtRef = useRef(0);
 
-  const clearTodoCollapseTimer = useCallback(() => {
-    if (todoCollapseTimerRef.current !== null) {
-      window.clearTimeout(todoCollapseTimerRef.current);
-      todoCollapseTimerRef.current = null;
-    }
-  }, []);
-
-  /** 用户手动切换模块（chips 点击/折叠按钮）：标记操作时间并取消待执行的自动折叠 */
+  /** 用户手动切换模块（chips 点击/折叠按钮） */
   const handleHubModuleChange = useCallback(
     (moduleId: string | null) => {
-      lastUserActionAtRef.current = Date.now();
-      clearTodoCollapseTimer();
       setHubActiveModule(taskId, moduleId);
     },
-    [clearTodoCollapseTimer, setHubActiveModule, taskId],
+    [setHubActiveModule, taskId],
   );
 
-  // 自动行为：新提问/权限确认到达 → 自动展开并切换对应类别；回答/处理后 → 默认折叠；
-  // todo 变更 → 仅两个时机展开（各展示 3s 后自动折叠，不抢占待处理的提问/权限）：
-  //   ① 本次生成内首次建立/变更（发送任务后 todo 首次出现/变化）
-  //   ② 进入「全部完成」态（所有项 completed 的上升沿）
-  //   中间变更不展开、不重置定时器（面板内容仍随 store 实时刷新）
+  // 自动行为：新提问/权限确认到达 → 自动展开并切换对应类别；回答/处理后 → 默认折叠。
   useEffect(() => {
     if (!taskId) return;
-    // 会话切换：重置基准状态（在比较前执行，避免旧会话计数/签名误触发）
+    // 会话切换：重置基准状态（在比较前执行，避免旧会话计数误触发）
     if (lastHubTaskIdRef.current !== taskId) {
       lastHubTaskIdRef.current = taskId;
       prevAskCountRef.current = 0;
       prevConfirmCountRef.current = 0;
-      prevTodoSigRef.current = null;
-      prevAllDoneRef.current = false;
-      runTodoExpandedRef.current = false;
-      clearTodoCollapseTimer();
     }
-    // 生成开始（上升沿）：重置「run 内首次展开」标志，下一次 todo 变更即为本次生成的首次
-    if (isGenerating && !prevGeneratingRef.current) {
-      runTodoExpandedRef.current = false;
-    }
-    prevGeneratingRef.current = isGenerating;
     const askCount = pendingAsks.filter((a) => a.sessionId === taskId).length;
     const confirmCount = pendingConfirms.filter((c) => c.sessionId === taskId).length;
-    const todoSig = todos.map((td) => `${td.id}:${td.status}`).join('|');
     const prevAsk = prevAskCountRef.current;
     const prevConfirm = prevConfirmCountRef.current;
-    const prevTodoSig = prevTodoSigRef.current;
-    const prevAllDone = prevAllDoneRef.current;
-    const wasRunTodoExpanded = runTodoExpandedRef.current;
-    const nowAllDone = todos.length > 0 && todos.every((td) => td.status === 'completed');
-    const todoChanged = prevTodoSig !== null && todoSig !== prevTodoSig;
     prevAskCountRef.current = askCount;
     prevConfirmCountRef.current = confirmCount;
-    prevTodoSigRef.current = todoSig;
-    // 基准在分支前无条件推进（ask/confirm 分支提前 return 也不能让基准过期）；
-    // 分支内使用的是上方捕获的旧值 wasRunTodoExpanded / prevAllDone
-    prevAllDoneRef.current = nowAllDone;
-    runTodoExpandedRef.current = wasRunTodoExpanded || todoChanged;
 
     // 新提问到达：切换/展开 ask（阻塞 agent，最高优先级）
     if (askCount > prevAsk) {
-      clearTodoCollapseTimer();
       setHubActiveModule(taskId, 'ask');
-      autoExpandAtRef.current = Date.now();
       return;
     }
     // 提问清空（已回答）：默认折叠；仍有待确认权限则切过去
@@ -463,48 +448,14 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     }
     // 新权限确认到达：切换/展开 permission
     if (confirmCount > prevConfirm) {
-      clearTodoCollapseTimer();
       setHubActiveModule(taskId, 'permission');
-      autoExpandAtRef.current = Date.now();
       return;
     }
     // 权限确认清空（已处理）：默认折叠；仍有待答提问则切回去
     if (prevConfirm > 0 && confirmCount === 0 && hubActiveModule === 'permission') {
       setHubActiveModule(taskId, askCount > 0 ? 'ask' : null);
-      return;
     }
-    // todo 变更（跳过首次初始化）：无阻塞项时，仅「本次生成内首次变更」或
-    // 「进入全部完成态」两个时机展开 3s 后自动折叠；中间变更静默刷新不展开
-    if (todoChanged && askCount === 0 && confirmCount === 0) {
-      const isFirstChange = !wasRunTodoExpanded;
-      const becomesAllDone = nowAllDone && !prevAllDone;
-      if (isFirstChange || becomesAllDone) {
-        clearTodoCollapseTimer();
-        setHubActiveModule(taskId, 'todo');
-        autoExpandAtRef.current = Date.now();
-        todoCollapseTimerRef.current = window.setTimeout(() => {
-          todoCollapseTimerRef.current = null;
-          const s = useStore.getState();
-          // 竞态防护：仅当仍处于 todo 模块且自动展开后用户无手动干预时才折叠
-          if (
-            s.hubActiveModuleBySession[taskId] === 'todo' &&
-            lastUserActionAtRef.current <= autoExpandAtRef.current
-          ) {
-            s.setHubActiveModule(taskId, null);
-          }
-        }, 3000);
-      }
-    }
-  }, [
-    pendingAsks,
-    pendingConfirms,
-    todos,
-    hubActiveModule,
-    taskId,
-    isGenerating,
-    setHubActiveModule,
-    clearTodoCollapseTimer,
-  ]);
+  }, [pendingAsks, pendingConfirms, hubActiveModule, taskId, setHubActiveModule]);
 
   // ===== 消息撤回（截断）状态机 =====
   /** 待确认的撤回目标（用户消息） */
@@ -631,13 +582,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     };
   }, [taskId, task]);
 
-  // 卸载时清理 todo 自动折叠定时器 + 防状态污染（不清 pendingAssistant：
-// 同会话重新挂载后仍需靠它继续接流）
-  useEffect(() => {
-    return () => {
-      clearTodoCollapseTimer();
-    };
-  }, [clearTodoCollapseTimer]);
 
   // ===== 会话编排（订阅 + 状态快照 + 分页 + 断线对齐 + 半截流式续接）=====
   // 历史加载 / todos / 上下文 / 统计 / 压缩卡片 / 半截草稿恢复全部收敛在 hook 内，
@@ -648,7 +592,20 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     loadingBefore,
     loaded: historyLoaded,
     reload: reloadHistory,
+    prefetchMore,
   } = useSessionHistory(taskId, listApiRef);
+
+  /**
+   * 启动里程碑：会话首屏历史真正就绪后才标记（Splash 据此判定「页面已加载完成」）。
+   * 空白页（taskId=''）由 Splash 直接视为就绪，无需标记。
+   */
+  const bootSessionMarkedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!taskId || !historyLoaded) return;
+    if (bootSessionMarkedRef.current === taskId) return;
+    bootSessionMarkedRef.current = taskId;
+    useStore.getState().markSessionReady(taskId);
+  }, [taskId, historyLoaded]);
 
   // ===== 自动滚动（自建虚拟列表接管）=====
   // followOutput 仅在「已在底部」时跟随 → 用户上滑查看历史时绝不被拉回；
@@ -1524,6 +1481,20 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 setScrollerEl(el);
               }}
               onStartReached={handleStartReached}
+              // 速度感知预取：快速上滑且接近顶部时才补一页（避免翻太快出现空窗）。
+              // 预算/节流/在途去重都在 useSessionHistory.prefetchOlder 内部完成（一页 20 条）。
+              onScrollMetrics={(m) => {
+                if (m.velocity < 0.3) return;
+                const sc = scrollerElRef.current;
+                if (!sc || m.scrollTop > sc.clientHeight * 2.5) return;
+                prefetchMore();
+              }}
+              // 滚动期间暂停 Markdown 水合，停止 120ms 后恢复（滚动优先）；
+              // 停止后再补一页缓冲，保证「停下来继续上滑」仍然跟手。
+              onScrollingChange={(scrolling) => {
+                setHydrationPaused(scrolling);
+                if (!scrolling) prefetchMore();
+              }}
               initialBottom
               // 接近顶部自动预取 + 内容不足 1.5 屏时自动补页（去掉任何「上滑加载」提示）
               startReachedThreshold={800}
@@ -1921,15 +1892,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                     );
                   }
                   return (
-                    <div className="flex flex-col gap-2.5">
-                      {confirms.map((cf) => (
-                        <ConfirmPromptCard
-                          key={cf.toolCallId}
-                          confirm={cf}
-                          className="border-0 bg-transparent p-0 shadow-none"
-                        />
-                      ))}
-                    </div>
+                    <ConfirmPromptCard
+                      confirms={confirms}
+                      className="border-0 bg-transparent p-0 shadow-none"
+                    />
                   );
                 },
               },
@@ -1998,9 +1964,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             {...rightResize.bind}
             className="absolute inset-y-0 -left-[3px] z-10 w-1.5 cursor-col-resize touch-none select-none after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:bg-transparent hover:after:bg-border"
           />
-          {/* 内容固定宽度 wrapper：宽度动画期间内容不被挤压变形（外层裁切） */}
+          {/* 内容固定宽度 wrapper：宽度动画期间内容不被挤压变形（外层裁切）。
+              仅展开时挂载内容：收起态不再初始化 Terminal(xterm)/文件树/变更/Computer 等重面板，
+              避免「面板没开」也消耗内存与首屏 CPU（宽度过渡仍由外层 width 动画保留）。 */}
           <div className="flex h-full min-h-0 flex-col overflow-hidden" style={{ width: rightPanelPx }}>
-            {rightPanelContent}
+            {rightPanelOpen && rightPanelContent}
           </div>
         </aside>
       )}
@@ -2451,6 +2419,9 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   // 超长正文截断渲染（防止单条巨型文本布局卡死）；展开后完整渲染。
   // 流式生成中超限时显示尾部（正在生成的内容在末尾），结束后恢复头部截断。
   const [expanded, setExpanded] = useState(false);
+  // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
+  // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   // 显式思考：流式思考期间每 100ms 刷新一次「当前时刻」，驱动状态行秒数递增（0.1s 分辨率；非思考消息不启动定时器）
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -2621,9 +2592,14 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   // assistant 消息
   return (
     <div className="group/message flex flex-col gap-2">
-      {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时） */}
+      {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时）。
+          折叠态不渲染正文：长会话 thinking 总量可达百万字符，折叠时仍解析/水合会把主线程打死。 */}
       {message.thinking && (
-        <details className="group">
+        <details
+          className="group"
+          open={thinkingOpen}
+          onToggle={(e) => setThinkingOpen((e.currentTarget as HTMLDetailsElement).open)}
+        >
           <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
             <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
             {message.thinkingStreaming ? (
@@ -2650,14 +2626,18 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               </span>
             )}
           </summary>
-          <div className="mt-1">
-            <MarkdownRenderer
-              text={message.thinking}
-              streaming={!!message.thinkingStreaming}
-              variant="compact"
-              defer={deferContent && !message.thinkingStreaming}
-            />
-          </div>
+          {thinkingOpen && (
+            <div className="mt-1">
+              <MarkdownRenderer
+                text={message.thinking}
+                streaming={!!message.thinkingStreaming}
+                variant="compact"
+                // 展开后也强制渐进水合（不随 inViewport 关闭）：超长思考按块分帧解析，
+                // 避免展开瞬间同步解析整段导致长任务。
+                defer
+              />
+            </div>
+          )}
         </details>
       )}
       {/* 正文 */}

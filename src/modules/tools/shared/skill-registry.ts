@@ -52,6 +52,8 @@ export interface SkillRegistry {
   unregister(name: string): void;
   get(name: string): Skill | null;
   list(): Skill[];
+  /** 后台播种/加载完成（未完成时 list() 可能为空，调用方可按需等待） */
+  whenReady(): Promise<void>;
   /** 启用状态（实时读 config.skills[name].enabled，缺省 true） */
   isEnabled(name: string): boolean;
   /**
@@ -138,6 +140,17 @@ class SkillRegistryImpl implements SkillRegistry {
 
   rescan(): string[] {
     return this.rescanFn ? this.rescanFn() : [];
+  }
+
+  /** 后台播种/加载完成信号（tools 模块 warmup 使用） */
+  private readyPromise: Promise<void> = Promise.resolve();
+
+  setReadyPromise(promise: Promise<void>): void {
+    this.readyPromise = promise;
+  }
+
+  whenReady(): Promise<void> {
+    return this.readyPromise;
   }
 
   reloadBySourceFile(sourceFile: string, skill: Skill): SkillReloadResult {
@@ -462,12 +475,6 @@ export function createSkillRegistry(
     });
   }
 
-  // 首次启动播种：若 ~/.moss/skills 不存在，从内置目录递归复制
-  seedBuiltinSkills(builtinDir, userDir, logger);
-
-  // 同步加载（仅从用户目录）
-  loadSkillsFromDirSync(reg, userDir, logger);
-
   // 安装等外部写入后可显式重扫：立即注册并广播 resources:changed（不依赖 watch 防抖）
   reg.setRescanFn(() => {
     const names = loadSkillsFromDirSync(reg, userDir, logger);
@@ -477,14 +484,31 @@ export function createSkillRegistry(
     return names;
   });
 
-  // 启动热重载监听（异步，不阻塞初始化）
-  startWatch(reg, userDir, logger, eventBus).catch(err => {
-    logger.debug(t('tools.skillWatchFailed'), {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // 播种 + 加载改为后台分片执行：启动路径立即返回空注册表，
+  // tools 模块 warmup 通过 whenReady() 等待完成后再广播。
+  const ready = (async (): Promise<void> => {
+    await yieldToLoop();
+    // 首次启动播种：若 ~/.moss/skills 不存在，从内置目录递归复制
+    seedBuiltinSkills(builtinDir, userDir, logger);
+    await yieldToLoop();
+    loadSkillsFromDirSync(reg, userDir, logger);
+    // watcher 延迟 1s，避免与首条消息抢 CPU
+    setTimeout(() => {
+      startWatch(reg, userDir, logger, eventBus).catch(err => {
+        logger.debug(t('tools.skillWatchFailed'), {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 1000);
+  })();
+  reg.setReadyPromise(ready);
 
   return reg;
+}
+
+/** 让出事件循环一轮（分片执行，避免后台重活阻塞首条消息） */
+function yieldToLoop(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 /** 同步从目录加载：目录式（<name>/SKILL.md）优先，兼容单文件 .md；返回本次新增/变化的技能名 */

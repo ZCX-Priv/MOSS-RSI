@@ -8,27 +8,30 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useLocation } from 'react-router-dom';
 import { useStore } from '../../store';
-import { wsClient } from '../../api/ws';
 
 /** 会话哨兵 key：存在即本会话已展示过 */
 const SPLASH_SESSION_KEY = 'moss-splash-shown';
 /** 最短展示时长：保证入场段完整（ms）；首屏已就绪时不额外拖延 */
 const MIN_DISPLAY_MS = 600;
-/** 兜底放行：后端未启动时不卡死（ms） */
-const FALLBACK_MS = 2_000;
+/** 兜底放行：后端异常 / 路由长期未就绪时不永久卡死（ms） */
+const FALLBACK_MS = 8_000;
 /** 淡出时长（ms），与 CSS transition duration 保持一致 */
 const EXIT_MS = 600;
 
-// 进度里程碑 target 值
-const T_MOUNT = 40; // splash 挂载（store 已 hydrate）
-const T_CONFIG = 65; // 配置加载完成（appConfig 就绪）
-const T_WS = 85; // WS 连接建立
-const T_READY = 100; // 预载资源就绪（@ 菜单数据）或兜底放行
+// 进度里程碑 target 值（只增不减；UI 就绪是真实信号，不再是「资源列表非空」的近似）
+const T_MOUNT = 30; // splash 挂载
+const T_CONFIG = 55; // 配置加载完成（appConfig 就绪）
+const T_PAGE = 80; // 当前路由页面真正渲染（Suspense 未挂起）
+const T_READY = 100; // 会话首屏历史就绪（无 taskId 的页面视为已就绪）
 
 export function SplashScreen() {
   const { t } = useTranslation();
   const animationSettings = useStore((s) => s.animationSettings);
+  // 当前路由的会话 id：有 taskId 时才等待该会话的首屏消息加载完成
+  const { pathname } = useLocation();
+  const routeTaskId = pathname.startsWith('/task/') ? pathname.slice('/task/'.length) : '';
 
   // 渲染期同步判断（首帧即正确）：会话内已展示 / 动画总关 / 系统减弱动态 → 不展示
   const shouldShow = useMemo(() => {
@@ -70,29 +73,22 @@ export function SplashScreen() {
     };
     const checkState = (s: ReturnType<typeof useStore.getState>) => {
       if (s.appConfig !== null) bump(T_CONFIG);
-      if (
-        s.tools.length > 0 ||
-        s.skills.length > 0 ||
-        s.agents.length > 0 ||
-        s.commands.length > 0
-      ) {
-        bump(T_READY);
-      }
+      // 页面真正渲染（Suspense 未挂起）才算 PAGE 完成——不再用「资源列表非空」近似，
+      // 否则 Splash 结束后可能仍停在 PageLoading（截图 2 的断层）。
+      if (s.bootPageReady) bump(T_PAGE);
+      // 有 taskId 的路由才等待该会话首屏历史；空白页（/task、/）视为已就绪
+      if (routeTaskId === '' || s.bootSessionId === routeTaskId) bump(T_READY);
     };
     // 挂载时信号可能已就绪（如 splash 晚于某个 hook 完成加载）
     checkState(useStore.getState());
     const unsubStore = useStore.subscribe(checkState);
-    const unsubWs = wsClient.onStatus((info) => {
-      if (info.status === 'open') bump(T_WS);
-    });
-    // 兜底：后端未启动时强制放行，避免启动被阻塞
+    // 兜底：后端异常 / 路由长期未就绪时强制放行，避免启动被永久阻塞
     const fallback = window.setTimeout(() => bump(T_READY), FALLBACK_MS);
     return () => {
       unsubStore();
-      unsubWs();
       window.clearTimeout(fallback);
     };
-  }, [shouldShow]);
+  }, [shouldShow, routeTaskId]);
 
   // rAF 追赶循环：display 平滑逼近 target，永不反超
   useEffect(() => {
@@ -132,15 +128,13 @@ export function SplashScreen() {
 
   if (!shouldShow || done) return null;
 
-  // 阶段文案按当前显示进度推导
+  // 阶段文案按当前显示进度推导（PAGE 之后会话消息正在补齐 → 「即将就绪」）
   const phaseKey =
-    pct < T_MOUNT
+    pct < T_CONFIG
       ? 'splash.loading'
-      : pct < T_CONFIG
+      : pct < T_PAGE
         ? 'splash.config'
-        : pct < T_WS
-          ? 'splash.connect'
-          : 'splash.ready';
+        : 'splash.ready';
 
   return (
     <div

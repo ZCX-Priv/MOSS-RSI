@@ -1,9 +1,14 @@
 // src/core/config-service.ts
-// 配置服务：加载 config.json + api.json，Zod 校验，热重载，分发。
+// 配置服务：加载 config.json + api.json，校验，热重载，分发。
+//
+// 启动性能关键路径（0.8GHz 单核低配机）：
+// - 启动期不再静态加载 zod（zod v4 约 729KB，进入启动闭包会带来数百毫秒到秒级开销）；
+// - 启动期走「JSON.parse + 旧字段迁移 + 默认值深合并」快速路径，立即可用；
+// - 完整 zod 校验延后到后台（且仅在配置文件指纹变化时执行），失败回退默认配置；
+// - 配置文件的 watch 也延后启动，不占启动关键路径。
 
 import { setBackendLocale, t } from './i18n';
 import { migrateLegacyApiConfig } from './provider-utils';
-import { z } from 'zod';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../utils/fs-atomic';
 import type {
@@ -16,401 +21,17 @@ import type {
   Logger,
   LogLevel,
 } from './types';
-import { buildToolsSchema, buildToolsDefaults } from '../modules/tools/manifest';
+import { buildToolsDefaults } from '../modules/tools/manifest';
 import { DEFAULT_FILE_HISTORY_CONFIG } from '../modules/file-history/types';
 import { DEFAULT_FILESYS_CONFIG } from '../modules/filesys/types';
 import { DEFAULT_CONTEXT_CONFIG } from '../modules/context/types';
 
-// ============================================================================
-// Zod Schemas
-// ============================================================================
-
-const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error', 'fatal']);
-
-const thinkingLevelSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  effort: z.string().min(1),
-});
-
-const providerThinkingSchema = z.object({
-  enabled: z.boolean(),
-  effort: z.string().optional(),
-  label: z.string().optional(),
-  budgetTokens: z.number().int().positive().optional(),
-});
-
-const providerModelConfigSchema = z.object({
-  id: z.string().min(1),
-  name: z.string(),
-  model: z.string(),
-  thinking: providerThinkingSchema,
-  contextWindow: z.string().optional(),
-  inputTokens: z.number().int().positive().optional(),
-  outputTokens: z.number().int().positive().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  topP: z.number().min(0).max(1).optional(),
-  topK: z.number().int().min(0).max(100).optional(),
-  thinkingLevels: z.array(thinkingLevelSchema).optional(),
-});
-
-const providerServiceSchema = z.object({
-  id: z.string().min(1),
-  name: z.string(),
-  type: z.literal('file-storage'),
-  endpoint: z.string(),
-  apiKey: z.string(),
-  maxQuota: z.number().positive().optional(),
-  quotaUnit: z.enum(['MB', 'GB', 'TB']).optional(),
-});
-
-const providerConfigSchema = z
-  .object({
-    id: z.string().min(1),
-    name: z.string(),
-    /** 服务商类型：model（默认/缺省）= 模型服务商；voice = 语音服务商 */
-    kind: z.enum(['model', 'voice']).optional(),
-    format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'voice']),
-    /** 语音引擎类型（kind='voice' 时必填）：openai-transcriptions（OpenAI 兼容整段转写） */
-    voiceEngine: z.enum(['openai-transcriptions']).optional(),
-    /** 语音模型名（kind='voice' 时使用，如 'whisper-1'） */
-    voiceModel: z.string().optional(),
-    endpoint: z.string(),
-    apiKey: z.string(),
-    balanceUrl: z.string().optional(),
-    modelsUrl: z.string().optional(),
-    icon: z.string().optional(),
-    services: z.array(providerServiceSchema).optional(),
-    models: z.array(providerModelConfigSchema).default([]),
-  })
-  .superRefine((p, ctx) => {
-    if (p.kind === 'voice') {
-      // kind='voice'：必须带 voiceEngine、format 固定 'voice'、无模型
-      if (!p.voiceEngine) {
-        ctx.addIssue({
-          code: 'custom',
-          message: "voice provider requires 'voiceEngine' (openai-transcriptions)",
-        });
-      }
-      if (p.format !== 'voice') {
-        ctx.addIssue({
-          code: 'custom',
-          message: "voice provider format must be 'voice'",
-        });
-      }
-      if (p.models.length > 0) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'voice provider must not carry models',
-        });
-      }
-    } else if (p.voiceEngine !== undefined) {
-      // 模型服务商（kind='model' 或缺省）不得携带 voiceEngine
-      ctx.addIssue({
-        code: 'custom',
-        message: "voiceEngine is only allowed on kind='voice' providers",
-      });
-    }
-  });
-
-const fileHistorySchema = z.object({
-  enabled: z.boolean(),
-  maxBackupsPerFile: z.number().int().min(1).max(100),
-  transcriptEnabled: z.boolean(),
-  backupRetentionDays: z.number().int().min(0).max(365),
-});
-
-// filesys：内层字段全部 .default() —— 旧 config.json 缺失时自动补全而非整体校验失败
-const filesysSchema = z.object({
-  roots: z.array(z.string()).default([]),
-  cacheMaxBytes: z.number().int().positive().default(64 * 1024 * 1024),
-  cacheMaxEntries: z.number().int().positive().default(2048),
-  cacheMaxFileBytes: z.number().int().positive().default(4 * 1024 * 1024),
-  terminalWatch: z
-    .object({
-      enabled: z.boolean().default(true),
-      maxFiles: z.number().int().positive().default(4000),
-      timeoutMs: z.number().int().positive().default(3000),
-      totalTimeoutMs: z.number().int().positive().default(600),
-    })
-    .prefault({}),
-});
-
-// safety：统一权限决策配置（内层全 .default() 自愈，旧 config.json 缺字段自动补全）
-const safetySchema = z.object({
-  defaultMode: z.enum(['ask', 'auto', 'skip']).default('ask'),
-  confirmTimeoutMinutes: z.number().int().min(0).max(1440).default(5),
-  blockDangerousCommands: z.boolean().default(true),
-  cautionPolicy: z.enum(['ask', 'deny']).default('ask'),
-  rules: z
-    .object({
-      allow: z.array(z.string()).default([]),
-      deny: z.array(z.string()).default([]),
-      ask: z.array(z.string()).default([]),
-    })
-    .prefault({}),
-  protectedPaths: z.array(z.string()).default(['~/.ssh', '~/.gnupg', '~/.aws']),
-});
-
-// logs：日志系统配置（内层全 .default() 自愈；外层 .prefault({}) 使旧 config.json 缺段自动补全）
-const logsSchema = z.object({
-  level: logLevelSchema.default('info'),
-  retentionDays: z.number().int().min(1).max(365).default(14),
-  maxFileMb: z.number().min(1).max(100).default(10),
-});
-
-// context：上下文引擎配置（压缩/工具结果修剪/自愈/遥测；内层全 .default() 自愈，
-// 旧 config.json 缺段自动补全，热更新经 config:changed 实时生效）
-const contextSchema = z.object({
-  compaction: z
-    .object({
-      enabled: z.boolean().default(true),
-      compactRatio: z.number().min(0.5).max(0.95).default(0.80),
-      tailKeepRatio: z.number().min(0.05).max(0.5).default(0.16),
-      summaryMaxTokens: z.number().int().positive().default(8192),
-      minFoldTokens: z.number().int().positive().default(400),
-      summaryModel: z.string().default('inherit'),
-      // 收缩比上限（摘要必须 ≤ 可压缩区 × 本值，否则放弃本轮）
-      maxShrinkRatio: z.number().min(0.1).max(0.95).default(0.5),
-      minCompactMessages: z.number().int().min(2).max(100).default(4),
-      // 冷却水位（token）与冷却时间窗（ms）
-      cooldownGrowthTokens: z.number().int().min(0).default(2000),
-      cooldownMs: z.number().int().min(0).default(60000),
-    })
-    .prefault({}),
-  toolPruning: z
-    .object({
-      enabled: z.boolean().default(true),
-      thresholdChars: z.number().int().positive().default(8192),
-      keepHeadChars: z.number().int().positive().default(4096),
-      keepTailChars: z.number().int().positive().default(1024),
-    })
-    .prefault({}),
-  healer: z
-    .object({
-      enabled: z.boolean().default(true),
-      toolNameFuzzy: z.boolean().default(true),
-      schemaFix: z.boolean().default(true),
-    })
-    .prefault({}),
-  telemetry: z
-    .object({
-      enabled: z.boolean().default(true),
-    })
-    .prefault({}),
-  // 文件索引模块（三引擎，默认全关；图谱/SAG 依赖索引引擎，开启时联动）
-  fileIndex: z
-    .object({
-      indexing: z
-        .object({
-          enabled: z.boolean().default(false),
-        })
-        .prefault({}),
-      graph: z
-        .object({
-          enabled: z.boolean().default(false),
-        })
-        .prefault({}),
-      sag: z
-        .object({
-          enabled: z.boolean().default(false),
-          llmModel: z.string().default('inherit'),
-          llmMaxChunks: z.number().int().min(0).max(100000).default(2000),
-        })
-        .prefault({}),
-      ignore: z.array(z.string()).default([]),
-    })
-    .prefault({}),
-  // 用户规则引擎（always/paths 双加载模式）
-  rules: z
-    .object({
-      enabled: z.boolean().default(true),
-      maxAlwaysTokens: z.number().int().positive().default(4000),
-      maxInjectPerSession: z.number().int().positive().min(1).max(100).default(20),
-    })
-    .prefault({}),
-  // 生命周期钩子引擎（终端命令 + TS 模块）
-  hooks: z
-    .object({
-      enabled: z.boolean().default(true),
-      defaultTimeout: z.number().int().positive().default(10000),
-    })
-    .prefault({}),
-  // 记忆引擎（记忆宫殿 + verbatim/蒸馏混合 + BM25 检索）
-  memory: z
-    .object({
-      enabled: z.boolean().default(true),
-      distillModel: z.string().default('inherit'),
-      distillMinMessages: z.number().int().min(1).max(100).default(6),
-      recallTopK: z.number().int().min(1).max(50).default(5),
-      recallTokenBudget: z.number().int().positive().default(2000),
-      l1ImportanceThreshold: z.number().min(0).max(1).default(0.75),
-      l1MaxEntries: z.number().int().min(1).max(100).default(20),
-    })
-    .prefault({}),
-  // 图片发送前优化（TinyPNG 式；sharp 不可用时自动降级为不压缩发送原图）
-  imageOptimization: z
-    .object({
-      enabled: z.boolean().default(true),
-      maxEdgePx: z.number().int().min(256).max(8192).default(1568),
-      quality: z.number().int().min(1).max(100).default(82),
-      format: z.enum(['auto', 'png', 'jpeg', 'webp']).default('auto'),
-      lossless: z.boolean().default(false),
-      maxInlineBytesPerImage: z.number().int().min(0).default(1024 * 1024),
-      skipBelowBytes: z.number().int().min(0).default(64 * 1024),
-      maxTotalImageBytes: z.number().int().min(0).default(4 * 1024 * 1024),
-    })
-    .prefault({}),
-  // 思考内容回传（计入估算对所有 provider 生效；回传按 provider 语义）
-  thinking: z
-    .object({
-      replayOpenAICompat: z.boolean().default(false),
-    })
-    .prefault({}),
-  // 上下文过半提醒（每轮注入、不持久化；占用 ≥ ratio 时提醒 AI 交接并自主压缩）
-  pressureReminder: z
-    .object({
-      enabled: z.boolean().default(true),
-      ratio: z.number().min(0.1).max(0.95).default(0.5),
-    })
-    .prefault({}),
-  // 单次请求体字节上限（256 KiB–64 MiB；默认 8 MiB）。
-  // 旧 config.json 缺该字段时由 .default() 自动补全；热更新经 config:changed 生效。
-  maxRequestBytes: z
-    .number()
-    .int()
-    .min(262144)
-    .max(67108864)
-    .default(8 * 1024 * 1024),
-});
-
-/**
- * 代码模式（PTC + Intelligent UI）配置。
- * - enabled=false：完全不暴露 run_code，行为与旧版一致。
- * - enabled=true：wire 暴露全部原生工具 + run_code（混合模式），提示词主推并行/多步任务使用 PTC。
- * - uiEnabled：是否允许程序内使用 ui.* 构建交互界面。
- * requireConfirmation 不在本段：统一走 tools.run_code 工具配置（与 terminal 等一致）。
- */
-const codeModeSchema = z.object({
-  enabled: z.boolean().default(true),
-  uiEnabled: z.boolean().default(true),
-  /** 单次程序执行预算（毫秒，含嵌套工具与审批等待） */
-  timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
-  /** 程序源码长度上限 */
-  maxCodeChars: z.number().int().min(1_000).max(200_000).default(20_000),
-  /** 嵌套工具调用并发上限（只读工具可重叠，写工具独占） */
-  maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
-});
-
-const appConfigSchema = z.object({
-  version: z.number().int().positive(),
-  server: z.object({
-    host: z.string(),
-    port: z.number().int().min(1).max(65535),
-    autoPort: z.boolean(),
-    locale: z.string().optional(),
-  }),
-  daemon: z.object({
-    enabled: z.boolean(),
-  }),
-  // 日志系统配置（缺段时自动补全默认值；旧版 daemon.logLevel 在读取前迁移）
-  logs: logsSchema.prefault({}),
-  update: z.object({
-    autoCheck: z.boolean(),
-    channel: z.enum(['stable', 'beta']),
-    checkIntervalHours: z.number().int().min(1),
-  }),
-  agent: z.object({
-    defaultModel: z.string(),
-    maxTokens: z.number().int().positive(),
-    // 0 = 不限制（无限轮）；1-199 仍合法（向后兼容存量配置，UI 侧最小 200）
-    maxTurns: z.number().int().min(0),
-    // SSE 流空闲超时（ms）：可选，缺省由 parseSSEStream 用内置默认（15 分钟）兜底。
-    // 存量 config.json 无此字段不会校验失败；上下限防止极端值把弱网半开连接挂死。
-    llmStreamIdleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
-    workingDirectory: z.string(),
-    // 代码模式（PTC + Intelligent UI）：缺段时用默认值自愈，旧 config.json 不受影响
-    codeMode: codeModeSchema.default({
-      enabled: true,
-      uiEnabled: true,
-      timeoutMs: 120_000,
-      maxCodeChars: 20_000,
-      maxParallelSubCalls: 10,
-    }),
-  }),
-  // tools schema 从 manifest 自动构建（单一真相源），新增工具无需手动改此文件
-  tools: buildToolsSchema(),
-  mcpServers: z.record(z.string(), z.unknown()),
-  // MCP 客户端配置（可选，向后兼容旧配置）
-  mcp: z
-    .object({
-      callTimeoutMs: z.number().int().positive().optional(),
-      allowSampling: z.boolean().optional(),
-    })
-    .optional(),
-  // 对外 MCP Server 暴露（/mcp 端点，可选）
-  mcpServer: z
-    .object({
-      enabled: z.boolean(),
-      allowedTools: z.array(z.string()),
-      // 缺省 'sse'：SDK 默认响应模式，长任务有 keep-alive 保护（见 types.ts 注释）
-      responseMode: z.enum(['json', 'sse']).default('sse'),
-      // 缺省 false：/mcp 只暴露 agent 级工具（moss_*），不暴露 MOSS 内部工具
-      exposeInternalTools: z.boolean().default(false),
-      // 缺省 true：moss_task_status 附带 LLM 轨迹摘要（失败自动降级）
-      trackSummary: z.boolean().default(true),
-    })
-    .optional(),
-  // Skill 启停（可选）
-  skills: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
-  // 自定义斜杠命令启停（~/.moss/commands/<name>.md；缺省启用）
-  commands: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
-  security: z.object({
-    authToken: z.string(),
-    bindLocalhostOnly: z.boolean(),
-  }),
-  // 远程访问（remote 模块：局域网/公网隧道控制 webui；内层全 .default() 自愈补全）
-  remote: z
-    .object({
-      enabled: z.boolean().default(false),
-      lanEnabled: z.boolean().default(true),
-      lanPasswordEnabled: z.boolean().default(true),
-      lanIpOverride: z.string().default(''),
-    })
-    .prefault({}),
-  // fileHistory 可选，缺失时用默认值（向后兼容旧配置）
-  fileHistory: fileHistorySchema.optional(),
-  // filesys 可选，内层全 .default() 自愈补全（向后兼容旧配置）
-  filesys: filesysSchema.optional(),
-  // safety 可选，内层全 .default() 自愈补全（向后兼容旧配置）
-  safety: safetySchema.optional(),
-  // context 可选，内层全 .default() 自愈补全（向后兼容旧配置）
-  context: contextSchema.optional(),
-  // voice 可选（语音输入总开关/服务商/本地模型；内层全 .default() 自愈补全，默认关闭）
-  voice: z
-    .object({
-      enabled: z.boolean().default(false),
-      providerId: z.string().default(''),
-      localModel: z.string().default(''),
-      language: z.string().default('auto'),
-    })
-    .prefault({}),
-});
-
-/** 旧版搜索服务商（已彻底移除）：加载时过滤，避免整份 api.json 校验失败 */
-function isLegacySearchProvider(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const record = value as { kind?: unknown; format?: unknown };
-  return record.kind === 'search' || record.format === 'search';
-}
-
-const apiConfigSchema = z.object({
-  version: z.number().int().positive(),
-  providers: z.preprocess(
-    (value) => (Array.isArray(value) ? value.filter((item) => !isLegacySearchProvider(item)) : value),
-    z.array(providerConfigSchema),
-  ),
-});
+/** 校验指纹文件（记录最近一次 zod 校验成功时的文件 mtime+size） */
+const VALIDATED_MARKER = '.validated.json';
+/** 后台校验延迟：等内核就绪后再做，避免与首条消息抢 CPU */
+const BACKGROUND_VALIDATION_DELAY_MS = 800;
+/** 配置 watcher 启动延迟 */
+const WATCHER_DELAY_MS = 300;
 
 // ============================================================================
 // 默认配置模板（首次运行使用）
@@ -427,7 +48,6 @@ export function defaultAppConfig(): AppConfig {
       defaultModel: '',
       maxTokens: 8192,
       maxTurns: 0,
-      // 15 分钟：长程任务/推理型模型长思考的空闲容忍度
       llmStreamIdleTimeoutMs: 900_000,
       workingDirectory: '',
       codeMode: {
@@ -438,7 +58,6 @@ export function defaultAppConfig(): AppConfig {
         maxParallelSubCalls: 10,
       },
     },
-    // tools 默认值从 manifest 自动构建（单一真相源）
     tools: buildToolsDefaults() as AppConfig['tools'],
     mcpServers: {},
     mcp: { callTimeoutMs: 120000, allowSampling: true },
@@ -485,17 +104,26 @@ export function defaultApiConfig(): ApiConfig {
 // ConfigService 实现
 // ============================================================================
 
+interface FileStamp {
+  mtimeMs: number;
+  size: number;
+}
+
 interface FsOps {
   exists(path: string): boolean;
   readText(path: string): string;
   writeText(path: string, content: string): void;
   mkdirRecursive(path: string): void;
   copyFile(src: string, dest: string): void;
+  stat(path: string): FileStamp | null;
 }
 
 class ConfigServiceImpl implements ConfigService {
   private appConfig: AppConfig | null = null;
   private apiConfig: ApiConfig | null = null;
+  /** 对外只读视图：每次配置变更只克隆/冻结一次，避免每次 get 深拷贝 */
+  private appView: AppConfig | null = null;
+  private apiView: ApiConfig | null = null;
   private readonly env: Environment;
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
@@ -503,12 +131,7 @@ class ConfigServiceImpl implements ConfigService {
   private readonly changeHandlers: Array<(which: 'app' | 'api') => void> = [];
   private watcherStarted = false;
 
-  constructor(
-    env: Environment,
-    eventBus: EventBus,
-    logger: Logger,
-    fs: FsOps,
-  ) {
+  constructor(env: Environment, eventBus: EventBus, logger: Logger, fs: FsOps) {
     this.env = env;
     this.eventBus = eventBus;
     this.logger = logger;
@@ -545,14 +168,17 @@ class ConfigServiceImpl implements ConfigService {
       }
     }
 
-    // 3. 读取并校验
-    this.appConfig = this.readAndValidateApp(appPath);
-    this.apiConfig = this.readAndValidateApi(apiPath);
+    // 3. 快速路径：JSON.parse + 迁移 + 默认值合并（不加载 zod）
+    this.setAppConfig(this.readAppFast(appPath));
+    this.setApiConfig(this.readApiFast(apiPath));
 
-    // 4. 启动文件 watcher（仅一次）
+    // 4. 后台完整校验（仅在指纹变化时执行）
+    this.scheduleBackgroundValidation(appPath, apiPath);
+
+    // 5. 文件 watcher 延后启动（不占启动关键路径）
     if (!this.watcherStarted) {
-      this.startWatcher(appPath, apiPath);
       this.watcherStarted = true;
+      setTimeout(() => this.startWatcher(appPath, apiPath), WATCHER_DELAY_MS);
     }
   }
 
@@ -561,20 +187,19 @@ class ConfigServiceImpl implements ConfigService {
    * 仅在 load() 抛错时由 kernel 调用，保证后续 getAppConfig()/getApiConfig() 可用。
    */
   loadDefaults(): void {
-    this.appConfig = defaultAppConfig();
-    this.apiConfig = defaultApiConfig();
+    this.setAppConfig(defaultAppConfig());
+    this.setApiConfig(defaultApiConfig());
     this.logger.warn(t('config.fallbackToDefaults'));
   }
 
   getAppConfig(): AppConfig {
-    if (!this.appConfig) throw new Error(t('config.notLoadedCallFirst'));
-    // 返回深拷贝避免外部意外修改
-    return deepClone(this.appConfig);
+    if (!this.appView) throw new Error(t('config.notLoadedCallFirst'));
+    return this.appView;
   }
 
   getApiConfig(): ApiConfig {
-    if (!this.apiConfig) throw new Error(t('config.notLoadedCallFirst'));
-    return deepClone(this.apiConfig);
+    if (!this.apiView) throw new Error(t('config.notLoadedCallFirst'));
+    return this.apiView;
   }
 
   async updateAppConfig(patch: Partial<AppConfig>): Promise<void> {
@@ -586,8 +211,10 @@ class ConfigServiceImpl implements ConfigService {
       delete sec.authToken;
     }
     const merged = deepMerge(this.appConfig, clean) as AppConfig;
+    // 写入路径必须完整校验（安全边界；此时 zod 动态加载已被缓存）
+    const { appConfigSchema } = await import('./config-schema');
     const parsed = appConfigSchema.parse(merged);
-    this.appConfig = parsed;
+    this.setAppConfig(parsed as AppConfig);
     this.logger.info(t('config.appConfigUpdated'), { keys: Object.keys(patch) });
     this.fs.writeText(join(this.env.configDir, 'config.json'), JSON.stringify(parsed, null, 2));
     this.applyLocale();
@@ -605,8 +232,9 @@ class ConfigServiceImpl implements ConfigService {
         if (existing) p.apiKey = existing.apiKey;
       }
     }
+    const { apiConfigSchema } = await import('./config-schema');
     const parsed = apiConfigSchema.parse(merged);
-    this.apiConfig = parsed;
+    this.setApiConfig(parsed as ApiConfig);
     this.fs.writeText(join(this.env.configDir, 'api.json'), JSON.stringify(parsed, null, 2));
     await this.eventBus.broadcast('config:changed', { which: 'api' });
     this.notifyChange('api');
@@ -615,15 +243,14 @@ class ConfigServiceImpl implements ConfigService {
   async reload(): Promise<void> {
     const appPath = join(this.env.configDir, 'config.json');
     const apiPath = join(this.env.configDir, 'api.json');
-    const newApp = this.readAndValidateApp(appPath);
-    const newApi = this.readAndValidateApi(apiPath);
+    // 变更路径完整校验（zod 已动态加载并缓存）
+    const newApp = await this.readAndValidateApp(appPath);
+    const newApi = await this.readAndValidateApi(apiPath);
     // 内容对比守卫：与内存中配置逐字对比，未变化的文件跳过通知。
-    // 防止 updateAppConfig 写盘后 watcher 二次触发的重复通知，以及
-    // 外部程序反复写相同内容（touch 噪音）被放大为 MCP 全量重载循环。
     const appChanged = this.appConfig === null || JSON.stringify(newApp) !== JSON.stringify(this.appConfig);
     const apiChanged = this.apiConfig === null || JSON.stringify(newApi) !== JSON.stringify(this.apiConfig);
-    this.appConfig = newApp;
-    this.apiConfig = newApi;
+    this.setAppConfig(newApp);
+    this.setApiConfig(newApi);
     this.applyLocale();
     if (appChanged) {
       await this.eventBus.broadcast('config:changed', { which: 'app' });
@@ -650,6 +277,21 @@ class ConfigServiceImpl implements ConfigService {
     };
   }
 
+  // ========================================================================
+  // 内部：配置写入与只读视图
+  // ========================================================================
+
+  private setAppConfig(config: AppConfig): void {
+    this.appConfig = config;
+    // 对外视图：冻结副本，避免调用方意外修改内存配置；只克隆一次而非每次 get
+    this.appView = deepFreeze(deepClone(config));
+  }
+
+  private setApiConfig(config: ApiConfig): void {
+    this.apiConfig = config;
+    this.apiView = deepFreeze(deepClone(config));
+  }
+
   /** 重新应用后端语言（server.locale 变更时后端 t() 实时同步） */
   private applyLocale(): void {
     if (!this.appConfig) return;
@@ -668,7 +310,11 @@ class ConfigServiceImpl implements ConfigService {
     }
   }
 
-  private readAndValidateApp(path: string): AppConfig {
+  // ========================================================================
+  // 内部：快速读取（启动路径，不加载 zod）
+  // ========================================================================
+
+  private readAppFast(path: string): AppConfig {
     const text = this.fs.readText(path);
     let raw: unknown;
     try {
@@ -676,11 +322,43 @@ class ConfigServiceImpl implements ConfigService {
     } catch (err) {
       throw new Error(t('config.configJsonInvalid', { error: err instanceof Error ? err.message : String(err) }));
     }
-    // 一次性迁移：旧版 daemon.logLevel → logs.level（仅当 logs.level 未显式设置时）；
-    // 迁移后删除旧字段，下次写盘自然落盘为新结构
+    const record = raw as Record<string, unknown>;
+    migrateLegacyLogLevel(record);
+    migrateLegacyShellNaming(record);
+    // 缺失字段用默认值补齐（等价于 zod 各层 .default/.prefault 的常规路径）
+    return deepMerge(defaultAppConfig(), record) as AppConfig;
+  }
+
+  private readApiFast(path: string): ApiConfig {
+    const text = this.fs.readText(path);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new Error(t('config.apiJsonInvalid', { error: err instanceof Error ? err.message : String(err) }));
+    }
+    if (migrateLegacyApiConfig(raw as Record<string, unknown>)) {
+      this.logger.info(t('config.apiConfigMigrated'));
+      this.fs.writeText(path, JSON.stringify(raw, null, 2));
+    }
+    return deepMerge(defaultApiConfig(), raw) as ApiConfig;
+  }
+
+  // ========================================================================
+  // 内部：完整校验（变更/后台路径，动态加载 zod）
+  // ========================================================================
+
+  private async readAndValidateApp(path: string): Promise<AppConfig> {
+    const text = this.fs.readText(path);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      throw new Error(t('config.configJsonInvalid', { error: err instanceof Error ? err.message : String(err) }));
+    }
     migrateLegacyLogLevel(raw as Record<string, unknown>);
-    // 一次性迁移：旧 shell 命名 → terminal 命名（tools.shell / filesys.shellWatch / safety 规则前缀 shell(）
     migrateLegacyShellNaming(raw as Record<string, unknown>);
+    const { appConfigSchema } = await import('./config-schema');
     const result = appConfigSchema.safeParse(raw);
     if (!result.success) {
       const issues = result.error.issues
@@ -691,7 +369,7 @@ class ConfigServiceImpl implements ConfigService {
     return result.data as AppConfig;
   }
 
-  private readAndValidateApi(path: string): ApiConfig {
+  private async readAndValidateApi(path: string): Promise<ApiConfig> {
     const text = this.fs.readText(path);
     let raw: unknown;
     try {
@@ -699,12 +377,11 @@ class ConfigServiceImpl implements ConfigService {
     } catch (err) {
       throw new Error(t('config.apiJsonInvalid', { error: err instanceof Error ? err.message : String(err) }));
     }
-    // 一次性迁移：旧版扁平 models（version 1）→ providers 结构（version 2）；
-    // 迁移成功后立即写回磁盘，防止仅内存迁移
     if (migrateLegacyApiConfig(raw as Record<string, unknown>)) {
       this.logger.info(t('config.apiConfigMigrated'));
       this.fs.writeText(path, JSON.stringify(raw, null, 2));
     }
+    const { apiConfigSchema } = await import('./config-schema');
     const result = apiConfigSchema.safeParse(raw);
     if (!result.success) {
       const issues = result.error.issues
@@ -715,12 +392,90 @@ class ConfigServiceImpl implements ConfigService {
     return result.data as ApiConfig;
   }
 
-  private startWatcher(appPath: string, apiPath: string): void {
-    // Bun 原生支持 fs.watch
+  /**
+   * 后台完整校验：指纹未变化的配置跳过（启动只做一次 JSON.parse + 默认值合并）。
+   * 校验失败 → 回退默认配置并广播 config:changed（与 loadDefaults 行为一致）。
+   */
+  private scheduleBackgroundValidation(appPath: string, apiPath: string): void {
+    if (this.isFingerprintFresh(appPath, apiPath)) return;
+    setTimeout(() => {
+      void this.validateInBackground(appPath, apiPath);
+    }, BACKGROUND_VALIDATION_DELAY_MS);
+  }
+
+  private markerPath(): string {
+    return join(this.env.configDir, VALIDATED_MARKER);
+  }
+
+  private isFingerprintFresh(appPath: string, apiPath: string): boolean {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const marker = JSON.parse(this.fs.readText(this.markerPath())) as {
+        version?: number;
+        app?: FileStamp;
+        api?: FileStamp;
+      };
+      if (marker.version !== 1 || !marker.app || !marker.api) return false;
+      const app = this.fs.stat(appPath);
+      const api = this.fs.stat(apiPath);
+      if (!app || !api) return false;
+      return (
+        app.mtimeMs === marker.app.mtimeMs &&
+        app.size === marker.app.size &&
+        api.mtimeMs === marker.api.mtimeMs &&
+        api.size === marker.api.size
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private writeFingerprint(appPath: string, apiPath: string): void {
+    const app = this.fs.stat(appPath);
+    const api = this.fs.stat(apiPath);
+    if (!app || !api) return;
+    try {
+      this.fs.writeText(
+        this.markerPath(),
+        JSON.stringify({ version: 1, app, api }, null, 2),
+      );
+    } catch {
+      // 指纹写失败只影响下次启动是否重复校验，不影响运行
+    }
+  }
+
+  private async validateInBackground(appPath: string, apiPath: string): Promise<void> {
+    try {
+      const [app, api] = await Promise.all([
+        this.readAndValidateApp(appPath),
+        this.readAndValidateApi(apiPath),
+      ]);
+      // 校验通过：以完整校验结果为准（与 zod 规范化语义一致）
+      this.setAppConfig(app);
+      this.setApiConfig(api);
+      this.applyLocale();
+      this.writeFingerprint(appPath, apiPath);
+      this.logger.debug(t('config.backgroundValidationPassed'));
+    } catch (err) {
+      this.logger.error(t('config.backgroundValidationFailed'), {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // 非法配置：回退默认，避免运行期出现半合法状态
+      this.loadDefaults();
+      this.applyLocale();
+      await this.eventBus.broadcast('config:changed', { which: 'app' }).catch(() => {});
+      this.notifyChange('app');
+    }
+  }
+
+  // ========================================================================
+  // 内部：文件监听
+  // ========================================================================
+
+  private startWatcher(appPath: string, apiPath: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const fs = require('node:fs');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { basename } = require('node:path');
       // 监听目录而非单个文件：编辑器/同步盘的原子替换（写临时文件后 rename）会让
       // fs.watch(file) 丢失后续事件，目录监听不受影响
@@ -733,7 +488,6 @@ class ConfigServiceImpl implements ConfigService {
         debounce = null;
         const which = Array.from(pending).join(',') || 'unknown';
         pending.clear();
-        // 实际是否变化由 reload() 内部做内容对比并以 reloadedFromDisk 记录
         this.logger.debug(t('config.fileChangedReloading', { which }));
         this.reload().catch(err => {
           this.logger.error(t('config.reloadFailed'), {
@@ -755,7 +509,6 @@ class ConfigServiceImpl implements ConfigService {
           else if (name === apiName) enqueue('api');
         },
       );
-      // watcher 的 error 事件若无监听会抛出并终止进程
       watcher.on('error', (err: Error) => {
         this.logger.warn(t('config.watcherStartFailed'), { error: err.message });
       });
@@ -774,6 +527,15 @@ class ConfigServiceImpl implements ConfigService {
 
 function deepClone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj)) as T;
+}
+
+/** 深度冻结：对外配置视图只读，防止调用方误改内存配置 */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value as Record<string, unknown>)) deepFreeze(v);
+  }
+  return value;
 }
 
 /** 旧版 daemon.logLevel → logs.level 迁移（原地修改 raw 对象） */
@@ -798,21 +560,18 @@ function migrateLegacyLogLevel(raw: Record<string, unknown> | null): void {
 function migrateLegacyShellNaming(raw: Record<string, unknown> | null): void {
   if (!raw || typeof raw !== 'object') return;
 
-  // tools.shell → tools.terminal
   const tools = raw.tools as Record<string, unknown> | undefined;
   if (tools && typeof tools === 'object' && 'shell' in tools && !('terminal' in tools)) {
     tools.terminal = tools.shell;
     delete tools.shell;
   }
 
-  // filesys.shellWatch → filesys.terminalWatch
   const filesys = raw.filesys as Record<string, unknown> | undefined;
   if (filesys && typeof filesys === 'object' && 'shellWatch' in filesys && !('terminalWatch' in filesys)) {
     filesys.terminalWatch = filesys.shellWatch;
     delete filesys.shellWatch;
   }
 
-  // safety.rules 前缀 shell( → terminal(
   const safety = raw.safety as Record<string, unknown> | undefined;
   const rules = safety?.rules as Record<string, unknown> | undefined;
   if (rules && typeof rules === 'object') {
@@ -870,6 +629,14 @@ function createNodeFsOps(): FsOps {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
     },
+    stat: (p: string) => {
+      try {
+        const st = fs.statSync(p);
+        return { mtimeMs: st.mtimeMs, size: st.size };
+      } catch {
+        return null;
+      }
+    },
   };
 }
 
@@ -881,7 +648,5 @@ export function createConfigService(
   return new ConfigServiceImpl(env, eventBus, logger, createNodeFsOps());
 }
 
-// 导出 schema 供外部校验使用
-export { appConfigSchema, apiConfigSchema };
 export type { FsOps };
 export type { LogLevel };

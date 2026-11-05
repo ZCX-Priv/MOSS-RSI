@@ -272,19 +272,22 @@ export class BrowserServiceImpl implements BrowserService {
 
   async initialize(): Promise<void> {
     ensureBrowserDirs(this.dirs);
-    // 截图清理是递归目录操作：延后到空闲，不占用内核启动关键路径
-    setTimeout(() => {
-      try {
-        pruneScreenshots(this.dirs);
-      } catch {
-        // 清理失败不影响启动
-      }
-    }, 0);
-    this.extensionStatus = seedExtension(this.env, this.dirs);
+    // 扩展播种 / 截图清理移到 warmup（递归目录 + 哈希是启动期明显开销）
     const cfg = this.getToolConfig();
     this.bridge.start(cfg.bridgePort);
     this.logger.info(`[browser] 模块已初始化（扩展目录 ${this.dirs.extension}）`);
     // 启动阶段不触碰浏览器：扩展安装只在用户于「设置 → 浏览器」点击按钮或工具 action='setup' 时执行
+  }
+
+  /** 后台预热：扩展目录播种 + 历史截图清理（不阻塞启动与首条消息） */
+  async warmup(): Promise<void> {
+    try {
+      pruneScreenshots(this.dirs);
+    } catch {
+      // 清理失败不影响功能
+    }
+    this.extensionStatus = seedExtension(this.env, this.dirs);
+    this.logger.info('[browser] warmup completed', { extensionDir: this.dirs.extension });
   }
 
   async destroy(): Promise<void> {

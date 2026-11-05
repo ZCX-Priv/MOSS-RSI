@@ -6,6 +6,7 @@
 
 import { t } from '../../core/i18n';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
+import { readdir as readdirAsync } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { safeSessionId, writeJsonStore } from '../filesys/store-io';
 import { atomicWriteFileAsync } from '../../utils/fs-atomic';
@@ -48,6 +49,8 @@ export interface Session {
   id: string;
   /** 任务历史（不含系统提示词，仅 user/assistant/tool；skill-inject 的 system 消息只存单行占位标题，全文运行时从注册表解析） */
   messages: AgentMessage[];
+  /** 可见消息缓存版本：软删除/恢复时递增（避免每次分页全量 filter） */
+  visibilityVersion?: number;
   /** 创建时间 */
   createdAt: string;
   /** 最后活跃时间 */
@@ -141,6 +144,10 @@ export class SessionStore {
    * 导致其他会话的流式/停止/WS 心跳一起卡住（1 核低主频机器尤其明显）。
    */
   private readonly writeQueues = new Map<string, Promise<void>>();
+  /** 后台会话索引 promise（惰性启动，仅扫描目录不读 JSON） */
+  private indexPromise: Promise<void> | null = null;
+  /** 内存中最多保留的会话数（1GB 低内存机必须限制） */
+  private static readonly MAX_CACHED_SESSIONS = 8;
 
   constructor(
     env: Environment,
@@ -150,7 +157,13 @@ export class SessionStore {
     this.logger = logger;
     this.tasksDir = join(env.dataDir, 'tasks');
     this.resolveSessionDir = opts?.resolveSessionDir ?? (() => null);
-    this.indexSessionFiles();
+    // 启动路径不再扫描目录：索引延迟到 whenIndexed()（warmup / 会话列表路由触发）
+  }
+
+  /** 会话磁盘索引就绪（后台异步扫描；未完成时按需 loadFromDisk 仍可工作） */
+  whenIndexed(): Promise<void> {
+    if (!this.indexPromise) this.indexPromise = this.indexSessionFilesAsync();
+    return this.indexPromise;
   }
 
   /**
@@ -185,6 +198,62 @@ export class SessionStore {
             });
           }
         }
+      }
+      this.logger.debug(t('agent.loadedSessions', { count: this.sessionFiles.size }));
+    } catch (err) {
+      this.logger.warn(t('agent.scanSessionsDirFailed'), {
+        dir: this.tasksDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * 异步启动索引（与 indexSessionFiles 同样的两级目录规则）：
+   * 只记录 sessionId → 文件路径，不读 JSON；每扫完一个分组让出事件循环。
+   */
+  private async indexSessionFilesAsync(): Promise<void> {
+    try {
+      if (!existsSync(this.tasksDir)) return;
+      const top = await readdirAsync(this.tasksDir, { withFileTypes: true });
+      for (const entry of top) {
+        if (!entry.isDirectory()) continue;
+        const d1 = entry.name;
+        const d1Abs = join(this.tasksDir, d1);
+        let entries;
+        try {
+          entries = await readdirAsync(d1Abs, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const item of entries) {
+          if (item.isDirectory()) continue;
+          if (!item.name.endsWith('.json') || item.name === 'task.json') continue;
+          this.sessionFiles.set(item.name.slice(0, -'.json'.length), {
+            dir: d1,
+            filePath: join(d1Abs, item.name),
+          });
+        }
+        for (const sub of entries) {
+          if (!sub.isDirectory()) continue;
+          const relDir = `${d1}/${sub.name}`;
+          const subAbs = join(d1Abs, sub.name);
+          let subEntries;
+          try {
+            subEntries = await readdirAsync(subAbs, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const item of subEntries) {
+            if (!item.name.endsWith('.json') || item.name === 'task.json') continue;
+            this.sessionFiles.set(item.name.slice(0, -'.json'.length), {
+              dir: relDir,
+              filePath: join(subAbs, item.name),
+            });
+          }
+        }
+        // 每扫完一个一级分组让出事件循环，避免后台索引阻塞首条消息
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
       this.logger.debug(t('agent.loadedSessions', { count: this.sessionFiles.size }));
     } catch (err) {
@@ -422,6 +491,7 @@ export class SessionStore {
           filePath,
         });
         this.sessions.set(session.id, session);
+        this.evictSessions();
         if (dirty || healedCount > 0 || reordered > 0) {
           // 重写瘦身：旧 systemPrompt 等废弃字段不再写入，自然消失；自愈结果同步落盘
           this.saveSessionNow(session);
@@ -462,8 +532,44 @@ export class SessionStore {
     if (!session) {
       // 冗余保护：尝试从磁盘加载
       session = this.loadFromDisk(sessionId);
+    } else {
+      this.touchSession(sessionId);
     }
     return session;
+  }
+
+  /**
+   * 可见消息缓存：分页每次 getHistory 都全量 filter 在大会话上是 pure waste。
+   * 以「messages.length + 软删除版本」为 key，软删除/恢复/追加时自动失效。
+   */
+  private readonly visibleCache = new WeakMap<Session, { key: string; list: AgentMessage[] }>();
+
+  getVisibleMessages(session: Session): AgentMessage[] {
+    const key = `${session.messages.length}:${session.visibilityVersion ?? 0}`;
+    const cached = this.visibleCache.get(session);
+    if (cached && cached.key === key) return cached.list;
+    const list = session.messages.filter((m) => !m.deletedAt);
+    this.visibleCache.set(session, { key, list });
+    return list;
+  }
+
+  /** LRU 触碰：把最近访问的会话移到 Map 末尾（淘汰从头部开始） */
+  private touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    this.sessions.set(sessionId, session);
+  }
+
+  /** 内存会话数超限时淘汰最久未访问且非脏的会话（1GB 低内存机防 OOM） */
+  private evictSessions(): void {
+    while (this.sessions.size > SessionStore.MAX_CACHED_SESSIONS) {
+      const oldest = this.sessions.keys().next().value as string | undefined;
+      if (!oldest) return;
+      // 脏会话尚未落盘：保留，等刷盘后再淘汰
+      if (this.dirtySessions.has(oldest)) return;
+      this.sessions.delete(oldest);
+    }
   }
 
   list(): Session[] {
@@ -781,6 +887,7 @@ export class SessionStore {
     for (let i = targetIndex; i < session.messages.length; i++) {
       if (!session.messages[i].deletedAt) {
         session.messages[i].deletedAt = now;
+        session.visibilityVersion = (session.visibilityVersion ?? 0) + 1;
         count++;
       }
     }
@@ -806,6 +913,7 @@ export class SessionStore {
       // 撤回场景目标消息必有 timestamp，此处仅防御脏数据）
       if (!Number.isNaN(fromMs) && !Number.isNaN(ts) && ts < fromMs) continue;
       m.deletedAt = undefined;
+      session.visibilityVersion = (session.visibilityVersion ?? 0) + 1;
       restored++;
     }
     if (restored > 0) {

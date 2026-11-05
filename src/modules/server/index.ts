@@ -576,58 +576,61 @@ class ServerModule implements Module {
       this.ctx.logger.info('dev mode: remote access enabled — bound to 0.0.0.0 (LAN reachable)', { host });
     }
 
-    // 启动端口保卫：先甄别占用者身份再决定回收/复用/换端口/失败。
-    // 绝不静默漂移（旧行为会让 dev 前端仍代理旧端口 → WebUI 全白）。
-    let port: number;
-    try {
-      const decision = await resolveStartupPort({
-        configuredPort: cfg.server.port,
-        host,
-        autoPort: cfg.server.autoPort,
-        packageRoot: this.ctx.env.packageRoot,
-        logger: this.ctx.logger,
-        isPortFree,
-      });
-      port = decision.port;
-      if (decision.switched) {
-        this.ctx.logger.warn(
-          t('server.autoPortUnavailable', { configured: cfg.server.port, actual: port }),
-        );
-        this.ctx.logger.info('server: WebUI 实际地址', {
-          url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`,
-          configuredPort: cfg.server.port,
-        });
-      }
-    } catch (err) {
-      if (err instanceof LiveMossPortError) {
-        this.ctx.logger.error('server: 已有健康 MOSS 实例占用端口，本次启动终止', {
-          pid: err.pid,
-          port: err.port,
-        });
-      } else {
-        this.ctx.logger.error('server: 启动端口解析失败', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      throw err;
-    }
-
+    // 快速路径：直接绑定配置端口（省掉 net.createServer 预探测的额外 socket 生命周期）。
+    // 只有 EADDRINUSE 才进入端口保卫流程：甄别占用者身份后决定回收/复用/换端口/失败。
+    let port = cfg.server.port;
+    let bound = false;
+    let firstBindError: unknown = null;
     try {
       this.server = this.createServerInstance(port, host);
+      bound = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (/EADDRINUSE|address already in use/i.test(msg)) {
-        this.ctx.logger.error(
-          t('server.bindInUse', { host, port }),
-          { error: msg, host, port },
-        );
-      } else {
+      if (!/EADDRINUSE|address already in use/i.test(msg)) {
         this.ctx.logger.error(
           t('server.startFailed', { host, port, msg }),
           { error: msg, host, port },
         );
+        throw err;
       }
-      throw err;
+      firstBindError = err;
+    }
+
+    if (!bound) {
+      try {
+        const decision = await resolveStartupPort({
+          configuredPort: cfg.server.port,
+          host,
+          autoPort: cfg.server.autoPort,
+          packageRoot: this.ctx.env.packageRoot,
+          logger: this.ctx.logger,
+          isPortFree,
+        });
+        port = decision.port;
+        if (decision.switched) {
+          this.ctx.logger.warn(
+            t('server.autoPortUnavailable', { configured: cfg.server.port, actual: port }),
+          );
+          this.ctx.logger.info('server: WebUI 实际地址', {
+            url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`,
+            configuredPort: cfg.server.port,
+          });
+        }
+        this.server = this.createServerInstance(port, host);
+      } catch (err) {
+        if (err instanceof LiveMossPortError) {
+          this.ctx.logger.error('server: 已有健康 MOSS 实例占用端口，本次启动终止', {
+            pid: err.pid,
+            port: err.port,
+          });
+        } else {
+          this.ctx.logger.error('server: 启动端口解析失败', {
+            error: err instanceof Error ? err.message : String(err),
+            firstBindError: firstBindError instanceof Error ? firstBindError.message : String(firstBindError),
+          });
+        }
+        throw err;
+      }
     }
 
     this.actualPort = port;

@@ -9,9 +9,7 @@ import type { ToolRegistry } from '../../contracts';
 import { ErrorCode } from '../../../core/error-codes';
 import { localizeDescription } from '../../tools/loader';
 import { compareToolNames } from '../../tools/sort';
-import { buildConfigShape, validateToolConfigPatch } from '../../tools/manifest';
 import type { ToolConfigManifest } from '../../tools/types';
-import { z } from 'zod';
 
 /** 读取 config.json 中某工具的当前配置值（config 不可用时返回空对象） */
 function readStoredToolConfig(config: ConfigService, name: string): Record<string, unknown> {
@@ -127,13 +125,15 @@ export function createUpdateToolHandler(services: ServiceRegistry, config: Confi
       return { status: 404, body: { error: ErrorCode.TOOL_NOT_FOUND } };
     }
 
-    // 字段校验：shape 来自工具自身 configManifest（builtin/custom 统一），无声明时仅允许 enabled/requireConfirmation
-    const shape = tool.configManifest
-      ? buildConfigShape(tool.configManifest)
-      : { enabled: z.boolean().default(true) };
-    const validation = validateToolConfigPatch(shape, patch);
-    if (!validation.ok) {
-      return { status: 400, body: { error: ErrorCode.TOOL_CONFIG_INVALID, message: validation.error } };
+    // 字段校验：shape 来自工具自身 configManifest（builtin/custom 统一），无声明时仅允许 enabled/requireConfirmation。
+    // zod 校验器动态加载（仅 PATCH 路径触发，不进启动闭包）。
+    if (tool.configManifest) {
+      const { buildConfigShape, validateToolConfigPatch } = await import('../../../core/config-schema');
+      const shape = buildConfigShape(tool.configManifest);
+      const validation = validateToolConfigPatch(shape, patch);
+      if (!validation.ok) {
+        return { status: 400, body: { error: ErrorCode.TOOL_CONFIG_INVALID, message: validation.error } };
+      }
     }
 
     try {

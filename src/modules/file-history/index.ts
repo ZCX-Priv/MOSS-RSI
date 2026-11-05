@@ -2,11 +2,10 @@
 // FileHistory 模块入口：实现三层文件历史架构（Track Edit + Snapshot + JSONL）。
 // 注册 FileHistoryService 到 ServiceNames.FILE_HISTORY，供 write/edit/delete/read/undo 工具消费。
 //
-// 依赖 tools 模块（工具在 execute 内通过 ctx.services.tryResolve 获取本服务）。
-// 本模块不依赖 server 模块（前端路由在 server/routes/file-history.ts 中独立实现）。
+// 启动性能：initialize 只注册服务；目录迁移与过期备份清理放到 warmup（后台、幂等）。
 
 import { t } from '../../core/i18n';
-import type { Module, ModuleContext, } from '../../core/types';
+import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import { FileHistoryServiceImpl } from './service';
 import { migrateLegacyLayout } from './migrate';
@@ -20,16 +19,30 @@ export type { ArchiveResult } from './archive';
 
 class FileHistoryModule implements Module {
   private ctx!: ModuleContext;
-  private service!: FileHistoryServiceImpl;
+  private service!: FileHistoryServiceImpl | null;
 
   async initialize(ctx: ModuleContext): Promise<void> {
     this.ctx = ctx;
-
-    // 从 config 读取 fileHistory 配置（容错：缺失字段用默认值）
     const config = this.readConfig(ctx);
+    // 先注册服务：写工具首次调用即可用（幂等迁移在 warmup 中后台完成）
+    this.service = new FileHistoryServiceImpl(ctx.env, ctx.logger, config);
+    ctx.services.register(ServiceNames.FILE_HISTORY, this.service, {
+      scope: 'file-history',
+    });
 
-    // 一次性目录布局迁移（幂等）：须在 service 构造前完成，
-    // 服务的 backups/transcripts/trash/ledger 路径直接指向新布局。
+    // 监听 config 变更（简化：不重建 service 实例，当前实现变更后需重启生效）
+    ctx.eventBus.onAction('config:changed', () => {
+      ctx.logger.debug(t('fileHistory.configChangedReloadSkipped'));
+    });
+
+    ctx.logger.info(t('fileHistory.moduleInitialized'), {
+      enabled: config.enabled,
+      transcriptEnabled: config.transcriptEnabled,
+    });
+  }
+
+  /** 后台预热：目录布局迁移 + 过期备份清理（启动路径零成本） */
+  async warmup(ctx: ModuleContext): Promise<void> {
     try {
       const migration = migrateLegacyLayout(ctx.env, ctx.logger);
       if (migration.movedDirs.length > 0 || migration.movedTranscripts > 0) {
@@ -40,38 +53,18 @@ class FileHistoryModule implements Module {
         }));
       }
     } catch (err) {
-      // 兜底：迁移函数内部已对单项失败容错，此处防御整体异常，不阻断启动
-      ctx.logger.warn(t('fileHistory.layoutMigrationFailed', {
+      ctx.logger.warn(t('fileHistory.layoutMigrationFailed'), {
         error: err instanceof Error ? err.message : String(err),
-      }));
+      });
     }
-
-    this.service = new FileHistoryServiceImpl(ctx.env, ctx.logger, config);
-
-    // 启动时清理过期备份
     try {
-      this.service.cleanupExpiredBackups();
+      this.service?.cleanupExpiredBackups();
     } catch (err) {
       ctx.logger.warn(t('fileHistory.cleanupFailed'), {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-
-    // 注册服务
-    ctx.services.register(ServiceNames.FILE_HISTORY, this.service, {
-      scope: 'file-history',
-    });
-
-    // 监听 config 变更，重建配置（简化：不重建 service 实例，只更新内部 config）
-    // 当前实现：config 变更后需重启生效。未来可扩展为热更新。
-    ctx.eventBus.onAction('config:changed', () => {
-      ctx.logger.debug(t('fileHistory.configChangedReloadSkipped'));
-    });
-
-    ctx.logger.info(t('fileHistory.moduleInitialized'), {
-      enabled: config.enabled,
-      transcriptEnabled: config.transcriptEnabled,
-    });
+    ctx.logger.info('fileHistory: warmup completed');
   }
 
   /** 从 config 读取 fileHistory 配置（容错：缺失字段用默认值兜底） */

@@ -3,7 +3,7 @@
 // 使用：node scripts/build.mjs
 
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -115,6 +115,10 @@ function buildBackend() {
     '--outdir', DIST,
     '--target', 'bun',
     '--format', 'esm',
+    // 低配机启动优化：minify 减少解析体积（标识符混淆已通过测试与运行时冒烟）
+    '--minify-syntax',
+    '--minify-whitespace',
+    '--minify-identifiers',
     '--splitting',
     '--external', 'sherpa-onnx-node',
     '--external', 'sharp',
@@ -133,6 +137,43 @@ function buildBackend() {
 // 步骤 3: 复制 tools 模块目录到 dist（供生产模式动态 import + tool.json 读取）
 // 含全部工具子目录 + shared/ 共享模块；顶层 .ts 已打包进 server.js，冗余但无害
 // ============================================================================
+/**
+ * 生成内置工具配置清单（启动性能关键路径）：
+ * 启动只读 dist/modules/tools/_config-manifest.json 一个文件，
+ * 不再逐个工具目录 readdir/stat/read tool.json。
+ */
+function generateToolConfigManifest() {
+  log('Generating tool config manifest...');
+  const src = resolve(ROOT, 'src', 'modules', 'tools');
+  const destDir = resolve(DIST, 'modules', 'tools');
+  const manifests = [];
+  let entries = [];
+  try {
+    entries = readdirSync(src, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const toolJson = resolve(src, entry.name, 'tool.json');
+    if (!existsSync(toolJson)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(toolJson, 'utf8'));
+      if (typeof manifest.name !== 'string') continue;
+      manifests.push({ dir: entry.name, manifest });
+    } catch {
+      // 无效 tool.json 由运行时工具加载器单独告警
+    }
+  }
+  // 启动只读这两个文件：
+  // - _tools.json：完整工具描述符（loadToolDescriptorsFromPrebuilt）
+  // - _config-manifest.json：config 段（defaultAppConfig / config-schema）
+  const tools = manifests.map(({ manifest }) => ({ name: manifest.name, config: manifest.config }));
+  writeFileSync(resolve(destDir, '_tools.json'), JSON.stringify({ version: 1, tools: manifests }, null, 2), 'utf8');
+  writeFileSync(resolve(destDir, '_config-manifest.json'), JSON.stringify({ version: 1, tools }, null, 2), 'utf8');
+  log(`Tool manifests written: ${tools.length} tools -> ${destDir}`);
+}
+
 function copyToolsModule() {
   log('Copying tools module...');
   const src = resolve(ROOT, 'src', 'modules', 'tools');
@@ -277,6 +318,7 @@ function main() {
   cleanDist();
   buildBackend();
   copyToolsModule();
+  generateToolConfigManifest();
   copyBrowserExtension();
   copyAgentPrompts();
   copyTreeSitterWasm();
