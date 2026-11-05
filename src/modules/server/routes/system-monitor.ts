@@ -331,7 +331,6 @@ function dirSize(dir: string): number {
 
 const DISK_CATEGORIES: Array<{ key: string; rel: string }> = [
   { key: 'logs', rel: 'logs' },
-  { key: 'file-index', rel: 'file-index' },
   { key: 'memory', rel: 'memory' },
   { key: 'live', rel: 'live' },
   { key: 'tasks', rel: 'tasks' },

@@ -1,7 +1,6 @@
 // src/modules/context/compiler/view-builder.ts
 // 消息视图构建（替代 agent/session.toUnifiedMessages）：
 //   [静态 system 前缀] + [env-context 锚定消息] + [压缩摘要消息] + [未压缩消息尾部] + [ephemeral 尾部消息]
-// 工具结果按 tool-pruner 微压缩（仅发送视图，session 原文不动）；
 // skill message 模式的占位消息替换为注册表全文；发送前 pair-sanitize 最终配对修复。
 //
 // 图片策略（图片留存 + 旧图优先淘汰）：
@@ -20,7 +19,6 @@ import type {
   ContextBreakdown,
   ContextMessage,
   ContextSessionLike,
-  ToolPruningConfig,
 } from '../types';
 import type { OptimizedImage } from './image-optimizer';
 import {
@@ -30,7 +28,6 @@ import {
   estimateMessageBytes,
 } from '../budgeter/estimator';
 import { sanitizeMessages, alignWindowBoundaries } from '../healer/pair-sanitize';
-import { isToolResultPruningExempt, pruneToolResultView } from '../compressor/tool-pruner';
 import { ENV_CONTEXT_MSG_NAME } from './env-context';
 
 /** 摘要消息 name 标识（与 compressor 一致） */
@@ -160,7 +157,6 @@ function readImages(
 }
 
 export interface BuildViewOptions {
-  toolPruning: ToolPruningConfig;
   /** 是否把 thinking 纳入发送视图与 token/字节核算（OpenAI 兼容默认 false；Anthropic 带签名时 true） */
   includeThinking?: boolean;
   /** skill 内容解析回调（message 模式占位替换 / system 模式由调用方拼进 staticSystemPrompt） */
@@ -229,25 +225,14 @@ export function buildRequestView(
       m.name !== SYSTEM_ERROR_MSG_NAME,
   );
 
-  // ===== 2. 视图消息准备（微压缩 + skill 占位替换；全部新建对象不动原消息） =====
-  // originalOf：视图对象 → 原始 session 消息。视图可能被复制（修剪），
+  // ===== 2. 视图消息准备（skill 占位替换；全部新建对象不动原消息） =====
+  // originalOf：视图对象 → 原始 session 消息。视图可能被复制（图片淘汰等），
   // 而标记 imagesSentAt 必须落在原始 session 对象上才能持久化生效。
   const originalOf = new WeakMap<ContextMessage, ContextMessage>();
   const prepared: ContextMessage[] = visible.map(raw => {
     let next: ContextMessage = raw;
 
-    // 2b. 工具结果微压缩（仅发送视图，session 原文不动）
-    // run_code 等聚合型结果无法通过重新读取恢复，跳过修剪，完整交给模型。
-    if (
-      next.role === 'tool' &&
-      opts.toolPruning.enabled &&
-      !isToolResultPruningExempt(next)
-    ) {
-      const pruned = pruneToolResultView(next.content, opts.toolPruning);
-      if (pruned !== next.content) next = { ...next, content: pruned };
-    }
-
-    // 2c. skill message 模式占位消息 → 注册表全文
+    // 2b. skill message 模式占位消息 → 注册表全文
     if (next.role === 'system' && next.name === SKILL_INJECT_MSG_NAME && opts.resolveSkillPrompt) {
       const skillName =
         (next.metadata as { skillName?: string } | undefined)?.skillName ??
@@ -259,7 +244,7 @@ export function buildRequestView(
       }
     }
 
-    // 2d. provider 不回传 thinking 时，从发送视图彻底移除（不只估算排除）：
+    // 2c. provider 不回传 thinking 时，从发送视图彻底移除（不只估算排除）：
     // DeepSeek/OpenAI 兼容默认不回传 reasoning_content，若仍留在视图里，
     // 既不会被 provider 发送，又会让 breakdown/字节预算虚高。
     if (!opts.includeThinking && (next.thinking || next.thinkingSignature)) {

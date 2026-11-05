@@ -176,9 +176,9 @@ export class ComputerServiceImpl implements ComputerService {
       try {
         await client.disconnect();
       } catch (err) {
-        this.logger.warn(t('computer.disconnectFailed'), {
+        this.logger.warn(t('computer.disconnectFailed', {
           error: err instanceof Error ? err.message : String(err),
-        });
+        }));
       }
     }
   }
@@ -189,9 +189,9 @@ export class ComputerServiceImpl implements ComputerService {
     try {
       await this.ensureConnected();
     } catch (err) {
-      this.logger.warn(t('computer.connectFailed'), {
+      this.logger.warn(t('computer.connectFailed', {
         error: err instanceof Error ? err.message : String(err),
-      });
+      }));
     }
     this.emitStatus();
   }
@@ -633,9 +633,9 @@ export class ComputerServiceImpl implements ComputerService {
       writeFileSync(path, Buffer.from(data, 'base64'));
       return { data, mimeType: mime, path };
     } catch (err) {
-      this.logger.warn(t('computer.saveImageFailed'), {
+      this.logger.warn(t('computer.saveImageFailed', {
         error: err instanceof Error ? err.message : String(err),
-      });
+      }));
       return null;
     }
   }
@@ -728,9 +728,9 @@ export class ComputerServiceImpl implements ComputerService {
         return { width, height, scale };
       }
     } catch (err) {
-      this.logger.debug(t('computer.screenSizeFailed'), {
+      this.logger.debug(t('computer.screenSizeFailed', {
         error: err instanceof Error ? err.message : String(err),
-      });
+      }));
     }
     return null;
   }

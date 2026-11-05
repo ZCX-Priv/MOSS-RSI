@@ -17,8 +17,11 @@ import {
   SUPPORTED_TYPES,
   type WalkEntry,
 } from '../shared/search-core';
-import { getFileIndex } from '../shared/file-index-hint';
+import { ScanCache } from '../shared/scan-cache';
 import type { ToolContext, ToolResult } from '../types';
+
+/** glob 专属文件列表缓存（独立实例；grep 不共享） */
+const globScanCache = new ScanCache({ ttlMs: 30_000, maxRoots: 2 });
 
 interface GlobParams {
   pattern?: string | string[];
@@ -129,67 +132,6 @@ export default {
     const offset = Math.max(p.offset ?? 0, 0);
     const sortBy: 'mtime' | 'path' = p.sortBy === 'path' ? 'path' : 'mtime';
 
-    // ---- 索引加速路径（文件索引引擎就绪时内存匹配，跳过目录遍历）----
-    // 条件：未指定子路径（base=cwd）+ 尊重忽略规则 + 不含隐藏文件
-    //（索引口径：仅 cwd、不含 gitignore/黑名单忽略项、不含隐藏文件，与遍历口径一致）
-    if (!p.path && !noIgnore && p.dot !== true) {
-      const fileIndex = getFileIndex(ctx);
-      if (fileIndex) {
-        try {
-          const indexed = await fileIndex.queryFiles(base, {
-            positiveGlobs,
-            negativeGlobs,
-            typeGlobs,
-            includeDirs: p.includeDirs === true,
-            sortBy,
-            offset,
-            maxResults: maxResults + 1000,
-          });
-          if (indexed) {
-            const total = indexed.total;
-            const truncated = total > offset + maxResults;
-            const page = indexed.page.slice(0, maxResults);
-            const patternDesc = Array.isArray(p.pattern) ? p.pattern.join('", "') : p.pattern;
-            const header =
-              t('tools.globFoundHeader', {
-                total,
-                entryUnit: t(total === 1 ? 'tools.globEntryUnitOne' : 'tools.globEntryUnitMany'),
-                pattern: patternDesc ?? '',
-                typeSuffix: p.type ? t('tools.globTypeSuffix', { type: p.type }) : '',
-                path: toDisplayPath(base, ctx.cwd || process.cwd()),
-              }) +
-              (truncated ? t('tools.globShowingRange', { from: offset + 1, to: offset + page.length }) : '') +
-              '\n';
-            const hint = truncated ? `\n${t('tools.searchTruncatedHint')}` : '';
-            const body = page.length > 0 ? page.map(e => e.rel).join('\n') : t('tools.searchNoResults');
-            return {
-              content: [{ type: 'text', text: header + body + hint }],
-              metadata: {
-                patterns: normalized,
-                root: base,
-                type: p.type ?? null,
-                totalMatches: total,
-                returned: page.length,
-                truncated,
-                maxResults,
-                offset,
-                sortBy,
-                includeDirs: p.includeDirs ?? false,
-                noIgnore,
-                dot: p.dot ?? false,
-                filesWalked: 0,
-                cancelled: false,
-                elapsedMs: Date.now() - startedAt,
-                via: 'index',
-              },
-            };
-          }
-        } catch {
-          // 索引路径异常 → 回退遍历
-        }
-      }
-    }
-
     // ---- 遍历 + 匹配（流式；目录豁免 type 检查）----
     const matched: WalkEntry[] = [];
     let filesWalked = 0;
@@ -203,17 +145,39 @@ export default {
       return true;
     };
 
+    // ---- 缓存枚举路径（glob 专属缓存；跳过重复目录遍历）----
+    // 条件与旧索引加速一致：未指定子路径 + 尊重忽略规则 + 不含隐藏文件。
+    let cachedEntries: WalkEntry[] | null = null;
+    if (!p.path && !noIgnore && p.dot !== true) {
+      try {
+        cachedEntries = await globScanCache.list(base, {
+          noIgnore: false,
+          dot: false,
+          includeDirs: p.includeDirs === true,
+        });
+      } catch {
+        cachedEntries = null; // 缓存枚举异常 → 回退流式遍历
+      }
+    }
+
     try {
-      for await (const entry of walkFiles(base, {
-        signal: ctx.signal,
-        noIgnore,
-        dot: p.dot === true,
-        includeDirs: p.includeDirs === true,
-      })) {
-        filesWalked++;
-        if (matchesEntry(entry)) matched.push(entry);
-        // 遍历上限保护：匹配数显著超出分页窗口时提前终止
-        if (matched.length > offset + maxResults + 1000) break;
+      if (cachedEntries) {
+        filesWalked = cachedEntries.length;
+        for (const entry of cachedEntries) {
+          if (matchesEntry(entry)) matched.push(entry);
+        }
+      } else {
+        for await (const entry of walkFiles(base, {
+          signal: ctx.signal,
+          noIgnore,
+          dot: p.dot === true,
+          includeDirs: p.includeDirs === true,
+        })) {
+          filesWalked++;
+          if (matchesEntry(entry)) matched.push(entry);
+          // 遍历上限保护：匹配数显著超出分页窗口时提前终止
+          if (matched.length > offset + maxResults + 1000) break;
+        }
       }
     } catch (err) {
       return {
@@ -287,6 +251,7 @@ export default {
         filesWalked,
         cancelled,
         elapsedMs: Date.now() - startedAt,
+        via: cachedEntries ? 'cache' : 'walk',
       },
     };
   },

@@ -254,8 +254,6 @@
 | GET | `/api/context/:sessionId/compactions` | 是 | 压缩历史 |
 | GET | `/api/context/:sessionId/compact-preview` | 是 | 手动压缩预览 |
 | POST | `/api/context/:sessionId/compact` | 是 | 手动触发压缩 |
-| GET | `/api/context/file-index/status` | 是 | 文件索引状态 |
-| POST | `/api/context/file-index/rebuild` | 是 | 重建文件索引 |
 
 ### 2.15 规则 / 钩子 / 记忆
 
@@ -589,7 +587,7 @@ export interface AppConfig {
     rules: { allow: string[]; deny: string[]; ask: string[] };
     protectedPaths: string[];
   };
-  context?: Record<string, unknown>;  // 压缩/修剪/自愈/遥测参数，见 src/modules/context/types.ts
+  context?: Record<string, unknown>;  // 压缩/自愈/遥测参数，见 src/modules/context/types.ts
   voice: { enabled: boolean; providerId: string; localModel: string; language: string };
 }
 
@@ -909,4 +907,3 @@ export interface WSMessage {
 | 文件历史 | `~/.moss/file-history/` |
 | 浏览器 / 桌面 / 语音 | `~/.moss/browser/`、`~/.moss/computer/`、`~/.moss/models/asr/` |
 | 远程访问 | `~/.moss/remote/` |
-| 文件索引 | `<cwd>/.moss/file-index/` |

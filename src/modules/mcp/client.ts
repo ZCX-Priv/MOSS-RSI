@@ -317,50 +317,75 @@ export class McpClient {
     if (!this.sdkClient) {
       throw new Error(t('mcp.clientNotConnected', { name: this.name }));
     }
-    const result = await this.sdkClient.callTool(
-      {
-        name: toolName,
-        arguments: args as Record<string, unknown>,
-      },
-      // resultSchema：传 undefined，交由 SDK 使用默认 CallToolResultSchema
-      undefined,
-      {
-        timeout: opts?.timeoutMs,
-        signal: opts?.signal,
-        resetTimeoutOnProgress: true,
-      },
-    );
 
-    // 归一化结果
-    const content: McpToolResult['content'] = [];
-    if (Array.isArray(result.content)) {
-      for (const part of result.content) {
-        if (part.type === 'text') {
-          content.push({ type: 'text', text: part.text ?? '' });
-        } else if (part.type === 'image') {
-          content.push({
-            type: 'image',
-            data: part.data ?? '',
-            mimeType: part.mimeType ?? 'image/png',
-          });
-        } else if (part.type === 'resource') {
-          // MCP resource 类型：完整保留 uri/mimeType/text/blob（resource links）
-          content.push({
-            type: 'resource',
-            uri: part.uri ?? '',
-            mimeType: part.mimeType,
-            text: part.text,
-            blob: part.blob,
-          });
+    // 每次调用派生独立 signal：SDK 的 protocol 会在传入 signal 上
+    // addEventListener('abort') 且请求结束后不移除（shared/protocol.js:737）。
+    // 若把 run 级 signal 直传，同一次 run 里每次 MCP 调用都会留下一个死监听器；
+    // 用户中止 run 时，这些已完成调用会与在途调用同帧发送 notifications/cancelled，
+    // 在 Bun 的子进程 stdin 上叠加成 drain 监听器（MaxListenersExceededWarning）。
+    const callCtl = new AbortController();
+    const outer = opts?.signal;
+    const forwardAbort = (): void => {
+      callCtl.abort(outer?.reason);
+    };
+    if (outer) {
+      // SDK 只监听 abort 事件，感知不到「传入即已中止」；不提前拒绝会挂到 timeout
+      if (outer.aborted) {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+      outer.addEventListener('abort', forwardAbort, { once: true });
+    }
+
+    try {
+      const result = await this.sdkClient.callTool(
+        {
+          name: toolName,
+          arguments: args as Record<string, unknown>,
+        },
+        // resultSchema：传 undefined，交由 SDK 使用默认 CallToolResultSchema
+        undefined,
+        {
+          timeout: opts?.timeoutMs,
+          signal: callCtl.signal,
+          resetTimeoutOnProgress: true,
+        },
+      );
+
+      // 归一化结果
+      const content: McpToolResult['content'] = [];
+      if (Array.isArray(result.content)) {
+        for (const part of result.content) {
+          if (part.type === 'text') {
+            content.push({ type: 'text', text: part.text ?? '' });
+          } else if (part.type === 'image') {
+            content.push({
+              type: 'image',
+              data: part.data ?? '',
+              mimeType: part.mimeType ?? 'image/png',
+            });
+          } else if (part.type === 'resource') {
+            // MCP resource 类型：完整保留 uri/mimeType/text/blob（resource links）
+            content.push({
+              type: 'resource',
+              uri: part.uri ?? '',
+              mimeType: part.mimeType,
+              text: part.text,
+              blob: part.blob,
+            });
+          }
         }
       }
+      return {
+        content,
+        isError: result.isError ?? false,
+        // structured output（2025-06-18 规范）：完整透传
+        structured: result.structuredContent,
+      };
+    } finally {
+      outer?.removeEventListener('abort', forwardAbort);
     }
-    return {
-      content,
-      isError: result.isError ?? false,
-      // structured output（2025-06-18 规范）：完整透传
-      structured: result.structuredContent,
-    };
   }
 
   // ========================================================================

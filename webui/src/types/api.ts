@@ -502,14 +502,6 @@ export interface CompactionConfig {
   summaryModel: string;
 }
 
-/** config.context.toolPruning 段 */
-export interface ToolPruningConfig {
-  enabled: boolean;
-  thresholdChars: number;
-  keepHeadChars: number;
-  keepTailChars: number;
-}
-
 /** config.context.healer 段 */
 export interface HealerConfig {
   enabled: boolean;
@@ -520,11 +512,8 @@ export interface HealerConfig {
 /** config.context 段 */
 export interface ContextEngineConfig {
   compaction: CompactionConfig;
-  toolPruning: ToolPruningConfig;
   healer: HealerConfig;
   telemetry: { enabled: boolean };
-  /** 文件索引模块（三引擎；可选，旧 config 无此段时视为全关） */
-  fileIndex?: FileIndexConfig;
   /** 用户规则引擎（可选，旧 config 无此段时用默认值） */
   rules?: RulesEngineConfig;
   /** 生命周期钩子引擎（可选，旧 config 无此段时用默认值） */
@@ -557,6 +546,15 @@ export interface MemoryEngineConfig {
   recallTokenBudget: number;
   l1ImportanceThreshold: number;
   l1MaxEntries: number;
+  /** 召回调优（旧配置缺失时后端用默认值） */
+  recallInsightWeight?: number;
+  recallTagWeight?: number;
+  recallVerbatimWeight?: number;
+  recallRecencyHalfLifeDays?: number;
+  recallPinnedBoost?: number;
+  recallDedupThreshold?: number;
+  recallMinScoreRatio?: number;
+  recallMaxPerRoom?: number;
 }
 
 // ============================================================================
@@ -695,6 +693,8 @@ export interface MemoryItem {
   createdAt: string;
   updatedAt: string;
   scope: RuleScope;
+  /** 搜索时的召回相关度（仅 q 检索结果携带） */
+  score?: number;
 }
 
 /** 宫殿树 */
@@ -729,40 +729,6 @@ export interface MemoryDistillResult {
   merged: number;
   skipped: boolean;
   reason?: string;
-}
-
-/** 文件索引配置（config.context.fileIndex） */
-export interface FileIndexConfig {
-  indexing: { enabled: boolean };
-  graph: { enabled: boolean };
-  sag: {
-    enabled: boolean;
-    llmModel: string;
-    llmMaxChunks: number;
-  };
-  ignore: string[];
-}
-
-/** 文件索引引擎状态（GET /api/context/file-index/status） */
-export interface FileIndexStatus {
-  projectRoot: string;
-  indexing: FileIndexEngineStatusBase & { fileCount: number; dirCount: number };
-  graph: FileIndexEngineStatusBase & { fileCount: number; symbolCount: number; edgeCount: number };
-  sag: FileIndexEngineStatusBase & {
-    chunkCount: number;
-    eventCount: number;
-    entityCount: number;
-    llmExtracted: number;
-    llmBudget: number;
-  };
-}
-
-interface FileIndexEngineStatusBase {
-  enabled: boolean;
-  state: 'disabled' | 'scanning' | 'ready' | 'error';
-  progress: { phase: string; percent: number } | null;
-  storeBytes: number;
-  error: string | null;
 }
 
 // ============================================================================

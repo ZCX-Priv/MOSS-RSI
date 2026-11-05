@@ -32,12 +32,12 @@ const POLL_MS = 2500;
 /** 分类图例配色（对齐图3 的多色分段条；键与后端 disk.categories 一致） */
 const CATEGORY_COLORS: Record<string, string> = {
   logs: '#38bdf8',
-  'file-index': '#a78bfa',
   memory: '#f472b6',
   live: '#facc15',
   tasks: '#34d399',
   todo: '#fb923c',
   terminals: '#22d3ee',
+  free: '#475569',
   other: '#94a3b8',
 };
 
@@ -433,7 +433,7 @@ export function SystemMonitorPage() {
                       items={[
                         { key: 'live', bytes: snapshot.memory.mossBytes },
                         { key: 'other', bytes: Math.max(0, snapshot.memory.usedBytes - snapshot.memory.mossBytes) },
-                        { key: 'file-index', bytes: Math.max(0, snapshot.memory.totalBytes - snapshot.memory.usedBytes) },
+                        { key: 'free', bytes: Math.max(0, snapshot.memory.totalBytes - snapshot.memory.usedBytes) },
                       ]}
                     />
                     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">

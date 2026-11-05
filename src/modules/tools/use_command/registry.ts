@@ -161,7 +161,7 @@ function fileExists(path: string): boolean {
 }
 
 /** 解析 command 文件：<name>.md（文件名即命令名） */
-function parseCommandFile(filePath: string): Command | null {
+export function parseCommandFile(filePath: string): Command | null {
   const raw = readFileSync(filePath, 'utf8');
   const { frontMatter, body } = splitFrontMatter(raw);
   // 文件名（去扩展名）即命令名

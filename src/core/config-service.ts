@@ -69,10 +69,8 @@ export function defaultAppConfig(): AppConfig {
     filesys: { ...DEFAULT_FILESYS_CONFIG },
     context: {
       compaction: { ...DEFAULT_CONTEXT_CONFIG.compaction },
-      toolPruning: { ...DEFAULT_CONTEXT_CONFIG.toolPruning },
       healer: { ...DEFAULT_CONTEXT_CONFIG.healer },
       telemetry: { ...DEFAULT_CONTEXT_CONFIG.telemetry },
-      fileIndex: { ...DEFAULT_CONTEXT_CONFIG.fileIndex },
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory },
@@ -214,8 +212,15 @@ class ConfigServiceImpl implements ConfigService {
     // 写入路径必须完整校验（安全边界；此时 zod 动态加载已被缓存）
     const { appConfigSchema } = await import('./config-schema');
     const parsed = appConfigSchema.parse(merged);
+    // 幂等守卫：patch 未带来任何实际变化时不写盘、不广播（重复提交的第二次请求在此被拦下）
+    if (JSON.stringify(parsed) === JSON.stringify(this.appConfig)) {
+      this.logger.debug(t('config.appConfigUnchanged'), { keys: Object.keys(patch) });
+      return;
+    }
     this.setAppConfig(parsed as AppConfig);
-    this.logger.info(t('config.appConfigUpdated'), { keys: Object.keys(patch) });
+    this.logger.info(t('config.appConfigUpdated', { keys: Object.keys(patch).join(', ') }), {
+      keys: Object.keys(patch),
+    });
     this.fs.writeText(join(this.env.configDir, 'config.json'), JSON.stringify(parsed, null, 2));
     this.applyLocale();
     await this.eventBus.broadcast('config:changed', { which: 'app' });

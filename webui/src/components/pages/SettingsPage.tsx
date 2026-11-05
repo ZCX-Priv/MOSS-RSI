@@ -36,7 +36,8 @@ import {
   Sparkles,
   X,
   Smartphone,
-  AppWindow,
+  Earth,
+  SquareMousePointer,
   DatabaseBackup,
   MessageSquare,
 } from 'lucide-react';
@@ -71,7 +72,6 @@ import { useAgents } from '../../hooks/useAgents';
 import { useTools } from '../../hooks/useTools';
 import { useCommands } from '../../hooks/useCommands';
 import { useConfig } from '../../hooks/useConfig';
-import { useFileIndex } from '../../hooks/useFileIndex';
 import { useReducedMotion } from '../../hooks/useAnimationClass';
 import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset } from '../../store';
 import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
@@ -79,7 +79,7 @@ import { api } from '../../api/http';
 import { BrandIcon } from '../../lib/brand-icons';
 import { TOOL_ICON_MAP } from '../../lib/tool-icons';
 import { SKILL_ICON_CHOICES, resolveSkillIcon } from '../../lib/skill-icons';
-import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, FileIndexConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
+import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
 import { ToolEditDialog } from './settings/ToolEditDialog';
 import { CreateAgentDialog } from '../settings/CreateAgentDialog';
 import {
@@ -128,8 +128,8 @@ export const settingsNavItems: NavItem[] = [
   { id: 'context', labelKey: 'settings.nav.context', Icon: Layers },
   { id: 'tools', labelKey: 'settings.nav.tools', Icon: Wrench },
   { id: 'safety', labelKey: 'settings.nav.safety', Icon: ShieldCheck },
-  { id: 'browser', labelKey: 'settings.nav.browser', Icon: AppWindow },
-  { id: 'computer', labelKey: 'settings.nav.computer', Icon: Monitor },
+  { id: 'browser', labelKey: 'settings.nav.browser', Icon: Earth },
+  { id: 'computer', labelKey: 'settings.nav.computer', Icon: SquareMousePointer },
   { id: 'remote', labelKey: 'settings.nav.remote', Icon: Smartphone },
   { id: 'im', labelKey: 'settings.nav.im', Icon: MessageSquare },
   { id: 'logs', labelKey: 'settings.nav.logs', Icon: ScrollText },
@@ -192,7 +192,6 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.safety.confirmTimeout', descriptionKey: 'settings.safety.confirmTimeoutDesc', section: 'safety' },
   { labelKey: 'settings.safety.sandboxTitle', descriptionKey: 'settings.safety.sandboxDesc', section: 'safety' },
   { labelKey: 'settings.safety.rulesTitle', descriptionKey: 'settings.safety.rulesDesc', section: 'safety' },
-  { labelKey: 'settings.placeholder.indexTitle', descriptionKey: 'settings.placeholder.indexDesc', section: 'index' },
   { labelKey: 'settings.commands.title', descriptionKey: 'settings.commands.subtitle', section: 'commands' },
   { labelKey: 'settings.commands.createCommand', section: 'commands' },
   { labelKey: 'settings.placeholder.rulesTitle', descriptionKey: 'settings.placeholder.rulesDesc', section: 'rules' },
@@ -768,7 +767,7 @@ export function SafetySettings() {
   );
 }
 
-/* ===== 上下文引擎设置（压缩 / 摘要模型 / 工具结果修剪 / 自愈） ===== */
+/* ===== 上下文引擎设置（压缩 / 摘要模型 / 自愈） ===== */
 
 /** 请求体字节上限默认值（MiB）——与后端 context.maxRequestBytes 默认一致 */
 const DEFAULT_MAX_REQUEST_BYTES_MB = 8;
@@ -782,7 +781,6 @@ const CONTEXT_FALLBACK: ContextEngineConfig = {
     minFoldTokens: 400,
     summaryModel: 'inherit',
   },
-  toolPruning: { enabled: true, thresholdChars: 8192, keepHeadChars: 4096, keepTailChars: 1024 },
   healer: { enabled: true, toolNameFuzzy: true, schemaFix: true },
   telemetry: { enabled: true },
   maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES_MB * 1024 * 1024,
@@ -809,7 +807,7 @@ function ContextSettingRow({
   );
 }
 
-/** 上下文设置：Tab 容器（引擎/索引/规则/记忆；路由驱动） */
+/** 上下文设置：Tab 容器（引擎/规则/记忆；路由驱动） */
 export function ContextSettings() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -817,7 +815,7 @@ export function ContextSettings() {
   const suffix = pathname.startsWith('/settings/context/')
     ? pathname.slice('/settings/context/'.length)
     : '';
-  const tab = ['index', 'rules', 'memory'].includes(suffix)
+  const tab = ['rules', 'memory'].includes(suffix)
     ? suffix
     : 'engine';
 
@@ -842,10 +840,6 @@ export function ContextSettings() {
               <Activity className="size-3.5" />
               {t('settings.context.tabEngine')}
             </TabsTrigger>
-            <TabsTrigger value="index" className="gap-1.5">
-              <Globe className="size-3.5" />
-              {t('settings.nav.index')}
-            </TabsTrigger>
             <TabsTrigger value="rules" className="gap-1.5">
               <ClipboardList className="size-3.5" />
               {t('settings.nav.rules')}
@@ -868,7 +862,7 @@ export function ContextSettings() {
   );
 }
 
-/** 引擎设置（上下文压缩 / 摘要模型 / 工具结果修剪 / 自愈） */
+/** 引擎设置（上下文压缩 / 摘要模型 / 自愈） */
 export function ContextEngineSettings() {
   const { t } = useTranslation();
   const { appConfig, apiConfig, updateAppConfig } = useConfig();
@@ -1013,23 +1007,6 @@ export function ContextEngineSettings() {
         </div>
       </div>
 
-      {/* 工具结果修剪 */}
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-foreground">{t('settings.context.toolPruningTitle')}</div>
-        <div className="text-xs text-muted-foreground">{t('settings.context.toolPruningDesc')}</div>
-        <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
-          <ContextSettingRow
-            title={t('settings.context.toolPruningEnabled')}
-            desc={t('settings.context.toolPruningEnabledDesc')}
-          >
-            <Switch
-              checked={context.toolPruning.enabled}
-              onCheckedChange={(v) => patchContext({ toolPruning: { ...context.toolPruning, enabled: v } })}
-            />
-          </ContextSettingRow>
-        </div>
-      </div>
-
       {/* 工具调用自愈 */}
       <div className="flex flex-col gap-1">
         <div className="text-sm font-medium text-foreground">{t('settings.context.healerTitle')}</div>
@@ -1070,300 +1047,6 @@ export function ContextEngineSettings() {
   );
 }
 
-/* ===== 文件索引设置（上下文>索引 Tab：三引擎开关 + 状态 + 重建） ===== */
-
-const FILE_INDEX_FALLBACK: FileIndexConfig = {
-  indexing: { enabled: false },
-  graph: { enabled: false },
-  sag: { enabled: false, llmModel: 'inherit', llmMaxChunks: 2000 },
-  ignore: [],
-};
-
-/** 字节数格式化（KB/MB） */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/** 引擎状态徽章 */
-function EngineStateBadge({ state, enabled }: { state: string; enabled: boolean }) {
-  const { t } = useTranslation();
-  if (!enabled) return <Badge variant="secondary">{t('settings.fileIndex.stateDisabled')}</Badge>;
-  if (state === 'scanning')
-    return <Badge className="bg-blue-600/15 text-blue-600">{t('settings.fileIndex.stateScanning')}</Badge>;
-  if (state === 'ready')
-    return <Badge className="bg-emerald-600/15 text-emerald-600">{t('settings.fileIndex.stateReady')}</Badge>;
-  if (state === 'error')
-    return <Badge className="bg-red-500/15 text-red-600">{t('settings.fileIndex.stateError')}</Badge>;
-  return <Badge variant="secondary">{t('settings.fileIndex.stateDisabled')}</Badge>;
-}
-
-/** 单引擎状态卡（统计行 + 进度条） */
-function EngineStatusCard({
-  title,
-  state,
-  enabled,
-  progress,
-  storeBytes,
-  error,
-  stats,
-}: {
-  title: string;
-  state: string;
-  enabled: boolean;
-  progress: { phase: string; percent: number } | null;
-  storeBytes: number;
-  error: string | null;
-  stats: string[];
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-foreground">{title}</span>
-        <EngineStateBadge state={state} enabled={enabled} />
-      </div>
-      {state === 'scanning' && progress ? (
-        <div className="flex flex-col gap-1">
-          <Progress value={progress.percent} className="h-1.5" />
-          <span className="text-xs text-muted-foreground">
-            {t('settings.fileIndex.building', { percent: progress.percent })}
-          </span>
-        </div>
-      ) : null}
-      {stats.length > 0 ? (
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          {stats.map((s) => (
-            <span key={s}>{s}</span>
-          ))}
-        </div>
-      ) : null}
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>{t('settings.fileIndex.storeSize', { size: formatBytes(storeBytes) })}</span>
-      </div>
-      {error ? <span className="text-xs text-red-600">{error}</span> : null}
-    </div>
-  );
-}
-
-export function FileIndexSettings() {
-  const { t } = useTranslation();
-  const { appConfig, updateAppConfig } = useConfig();
-  const fileIndex = appConfig?.context?.fileIndex ?? FILE_INDEX_FALLBACK;
-  const cwd = appConfig?.agent?.workingDirectory || undefined;
-  const { status, rebuild } = useFileIndex(cwd);
-  const [rebuildOpen, setRebuildOpen] = useState(false);
-  const [rebuilding, setRebuilding] = useState(false);
-
-  const patchFileIndex = (patch: Partial<FileIndexConfig>): Promise<void> =>
-    updateAppConfig({
-      context: { ...(appConfig?.context ?? CONTEXT_FALLBACK), fileIndex: { ...fileIndex, ...patch } },
-    }).then(
-      () => undefined,
-      () => undefined, // toast 已在 useConfig 内处理
-    );
-
-  // 开启任一引擎后立即触发一次构建：否则仅改配置、后端无任何触发点 → 引擎不启动、不落库。
-  const startAfterEnable = (): void => {
-    if (!cwd || cwd === '__system__') return; // 系统作用域无单一项目根，索引跳过
-    void rebuild(['indexing']).catch(err => {
-      toast.error(err instanceof Error ? err.message : String(err));
-    });
-  };
-
-  // 开关联动：graph/sag 开启 → indexing 强制开启；indexing 关闭 → graph/sag 一并关闭
-  const setIndexing = (v: boolean) => {
-    if (v) {
-      void patchFileIndex({ indexing: { enabled: true } }).then(startAfterEnable);
-    } else {
-      void patchFileIndex({
-        indexing: { enabled: false },
-        graph: { enabled: false },
-        sag: { ...fileIndex.sag, enabled: false },
-      });
-    }
-  };
-  const setGraph = (v: boolean) => {
-    if (v) {
-      toast.info(t('settings.fileIndex.linkedOn'));
-      void patchFileIndex({ indexing: { enabled: true }, graph: { enabled: true } }).then(startAfterEnable);
-    } else {
-      void patchFileIndex({ graph: { enabled: false } });
-    }
-  };
-  const setSag = (v: boolean) => {
-    if (v) {
-      toast.info(t('settings.fileIndex.linkedOn'));
-      void patchFileIndex({ indexing: { enabled: true }, sag: { ...fileIndex.sag, enabled: true } }).then(startAfterEnable);
-    } else {
-      void patchFileIndex({ sag: { ...fileIndex.sag, enabled: false } });
-    }
-  };
-
-  const doRebuild = async () => {
-    setRebuilding(true);
-    try {
-      await rebuild();
-      toast.success(t('settings.fileIndex.rebuildStarted'));
-      setRebuildOpen(false);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRebuilding(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-6 p-6">
-      {/* 索引引擎 */}
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-foreground">{t('settings.fileIndex.indexingTitle')}</div>
-        <div className="text-xs text-muted-foreground">{t('settings.fileIndex.indexingDesc')}</div>
-        <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
-          <ContextSettingRow
-            title={t('settings.fileIndex.indexingEnabled')}
-            desc={t('settings.fileIndex.indexingEnabledDesc')}
-          >
-            <Switch checked={fileIndex.indexing.enabled} onCheckedChange={setIndexing} />
-          </ContextSettingRow>
-        </div>
-        {status ? (
-          <div className="mt-2">
-            <EngineStatusCard
-              title={t('settings.fileIndex.indexingTitle')}
-              state={status.indexing.state}
-              enabled={status.indexing.enabled}
-              progress={status.indexing.progress}
-              storeBytes={status.indexing.storeBytes}
-              error={status.indexing.error}
-              stats={[
-                t('settings.fileIndex.statFiles', { count: status.indexing.fileCount }),
-                t('settings.fileIndex.statDirs', { count: status.indexing.dirCount }),
-              ]}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {/* 图谱引擎 */}
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-foreground">{t('settings.fileIndex.graphTitle')}</div>
-        <div className="text-xs text-muted-foreground">{t('settings.fileIndex.graphDesc')}</div>
-        <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
-          <ContextSettingRow
-            title={t('settings.fileIndex.graphEnabled')}
-            desc={t('settings.fileIndex.graphEnabledDesc')}
-          >
-            <Switch checked={fileIndex.graph.enabled} onCheckedChange={setGraph} />
-          </ContextSettingRow>
-        </div>
-        {status ? (
-          <div className="mt-2">
-            <EngineStatusCard
-              title={t('settings.fileIndex.graphTitle')}
-              state={status.graph.state}
-              enabled={status.graph.enabled}
-              progress={status.graph.progress}
-              storeBytes={status.graph.storeBytes}
-              error={status.graph.error}
-              stats={[
-                t('settings.fileIndex.statFiles', { count: status.graph.fileCount }),
-                t('settings.fileIndex.statSymbols', { count: status.graph.symbolCount }),
-                t('settings.fileIndex.statEdges', { count: status.graph.edgeCount }),
-              ]}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {/* SAG 引擎 */}
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-foreground">{t('settings.fileIndex.sagTitle')}</div>
-        <div className="text-xs text-muted-foreground">{t('settings.fileIndex.sagDesc')}</div>
-        <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
-          <ContextSettingRow
-            title={t('settings.fileIndex.sagEnabled')}
-            desc={t('settings.fileIndex.sagEnabledDesc')}
-          >
-            <Switch checked={fileIndex.sag.enabled} onCheckedChange={setSag} />
-          </ContextSettingRow>
-          <ContextSettingRow
-            title={t('settings.fileIndex.sagBudget')}
-            desc={t('settings.fileIndex.sagBudgetDesc')}
-          >
-            <Input
-              type="number"
-              min={0}
-              max={100000}
-              className="w-28"
-              value={fileIndex.sag.llmMaxChunks}
-              disabled={!fileIndex.sag.enabled}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (!Number.isNaN(v)) {
-                  patchFileIndex({ sag: { ...fileIndex.sag, llmMaxChunks: Math.max(0, Math.min(100000, Math.floor(v))) } });
-                }
-              }}
-            />
-          </ContextSettingRow>
-        </div>
-        {status ? (
-          <div className="mt-2">
-            <EngineStatusCard
-              title={t('settings.fileIndex.sagTitle')}
-              state={status.sag.state}
-              enabled={status.sag.enabled}
-              progress={status.sag.progress}
-              storeBytes={status.sag.storeBytes}
-              error={status.sag.error}
-              stats={[
-                t('settings.fileIndex.statChunks', { count: status.sag.chunkCount }),
-                t('settings.fileIndex.statEvents', { count: status.sag.eventCount }),
-                t('settings.fileIndex.statEntities', { count: status.sag.entityCount }),
-                t('settings.fileIndex.statLlm', { done: status.sag.llmExtracted, total: status.sag.llmBudget }),
-              ]}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {/* 重建 */}
-      <div className="flex flex-col gap-2">
-        <div className="text-sm font-medium text-foreground">{t('settings.fileIndex.rebuildTitle')}</div>
-        <div className="text-xs text-muted-foreground">{t('settings.fileIndex.rebuildDesc')}</div>
-        <Button
-          variant="outline"
-          className="w-fit gap-1.5"
-          disabled={!fileIndex.indexing.enabled}
-          onClick={() => setRebuildOpen(true)}
-        >
-          <RefreshCw className="size-3.5" />
-          {t('settings.fileIndex.rebuildButton')}
-        </Button>
-      </div>
-
-      {/* 重建确认弹窗 */}
-      <Dialog open={rebuildOpen} onOpenChange={(o) => !rebuilding && setRebuildOpen(o)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('settings.fileIndex.rebuildTitle')}</DialogTitle>
-            <DialogDescription>{t('settings.fileIndex.rebuildConfirmDesc')}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRebuildOpen(false)} disabled={rebuilding}>
-              {t('common.cancel')}
-            </Button>
-            <Button onClick={() => void doRebuild()} disabled={rebuilding}>
-              {rebuilding ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              {t('settings.fileIndex.rebuildButton')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
 
 /* ===== 日志设置 ===== */
 const LOG_LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error', 'fatal'];
@@ -2452,9 +2135,14 @@ export function ToolsSettings() {
         <p className="text-xs text-muted-foreground">{t('settings.tools.codeModeHint')}</p>
       </div>
 
-      {/* 工具列表：小标题 + 卡片列表 */}
+      {/* 工具列表：小标题 + 数量 + 卡片列表 */}
       <div className="flex flex-col gap-3">
-        <div className="text-sm font-medium text-foreground">{t('settings.tools.listTitle')}</div>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{t('settings.tools.listTitle')}</span>
+          <span className="text-xs text-muted-foreground">
+            {t('settings.tools.listCount', { count: tools.length })}
+          </span>
+        </div>
         <div className="flex flex-col gap-2">
           {filteredTools.length === 0 && (
             <div className="py-12 text-center text-sm text-muted-foreground">
@@ -2993,7 +2681,6 @@ export function AppearanceSettingsSection() {
 
 /* ===== 占位 section 路由组件（按 section 查表渲染 PlaceholderSettings） ===== */
 const PLACEHOLDER_SECTION_KEYS: Record<string, { titleKey: string; descKey: string }> = {
-  index: { titleKey: 'settings.placeholder.indexTitle', descKey: 'settings.placeholder.indexDesc' },
   rules: { titleKey: 'settings.placeholder.rulesTitle', descKey: 'settings.placeholder.rulesDesc' },
   memory: { titleKey: 'settings.placeholder.memoryTitle', descKey: 'settings.placeholder.memoryDesc' },
   hooks: { titleKey: 'settings.placeholder.hooksTitle', descKey: 'settings.placeholder.hooksDesc' },

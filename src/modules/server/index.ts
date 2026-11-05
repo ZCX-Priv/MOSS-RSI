@@ -156,8 +156,6 @@ import {
   createCompactPreviewHandler,
   createManualCompactHandler,
   createSummaryModelsHandler,
-  createFileIndexStatusHandler,
-  createFileIndexRebuildHandler,
 } from './routes/context';
 import {
   createListRulesHandler,
@@ -287,15 +285,6 @@ class ServerModule implements Module {
     // 通过 EventBus 解耦，避免 config-service / kernel 直接依赖 server.instance（循环依赖）
     ctx.eventBus.onAction('config:changed', (data) => {
       this.wsHandler.broadcast({ type: 'config.changed', payload: data });
-      // 文件索引配置热重载：开关变化 → 引擎启停（context 引擎缺失时静默跳过）
-      const contextEngine = ctx.services.tryResolve<{
-        onFileIndexConfigChanged(): Promise<void>;
-      }>(ServiceNames.CONTEXT_ENGINE);
-      if (contextEngine) {
-        void contextEngine.onFileIndexConfigChanged().catch(() => {
-          // 配置热重载失败不影响主流程
-        });
-      }
     });
     // 资源文件（skill/spec/tool）热重载事件，转发为 WS resources.changed
     ctx.eventBus.onAction('resources:changed', (data) => {
@@ -520,14 +509,12 @@ class ServerModule implements Module {
 
     // AI 诊断（链路式流式）改走 WebSocket（ws-handler: insight.diagnose），不再提供 HTTP 接口。
 
-    // context（上下文引擎：统计 / 压缩历史 / 手动压缩 / 摘要模型列表 / 文件索引）
+    // context（上下文引擎：统计 / 压缩历史 / 手动压缩 / 摘要模型列表）
     this.router.addRoute({ method: 'GET', pattern: '/api/context/summary-models', handler: createSummaryModelsHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/stats', handler: createContextStatsHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compactions', handler: createContextCompactionsHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compact-preview', handler: createCompactPreviewHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/context/:sessionId/compact', handler: createManualCompactHandler(services), auth: true });
-    this.router.addRoute({ method: 'GET', pattern: '/api/context/file-index/status', handler: createFileIndexStatusHandler(services), auth: true });
-    this.router.addRoute({ method: 'POST', pattern: '/api/context/file-index/rebuild', handler: createFileIndexRebuildHandler(services), auth: true });
 
     // rules（规则引擎：双作用域 CRUD）
     this.router.addRoute({ method: 'GET', pattern: '/api/rules', handler: createListRulesHandler(services), auth: true });
@@ -699,8 +686,8 @@ class ServerModule implements Module {
     return BunAny.serve({
       port,
       hostname,
-      // 顶层（HTTP 请求）：Bun 默认 10s 空闲即断连接，慢接口（文件索引 rebuild、
-      // provider 拉模型等）会被中途杀掉；60s 对本地 API 安全
+      // 顶层（HTTP 请求）：Bun 默认 10s 空闲即断连接，慢接口（provider 拉模型、
+      // 备份导出等）会被中途杀掉；60s 对本地 API 安全
       idleTimeout: 60,
       fetch: async (req: Request, srv: BunServer): Promise<Response> => {
         const url = new URL(req.url);

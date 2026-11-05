@@ -1193,11 +1193,11 @@ export const useStore = create<Store>((set, get) => ({
   cacheHistoryPage: (sessionId, entry) =>
     set((state) => {
       const prev = state.historyCacheBySession[sessionId] ?? [];
-      // 同一 before 游标只保留最新一份；最近邻优先，最多 4 页防内存膨胀
-      // （预取预算已收敛到「1 页 × 20 条」，4 页足够兜住快速上滑，不再堆积 20 页）
+      // 同一 before 游标只保留最新一份；最近邻优先，最多 6 页防内存膨胀
+      // （预取目标 2 页 × 20 条；6 页上限兜住快速上滑且不无限堆积）
       const next = [...prev.filter((p) => p.before !== entry.before), entry]
         .sort((a, b) => b.before - a.before)
-        .slice(0, 4);
+        .slice(0, 6);
       return {
         historyCacheBySession: { ...state.historyCacheBySession, [sessionId]: next },
       };

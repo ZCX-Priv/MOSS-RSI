@@ -4,7 +4,7 @@
 // 剔除原则（不写入备份包）：
 //   - 跨机器不可复用：browser/（浏览器二进制+扩展）、models/（语音模型权重）、
 //     remote/bin（cloudflared）、agent/attachments（本机绝对路径引用）、computer/（截图）
-//   - 运行时可再生：file-index/（索引缓存）、logs/、live/（流式草稿）、
+//   - 运行时可再生：file-index/（旧版索引缓存，功能已移除）、logs/、live/（流式草稿）、
 //     terminals/、terminal-output/、terminal-cmds/、moss.pid、ui-state.json
 //   - 绑定本机状态：file-history/（备份文件按绝对路径索引）、extensions.json（插件启停）、
 //     automations-history.json（执行历史）

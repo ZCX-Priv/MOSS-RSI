@@ -45,9 +45,14 @@ function readConfiguredPort() {
   return 7766;
 }
 
+/** 本地时间 HH:MM:SS（与内核日志一致；toISOString 是 UTC，会与日志相差 8 小时） */
+function localTime(d = new Date()) {
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function log(tag, msg) {
-  const time = new Date().toISOString().slice(11, 19);
-  console.log(`[${time}] [${tag}] ${msg}`);
+  console.log(`[${localTime()}] [${tag}] ${msg}`);
 }
 
 function hasBun() {

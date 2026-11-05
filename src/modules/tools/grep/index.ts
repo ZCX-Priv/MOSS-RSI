@@ -20,8 +20,11 @@ import {
   isBinaryBufferHead,
   SUPPORTED_TYPES,
 } from '../shared/search-core';
-import { getFileIndex } from '../shared/file-index-hint';
+import { ScanCache } from '../shared/scan-cache';
 import type { ToolContext, ToolResult } from '../types';
+
+/** grep 专属文件列表缓存（独立实例；glob 不共享） */
+const grepScanCache = new ScanCache({ ttlMs: 30_000, maxRoots: 2 });
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 /** multiline 模式单文件上限（整文件 exec，收紧防大文件回溯开销） */
@@ -345,26 +348,25 @@ export default {
     if (pathIsFile) {
       await processFile('', searchPath);
     } else {
-      // ---- 索引加速枚举（文件索引引擎就绪时跳过目录遍历；口径同 glob 工具）----
-      let indexedFiles: Array<{ rel: string; abs: string }> | null = null;
+      // ---- 缓存枚举（grep 专属文件列表缓存；跳过重复目录遍历）----
+      let cachedFiles: Array<{ rel: string; abs: string }> | null = null;
       if (!p.path && !noIgnore && p.dot !== true) {
-        const fileIndex = getFileIndex(ctx);
-        if (fileIndex) {
-          try {
-            const list = await fileIndex.listTextFiles(searchPath);
-            if (list) {
-              indexedFiles = list.map(e => ({ rel: e.rel, abs: `${searchPath}/${e.rel}` }));
-            }
-          } catch {
-            // 索引路径异常 → 回退遍历
-          }
+        try {
+          const entries = await grepScanCache.list(searchPath, {
+            noIgnore: false,
+            dot: false,
+            includeDirs: false,
+          });
+          cachedFiles = entries.filter((e) => !e.isDir).map((e) => ({ rel: e.rel, abs: e.abs }));
+        } catch {
+          cachedFiles = null; // 缓存枚举异常 → 回退遍历
         }
       }
 
       try {
-        if (indexedFiles) {
-          // 索引枚举路径：内存列表过滤 + 处理（kind=binary 已在索引侧排除）
-          for (const entry of indexedFiles) {
+        if (cachedFiles) {
+          // 缓存枚举路径：内存列表过滤 + 处理
+          for (const entry of cachedFiles) {
             if (ctx.signal?.aborted) break;
             if (!filePassesFilters(entry.rel)) continue;
             await processFile(entry.rel, entry.abs);

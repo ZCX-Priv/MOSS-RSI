@@ -6,7 +6,7 @@ import {
   Wrench, Plug, FileText, FilePlus, FilePen, Trash2, Terminal,
   FolderSearch, Search, ListChecks, HelpCircle, Sparkles, List, BookOpen,
   FileCode, Copy, FolderInput, CalendarClock, Timer, Bot, Brain, Globe, Monitor,
-  AppWindow, Code,
+  AppWindow, Code, Settings, SquareMousePointer, Earth,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -36,6 +36,9 @@ export const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   'monitor': Monitor,
   'app-window': AppWindow,
   'code': Code,
+  'settings': Settings,
+  'square-mouse-pointer': SquareMousePointer,
+  'earth': Earth,
 };
 
 /** 按 toolName + toolIconMap 解析图标组件，未知/缺失回退 Wrench */

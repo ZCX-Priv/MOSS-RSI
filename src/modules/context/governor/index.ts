@@ -1,7 +1,6 @@
 // src/modules/context/governor/index.ts
 // 治理器：每轮 LLM 请求前的统一流水线（engine 调用点）。
 //   1. ensureEnvContext（跨天环境追加 / 旧会话补建锚定）
-//   1.5 ensureProjectContext（文件索引概要注入）
 //   1.7 记忆注入（memory 引擎）：L1 关键事实锚定（每会话一次）+ L2 召回（ephemeral 尾部）
 //   1.8 规则注入（rules 引擎）：always 段入系统提示（paths 规则由 agent 工具调用后直接追加锚定消息）
 //   2. 构建静态系统提示（skill system 模式注入 + always 用户规则段）
@@ -24,7 +23,6 @@ import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSes
 import type { OptimizedImage, ImageOptimizer } from '../compiler';
 import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
 import { MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from '../compiler/view-builder';
-import { ensureProjectContext } from '../file-index/project-context';
 import { compactSession, resolveSummaryModel } from '../compressor';
 import { planCompaction } from '../compressor/planner';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
@@ -66,10 +64,6 @@ export interface GovernorDeps {
   getCompactionGuard?(sessionId: string): { at: number; tokens: number } | undefined;
   /** 记录本次自动压缩水位（供冷却判定） */
   setCompactionGuard?(sessionId: string, guard: { at: number; tokens: number }): void;
-  /** 项目概要文本（文件索引模块；索引开启时注入锚定消息，关闭返回 null） */
-  getProjectOverview?(cwd: string): Promise<string | null>;
-  /** 主动确保文件索引项目运行时（索引开启时每次请求幂等触发；fire-and-forget） */
-  ensureFileIndex?(cwd: string): void;
   /** 按真实 usage/char 校准后的 token 估算（未校准时返回 null，回退 breakdown 估算） */
   estimateTokensForMessages?(messages: readonly import('../../llm/types').UnifiedMessage[]): number | null;
   /** 最近一次压缩失败（用于抑制压力提醒，防止模型反复重试） */
@@ -177,18 +171,6 @@ export async function prepareRequest(
   const includeThinking = input.includeThinking === true;
   const config = deps.getConfig();
 
-  // ===== 0. 文件索引主动激活（仅开 indexing 时也需建运行时并扫描；幂等、不阻塞）=====
-  if (config.fileIndex.indexing.enabled) {
-    try {
-      deps.ensureFileIndex?.(cwd);
-    } catch (err) {
-      deps.logger.warn('context: ensureFileIndex failed', {
-        sessionId: session.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   // ===== 1. 环境上下文保障（跨天追加 / 旧会话补建；模型信息随消息锚定）=====
   try {
     if (ensureEnvContext(session, deps.env, cwd, model, modelDisplayName)) {
@@ -199,20 +181,6 @@ export async function prepareRequest(
       sessionId: session.id,
       error: err instanceof Error ? err.message : String(err),
     });
-  }
-
-  // ===== 1.5 项目概要锚定（文件索引：索引开启时注入大局观）=====
-  if (deps.getProjectOverview && config.fileIndex.indexing.enabled) {
-    try {
-      if (await ensureProjectContext(session, () => deps.getProjectOverview!(cwd))) {
-        deps.persistSession(session);
-      }
-    } catch (err) {
-      deps.logger.warn('context: ensureProjectContext failed', {
-        sessionId: session.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
   }
 
   // ===== 1.7 记忆注入（memory 引擎；模块未启用/未注册时跳过）=====
@@ -314,7 +282,6 @@ export async function prepareRequest(
 
   const buildView = (budgetTokens?: number, budgetBytes?: number) =>
     buildRequestView(session, staticSystemPrompt, {
-      toolPruning: config.toolPruning,
       includeThinking,
       resolveSkillPrompt: resolveSkill,
       budgetTokens,

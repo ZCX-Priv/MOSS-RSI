@@ -17,7 +17,7 @@ import { useCallback } from 'react';
 import { useStore } from '../store';
 import { wsClient } from '../api/ws';
 import { api } from '../api/http';
-import { pendingAssistant, pendingRunId } from '../lib/pending-assistant';
+import { pendingAssistant, pendingGuideRunIds, pendingRunId } from '../lib/pending-assistant';
 import { flushPending, resetStreamBuffer } from '../lib/stream-buffer';
 import { resolveWorkingDirectoryName } from '../lib/utils';
 import { stripAttachmentBlock } from '../lib/attachment-block';
@@ -164,10 +164,11 @@ export function useTask() {
         setSending(sessionId, true);
         try {
           const guideRunId = genRunId();
-          pendingRunId.set(sessionId, guideRunId);
-          // 引导模式：本地终止上一轮的流式展示，但不熄灭生成态（新的引导 run 即将开始）
-          useStore.getState().terminateRun(sessionId, undefined, { keepGenerating: true });
-          useStore.getState().beginRun(sessionId, guideRunId);
+          // 关键：不提前 terminateRun / beginRun。引导消息要等后端「当前工具调用完成」才生效，
+          // 这段窗口内必须继续显示旧 run 的流；提前切 runId 会让旧 run 的全部分片被 runId 过滤
+          // 丢弃（前端只剩「响应中」、内容整轮缺失）。guideRunId 进入待生效队列，
+          // 后端续跑时随 task.done.nextRunId 返回，本地再无缝承接。
+          pendingGuideRunIds.enqueue(sessionId, guideRunId);
 
           // clientMessageId：本地乐观消息与服务端持久化副本同身份（尾部补齐时按 id 去重）
           const guideClientMessageId = genId();
@@ -307,8 +308,10 @@ export function useTask() {
 
       // 3) 流式身份清理（后续新一轮会重新建立）
       pendingAssistant.delete(sid);
+      // 4) 尚未生效的引导随停止作废（后端已中止，不会再续跑）
+      pendingGuideRunIds.clear(sid);
 
-      // 4) 控制消息：连接断开时只保留最后一条（不随业务消息无限排队）
+      // 5) 控制消息：连接断开时只保留最后一条（不随业务消息无限排队）
       wsClient.sendControl({ type: 'task.abort', sessionId: sid });
 
       if (opts?.forSend) {

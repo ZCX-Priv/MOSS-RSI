@@ -86,3 +86,76 @@ describe('McpClient.callTool 实参顺序（SDK callTool(params, resultSchema?, 
     expect(captured).toHaveLength(0);
   });
 });
+
+// ============================================================================
+// 回归：SDK 的 protocol 在传入 signal 上 addEventListener('abort') 且请求结束后
+// 不移除。若把 run 级 signal 直传，一次 run 内每次 MCP 调用都会留下一个死监听器，
+// 用户停止时已完成调用会集中发送 notifications/cancelled（Bun 子进程 stdin 上叠加
+// 成 drain 监听器 → MaxListenersExceededWarning）。以下测试锁死「每次调用独立 signal」。
+// ============================================================================
+
+describe('McpClient.callTool 的 AbortSignal 隔离', () => {
+  /** 替换私有 sdkClient，记录每次调用收到的 signal，并返回固定结果 */
+  function stubRecordingSignals(client: McpClient, signals: AbortSignal[]): void {
+    (client as unknown as { sdkClient: unknown }).sdkClient = {
+      callTool: async (...args: unknown[]) => {
+        const options = args[2] as { signal?: AbortSignal } | undefined;
+        if (options?.signal) signals.push(options.signal);
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    };
+  }
+
+  it('每次调用派生独立 signal；已完成调用在中止 run 时不会被重放取消', async () => {
+    const client = makeClient();
+    const signals: AbortSignal[] = [];
+    stubRecordingSignals(client, signals);
+
+    const run = new AbortController();
+    await client.callTool('a', {}, { signal: run.signal });
+    await client.callTool('b', {}, { signal: run.signal });
+
+    expect(signals).toHaveLength(2);
+    // 每次调用必须拿到新的 signal，而不是同一个 run signal
+    expect(signals[0]).not.toBe(signals[1]);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(signals[1]?.aborted).toBe(false);
+
+    // 模拟用户点停止：已完成调用的 signal 不应被触发（否则会重放 cancel 通知）
+    run.abort();
+    expect(signals.every(s => !s.aborted)).toBe(true);
+  });
+
+  it('中止 run 时只终止在途调用的 signal', async () => {
+    const client = makeClient();
+    let captured: AbortSignal | undefined;
+    let release: ((value: unknown) => void) | undefined;
+    (client as unknown as { sdkClient: unknown }).sdkClient = {
+      callTool: (...args: unknown[]) => {
+        captured = (args[2] as { signal?: AbortSignal } | undefined)?.signal;
+        return new Promise(resolve => {
+          release = resolve;
+        });
+      },
+    };
+
+    const run = new AbortController();
+    const pending = client.callTool('a', {}, { signal: run.signal });
+    run.abort();
+
+    expect(captured?.aborted).toBe(true);
+    release?.({ content: [{ type: 'text', text: 'ok' }] });
+    await pending;
+  });
+
+  it('传入已中止的 signal 时直接拒绝，不向 SDK 发请求', async () => {
+    const client = makeClient();
+    const captured: CapturedArgs = [];
+    stubSdkClient(client, captured);
+
+    const run = new AbortController();
+    run.abort();
+    await expect(client.callTool('a', {}, { signal: run.signal })).rejects.toThrow('aborted');
+    expect(captured).toHaveLength(0);
+  });
+});

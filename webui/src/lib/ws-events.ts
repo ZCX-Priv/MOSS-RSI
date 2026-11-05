@@ -13,7 +13,7 @@
 import { toast } from 'sonner';
 import { useStore } from '../store';
 import { api } from '../api/http';
-import { pendingAssistant, pendingRunId } from './pending-assistant';
+import { pendingAssistant, pendingGuideRunIds, pendingRunId } from './pending-assistant';
 import { handleTerminalMessage } from './terminal-events';
 import {
   dumpStreamAccounting,
@@ -95,6 +95,37 @@ const SUBAGENT_DISPLAY_EVENT_TYPES = new Set([
 function eventRunIdOf(msg: WSMessage): string | undefined {
   const v = (msg.payload as { runId?: unknown } | undefined)?.runId;
   return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * 本地 run 被服务端权威 runId 替换的宽限期（ms）。
+ * 覆盖「前端已 beginRun、task.stream 尚未被后端处理」的竞态：此窗口内到达的旧快照
+ * 不得把刚点亮的本地 runId 覆盖掉。
+ */
+const RUN_ADOPT_GRACE_MS = 5_000;
+
+/**
+ * 以服务端权威 runId 对齐本地 activeRun。
+ *
+ * 为什么必须对齐：前端 runId 过滤（AGENT_STREAM_EVENT_TYPES）只放行与本地 activeRun
+ * 相同的分片。重连 / 多客户端（WebUI + CLI）切换 / 终态丢失后，本地 activeRun 可能是旧
+ * runId；若不对齐，新 run 的全部流式事件（含 tool-call-start / stats-updated）都会被丢弃，
+ * 前端永久停在「响应中」，只有刷新（activeRun 清空）后才恢复。
+ */
+export function adoptAuthoritativeRunId(sessionId: string, runId: string | undefined): void {
+  if (!sessionId || !runId) return;
+  const st = useStore.getState();
+  const active = st.activeRunBySession[sessionId];
+  if (active?.runId === runId) return;
+  // 本地刚发起的新 run 还在「后端尚未注册」的窗口：保留本地 runId，不做覆盖
+  if (active && Date.now() - active.startedAt < RUN_ADOPT_GRACE_MS) return;
+  diagAlways('runid-adopt-authoritative', {
+    sessionId,
+    runId,
+    prevRunId: active?.runId,
+  });
+  pendingRunId.set(sessionId, runId);
+  st.beginRun(sessionId, runId);
 }
 
 // ============================================================================
@@ -303,6 +334,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       currentRunId: pendingRunId.get(sessionId),
       sessionId,
     });
+    // 终态与本地 run 认知不一致：不能静默吞掉（否则本地永久停在旧 run）。
+    // 交给编排层做一次权威对账（/state 的 running + runId），按后端真实状态对齐或收敛。
+    if (sessionId) requestStreamResync(sessionId);
   }
 
   switch (msg.type) {
@@ -663,6 +697,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       // 原始 provider 错误文本（用于错误卡片正文 + 「诊断」弹窗输入；与刷新后历史恢复字段一致）
       const errorDetail = event.providerError ?? localizedMessage;
       if (sessionId) {
+        // 失败终止：未生效的引导不会被执行（后端 run 已结束）
+        pendingGuideRunIds.clear(sessionId);
         s.finalizeStreamingMessages(sessionId);
         s.addMessage(sessionId, {
           // 稳定身份：与后端持久化 system-error 消息同 id（`<sid>#<turn>#error`）→
@@ -688,7 +724,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     case 'done': {
       flushPending();
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
-      const doneEvent = (msg.payload ?? {}) as Extract<AgentEvent, { type: 'done' }>;
+      const doneEvent = (msg.payload ?? {}) as Extract<AgentEvent, { type: 'done' }> & {
+        nextRunId?: string;
+      };
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
         const pending = pendingAssistant.get(sessionId);
@@ -706,6 +744,15 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         pendingRunId.delete(sessionId);
         // 统一收敛点：记入终止集合 + 定稿本轮消息 + 熄灭生成态（不再裸写 generating）
         s.terminateRun(sessionId, doneEvent.runId ?? eventRunId);
+        // 引导续跑：后端在旧 run 收尾的同一时刻已挂起新 run（nextRunId），
+        // 立即以其点亮本地状态，保证新 run 的分片不被旧 run 过滤丢弃。
+        if (doneEvent.nextRunId) {
+          pendingGuideRunIds.shift(sessionId); // 消费已生效的引导条目
+          pendingRunId.set(sessionId, doneEvent.nextRunId);
+          useStore.getState().beginRun(sessionId, doneEvent.nextRunId);
+        } else {
+          pendingGuideRunIds.clear(sessionId); // 正常结束：未生效的引导一并作废
+        }
         useStore.getState().clearPendingAsksBySession(sessionId);
         useStore.getState().clearPendingConfirmsBySession(sessionId);
         // 轮数触顶：插入提示卡（幂等防重）
@@ -746,6 +793,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     case 'task.done': {
       flushPending();
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
+      const taskDoneEvent = (msg.payload ?? {}) as { runId?: string; nextRunId?: string };
       if (sessionId) {
         s.finalizeStreamingMessages(sessionId);
         const pending = pendingAssistant.get(sessionId);
@@ -762,6 +810,14 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         }
         pendingRunId.delete(sessionId);
         s.terminateRun(sessionId, eventRunId);
+        // 引导续跑承接（与 done 分支同语义）
+        if (taskDoneEvent.nextRunId) {
+          pendingGuideRunIds.shift(sessionId);
+          pendingRunId.set(sessionId, taskDoneEvent.nextRunId);
+          useStore.getState().beginRun(sessionId, taskDoneEvent.nextRunId);
+        } else {
+          pendingGuideRunIds.clear(sessionId);
+        }
         emitSettled(sessionId, 'done');
       }
       break;
@@ -771,6 +827,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       // 用户主动中断：后端 run 已结束，这里才是「彻底停下」的权威收敛点
       if (sessionId) {
+        // 未生效的引导随停止一并作废（后端已中止，不会再续跑）
+        pendingGuideRunIds.clear(sessionId);
         s.finalizeStreamingMessages(sessionId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
@@ -802,6 +860,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       // running=false → 由编排层判断是否需要尾部补齐后再收尾（避免误判「已完成」）
       if (payload.running === true) {
         useStore.getState().setGenerating(sessionId, true);
+        // 权威 runId 对齐：本地 activeRun 若是旧 run，必须切到后端当前 runId，
+        // 否则该 run 的流式分片会被 runId 过滤全部丢弃（「响应中」永挂、刷新才恢复的根因）。
+        adoptAuthoritativeRunId(sessionId, payload.runId);
       }
       if (payload.liveDraft && payload.liveDraft.messageId) {
         attachLiveDraft(payload.liveDraft);

@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AppWindow, Loader2 } from 'lucide-react';
+import { Earth, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/api/http';
 import { Button } from '@/components/ui/button';
@@ -112,7 +112,7 @@ export function BrowserInstallConfirmDialog() {
       <DialogContent size="md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <AppWindow className="size-4" />
+            <Earth className="size-4" />
             {t('settings.browser.installConfirmTitle')}
           </DialogTitle>
           <DialogDescription>
@@ -141,7 +141,7 @@ export function BrowserInstallConfirmDialog() {
             {busy ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
-              <AppWindow className="h-4 w-4" />
+              <Earth className="h-4 w-4" />
             )}
             {t('settings.browser.installConfirmAction')}
           </Button>

@@ -6,7 +6,7 @@
 // - 移动端：底部 Sheet 抽屉，齿轮展开内联设置。
 // 自包含触发按钮，不再依赖外部 children。
 
-import { useState, useRef, useLayoutEffect } from 'react';
+import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { SlidersHorizontal, Plus, ChevronDown, Server } from 'lucide-react';
@@ -34,15 +34,60 @@ import {
 import { cn } from '@/lib/utils';
 import { DEFAULT_LEVELS } from '../../lib/model-utils';
 import { getProviderIcon } from '../../lib/provider-icons';
-import { ThinkingLevelTags } from '../pages/ProviderSettings';
+import { Slider } from '@/components/ui/slider';
 import { useProviders } from '../../hooks/useProviders';
 import { useIsMobile } from '../../hooks/use-mobile';
-import type { ProviderItem, ProviderModelItem } from '../../types/api';
+import type { ProviderItem, ProviderModelItem, ThinkingLevelItem } from '../../types/api';
 
 /** 渲染上下文：模型 + 所属服务商 id（调参写回用） */
 interface ModelWithContext extends ProviderModelItem {
   providerId: string;
 }
+
+/** 上下文长度固定刻度节点（无极调节，不吸附；右上角为模型支持的最长上下文） */
+const CONTEXT_NODES = [0, 64_000, 128_000, 200_000, 256_000, 500_000, 1_000_000];
+
+/** token 数 → 刻度标签（0 显示为「默认」） */
+function contextNodeLabel(n: number): string {
+  if (n <= 0) return '0';
+  if (n >= 1_000_000) return `${n / 1_000_000}M`;
+  return `${Math.round(n / 1_000)}K`;
+}
+
+/** 当前上下文值 → 展示文本 */
+function formatContextValue(n: number, defaultLabel: string): string {
+  if (n <= 0) return defaultLabel;
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  return `${Math.round(n / 1_000)}K`;
+}
+
+/** token 值 → 滑块节点位置（分数下标；节点间线性插值，实现无极调节） */
+function toNodePosition(value: number, nodes: readonly number[]): number {
+  const last = nodes.length - 1;
+  if (last <= 0) return 0;
+  if (value <= nodes[0]) return 0;
+  if (value >= nodes[last]) return last;
+  for (let i = 0; i < last; i++) {
+    const a = nodes[i];
+    const b = nodes[i + 1];
+    if (value <= b) return i + (value - a) / (b - a);
+  }
+  return last;
+}
+
+/** 滑块节点位置 → token 值（分段线性） */
+function fromNodePosition(pos: number, nodes: readonly number[]): number {
+  const last = nodes.length - 1;
+  if (last <= 0) return nodes[0] ?? 0;
+  const clamped = Math.max(0, Math.min(last, pos));
+  const i = Math.min(last - 1, Math.floor(clamped));
+  const frac = clamped - i;
+  return Math.round(nodes[i] + (nodes[i + 1] - nodes[i]) * frac);
+}
+
 
 /** 服务商分组标题（品牌图标 + 名称；未配置 fallback Server） */
 function GroupLabel({ provider, className }: { provider: ProviderItem; className?: string }) {
@@ -59,10 +104,181 @@ function GroupLabel({ provider, className }: { provider: ProviderItem; className
   );
 }
 
+/**
+ * 模型参数面板（聊天输入框齿轮；桌面子菜单与移动端内联共用）：
+ * - 上下文长度：固定刻度 + 无极调节滑块，0 = 默认，写回 inputTokens；
+ * - 思考等级：等级库节点滑块，释放时写回 thinking；
+ * - 输出窗口：保留数字输入（用户未要求改）。
+ * 设置页模型编辑弹窗（ProviderModelDialog）保持原标签/输入实现，不受影响。
+ */
+function ModelParamSettings({
+  model,
+  providerId,
+}: {
+  model: ProviderModelItem;
+  providerId: string;
+}) {
+  const { t } = useTranslation();
+  const { updateProviderModel } = useProviders();
+
+  // 轨道上限 = 面板打开时模型声明的最长上下文（至少 1M）；打开期间固定，
+  // 避免拖动写回后节点集合跟随当前值收缩导致轨道比例抖动。
+  const [maxContext] = useState(() => Math.max(1_000_000, model.inputTokens ?? 0));
+  /** 刻度节点集合（固定节点 + 超过 1M 时的模型上限节点） */
+  const contextNodes = useMemo(() => {
+    const base = CONTEXT_NODES.filter((n) => n <= maxContext);
+    if (maxContext > CONTEXT_NODES[CONTEXT_NODES.length - 1]) base.push(maxContext);
+    return base;
+  }, [maxContext]);
+  /** 滑块位置（节点分数下标；节点间无极调节） */
+  const [nodePos, setNodePos] = useState(() =>
+    toNodePosition(model.inputTokens ?? 0, contextNodes),
+  );
+
+  // 思考等级节点：模型等级库（有序）+ 当前档不在库中时的孤儿节点（保证当前值可见）
+  const levels = model.thinkingLevels ?? DEFAULT_LEVELS;
+  const currentEffort = model.thinking?.enabled ? model.thinking.effort : 'off';
+  const orphanLevel: ThinkingLevelItem | null =
+    currentEffort && !levels.some((l) => l.effort === currentEffort)
+      ? {
+          id: '__current_effort__',
+          label: currentEffort === 'off' ? 'Off' : currentEffort,
+          effort: currentEffort,
+        }
+      : null;
+  const nodes: ThinkingLevelItem[] = orphanLevel ? [...levels, orphanLevel] : levels;
+  const [levelIndex, setLevelIndex] = useState(() => {
+    const idx = nodes.findIndex((l) => l.effort === currentEffort);
+    return idx >= 0 ? idx : 0;
+  });
+  const safeIndex = Math.min(levelIndex, nodes.length - 1);
+  const currentLevel = nodes[safeIndex];
+
+  /** 释放上下文滑块：0 = 默认（清空 inputTokens，由后端回退 128K） */
+  const commitContext = (value: number) => {
+    void updateProviderModel(providerId, model.id, {
+      inputTokens: value > 0 ? Math.max(1_024, Math.floor(value)) : undefined,
+    });
+  };
+
+  /** 释放思考等级滑块：off 档写 enabled=false，其余写 effort + label */
+  const commitLevel = (index: number) => {
+    const level = nodes[index];
+    if (!level) return;
+    void updateProviderModel(providerId, model.id, {
+      thinking:
+        level.effort === 'off'
+          ? { enabled: false }
+          : { enabled: true, effort: level.effort, label: level.label },
+    });
+  };
+
+  return (
+    <>
+      {/* 上下文长度（替换原输入窗口数字框） */}
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-sm font-medium text-foreground">
+            {t('modelSelector.contextLength')}
+          </label>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {formatContextValue(
+              fromNodePosition(nodePos, contextNodes),
+              t('modelSelector.contextLengthDefault'),
+            )}
+          </span>
+        </div>
+        <Slider
+          value={[nodePos]}
+          min={0}
+          max={contextNodes.length - 1}
+          step={0.01}
+          onValueChange={(v) => setNodePos(v[0] ?? 0)}
+          onValueCommit={(v) => commitContext(fromNodePosition(v[0] ?? 0, contextNodes))}
+        />
+        <div className="flex items-center justify-between gap-0 text-[9px] leading-none text-muted-foreground">
+          {contextNodes.map((n) => (
+            <span key={n} className="shrink-0 tabular-nums">
+              {contextNodeLabel(n)}
+            </span>
+          ))}
+        </div>
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          {t('modelSelector.contextLengthHint')}
+        </p>
+      </div>
+
+      {/* 思考等级（替换原标签组） */}
+      <div className="mt-4 flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-sm font-medium text-foreground">
+            {t('modelSelector.thinkingLevel')}
+          </label>
+          <span className="text-xs text-muted-foreground">{currentLevel?.label ?? '—'}</span>
+        </div>
+        {nodes.length > 1 ? (
+          <>
+            <Slider
+              value={[safeIndex]}
+              min={0}
+              max={nodes.length - 1}
+              step={1}
+              onValueChange={(v) => setLevelIndex(Math.round(v[0] ?? 0))}
+              onValueCommit={(v) => commitLevel(Math.round(v[0] ?? 0))}
+            />
+            <div className="flex flex-wrap justify-between gap-x-1 gap-y-0.5 text-[10px] text-muted-foreground">
+              {nodes.map((level, i) => (
+                <button
+                  key={level.id}
+                  type="button"
+                  onClick={() => {
+                    setLevelIndex(i);
+                    commitLevel(i);
+                  }}
+                  className={cn(
+                    'rounded px-0.5 transition-colors hover:text-foreground',
+                    i === safeIndex && 'font-medium text-foreground',
+                  )}
+                >
+                  {level.label}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">{currentLevel?.label ?? '—'}</span>
+        )}
+        <p className="text-[11px] leading-snug text-muted-foreground">
+          {t('modelSelector.thinkingLevelHint')}
+        </p>
+      </div>
+
+      {/* 输出窗口：保留数字输入 */}
+      <div className="mt-4 flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-foreground">
+          {t('settings.provider.outputWindow')}
+        </label>
+        <Input
+          type="number"
+          min={1}
+          defaultValue={model.outputTokens ?? ''}
+          placeholder="8192"
+          onBlur={(e) => {
+            const v = e.target.value.trim();
+            void updateProviderModel(providerId, model.id, {
+              outputTokens: v ? Math.max(1, Math.floor(Number(v))) : undefined,
+            });
+          }}
+        />
+      </div>
+    </>
+  );
+}
+
 export function ModelSelector() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { providers, currentModel, setCurrent, updateProviderModel } = useProviders();
+  const { providers, currentModel, setCurrent } = useProviders();
   const isMobile = useIsMobile();
   const hasAnyModel = providers.some((p) => p.models.length > 0);
   // 模型列表只展示「有模型的服务商」；语音服务商 models 恒空，自然被过滤
@@ -112,63 +328,9 @@ export function ModelSelector() {
   }, [mainOpen]);
 
   /** 渲染模型参数设置区（桌面子菜单与移动端内联共用） */
-  const renderSettings = (model: ModelWithContext, provider: ProviderItem) => {
-    return (
-      <>
-        {/* 上下文窗口：输入 / 输出 */}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-foreground">
-              {t('settings.provider.inputWindow')}
-            </label>
-            <Input
-              type="number"
-              min={1}
-              defaultValue={model.inputTokens ?? ''}
-              placeholder="200000"
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                void updateProviderModel(model.providerId, model.id, {
-                  inputTokens: v ? Math.max(1, Math.floor(Number(v))) : undefined,
-                });
-              }}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-foreground">
-              {t('settings.provider.outputWindow')}
-            </label>
-            <Input
-              type="number"
-              min={1}
-              defaultValue={model.outputTokens ?? ''}
-              placeholder="8192"
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                void updateProviderModel(model.providerId, model.id, {
-                  outputTokens: v ? Math.max(1, Math.floor(Number(v))) : undefined,
-                });
-              }}
-            />
-          </div>
-        </div>
-
-        {/* 思考强度（标签化：服务商级等级库） */}
-        <div className="mt-4">
-          <ThinkingLevelTags
-            levels={model.thinkingLevels ?? DEFAULT_LEVELS}
-            value={model.thinking}
-            onThinkingChange={(thinking) => {
-              void updateProviderModel(model.providerId, model.id, { thinking });
-            }}
-            onLevelsChange={(levels) => {
-              void updateProviderModel(model.providerId, model.id, { thinkingLevels: levels });
-            }}
-          />
-        </div>
-      </>
-    );
-  };
+  const renderSettings = (model: ModelWithContext) => (
+    <ModelParamSettings model={model} providerId={model.providerId} />
+  );
 
   // ======================== 移动端：底部抽屉 ========================
   if (isMobile) {
@@ -230,7 +392,7 @@ export function ModelSelector() {
                         </div>
                         {expandedId === model.id && (
                           <div className="border-t px-1 py-3">
-                            {renderSettings({ ...model, providerId: provider.id }, provider)}
+                            {renderSettings({ ...model, providerId: provider.id })}
                           </div>
                         )}
                       </div>
@@ -369,7 +531,7 @@ export function ModelSelector() {
                         }
                       }}
                     >
-                      {renderSettings({ ...model, providerId: provider.id }, provider)}
+                      {renderSettings({ ...model, providerId: provider.id })}
                     </PopoverContent>
                   </Popover>
                 </DropdownMenuItem>

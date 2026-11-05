@@ -4,8 +4,6 @@
 // agent/session Session 的结构子集（鸭子类型注入）。
 
 import type { UnifiedMessage } from '../llm/types';
-import type { FileIndexConfig } from './file-index/types';
-import { DEFAULT_FILE_INDEX_CONFIG } from './file-index/types';
 
 // ============================================================================
 // 配置（config.context，由 config-service Zod schema 校验，此处为运行时类型）
@@ -78,14 +76,6 @@ export interface ContextPressureConfig {
   ratio: number;
 }
 
-export interface ToolPruningConfig {
-  enabled: boolean;
-  /** 工具结果超过此字符数触发中段修剪（仅发送视图，session 原文不动） */
-  thresholdChars: number;
-  keepHeadChars: number;
-  keepTailChars: number;
-}
-
 export interface HealerConfig {
   enabled: boolean;
   /** 工具名模糊纠正（编辑距离） */
@@ -129,15 +119,28 @@ export interface MemoryConfig {
   l1ImportanceThreshold: number;
   /** L1 常驻条数上限 */
   l1MaxEntries: number;
+  /** 召回调优：insight 字段权重 */
+  recallInsightWeight: number;
+  /** 召回调优：tags 字段权重 */
+  recallTagWeight: number;
+  /** 召回调优：verbatim 字段权重 */
+  recallVerbatimWeight: number;
+  /** 召回调优：时间衰减半衰期（天） */
+  recallRecencyHalfLifeDays: number;
+  /** 召回调优：置顶加成倍数 */
+  recallPinnedBoost: number;
+  /** 召回调优：近重复去重阈值（0 = 关闭） */
+  recallDedupThreshold: number;
+  /** 召回调优：最低分 / 最高分比例（过滤弱相关） */
+  recallMinScoreRatio: number;
+  /** 召回调优：每个 room 最多入选条数（0 = 不限制） */
+  recallMaxPerRoom: number;
 }
 
 export interface ContextEngineConfig {
   compaction: CompactionConfig;
-  toolPruning: ToolPruningConfig;
   healer: HealerConfig;
   telemetry: ContextTelemetryConfig;
-  /** 文件索引模块（三引擎，默认全关） */
-  fileIndex: FileIndexConfig;
   /** 用户规则引擎（默认开） */
   rules: RulesConfig;
   /** 生命周期钩子引擎（默认开） */
@@ -192,13 +195,6 @@ export const DEFAULT_CONTEXT_PRESSURE_CONFIG: ContextPressureConfig = {
   ratio: 0.5,
 };
 
-export const DEFAULT_TOOL_PRUNING_CONFIG: ToolPruningConfig = {
-  enabled: true,
-  thresholdChars: 8192,
-  keepHeadChars: 4096,
-  keepTailChars: 1024,
-};
-
 export const DEFAULT_HEALER_CONFIG: HealerConfig = {
   enabled: true,
   toolNameFuzzy: true,
@@ -228,6 +224,14 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   recallTokenBudget: 2000,
   l1ImportanceThreshold: 0.75,
   l1MaxEntries: 20,
+  recallInsightWeight: 2.0,
+  recallTagWeight: 1.5,
+  recallVerbatimWeight: 1.0,
+  recallRecencyHalfLifeDays: 30,
+  recallPinnedBoost: 1.15,
+  recallDedupThreshold: 0.8,
+  recallMinScoreRatio: 0.25,
+  recallMaxPerRoom: 0,
 };
 
 /** 请求体字节上限默认值（8 MiB）与下限（256 KiB；router 兜底降级时不会低于此值） */
@@ -236,10 +240,8 @@ export const MIN_MAX_REQUEST_BYTES = 256 * 1024;
 
 export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   compaction: { ...DEFAULT_COMPACTION_CONFIG },
-  toolPruning: { ...DEFAULT_TOOL_PRUNING_CONFIG },
   healer: { ...DEFAULT_HEALER_CONFIG },
   telemetry: { ...DEFAULT_CONTEXT_TELEMETRY_CONFIG },
-  fileIndex: { ...DEFAULT_FILE_INDEX_CONFIG },
   rules: { ...DEFAULT_RULES_CONFIG },
   hooks: { ...DEFAULT_HOOKS_CONFIG },
   memory: { ...DEFAULT_MEMORY_CONFIG },
@@ -390,7 +392,7 @@ export interface ContextBreakdown {
   env: number;
   /** 活跃压缩摘要 */
   summary: number;
-  /** 历史消息（未压缩 + 工具结果修剪后） */
+  /** 历史消息（未压缩部分） */
   history: number;
   /** paths 规则注入消息（active-rules 锚定） */
   rules: number;

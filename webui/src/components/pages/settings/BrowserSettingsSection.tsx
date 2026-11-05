@@ -7,14 +7,14 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, Outlet, Navigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { AppWindow, Loader2, PlugZap, Puzzle } from 'lucide-react';
+import { Earth, Loader2, PlugZap, Puzzle } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/api/http';
 import type { BrowserMode } from '@/types/api';
 import { useBrowserToolConfig } from './useBrowserStatus';
 
-const MODE_TABS: Array<{ id: BrowserMode; Icon: typeof AppWindow }> = [
-  { id: 'builtin', Icon: AppWindow },
+const MODE_TABS: Array<{ id: BrowserMode; Icon: typeof Earth }> = [
+  { id: 'builtin', Icon: Earth },
   { id: 'extension', Icon: Puzzle },
   { id: 'cdp', Icon: PlugZap },
 ];

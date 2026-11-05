@@ -224,52 +224,6 @@ function copyAgentPrompts() {
 }
 
 // ============================================================================
-// 步骤 3d: 复制 tree-sitter wasm 资产到 dist/vendor（图谱引擎运行时加载）
-// 核心 wasm（web-tree-sitter.wasm）+ 常用语言语法 wasm（tree-sitter-wasm 包）。
-// 运行时定位顺序：node_modules（开发模式）→ dist/vendor（安装模式），见 file-index/graph-engine/parser.ts。
-// ============================================================================
-const TREE_SITTER_LANGS = [
-  'typescript', 'tsx', 'javascript', 'python', 'go', 'rust', 'java',
-  'c', 'cpp', 'json', 'yaml', 'toml', 'markdown', 'css', 'html',
-  'bash', 'ruby', 'php', 'lua',
-];
-
-function copyTreeSitterWasm() {
-  log('Copying tree-sitter wasm assets...');
-  const vendorDir = resolve(DIST, 'vendor');
-  mkdirSync(vendorDir, { recursive: true });
-
-  // 核心 wasm
-  const coreSrc = resolve(ROOT, 'node_modules', 'web-tree-sitter', 'web-tree-sitter.wasm');
-  if (!existsSync(coreSrc)) {
-    error(`web-tree-sitter.wasm not found: ${coreSrc}`);
-    process.exit(1);
-  }
-  cpSync(coreSrc, resolve(vendorDir, 'web-tree-sitter.wasm'));
-
-  // 语言 wasm（按需子集，控制包体积；未拷语言运行时自动降级跳过）
-  // tree-sitter-wasm v2 布局为 <lang>/tree-sitter-<lang>.wasm，v1 为 out/<lang>/…；
-  // 产物仍统一落到 vendor/tree-sitter-wasm/out/<lang>/（运行时与既有安装包布局保持不变）。
-  let copied = 0;
-  for (const lang of TREE_SITTER_LANGS) {
-    const fileName = `tree-sitter-${lang}.wasm`;
-    const src = [
-      resolve(ROOT, 'node_modules', 'tree-sitter-wasm', lang, fileName),
-      resolve(ROOT, 'node_modules', 'tree-sitter-wasm', 'out', lang, fileName),
-    ].find((p) => existsSync(p));
-    if (!src) {
-      log(`  (skip) grammar not found: ${lang}`);
-      continue;
-    }
-    const destDir = resolve(vendorDir, 'tree-sitter-wasm', 'out', lang);
-    mkdirSync(destDir, { recursive: true });
-    cpSync(src, resolve(destDir, fileName));
-    copied++;
-  }
-  log(`Tree-sitter wasm copied: core + ${copied} grammars -> ${vendorDir}`);
-}
-
-// ============================================================================
 // 步骤 4: 构建前端 (Vite build -> dist/webui/)
 // ============================================================================
 function buildFrontend() {
@@ -321,7 +275,6 @@ function main() {
   generateToolConfigManifest();
   copyBrowserExtension();
   copyAgentPrompts();
-  copyTreeSitterWasm();
   buildFrontend();
   verifyArtifacts();
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2);

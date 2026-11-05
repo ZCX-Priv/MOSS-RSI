@@ -853,10 +853,16 @@ export function VirtualList<T>({
       // 仅在「向上滚动」且接近顶部时触发加载：初始贴底/首帧布局期间的 scroll 事件
       // （scrollTop 从 0 被程序化拉到底前后）不应被误判为「用户上滑」，
       // 否则首屏会额外拉一页历史，与后台预取重复请求同一区间。
+      // 动态阈值：快速上滑时提前触发（速度 px/ms × 600，上限 3000px），
+      // 避免滚到顶部 spacer 才加载造成空窗/顿挫。
+      const dynamicStartThreshold = Math.max(
+        startThresholdRef.current,
+        Math.min(3000, Math.abs(velocityRef.current) * 600),
+      );
       if (
         delta < 0 &&
         Date.now() >= startArmedAtRef.current &&
-        sc.scrollTop <= startThresholdRef.current &&
+        sc.scrollTop <= dynamicStartThreshold &&
         !suppressStartRef.current
       ) {
         startCbRef.current?.();

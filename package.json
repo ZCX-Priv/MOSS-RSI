@@ -57,9 +57,7 @@
     "sherpa-onnx-node": "^1.13.8",
     "tar": "^7.5.22",
     "trash": "^10.1.1",
-    "tree-sitter-wasm": "^2.0.4",
     "unbzip2-stream": "^1.4.3",
-    "web-tree-sitter": "^0.27.1",
     "word-extractor": "^1.0.4",
     "zod": "^4.6.7"
   },

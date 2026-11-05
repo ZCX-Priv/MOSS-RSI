@@ -7,6 +7,4 @@ export {
   createCompactPreviewHandler,
   createManualCompactHandler,
   createSummaryModelsHandler,
-  createFileIndexStatusHandler,
-  createFileIndexRebuildHandler,
 } from '../../context/api/routes';

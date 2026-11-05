@@ -286,7 +286,7 @@ export interface AppConfig {
   filesys?: FilesysConfig;
   /** 统一权限决策配置（由 safety 模块消费：模式/规则/危险拦截/保护路径） */
   safety?: SafetyConfig;
-  /** 上下文引擎配置（由 context 模块消费：压缩/修剪/自愈/遥测） */
+  /** 上下文引擎配置（由 context 模块消费：压缩/自愈/遥测） */
   context?: ContextEngineConfig;
   /** 远程访问配置（由 remote 模块消费：局域网/公网隧道控制 webui；Zod schema 全 default 自愈） */
   remote: RemoteConfig;

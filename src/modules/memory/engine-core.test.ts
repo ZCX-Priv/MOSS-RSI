@@ -3,7 +3,7 @@
 // L2 双翼检索覆盖（user wing）、按消息切换的召回去重语义。
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tokenize, tokenOverlap } from './tokenizer';
@@ -133,6 +133,98 @@ describe('memory storage（哈希 JSON + 宫殿目录）', () => {
     expect(raw).toHaveProperty('insight');
     expect(raw).toHaveProperty('importance');
     void tree;
+  });
+});
+
+// ============================================================================
+// 召回升级（增量索引 / 字段加权 / 近重复去重）
+// ============================================================================
+
+describe('召回升级（增量索引 / 字段加权 / 去重）', () => {
+  let dataDir: string;
+  let cwd: string;
+  let globalRoot: string;
+  let retriever: MemoryRetriever;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'moss-recall-upgrade-'));
+    cwd = mkdtempSync(join(tmpdir(), 'moss-recall-upgrade-project-'));
+    globalRoot = join(dataDir, 'memory');
+    retriever = new MemoryRetriever({ dataDir } as Environment);
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  test('增量索引：文件内容原地更新后（invalidate）命中新内容', () => {
+    const rec = buildMemoryRecord({
+      wing: 'user',
+      room: 'context',
+      hall: 'decision',
+      verbatim: '旧原文',
+      insight: '旧的索引策略',
+    });
+    writeMemory(globalRoot, rec);
+    expect(retriever.recall(cwd, '旧的索引策略', { topK: 5 })).toHaveLength(1);
+
+    // 模拟外部修改同一文件（只改 content → mtime/size 变化）
+    const file = join(globalRoot, 'user', 'context', `${rec.id}.json`);
+    writeFileSync(file, JSON.stringify({ ...rec, insight: '全新的向量召回方案' }, null, 2), 'utf8');
+    retriever.invalidate();
+
+    const hits = retriever.recall(cwd, '向量召回', { topK: 5 });
+    expect(hits.map((h) => h.id)).toContain(rec.id);
+    expect(retriever.recall(cwd, '旧的索引策略', { topK: 5 })).toHaveLength(0);
+  });
+
+  test('字段加权：insight 命中排在 verbatim 命中之前', () => {
+    const insightRec = buildMemoryRecord({
+      wing: 'user',
+      room: 'a',
+      hall: 'decision',
+      verbatim: '无关原文',
+      insight: '上下文压缩策略',
+    });
+    const verbatimRec = buildMemoryRecord({
+      wing: 'user',
+      room: 'b',
+      hall: 'decision',
+      verbatim: '上下文压缩策略',
+      insight: '无关洞察',
+    });
+    writeMemory(globalRoot, insightRec);
+    writeMemory(globalRoot, verbatimRec);
+
+    const hits = retriever.recallScored(cwd, '上下文压缩策略', { topK: 5 });
+    expect(hits[0].id).toBe(insightRec.id);
+  });
+
+  test('近重复去重：同内容的两条记忆只保留最高分一条', () => {
+    const a = buildMemoryRecord({
+      wing: 'user',
+      room: 'r1',
+      hall: 'preference',
+      verbatim: 'v1',
+      insight: '用户偏好简洁回复',
+    });
+    const b = buildMemoryRecord({
+      wing: 'user',
+      room: 'r1',
+      hall: 'preference',
+      verbatim: 'v1',
+      // 仅标点差异 → 分词集合完全相同（近重复），但内容哈希 id 不同
+      insight: '用户偏好简洁回复。',
+    });
+    writeMemory(globalRoot, a);
+    writeMemory(globalRoot, b);
+
+    const hits = retriever.recallScored(cwd, '用户偏好简洁回复', {
+      topK: 5,
+      weights: { dedupThreshold: 0.8 },
+    });
+    expect(hits).toHaveLength(1);
   });
 });
 

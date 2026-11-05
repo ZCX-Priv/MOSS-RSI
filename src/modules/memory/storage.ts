@@ -5,7 +5,7 @@
 // 写盘节流的 touch（召回时更新访问计数，异步合并写）。
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Environment } from '../../core/types';
 import { MEMORY_HALLS } from './types';
@@ -76,7 +76,7 @@ function ensureDir(dir: string): void {
 }
 
 /** 单文件解析（无效文件跳过返回 null） */
-function readMemoryFile(file: string, scope: MemoryScope): ScopedMemoryRecord | null {
+export function readMemoryFile(file: string, scope: MemoryScope): ScopedMemoryRecord | null {
   try {
     const raw = readFileSync(file, 'utf8');
     const rec = JSON.parse(raw) as Partial<MemoryRecord>;
@@ -124,6 +124,43 @@ export function listAllMemories(root: string, scope: MemoryScope): ScopedMemoryR
         if (!file.endsWith('.json')) continue;
         const rec = readMemoryFile(join(roomDir, file), scope);
         if (rec) out.push(rec);
+      }
+    }
+  }
+  return out;
+}
+
+/** 记忆文件元信息（增量索引用：只 stat 不读内容） */
+export interface MemoryFileInfo {
+  file: string;
+  scope: MemoryScope;
+  mtimeMs: number;
+  size: number;
+}
+
+/**
+ * 枚举宫殿内全部记忆文件 + mtime/size（供检索器做增量索引）。
+ * 单文件 stat 失败（并发删除/权限）时跳过，不阻断整轮扫描。
+ */
+export function scanMemoryFileInfos(root: string, scope: MemoryScope): MemoryFileInfo[] {
+  if (!existsSync(root)) return [];
+  const out: MemoryFileInfo[] = [];
+  for (const wingEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!wingEntry.isDirectory() || wingEntry.name === 'scripts') continue;
+    const wingDir = join(root, wingEntry.name);
+    for (const roomEntry of readdirSync(wingDir, { withFileTypes: true })) {
+      if (!roomEntry.isDirectory()) continue;
+      const roomDir = join(wingDir, roomEntry.name);
+      for (const file of readdirSync(roomDir)) {
+        if (!file.endsWith('.json')) continue;
+        const full = join(roomDir, file);
+        try {
+          const st = statSync(full);
+          if (!st.isFile()) continue;
+          out.push({ file: full, scope, mtimeMs: st.mtimeMs, size: st.size });
+        } catch {
+          // 单文件失败跳过
+        }
       }
     }
   }

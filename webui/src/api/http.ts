@@ -47,7 +47,6 @@ import type {
   CompactionRecord,
   CompactPreview,
   ManualCompactResult,
-  FileIndexStatus,
   RulesListResult,
   RuleItem,
   RuleUpsertBody,
@@ -323,21 +322,6 @@ export const api = {
     request<{ models: Array<{ id: string; name: string; model: string }> }>(
       'GET',
       '/api/context/summary-models',
-    ),
-
-  // ==========================================================================
-  // 文件索引（三引擎状态 / 手动重建）
-  // ==========================================================================
-  getFileIndexStatus: (cwd?: string) =>
-    request<FileIndexStatus>(
-      'GET',
-      `/api/context/file-index/status${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`,
-    ),
-  rebuildFileIndex: (cwd?: string, engines?: Array<'indexing' | 'graph' | 'sag'>) =>
-    request<{ ok: boolean }>(
-      'POST',
-      '/api/context/file-index/rebuild',
-      { ...(cwd ? { cwd } : {}), ...(engines ? { engines } : {}) },
     ),
 
   // ==========================================================================

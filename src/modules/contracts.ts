@@ -133,45 +133,6 @@ export interface ContextPrepareOptions {
   windowTokens?: number;
 }
 
-/** 文件索引服务（上下文引擎子模块；三引擎编排）——结构子集（工具层/路由层用） */
-export interface FileIndexServiceLike {
-  /** glob 查询（索引 ready 时内存匹配；否则 null 回退遍历） */
-  queryFiles(
-    cwd: string,
-    q: {
-      positiveGlobs: readonly unknown[];
-      negativeGlobs: readonly unknown[];
-      typeGlobs: readonly unknown[] | null;
-      includeDirs: boolean;
-      sortBy: 'mtime' | 'path';
-      offset: number;
-      maxResults: number;
-    },
-  ): Promise<{
-    page: Array<{ rel: string; name: string; ext: string; size: number; mtimeMs: number; isDir: boolean; kind: string }>;
-    total: number;
-    truncated: boolean;
-  } | null>;
-  /** 文本文件枚举（grep 加速；索引不可用返回 null） */
-  listTextFiles(
-    cwd: string,
-  ): Promise<Array<{ rel: string; name: string; ext: string; size: number; mtimeMs: number; isDir: boolean; kind: string }> | null>;
-  /** 影响面文本（edit/write 结果附加；图谱未就绪返回 null） */
-  impactHint(cwd: string, relPath: string): Promise<string | null>;
-  /** SAG 多跳语义检索 */
-  search(cwd: string, query: string, topK?: number): Promise<Array<{
-    chunkId: number;
-    file: string;
-    startLine: number;
-    endLine: number;
-    summary: string;
-    score: number;
-    matchedEntities: string[];
-  }>>;
-  /** 项目概要文本（锚定消息注入用） */
-  projectOverview(cwd: string): Promise<string | null>;
-}
-
 /**
  * 上下文引擎服务契约（基础设施级：拼接/压缩/自愈/预算/治理/遥测）。
  * agent 模块为调用方：run 循环每轮调用 prepareRequest，工具执行前调用 healToolCall。
@@ -204,8 +165,6 @@ export interface ContextEngine {
   getStats(sessionId: string): ContextStats | null;
   /** 压缩历史 */
   getCompactions(sessionId: string): CompactionRecord[];
-  /** 文件索引服务访问器（三引擎；默认关闭时方法安全降级） */
-  getFileIndex(): FileIndexServiceLike;
   /**
    * 确认「本轮请求已成功送达」→ 把本轮内联发送过图片的消息标记为已发送（落盘）。
    * 之后这些图片在发送视图中降级为占位符（避免历史 base64 每轮重发撑爆请求体）。

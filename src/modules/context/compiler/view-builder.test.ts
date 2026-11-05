@@ -7,9 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRequestView, ACTIVE_RULES_MSG_NAME, MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from './view-builder';
-import { PRUNE_MARKER } from '../compressor/tool-pruner';
 import type { ContextMessage, ContextSessionLike } from '../types';
-import { DEFAULT_TOOL_PRUNING_CONFIG } from '../types';
 
 function mkSession(messages: ContextMessage[]): ContextSessionLike {
   return {
@@ -33,7 +31,6 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
       { role: 'user', name: MEMORY_RECALL_MSG_NAME, content: '[记忆 | 相关记忆]\n- xxx' },
     ];
     const view = buildRequestView(session, 'SYSTEM', {
-      toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
       ephemeralMessages: ephemeral,
     });
     // 最后一条对话消息是 ephemeral
@@ -51,7 +48,6 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
       { role: 'user', name: MEMORY_L1_MSG_NAME, content: '[记忆 | 关键事实] 事实事实' },
     ]);
     const view = buildRequestView(session, 'SYSTEM', {
-      toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
       ephemeralMessages: [
         { role: 'user', name: MEMORY_RECALL_MSG_NAME, content: '[记忆 | 相关记忆] 召回召回' },
       ],
@@ -66,61 +62,9 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
 
   test('无 ephemeral 时 breakdown.rules/memory = 0（零注入零开销）', () => {
     const session = mkSession(baseMessages);
-    const view = buildRequestView(session, 'SYSTEM', {
-      toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
-    });
+    const view = buildRequestView(session, 'SYSTEM', {});
     expect(view.breakdown.rules).toBe(0);
     expect(view.breakdown.memory).toBe(0);
-  });
-
-  test('run_code 结果不做头尾修剪（完整返回值交给模型）', () => {
-    // 模拟 60 条搜索结果（约 12KB，远超 8192 修剪阈值）
-    const longContent = Array.from(
-      { length: 60 },
-      (_, i) => `[${i + 1}] 搜索结果 ${'x'.repeat(180)}`,
-    ).join('\n');
-    const session = mkSession([
-      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'run_code', arguments: '{"code":"..."}' }] },
-      {
-        role: 'tool',
-        toolCallId: 'tc1',
-        name: 'run_code',
-        content: longContent,
-        metadata: { codeRun: { version: 1 } },
-      },
-    ]);
-    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
-    const tool = view.messages.find(m => m.role === 'tool');
-    expect(tool?.content).toBe(longContent);
-    expect(tool?.content).not.toContain(PRUNE_MARKER);
-  });
-
-  test('codeRun metadata 兜底：工具名不匹配时仍跳过修剪', () => {
-    const longContent = 'x'.repeat(20_000);
-    const session = mkSession([
-      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'legacy_run', arguments: '{}' }] },
-      {
-        role: 'tool',
-        toolCallId: 'tc1',
-        name: 'legacy_run',
-        content: longContent,
-        metadata: { codeRun: { version: 1 } },
-      },
-    ]);
-    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
-    const tool = view.messages.find(m => m.role === 'tool');
-    expect(tool?.content).toBe(longContent);
-  });
-
-  test('普通工具结果仍按头尾修剪', () => {
-    const longContent = 'x'.repeat(20_000);
-    const session = mkSession([
-      { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.txt"}' }] },
-      { role: 'tool', toolCallId: 'tc1', name: 'read', content: longContent },
-    ]);
-    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
-    const tool = view.messages.find(m => m.role === 'tool');
-    expect(tool?.content).toContain(PRUNE_MARKER);
   });
 
   test('多模态：tool 消息的图片路径被实时读盘编码，且不落 session', () => {
@@ -132,7 +76,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
         { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.png"}' }] },
         { role: 'tool', toolCallId: 'tc1', name: 'read', content: '[image: image/png]', images: [p] },
       ]);
-      const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+      const view = buildRequestView(session, 'SYSTEM', {});
       const toolMsg = view.messages.find(m => m.role === 'tool');
       expect(toolMsg?.images).toHaveLength(1);
       expect(toolMsg?.images?.[0].mimeType).toBe('image/png');
@@ -149,7 +93,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     const session = mkSession([
       { role: 'user', content: '看这个', attachments: ['D:\\nonexist\\x.mp4', 'D:\\nonexist\\y.png'] },
     ]);
-    const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+    const view = buildRequestView(session, 'SYSTEM', {});
     const userMsg = view.messages.find(m => m.role === 'user' && m.content === '看这个');
     expect(userMsg?.images).toBeUndefined();
   });
@@ -164,7 +108,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
         { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.png"}' }] },
         toolMsg,
       ]);
-      const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+      const view = buildRequestView(session, 'SYSTEM', {});
       const tool = view.messages.find(m => m.role === 'tool');
       // 图片持续内联（默认留存；仅在字节超预算时才淘汰）
       expect(tool?.images).toHaveLength(1);
@@ -189,7 +133,6 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
         { role: 'user', content: '新图（未看过）', attachments: [p2] },
       ]);
       const view = buildRequestView(session, 'SYSTEM', {
-        toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
         budgetBytes: 900_000, // 仅容得下一张图
       });
       const oldMsg = view.messages.find(m => m.content.includes('旧图'));
@@ -216,7 +159,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
         { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'read', arguments: '{}' }] },
         toolMsg,
       ]);
-      const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+      const view = buildRequestView(session, 'SYSTEM', {});
       expect(view.messages.find(m => m.role === 'tool')?.images).toHaveLength(1);
       // 必须是原始 session 对象（governor 才能把 imagesSentAt 落盘持久化）
       expect(view.imageMessagesToMark).toContain(toolMsg);
@@ -231,7 +174,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
       const p = join(dir, 'big.png');
       writeFileSync(p, Buffer.alloc(3000)); // base64 ≈ ceil(3000/3)*4 = 4000 字节
       const session = mkSession([{ role: 'user', content: '看这个', attachments: [p] }]);
-      const view = buildRequestView(session, 'SYSTEM', { toolPruning: DEFAULT_TOOL_PRUNING_CONFIG });
+      const view = buildRequestView(session, 'SYSTEM', {});
       expect(view.bytes).toBeGreaterThanOrEqual(4000);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -250,7 +193,6 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
         { role: 'user', content: '最后一条问题' },
       ]);
       const view = buildRequestView(session, 'SYSTEM', {
-        toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
         budgetBytes: 100 * 1024, // 远小于图片体积 → 触发字节裁剪
       });
       expect(view.tailDropped).toBeGreaterThan(0);

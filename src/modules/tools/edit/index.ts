@@ -17,7 +17,6 @@ import { existsSync, statSync } from 'node:fs';
 import { stripBom } from '../../../utils/encoding';
 import { computeLineDiff } from '../../file-history/diff';
 import { hashText } from '../../filesys/hash';
-import { impactHintFor } from '../shared/file-index-hint';
 import type { FileHistoryService, FilesysService } from '../../contracts';
 import type { ChangeTracker } from '../../file-history/types';
 import type { ToolContext, ToolResult } from '../types';
@@ -541,13 +540,9 @@ export default {
       const backupNote = r.backedUp && r.entryId
         ? `\n[${t('tools.editBackupCreated', { entryId: r.entryId })}]`
         : '';
-      // 影响面注入（图谱开启且就绪时；非 dryRun 的真实写入才提示）
-      const impactNote = !r.dryRun && r.path
-        ? await impactHintFor(ctx, r.path).then(h => (h ? `\n${h}` : ''))
-        : '';
 
       return {
-        content: [{ type: 'text', text: summary + fuzzyNote + diffSection + backupNote + impactNote }],
+        content: [{ type: 'text', text: summary + fuzzyNote + diffSection + backupNote }],
         metadata: {
           path: r.path,
           replacements: r.replacements,
@@ -610,18 +605,6 @@ export default {
       lines.push(t('tools.editFailedLabel'));
       for (const r of failed) {
         lines.push(`  - ${r.path}: ${r.error}`);
-      }
-    }
-
-    // 影响面注入（多文件：合并每个成功文件的上游清单，图谱开启且就绪时）
-    if (!dryRun && succeeded.length > 0 && succeeded.length <= 5) {
-      const impacts = await Promise.all(
-        succeeded.filter(r => r.path).map(async r => ({ path: r.path, hint: await impactHintFor(ctx, r.path!) })),
-      );
-      const hits = impacts.filter(x => x.hint);
-      if (hits.length > 0) {
-        lines.push('');
-        lines.push(hits.map(x => x.hint).join('\n'));
       }
     }
 

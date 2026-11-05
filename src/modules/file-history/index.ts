@@ -53,9 +53,9 @@ class FileHistoryModule implements Module {
         }));
       }
     } catch (err) {
-      ctx.logger.warn(t('fileHistory.layoutMigrationFailed'), {
+      ctx.logger.warn(t('fileHistory.layoutMigrationFailed', {
         error: err instanceof Error ? err.message : String(err),
-      });
+      }));
     }
     try {
       this.service?.cleanupExpiredBackups();

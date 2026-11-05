@@ -286,14 +286,13 @@ class RemoteModule implements Module {
       this.server
         .rebind(hostname)
         .then(() => {
-          this.ctx.logger.info(t('remote.rebound'), { hostname });
+          this.ctx.logger.info(t('remote.rebound', { hostname }));
         })
         .catch(err => {
           // rebind 失败时 server 内部已按原 hostname 回滚
-          this.ctx.logger.error(t('remote.rebindFailed'), {
+          this.ctx.logger.error(t('remote.rebindFailed', {
             error: err instanceof Error ? err.message : String(err),
-            hostname,
-          });
+          }), { hostname });
         });
     }, REBIND_DELAY_MS);
   }

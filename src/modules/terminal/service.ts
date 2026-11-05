@@ -466,8 +466,7 @@ export class TerminalManager implements TerminalService {
     this.runtimes.set(id, rt);
     void rt.proc.exited.then((code) => this.onExit(rt, code)).catch(() => this.onExit(rt, -3));
 
-    this.logger.info(t('terminal.created'), {
-      id,
+    this.logger.info(t('terminal.created', { id }), {
       sessionId: opts.sessionId,
       interpreter: interpreter.bin,
       pty: usePty,

@@ -11,7 +11,7 @@ import {
   CircleAlert,
   Download,
   Loader2,
-  Monitor,
+  SquareMousePointer,
   Pause,
   Play,
   PlugZap,
@@ -307,7 +307,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* 头部：状态 / 版本 / 安装 / 刷新 */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-        <Monitor className="size-4 shrink-0 text-primary-strong" />
+        <SquareMousePointer className="size-4 shrink-0 text-primary-strong" />
         <span className="text-xs font-medium text-foreground">{t('computer.title')}</span>
         <Badge variant={badgeVariant} className="gap-1">
           <span

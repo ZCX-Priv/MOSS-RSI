@@ -1,6 +1,14 @@
 // src/modules/llm/providers/openai-responses.ts
-// OpenAI Responses API provider（2025 年新格式）。
+// OpenAI Responses API provider（兼容 2025 旧格式与最新标准）。
 // 端点：/v1/responses，使用 input/output 结构，reasoning.effort + reasoning.summary。
+//
+// 兼容策略（刻意保持「请求保守」）：
+//  - 请求只使用新老两代都支持的字段：instructions / input / max_output_tokens / reasoning 等；
+//    不发送 store/include/text/parallel_tool_calls/stream_options/prompt_cache_* 等新-only 字段。
+//  - 解析同时兼容最新输出结构与旧版结构（output_text 聚合、旧 reasoning summary_text、
+//    refusal、reasoning_text、incomplete/failed/error 事件）。
+//  - 流式解析保持无状态：provider 为单例会被并发会话复用，禁止跨请求累积状态；
+//    done 事件与已累计 delta 重复，一律忽略。
 
 import type {
   LLMProvider,
@@ -20,14 +28,17 @@ export class OpenAIResponsesProvider implements LLMProvider {
   readonly format: ProviderFormat = 'openai-responses';
 
   transformRequest(req: UnifiedRequest, cfg: ModelConfig): unknown {
-    // Responses API 用 input 数组替代 messages
-    const input = toResponsesInputs(req.messages);
+    // 系统提示统一放入顶层 instructions（Responses API 自发布起即支持，新老端点通用）
+    const { instructions, messages } = splitSystemMessages(req.messages);
+    const input = toResponsesInputs(messages);
 
     const body: Record<string, unknown> = {
       model: req.model,
       input,
       stream: req.stream,
     };
+    if (instructions) body.instructions = instructions;
+
     // 采样参数：请求级优先，模型配置兜底（OpenAI 不支持 top_k，忽略）
     const temperature = req.temperature ?? cfg.temperature;
     if (temperature !== undefined) body.temperature = temperature;
@@ -59,23 +70,35 @@ export class OpenAIResponsesProvider implements LLMProvider {
 
   transformResponse(raw: unknown): UnifiedResponse {
     const data = raw as OpenAIResponsesResponse;
-    // 解析 output 数组：提取 message + reasoning + function_call
+    // 解析 output 数组：message / reasoning / function_call；同时兼容旧版结构。
     let content = '';
-    let thinking: string | undefined;
+    let reasoningSummary = '';
+    let reasoningContent = '';
     const toolCalls: UnifiedToolCall[] = [];
 
     for (const item of data.output ?? []) {
       if (item.type === 'message' && item.role === 'assistant') {
         for (const part of item.content ?? []) {
-          if (part.type === 'output_text') {
+          if (part.type === 'output_text' || part.type === 'text') {
+            content += part.text ?? '';
+          } else if (part.type === 'refusal') {
+            // 最新标准：模型拒绝回答时正文在 refusal 字段
+            content += part.refusal ?? '';
+          } else if (typeof part.text === 'string') {
+            // 兼容未知/第三方内容块（有 text 即视为正文）
             content += part.text;
           }
         }
       } else if (item.type === 'reasoning') {
-        // reasoning 摘要
+        // 最新标准：summary[].text；旧标准：content[].summary_text / output_text
+        for (const part of item.summary ?? []) {
+          reasoningSummary += part.text ?? '';
+        }
         for (const part of item.content ?? []) {
-          if (part.type === 'summary_text' || part.type === 'output_text') {
-            thinking = (thinking ?? '') + (part.text ?? '');
+          if (typeof part.text === 'string' && part.text) {
+            reasoningContent += part.text;
+          } else if (typeof part.refusal === 'string' && part.refusal) {
+            reasoningContent += part.refusal;
           }
         }
       } else if (item.type === 'function_call') {
@@ -90,27 +113,20 @@ export class OpenAIResponsesProvider implements LLMProvider {
       }
     }
 
-    const usage: UnifiedUsage = {
-      prompt_tokens: data.usage?.input_tokens ?? 0,
-      completion_tokens: data.usage?.output_tokens ?? 0,
-      total_tokens: (data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0),
-      reasoning_tokens: undefined,
-      cached_tokens: (
-        data.usage as { input_tokens_details?: { cached_tokens?: number } } | undefined
-      )?.input_tokens_details?.cached_tokens,
-    };
-    if (typeof data.usage === 'object' && data.usage !== null && 'output_tokens_details' in data.usage) {
-      const details = (data.usage as { output_tokens_details?: { reasoning_tokens?: number } }).output_tokens_details;
-      if (details?.reasoning_tokens !== undefined) {
-        usage.reasoning_tokens = details.reasoning_tokens;
-      }
+    // 旧版聚合字段兜底：output 中没有可用正文时使用 output_text
+    if (!content && typeof data.output_text === 'string') {
+      content = data.output_text;
     }
+
+    // summary 优先（请求了 summary 时 content 通常为空）；两者都有时避免重复拼接
+    const thinking = reasoningSummary || reasoningContent || undefined;
+    const usage = toUnifiedUsage(data.usage);
 
     return {
       content,
       thinking,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-      finish_reason: mapStatus(data.status),
+      finish_reason: mapStatus(data),
       usage,
       raw,
     };
@@ -124,63 +140,91 @@ export class OpenAIResponsesProvider implements LLMProvider {
       return null;
     }
 
-    const deltas: StreamDelta[] = [];
     switch (data.type) {
       case 'response.output_text.delta':
-        if (data.delta) deltas.push({ type: 'text', text: data.delta });
-        break;
+      case 'response.refusal.delta':
+        return data.delta ? { type: 'text', text: data.delta } : null;
+
       case 'response.reasoning_summary_text.delta':
-        if (data.delta) deltas.push({ type: 'thinking', text: data.delta });
-        break;
-      case 'response.function_call_arguments.delta':
-        deltas.push({
-          type: 'tool_call',
-          toolCallId: data.item_id ?? '',
-          name: '',
-          argumentsDelta: data.delta ?? '',
-          index: data.output_index ?? 0,
-        });
-        break;
+      case 'response.reasoning_text.delta':
+        return data.delta ? { type: 'thinking', text: data.delta } : null;
+
       case 'response.output_item.added':
         if (data.item?.type === 'function_call') {
-          deltas.push({
+          return {
             type: 'tool_call',
             toolCallId: data.item.call_id ?? '',
             name: data.item.name ?? '',
-            argumentsDelta: '',
+            // 少数兼容端点会在 added 中直接带完整 arguments；官方通常为空串
+            argumentsDelta: data.item.arguments ?? '',
             index: data.output_index ?? 0,
-          });
-        }
-        break;
-      case 'response.completed':
-        if (data.response?.usage) {
-          const u = data.response.usage as {
-            input_tokens?: number;
-            output_tokens?: number;
-            input_tokens_details?: { cached_tokens?: number };
           };
-          deltas.push({
-            type: 'usage',
-            usage: {
-              prompt_tokens: u.input_tokens ?? 0,
-              completion_tokens: u.output_tokens ?? 0,
-              total_tokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
-              cached_tokens: u.input_tokens_details?.cached_tokens,
-            },
-          });
         }
-        deltas.push({ type: 'finish', finishReason: mapStatus(data.response?.status) });
-        break;
+        return null;
+
+      case 'response.function_call_arguments.delta':
+        // 关键：item_id ≠ call_id。工具结果的配对准据是 output_item.added 中的 call_id，
+        // 这里的增量不得把 item_id 当作 toolCallId（否则会覆盖引擎已记录的正确 call_id）。
+        return {
+          type: 'tool_call',
+          toolCallId: data.call_id ?? '',
+          name: '',
+          argumentsDelta: data.delta ?? '',
+          index: data.output_index ?? 0,
+        };
+
+      case 'response.completed': {
+        const deltas: StreamDelta[] = [];
+        const usage = toUnifiedUsage(data.response?.usage);
+        if (data.response?.usage) deltas.push({ type: 'usage', usage });
+        deltas.push({ type: 'finish', finishReason: 'stop' });
+        return deltas;
+      }
+
+      case 'response.incomplete': {
+        const reason = data.response?.incomplete_details?.reason;
+        const deltas: StreamDelta[] = [];
+        if (data.response?.usage) {
+          deltas.push({ type: 'usage', usage: toUnifiedUsage(data.response.usage) });
+        }
+        if (reason === 'content_filter') {
+          deltas.push({ type: 'error', message: 'Response incomplete: content_filter' });
+          deltas.push({ type: 'finish', finishReason: 'error' });
+        } else {
+          deltas.push({ type: 'finish', finishReason: 'length' });
+        }
+        return deltas;
+      }
+
+      case 'response.failed': {
+        const message = data.response?.error?.message ?? 'Response failed';
+        return [
+          { type: 'error', message },
+          { type: 'finish', finishReason: 'error' },
+        ];
+      }
+
+      case 'error': {
+        return {
+          type: 'error',
+          message: data.message ?? data.error?.message ?? 'Stream error',
+        };
+      }
+
       default:
-        // 忽略其他事件类型
+        // 忽略 response.created/in_progress/queued、各类 done、content_part、
+        // annotation 等不产生增量的生命周期事件
         return null;
     }
-    return deltas.length === 0 ? null : deltas.length === 1 ? deltas[0] : deltas;
   }
 
   resolveEndpoint(cfg: ModelConfig): string {
     const base = cfg.endpoint.replace(/\/$/, '');
+    // 用户直接粘贴完整端点时原样使用，避免重复拼接
+    if (base.endsWith('/responses')) return base;
     if (base.endsWith('/v1')) return `${base}/responses`;
+    // Azure 常见形态：https://host/openai （不带 /v1）
+    if (base.endsWith('/openai')) return `${base}/v1/responses`;
     return `${base}/v1/responses`;
   }
 
@@ -209,6 +253,26 @@ export function toOpenAIResponsesThinking(t: ThinkingConfig): Record<string, unk
 // ============================================================================
 // 内部 helper
 // ============================================================================
+
+/**
+ * 拆分系统提示与其余消息。
+ * Responses API 的 system 提示统一走顶层 instructions；input 中不再保留 system 项。
+ */
+function splitSystemMessages(msgs: UnifiedMessage[]): {
+  instructions: string;
+  messages: UnifiedMessage[];
+} {
+  const systemParts: string[] = [];
+  const messages: UnifiedMessage[] = [];
+  for (const msg of msgs) {
+    if (msg.role === 'system') {
+      if (msg.content) systemParts.push(msg.content);
+      continue;
+    }
+    messages.push(msg);
+  }
+  return { instructions: systemParts.join('\n\n'), messages };
+}
 
 /**
  * 统一消息 → Responses API input 数组。
@@ -249,10 +313,6 @@ function toResponsesInputs(msgs: UnifiedMessage[]): unknown[] {
  * （「No tool call found for function call output ...」）。
  */
 function toResponsesInput(msg: UnifiedMessage): unknown[] {
-  // system 消息在 Responses API 中用 instructions 字段，或作为 input 中的 system 项
-  if (msg.role === 'system') {
-    return [{ type: 'system', content: msg.content }];
-  }
   if (msg.role === 'tool') {
     // 工具结果：function_call_output
     return [
@@ -283,7 +343,7 @@ function toResponsesInput(msg: UnifiedMessage): unknown[] {
   if (msg.role === 'user' && msg.images && msg.images.length > 0) {
     return [{ type: 'message', role: 'user', content: contentWithImages(msg.content, msg.images) }];
   }
-  // user / assistant
+  // user / assistant（EasyInputMessage 允许 content 为字符串）
   return [
     {
       type: 'message',
@@ -306,12 +366,29 @@ function contentWithImages(text: string, images: UnifiedImage[]): unknown[] {
   return parts;
 }
 
-function mapStatus(s: string | undefined): 'stop' | 'tool_use' | 'length' | 'error' {
-  if (!s) return 'stop';
-  if (s === 'completed') return 'stop';
-  if (s === 'incomplete') return 'length';
-  if (s === 'failed') return 'error';
+/** completion 状态 → 统一 finish_reason */
+function mapStatus(data: OpenAIResponsesResponse): 'stop' | 'tool_use' | 'length' | 'error' {
+  const status = data.status;
+  if (!status) return 'stop';
+  if (status === 'completed') return 'stop';
+  if (status === 'incomplete') {
+    return data.incomplete_details?.reason === 'content_filter' ? 'error' : 'length';
+  }
+  if (status === 'failed' || status === 'cancelled') return 'error';
   return 'stop';
+}
+
+/** 原生 usage → 统一 usage（兼容 total_tokens 缺失 / 旧版无 details） */
+function toUnifiedUsage(u: OpenAIResponsesUsage | undefined): UnifiedUsage {
+  const input = u?.input_tokens ?? 0;
+  const output = u?.output_tokens ?? 0;
+  return {
+    prompt_tokens: input,
+    completion_tokens: output,
+    total_tokens: typeof u?.total_tokens === 'number' ? u.total_tokens : input + output,
+    reasoning_tokens: u?.output_tokens_details?.reasoning_tokens,
+    cached_tokens: u?.input_tokens_details?.cached_tokens,
+  };
 }
 
 function mergeThinking(
@@ -327,40 +404,62 @@ function mergeThinking(
 }
 
 // ============================================================================
-// 类型定义（OpenAI Responses 原生格式）
+// 类型定义（OpenAI Responses 原生格式，含旧版兼容字段）
 // ============================================================================
 
-interface OpenAIResponsesResponse {
-  output?: Array<{
-    type: string;
-    id?: string;
-    call_id?: string;
-    name?: string;
-    arguments?: string;
-    role?: string;
-    status?: string;
-    content?: Array<{
-      type: string;
-      text?: string;
-    }>;
-  }>;
+interface OpenAIResponsesContentPart {
+  type?: string;
+  text?: string;
+  /** 最新标准：refusal 内容块 */
+  refusal?: string;
+}
+
+interface OpenAIResponsesOutputItem {
+  type?: string;
+  id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  role?: string;
   status?: string;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    output_tokens_details?: { reasoning_tokens?: number };
-  };
+  /** 旧版把 reasoning 摘要放在 content；最新标准放在 summary */
+  content?: OpenAIResponsesContentPart[];
+  summary?: OpenAIResponsesContentPart[];
+}
+
+interface OpenAIResponsesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  output_tokens_details?: { reasoning_tokens?: number };
+}
+
+interface OpenAIResponsesResponse {
+  output?: OpenAIResponsesOutputItem[];
+  /** 旧版聚合正文字段 */
+  output_text?: string;
+  status?: string;
+  incomplete_details?: { reason?: string };
+  error?: { message?: string; code?: string };
+  usage?: OpenAIResponsesUsage;
 }
 
 interface OpenAIResponsesStreamEvent {
-  type: string;
+  type?: string;
   delta?: string;
   item_id?: string;
   output_index?: number;
+  /** 部分第三方兼容端点在参数增量事件中提供 call_id */
+  call_id?: string;
   item?: {
     type?: string;
     call_id?: string;
     name?: string;
+    arguments?: string;
   };
   response?: OpenAIResponsesResponse;
+  error?: { message?: string; code?: string };
+  /** 顶层 error 事件的消息字段 */
+  message?: string;
 }

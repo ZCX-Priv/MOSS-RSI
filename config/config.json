@@ -39,12 +39,6 @@
       "minFoldTokens": 400,
       "summaryModel": "inherit"
     },
-    "toolPruning": {
-      "enabled": true,
-      "thresholdChars": 8192,
-      "keepHeadChars": 4096,
-      "keepTailChars": 1024
-    },
     "healer": {
       "enabled": true,
       "toolNameFuzzy": true,

@@ -17,9 +17,10 @@ import type { RefObject } from 'react';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { useStore } from '../store';
-import { pendingAssistant, pendingRunId } from '../lib/pending-assistant';
+import { pendingAssistant, pendingGuideRunIds, pendingRunId } from '../lib/pending-assistant';
 import { flushPending, finishResync, onStreamResyncNeeded, resetStreamBuffer } from '../lib/stream-buffer';
 import {
+  adoptAuthoritativeRunId,
   attachLiveDraft,
   fetchTailPages,
   onHistoryInvalidated,
@@ -40,10 +41,10 @@ export const HISTORY_PAGE_SIZE = 30;
  * 60 条约 2.5MB，已越过卡顿阈值（快速上滑黑屏的直接来源）。
  */
 const HISTORY_PREFETCH_PAGE_SIZE = 20;
-/** 每个会话始终保持的预取页数（滚动停止后补足 1 页，避免上滑断档） */
-const HISTORY_PREFETCH_PAGES = 1;
+/** 每个会话始终保持的预取页数（滚动停止后补足 2 页，避免快速上滑断档） */
+const HISTORY_PREFETCH_PAGES = 2;
 /** 速度感知预取的触发冷却（ms）：同一会话至少间隔这么久才允许再发一次预取 */
-const PREFETCH_TRIGGER_COOLDOWN_MS = 300;
+const PREFETCH_TRIGGER_COOLDOWN_MS = 150;
 
 export interface UseSessionHistoryResult {
   /** 加载更早的一页（列表到达顶部时回调） */
@@ -248,7 +249,8 @@ export function useSessionHistory(
    * 与后端权威状态对齐：运行态 / 半截草稿 / 待答 / 待确认 / 权限模式 / 统计。
    * 用于：首屏、WS 重连、offset 缺口自愈三种时机。
    */
-  const reconcileFromState = useCallback(async (sessionId: string): Promise<void> => {
+  const reconcileFromState = useCallback(
+    async (sessionId: string, opts?: { allowIdleConverge?: boolean }): Promise<void> => {
     let state: SessionState;
     try {
       state = await withRetry(() => api.getSessionState(sessionId));
@@ -267,7 +269,24 @@ export function useSessionHistory(
     // ① 权威运行态（只升不降）：true 直接点亮；false **不降级**——
     //    「本地已发送、后端尚未注册 run」窗口内的 /state 竞态会瞬间熄灭刚点亮的「响应中」。
     //    降级由完成类事件（done/error/aborted）与 session.subscribed running=false 兜底分支负责。
-    if (state.running) st.setGenerating(sessionId, true);
+    //    allowIdleConverge 例外：终态 mismatch / 缺口自愈需要按后端权威态收敛，否则永久停在旧 run。
+    if (state.running) {
+      st.setGenerating(sessionId, true);
+      // 权威 runId 对齐：本地 activeRun 指向旧 run 时，新 run 的流式分片会被 runId 过滤全部丢弃
+      adoptAuthoritativeRunId(sessionId, state.runId);
+    } else if (opts?.allowIdleConverge && !state.liveDraft && st.generatingBySession[sessionId]) {
+      // 后端已空闲且无半截草稿：先补齐服务端正式消息（保留半截内容），再做权威收敛
+      await catchUpTail(sessionId, false);
+      const cur = useStore.getState();
+      if (cur.activeSessionId && cur.activeSessionId !== sessionId) {
+        finishResync(sessionId);
+        return;
+      }
+      cur.terminateRun(sessionId, cur.activeRunBySession[sessionId]?.runId);
+      pendingAssistant.delete(sessionId);
+      pendingRunId.delete(sessionId);
+      pendingGuideRunIds.clear(sessionId);
+    }
 
     // ② 半截流式草稿（含 stale 的历史残留）
     if (state.liveDraft && state.liveDraft.messageId) {
@@ -500,6 +519,7 @@ export function useSessionHistory(
           st.terminateRun(sessionId, payload.runId ?? active?.runId);
           pendingAssistant.delete(sessionId);
           pendingRunId.delete(sessionId);
+          pendingGuideRunIds.clear(sessionId);
         });
       } else if (payload.running === true) {
         // 重连后仍在运行：对齐草稿（半截内容 / 工具卡片状态）
@@ -519,8 +539,9 @@ export function useSessionHistory(
 
     const unsubResync = onStreamResyncNeeded((sessionId) => {
       if (sessionId !== taskId) return;
-      // 出现缺口（分片丢失 / 乱序）：用后端草稿重建该消息内容，精确愈合
-      void reconcileFromState(sessionId).catch(() => {});
+      // 出现缺口（分片丢失 / 乱序）或终态 runId 不一致：用后端权威状态重建该消息内容，
+      // 并按 running/runId 对齐；后端已空闲时允许收敛本地生成态（否则永久停在旧 run）。
+      void reconcileFromState(sessionId, { allowIdleConverge: true }).catch(() => {});
     });
 
     const unsubInvalidated = onHistoryInvalidated((sessionId) => {

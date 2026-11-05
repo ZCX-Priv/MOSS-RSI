@@ -212,13 +212,17 @@ html[data-density='comfortable'] {
 }
 
 /* 聊天消息区（消息 + AI 回复）：隐藏滚动条但保留滚动能力（与全局一致）。
-   曾一度显式展示可交互滚动条，现按需求隐藏，避免滚动条遮挡消息内容。 */
+   曾一度显式展示可交互滚动条，现按需求隐藏，避免滚动条遮挡消息内容。
+   overflow-anchor: none —— 虚拟列表已用手动 anchorPrepend/前缀和修正 scrollTop，
+   浏览器原生滚动锚定会二次补偿，造成滚动中「突然变速/跳动」。
+   （注意：不要折叠为单条规则注释，保持两条规则各自的语义） */
 .task-scroll-area::-webkit-scrollbar {
   display: none;
 }
 /* Firefox */
 .task-scroll-area {
   scrollbar-width: none;
+  overflow-anchor: none;
 }
 
 /* 终端（xterm）移动端触摸滚动适配：

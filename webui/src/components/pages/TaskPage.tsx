@@ -34,7 +34,7 @@ import {
   SquarePen,
   ArrowUp,
   Stethoscope,
-  Monitor,
+  SquareMousePointer,
 } from 'lucide-react';
 import {
   Dialog,
@@ -144,7 +144,6 @@ import {
   SYSTEM_WORKING_DIRECTORY,
 } from '../../store';
 import { useTask } from '../../hooks/useTask';
-import { useFileIndex } from '../../hooks/useFileIndex';
 import { api } from '../../api/http';
 import { copyText } from '../../lib/clipboard';
 import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, AskQuestion } from '../../types/api';
@@ -153,33 +152,6 @@ import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, A
 const EMPTY_MESSAGES: TaskMessage[] = [];
 const EMPTY_TODOS: TodoItem[] = [];
 
-/** 文件索引构建进度条（三引擎构建期间显示于任务页顶部；全就绪/全关时隐藏） */
-function FileIndexProgressBar() {
-  const { t } = useTranslation();
-  const cwd = useStore((s) => s.workingDirectory) || undefined;
-  const { status, building, overallPercent } = useFileIndex(cwd);
-  if (!building || !status) return null;
-  const engineName =
-    status.indexing.state === 'scanning'
-      ? t('settings.fileIndex.indexingTitle')
-      : status.graph.state === 'scanning'
-        ? t('settings.fileIndex.graphTitle')
-        : status.sag.state === 'scanning'
-          ? t('settings.fileIndex.sagTitle')
-          : '';
-  const percent = overallPercent ?? 0;
-  return (
-    <div
-      className="flex shrink-0 items-center gap-2 border-b border-border/60 px-4 py-1.5"
-      title={t('task.fileIndexBuilding', { engine: engineName, percent })}
-    >
-      <Progress value={percent} className="h-1 flex-1" />
-      <span className="shrink-0 text-xs text-muted-foreground">
-        {t('task.fileIndexBuilding', { engine: engineName, percent })}
-      </span>
-    </div>
-  );
-}
 const EMPTY_QUEUE: Array<{
   id: string;
   content: string;
@@ -463,6 +435,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // ===== 滚动控制（自建虚拟列表：followOutput 仅在「已在底部」时跟随）=====
   const listApiRef = useRef<VirtualListApi | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+  /**
+   * 列表是否正在滚动。
+   * 滚动期间强制走「纯文本占位」渲染：否则新进入视口的条目会在下一帧同步解析
+   * Markdown/代码高亮/图表，抢占主线程导致滚动突然变速甚至卡顿。
+   * 停止滚动后由 hydration-scheduler 按帧预算渐进升级，不再同步全量渲染。
+   */
+  const [isScrollingList, setIsScrollingList] = useState(false);
   /** 滚动容器 DOM 的 state 副本：供对话节点导航（当前节点判定 / 跳转）使用 */
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   /** 跟随态快照（供发送时读取最新值，不触发重渲染） */
@@ -1030,7 +1009,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               <DropdownMenuItem
                 onSelect={() => addSidebarTab(taskId, 'computer', 'computer.title')}
               >
-                <Monitor className="size-4" />
+                <SquareMousePointer className="size-4" />
                 {t('computer.title')}
               </DropdownMenuItem>
             )}
@@ -1362,7 +1341,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               onContinue={handleContinue}
               continueDisabled={isGenerating}
               onOpenAttachment={openAttachment}
-              deferContent={!inViewport}
+              deferContent={!inViewport || isScrollingList}
             />
           </MessageErrorBoundary>
         </div>
@@ -1375,6 +1354,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       replyEndIds,
       lastReplyEndId,
       isGenerating,
+      isScrollingList,
       handleTruncateClick,
       handleCopyMessage,
       handleRegenerate,
@@ -1441,15 +1421,12 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           </Button>
         </div>
 
-        {/* 文件索引构建进度（构建期间显示，全就绪时隐藏） */}
-        <FileIndexProgressBar />
-
         {/* 消息区行：左 = 对话列（最大宽度居中），右 = 刻度列（md+ 恒占位）。
             刻度列与桌面端 header 的「展开/收起侧栏」按钮同一竖列，且预留 56px 空槽，
             保证刻度与消息内容之间始终有间距、不遮挡正文。 */}
         <div className="flex min-h-0 flex-1">
         {/* 对话列：固定最大宽度（CHAT_MAX_WIDTH_PX）+ 水平居中；可用宽度不足时由 w-full 自动收缩。
-            header 与文件索引进度条保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
+            header 与消息区保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
         <div
           className="mx-auto flex min-h-0 w-full flex-1 flex-col"
           style={{ maxWidth: chatMaxWidth }}
@@ -1489,10 +1466,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 if (!sc || m.scrollTop > sc.clientHeight * 2.5) return;
                 prefetchMore();
               }}
-              // 滚动期间暂停 Markdown 水合，停止 120ms 后恢复（滚动优先）；
+              // 滚动期间暂停 Markdown 水合并强制占位渲染，停止 120ms 后恢复（滚动优先）；
               // 停止后再补一页缓冲，保证「停下来继续上滑」仍然跟手。
               onScrollingChange={(scrolling) => {
                 setHydrationPaused(scrolling);
+                setIsScrollingList(scrolling);
                 if (!scrolling) prefetchMore();
               }}
               initialBottom
@@ -2222,7 +2200,7 @@ function StartPanel({ onOpen }: StartPanelProps) {
       type: 'computer',
       titleKey: 'computer.title',
       descKey: 'start.computerDesc',
-      Icon: Monitor,
+      Icon: SquareMousePointer,
     },
   ];
   return (
@@ -2589,6 +2567,17 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
     );
   }
 
+  // 历史空占位 assistant（无正文、无思考、无工具调用、无中断标记）：不渲染空气泡。
+  // 这类消息来自进程中断/空回合，刷新后若渲染会留下无意义的空白间隙。
+  if (
+    !visibleContent.trim() &&
+    !message.thinking &&
+    !(message.toolCalls?.length) &&
+    !message.interrupted
+  ) {
+    return null;
+  }
+
   // assistant 消息
   return (
     <div className="group/message flex flex-col gap-2">
@@ -2856,8 +2845,14 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
           <span>{t('task.interruptedReply')}</span>
         </div>
       )}
-      {/* 统一 AI 回复操作栏：仅在「一段回复的结尾」渲染（复制每条都有；重新生成/诊断仅最新一段） */}
-      {showActions && !message.streaming && (visibleContent.trim().length > 0 || (message.toolCalls?.length ?? 0) > 0) && (
+      {/* 统一 AI 回复操作栏：仅在「一段回复的结尾」渲染（复制每条都有；重新生成/诊断仅最新一段）。
+          thinking-only 的回复（模型只产出思考、无正文/工具）也必须渲染：否则 reply-end 判定
+          把它当作回复结尾后，操作栏会因本条件为空而整体消失（按钮栏位置错乱的另一半）。 */}
+      {showActions && !message.streaming && (
+        visibleContent.trim().length > 0 ||
+        (message.toolCalls?.length ?? 0) > 0 ||
+        (message.thinking ?? '').trim().length > 0
+      ) && (
         <MessageActions
           content={visibleContent}
           onCopy={onCopy}

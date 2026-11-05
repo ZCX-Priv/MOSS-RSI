@@ -6,6 +6,7 @@
 // agentic 回复中，中间轮次的 assistant 消息后面必是 tool 消息 → 非结尾（不夹带操作栏）。
 
 import type { TaskMessage } from '@/types/api';
+import { stripInjectBlock } from './inject-block';
 
 /** 系统卡片（轮数触顶 / 输出触顶 / 压缩卡）：不属于任何一段 AI 回复 */
 export function isSystemCard(m: TaskMessage): boolean {
@@ -13,15 +14,36 @@ export function isSystemCard(m: TaskMessage): boolean {
 }
 
 /**
+ * assistant 消息是否有「可操作正文」——与 MessageActions 的渲染条件保持一致：
+ * 错误卡 / 有工具调用 / 可见正文非空 / 有思考内容。
+ *
+ * 为什么纳入 thinking：agentic 多轮中，新一轮回复往往先产出思考、正文与工具调用稍后到达。
+ * 若把「只有 thinking」的 assistant 当成空占位跳过，上一轮工具消息会被误判为「回复结尾」，
+ * 操作栏就渲染在它的末尾（位于新一轮的思考折叠行之上）——用户看到的按钮栏位置错乱。
+ * 把 thinking 视为正文后，该消息自身成为回复结尾，操作栏落在它底部（思考折叠行下方）。
+ *
+ * 完全空（无正文 / 无 thinking / 无工具）的 assistant 仍跳过：刷新后末尾的空占位
+ * 不应抢占 lastReplyEndId，否则前一条真实回复会失去操作栏。
+ */
+function hasReplyBody(m: TaskMessage): boolean {
+  if (m.isError) return true;
+  if ((m.toolCalls?.length ?? 0) > 0) return true;
+  if ((m.thinking ?? '').trim().length > 0) return true;
+  return stripInjectBlock(m.content).trim().length > 0;
+}
+
+/**
  * assistant 消息是否为「一段 AI 回复的结尾」：
  * 其后的下一条「真实对话消息」是 user（或已到列表末尾）→ 是结尾。
+ * 空占位 assistant（无正文/无工具调用/非错误）与系统卡片同样跳过。
  */
 export function isReplyEnd(messages: TaskMessage[], i: number): boolean {
   const m = messages[i];
-  if (!m || m.role !== 'assistant' || isSystemCard(m)) return false;
+  if (!m || m.role !== 'assistant' || isSystemCard(m) || !hasReplyBody(m)) return false;
   for (let j = i + 1; j < messages.length; j++) {
-    if (isSystemCard(messages[j])) continue;
-    return messages[j].role === 'user';
+    const next = messages[j];
+    if (isSystemCard(next) || (next.role === 'assistant' && !hasReplyBody(next))) continue;
+    return next.role === 'user';
   }
   return true;
 }
@@ -48,7 +70,11 @@ export function computeReplyEnds(messages: TaskMessage[]): ReplyEnds {
   let nextRole: TaskMessage['role'] | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (isSystemCard(m)) continue; // 系统卡片不属于任何一段回复，跳过且不改变 nextRole
+    // 系统卡片不属于任何一段回复，跳过且不改变 nextRole；
+    // 空占位 assistant（刷新后末尾只有 thinking / 完全为空）同理 —— 否则它会
+    // 抢走 lastReplyEndId 并让前一条真实回复失去结尾资格（按钮栏整体消失）。
+    if (isSystemCard(m)) continue;
+    if (m.role === 'assistant' && !hasReplyBody(m)) continue;
     if (m.role === 'assistant' && (nextRole === null || nextRole === 'user')) {
       replyEndIds.add(m.id);
       // 从后往前遇到的第一个回复结尾 = 列表顺序中最后一段回复

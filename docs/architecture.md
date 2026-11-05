@@ -87,7 +87,7 @@ MOSS/
 │   │   ├── hooks/               # 生命周期钩子引擎
 │   │   ├── memory/              # 记忆引擎
 │   │   ├── voice/               # 语音识别（本地 / 在线 / WASM）
-│   │   ├── context/             # 上下文引擎（压缩/自愈/文件索引）
+│   │   ├── context/             # 上下文引擎（压缩/自愈）
 │   │   ├── agent/               # Agent 引擎（ReAct 循环）
 │   │   ├── subagent/            # Agent 注册表 + 一次性子代理运行
 │   │   ├── file-history/        # 文件历史（追踪/快照/回滚）
@@ -271,7 +271,7 @@ subagent → file-history → daemon → automation
 
 - `agent.maxTurns: 0` 表示不限制轮数；`logs` 段控制日志级别/保留天数/单文件大小（旧版 `daemon.logLevel` 加载时自动迁移到 `logs.level`）。
 - `tools` 段 schema 由 `src/modules/tools/manifest.ts` 扫描各工具目录的 `tool.json` 自动生成，新增工具无需手工改 `config-service.ts`。
-- 其余可选段：`mcp`（客户端调用超时 / sampling）、`mcpServer`（对外 MCP Server）、`skills` / `commands`（启停）、`fileHistory`、`context`（压缩/修剪/自愈/遥测），内层字段均有默认值，旧配置缺段自动补全。
+- 其余可选段：`mcp`（客户端调用超时 / sampling）、`mcpServer`（对外 MCP Server）、`skills` / `commands`（启停）、`fileHistory`、`context`（压缩/自愈/遥测），内层字段均有默认值，旧配置缺段自动补全。
 
 ### 5.2 ApiConfig（`~/.moss/config/api.json`）
 
@@ -394,7 +394,7 @@ onEvent('done', finishReason)
 
 ## 八、数据持久化
 
-所有用户数据存储在 `~/.moss/`（`env.dataDir`）；规则/记忆/钩子/文件索引另支持项目级作用域 `<cwd>/.moss/`。
+所有用户数据存储在 `~/.moss/`（`env.dataDir`）；规则/记忆/钩子另支持项目级作用域 `<cwd>/.moss/`。
 
 | 路径 | 用途 | 格式 |
 |---|---|---|
@@ -421,7 +421,6 @@ onEvent('done', finishReason)
 | `~/.moss/models/asr/` | 语音模型（sherpa-onnx） | 模型文件 |
 | `~/.moss/remote/` | 远程访问密码与隧道状态 | JSON |
 | `<cwd>/.moss/rules/`、`<cwd>/.moss/memory/`、`<cwd>/.moss/hooks/` | 项目级规则 / 记忆 / 钩子 | JSON |
-| `<cwd>/.moss/file-index/` | 项目级文件索引（index-list + 索引数据） | JSON/目录 |
 
 ## 九、相关文档
 

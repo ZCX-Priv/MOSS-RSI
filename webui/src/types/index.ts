@@ -18,7 +18,6 @@ export type SettingsSection =
   | 'remote'
   | 'im'
   | 'logs'
-  | 'index'
   | 'commands'
   | 'rules'
   | 'memory'

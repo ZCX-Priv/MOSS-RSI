@@ -74,13 +74,15 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
     seenIds.add(msgId);
     // 压缩摘要消息（compaction-summary）与 day-rollover/env-context 不进消息流：
     // 压缩卡片由 getCompactions 历史恢复（TaskPage 合并），其余为引擎内部锚定消息
-    // （active-rules = paths 规则注入锚定 / memory-l1 = 记忆关键事实锚定）
+    // （active-rules = paths 规则注入锚定 / memory-l1 = 记忆关键事实锚定 /
+    //   project-context = 旧版文件索引项目概要锚定，移除索引后仍需过滤旧会话残留）
     if (
       m.name === 'compaction-summary' ||
       m.name === 'env-context' ||
       m.name === 'day-rollover' ||
       m.name === 'active-rules' ||
-      m.name === 'memory-l1'
+      m.name === 'memory-l1' ||
+      m.name === 'project-context'
     ) {
       continue;
     }

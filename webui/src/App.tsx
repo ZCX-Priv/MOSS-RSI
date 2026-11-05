@@ -50,9 +50,6 @@ const ContextSettings = lazy(() =>
 const ContextEngineSettings = lazy(() =>
   import('./components/pages/SettingsPage').then((m) => ({ default: m.ContextEngineSettings })),
 );
-const FileIndexSettings = lazy(() =>
-  import('./components/pages/SettingsPage').then((m) => ({ default: m.FileIndexSettings })),
-);
 const AppearanceSettings = lazy(() =>
   import('./components/pages/SettingsPage').then((m) => ({ default: m.AppearanceSettings })),
 );
@@ -377,10 +374,9 @@ export default function App() {
               <Route path="provider/*" element={<Navigate to="/settings/provider" replace />} />
               {/* 旧路径兼容：模型设置并入服务商 */}
               <Route path="model" element={<Navigate to="/settings/provider" replace />} />
-              {/* 上下文：Tab 容器（引擎 / 索引 / 规则 / 记忆） */}
+              {/* 上下文：Tab 容器（引擎 / 规则 / 记忆） */}
               <Route path="context" element={<ContextSettings />}>
                 <Route index element={<ContextEngineSettings />} />
-                <Route path="index" element={<FileIndexSettings />} />
                 <Route path="rules" element={<RulesSettingsSection />} />
                 <Route path="memory" element={<MemorySettingsSection />} />
               </Route>
@@ -407,7 +403,7 @@ export default function App() {
               {/* 旧路径重定向（并入 Tab 后保留兼容：搜索索引/书签仍指向旧地址） */}
               <Route path="render" element={<Navigate to="/settings/appearance/render" replace />} />
               <Route path="anim" element={<Navigate to="/settings/appearance/anim" replace />} />
-              <Route path="index" element={<Navigate to="/settings/context/index" replace />} />
+              <Route path="index" element={<Navigate to="/settings/context" replace />} />
               <Route path="rules" element={<Navigate to="/settings/context/rules" replace />} />
               <Route path="memory" element={<Navigate to="/settings/context/memory" replace />} />
               <Route path="*" element={<Navigate to="/settings/general" replace />} />

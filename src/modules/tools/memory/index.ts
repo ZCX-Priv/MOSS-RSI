@@ -88,7 +88,7 @@ function runSearch(p: MemoryParams, ctx: ToolContext): ToolResult {
       : undefined;
   const topK = Math.min(50, Math.max(1, p.topK ?? 10));
 
-  const hits = engine.search(ctx.cwd, p.query, {
+  const hits = engine.searchScored(ctx.cwd, p.query, {
     ...(p.wing ? { wing: p.wing } : {}),
     ...(p.room ? { room: p.room } : {}),
     ...(hall ? { hall } : {}),
@@ -103,11 +103,15 @@ function runSearch(p: MemoryParams, ctx: ToolContext): ToolResult {
 
   const lines = hits.map(
     m =>
-      `- [${m.wing}/${m.room}/${m.hall}] (重要性${m.importance.toFixed(1)}${m.pinned ? '，置顶' : ''}) ${m.insight}\n  原文：${m.verbatim.slice(0, 200)}${m.verbatim.length > 200 ? '…' : ''}`,
+      `- [${m.wing}/${m.room}/${m.hall}] (相关度 ${m.score.toFixed(2)} · 重要性${m.importance.toFixed(1)}${m.pinned ? '，置顶' : ''}) ${m.insight}\n  原文：${m.verbatim.slice(0, 200)}${m.verbatim.length > 200 ? '…' : ''}`,
   );
   return {
     content: [{ type: 'text', text: `检索到 ${hits.length} 条相关记忆：\n${lines.join('\n')}` }],
-    metadata: { count: hits.length, ids: hits.map(h => h.id) },
+    metadata: {
+      count: hits.length,
+      ids: hits.map(h => h.id),
+      scores: hits.map(h => Math.round(h.score * 1000) / 1000),
+    },
   };
 }
 

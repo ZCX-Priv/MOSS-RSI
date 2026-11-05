@@ -147,6 +147,10 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
   let restartAttempts = 0;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
   let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 是否曾经连接成功（用于区分首次连接与自动重连恢复） */
+  let everConnected = false;
+  /** 当前实例是否处于已连接状态（READY/RESUMED 与 disconnected/error 之间） */
+  let linked = false;
   const typingEntries = new Map<string, QqTypingEntry>();
 
   const handleMessage = (_context: unknown, message: QQInbound): void => {
@@ -233,6 +237,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
   const stopInstance = (): void => {
     // 先使旧实例的事件回调失效，再停止，避免旧 start() 结算触发新的重建
     generation += 1;
+    linked = false;
     const current = sdkBot;
     sdkBot = null;
     try {
@@ -243,15 +248,23 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
   };
 
   const markConnected = (): void => {
+    const recovered = everConnected && !linked;
     authExpired = false;
     restartAttempts = 0;
     clearRecoveryTimer();
     clearRestartTimer();
+    linked = true;
+    everConnected = true;
+    if (recovered) {
+      // SDK 内部自动重连成功时原本没有任何日志，补一条便于确认网关已恢复
+      logger.info('im: QQ 机器人网关已恢复（自动重连成功）', { botId: bot.botId });
+    }
     onStatus({ connected: true, lastError: null, extra: { authExpired: '' } });
   };
 
   const markAuthExpired = (): void => {
     authExpired = true;
+    linked = false;
     clearRecoveryTimer();
     clearRestartTimer();
     for (const entry of typingEntries.values()) {
@@ -316,7 +329,13 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
         debug: () => undefined,
         info: () => undefined,
         warn: (...args: unknown[]) => logger.warn(`[qq-official] ${args.map(String).join(' ')}`),
-        error: (...args: unknown[]) => logger.error(`[qq-official] ${args.map(String).join(' ')}`),
+        error: (...args: unknown[]) => {
+          const text = args.map(String).join(' ');
+          // SDK 对可自愈的瞬时网络/超时失败也打 error（内部会按退避自动重连）：
+          // 降级为 warn，避免把「断网→自动恢复」记录成需要人工处理的 ERROR
+          if (isQqTransportError(text)) logger.warn(`[qq-official] ${text}`);
+          else logger.error(`[qq-official] ${text}`);
+        },
       },
     });
     sdkBot = instance;
@@ -344,6 +363,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
     });
     instance.on('disconnected', event => {
       if (!valid()) return;
+      linked = false;
       onStatus({
         connected: false,
         lastError: `QQ 机器人连接断开：${event.reason || `关闭码 ${event.code}`}`,
@@ -354,6 +374,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
     });
     instance.on('error', (error: Error) => {
       if (!valid()) return;
+      linked = false;
       if (isQqAuthorizationError(error)) {
         markAuthExpired();
         settle?.(new Error(QQ_AUTH_EXPIRED_MESSAGE));
@@ -387,6 +408,8 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
       stopped = false;
       authExpired = false;
       restartAttempts = 0;
+      everConnected = false;
+      linked = false;
       clearRestartTimer();
       clearRecoveryTimer();
       stopInstance();
@@ -396,6 +419,7 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
     async stop() {
       stopped = true;
       generation += 1;
+      linked = false;
       clearRestartTimer();
       clearRecoveryTimer();
       for (const entry of typingEntries.values()) {

@@ -1,0 +1,136 @@
+{
+  "name": "set",
+  "description": "统一管理 MOSS 用户资源（kind = skill / rule / hook / command）。action：list 列出全部（只读）；create 新建；update 修改现有项（名称不可变，未提供的字段保持原值）；delete 删除；kind=skill 额外支持 search（按 keyword 搜索 SkillHub 技能市场）与 install（按 canonicalName（@owner/slug）从市场安装）。skill/command 名称必须匹配 ^[a-z][a-z0-9-]*$。rule 支持 scope=global/project、paths（空数组=始终注入，有值=访问匹配文件时注入）、priority；hook 支持 event / matcher / hookType / command / modulePath / timeout，terminal 钩子会执行任意命令，请谨慎使用；command 的 content 是斜杠命令提示词模板（可含 $ARGUMENTS）。list/search 只读放行；create/update/delete/install 属于写操作，可能触发用户确认。",
+  "description_en": "Unified management of MOSS user resources (kind = skill / rule / hook / command). action: list all (read-only); create; update an existing item (name is immutable; omitted fields keep their current values); delete; for kind=skill, search the SkillHub market by keyword or install by canonicalName (@owner/slug). skill/command names must match ^[a-z][a-z0-9-]*$. rule supports scope=global/project, paths (empty = always injected, non-empty = injected when matching files are accessed), and priority; hook supports event / matcher / hookType / command / modulePath / timeout — terminal hooks execute arbitrary commands, use with caution; command content is the slash-command prompt template (may contain $ARGUMENTS). list/search are read-only; create/update/delete/install are write operations and may require user confirmation.",
+  "icon": "settings",
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": ["skill", "rule", "hook", "command"],
+        "description": "资源类型",
+        "description_en": "Resource kind"
+      },
+      "action": {
+        "type": "string",
+        "enum": ["list", "create", "update", "delete", "search", "install"],
+        "description": "操作类型；search/install 仅用于 kind=skill",
+        "description_en": "Operation; search/install are only valid for kind=skill"
+      },
+      "name": {
+        "type": "string",
+        "description": "目标名称（create/update/delete/list 过滤）。skill/command 必须匹配 ^[a-z][a-z0-9-]*$；update 时不可改名。",
+        "description_en": "Target name (create/update/delete/list filter). skill/command must match ^[a-z][a-z0-9-]*$; names are immutable on update."
+      },
+      "id": {
+        "type": "string",
+        "description": "rule/hook 的内容哈希 id；update/delete 时优先于 name，用于精确指定同名多项。",
+        "description_en": "Content-hash id for rule/hook; takes precedence over name for update/delete when multiple items share a name."
+      },
+      "scope": {
+        "type": "string",
+        "enum": ["global", "project"],
+        "description": "rule/hook 作用域：global（~/.moss）或 project（当前工作目录 .moss）。缺省 global；update 时沿用原作用域。",
+        "description_en": "Scope for rule/hook: global (~/.moss) or project (current cwd .moss). Defaults to global; update keeps the existing scope."
+      },
+      "description": {
+        "type": "string",
+        "description": "描述（skill create 必填；其余可选）",
+        "description_en": "Description (required when creating a skill; optional otherwise)"
+      },
+      "content": {
+        "type": "string",
+        "description": "正文内容：skill 的提示词 / rule 的规则正文 / command 的提示词模板",
+        "description_en": "Body content: skill prompt / rule body / command prompt template"
+      },
+      "enabled": {
+        "type": "boolean",
+        "description": "启用状态（skill/command 写入 config；rule/hook 写入记录）",
+        "description_en": "Enabled state (skill/command written to config; rule/hook stored in the record)"
+      },
+      "paths": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "rule 的 glob 路径列表；空数组 = 始终注入",
+        "description_en": "Rule glob paths; empty array = always injected"
+      },
+      "priority": {
+        "type": "number",
+        "description": "rule 同名冲突优先级（高者胜）",
+        "description_en": "Rule priority for same-name conflicts (higher wins)"
+      },
+      "event": {
+        "type": "string",
+        "enum": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"],
+        "description": "hook 生命周期事件",
+        "description_en": "Hook lifecycle event"
+      },
+      "matcher": {
+        "type": "string",
+        "description": "hook 工具名匹配（精确名或 glob；仅工具类事件有效）",
+        "description_en": "Hook tool-name matcher (exact name or glob; tool events only)"
+      },
+      "hookType": {
+        "type": "string",
+        "enum": ["terminal", "module"],
+        "description": "hook 执行形式：terminal 外部命令 / module TS 模块",
+        "description_en": "Hook execution type: terminal command / module TS file"
+      },
+      "command": {
+        "type": "string",
+        "description": "hookType=terminal 时的命令行（支持 ~ 展开与环境变量）",
+        "description_en": "Command line when hookType=terminal (supports ~ expansion and env vars)"
+      },
+      "modulePath": {
+        "type": "string",
+        "description": "hookType=module 时的模块路径（相对 hooks/scripts/）",
+        "description_en": "Module path when hookType=module (relative to hooks/scripts/)"
+      },
+      "timeout": {
+        "type": "number",
+        "description": "hook 执行超时 ms（0 = 使用引擎默认）",
+        "description_en": "Hook execution timeout in ms (0 = engine default)"
+      },
+      "icon": {
+        "type": "string",
+        "description": "skill/command 的图标（Lucide kebab-case 名，或 .svg 文件名）",
+        "description_en": "Icon for skill/command (Lucide kebab-case name or .svg filename)"
+      },
+      "allowedTools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "skill 激活时建议允许的工具列表（提示性约束）",
+        "description_en": "Suggested allowed tools when the skill is active (advisory)"
+      },
+      "argumentHint": {
+        "type": "string",
+        "description": "command 的参数提示（菜单展示，如 [issue-number]）",
+        "description_en": "Command argument hint shown in menus (e.g. [issue-number])"
+      },
+      "keyword": {
+        "type": "string",
+        "description": "skill 市场搜索关键词",
+        "description_en": "Skill market search keyword"
+      },
+      "canonicalName": {
+        "type": "string",
+        "description": "skill 市场安装标识，格式 @owner/slug",
+        "description_en": "Skill market install identifier, format @owner/slug"
+      }
+    },
+    "required": ["kind", "action"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true
+    },
+    "schema": {}
+  }
+}

@@ -83,10 +83,12 @@ export class ImController {
       try {
         await this.startBot(bot);
       } catch (error) {
-        this.deps.logger.warn(t('im.botStartFailed'), {
-          botId: bot.botId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        this.deps.logger.warn(
+          t('im.botStartFailed', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+          { botId: bot.botId },
+        );
       }
     }
   }
@@ -173,10 +175,12 @@ export class ImController {
     if (bot.enabled) {
       // 启动失败不回滚配置：状态里会显示错误原因，用户可直接重试
       await this.startBot(bot).catch(error => {
-        this.deps.logger.warn(t('im.botStartFailed'), {
-          botId: bot.botId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        this.deps.logger.warn(
+          t('im.botStartFailed', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+          { botId: bot.botId },
+        );
       });
     } else {
       await this.stopBot(bot.botId);
@@ -218,10 +222,12 @@ export class ImController {
       boundAt: now,
     });
     await this.startBot(bot).catch(error => {
-      this.deps.logger.warn(t('im.botStartFailed'), {
-        botId: bot.botId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      this.deps.logger.warn(
+        t('im.botStartFailed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        { botId: bot.botId },
+      );
     });
     return this.snapshot(bot);
   }
@@ -254,10 +260,12 @@ export class ImController {
       this.deps.state.bind(bot.botId, { id: openid, name: '扫码者', boundAt: now });
     }
     await this.startBot(bot).catch(error => {
-      this.deps.logger.warn(t('im.botStartFailed'), {
-        botId: bot.botId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      this.deps.logger.warn(
+        t('im.botStartFailed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        { botId: bot.botId },
+      );
     });
     return this.snapshot(bot);
   }
@@ -392,10 +400,12 @@ export class ImController {
     try {
       await entry.adapter.stop();
     } catch (error) {
-      this.deps.logger.warn(t('im.botStopFailed'), {
-        botId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      this.deps.logger.warn(
+        t('im.botStopFailed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        { botId },
+      );
     }
   }
 

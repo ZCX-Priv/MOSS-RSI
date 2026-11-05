@@ -23,7 +23,7 @@ import type { LLMRouter } from '../contracts';
 const MAX_SHRINK_STEPS = 8;
 /** 收到 HTTP 413 后最多收紧上限并重试的次数 */
 const MAX_413_RETRIES = 2;
-/** 末位护栏的截断口径（与 context.toolPruning 无关，仅保证任何请求体可收敛） */
+/** 末位护栏的截断口径（与上下文压缩无关，仅保证任何请求体可收敛） */
 const SHRINK_OPTIONS: ShrinkOptions = { keepHeadChars: 8192, keepTailChars: 2048 };
 
 export class LLMRouterImpl implements LLMRouter {

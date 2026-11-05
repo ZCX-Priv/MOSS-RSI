@@ -27,6 +27,8 @@ export class MCPManagerImpl implements MCPManager {
   private serverDefs: Map<string, ServerConfig> = new Map();
   private mcpsWatcher?: FSWatcher;
   private watchStarted = false;
+  /** 重载代次：每次 reloadAll/shutdown 递增，用于作废重载前发起、重载后才完成的连接 */
+  private epoch = 0;
 
   constructor(deps: {
     config: ConfigService;
@@ -104,7 +106,12 @@ export class MCPManagerImpl implements MCPManager {
   async initialize(): Promise<void> {
     this.serverDefs = await this.loadServerDefs();
     const names = Array.from(this.serverDefs.keys());
-    this.logger.info(t('mcp.managerInitializing'), { serverCount: names.length, names });
+    // 未配置任何 MCP 服务器是正常状态（定义在 ~/.moss/mcps/*.json），只在 debug 记录
+    if (names.length > 0) {
+      this.logger.info(t('mcp.managerInitializing'), { serverCount: names.length, names });
+    } else {
+      this.logger.debug(t('mcp.managerInitializing'), { serverCount: 0, names: [] });
+    }
 
     // 后台连接（单服务器失败不影响其他；禁用的跳过）
     for (const name of names) {
@@ -243,6 +250,7 @@ export class MCPManagerImpl implements MCPManager {
 
     // sampling 钩子按配置注入（allowSampling=false 时不声明能力）
     const samplingEnabled = this.config.getAppConfig().mcp?.allowSampling !== false;
+    const epoch = this.epoch;
     const client = new McpClient(
       serverName,
       serverCfg,
@@ -251,6 +259,11 @@ export class MCPManagerImpl implements MCPManager {
       samplingEnabled ? this.buildSamplingHook() : undefined,
     );
     await client.connect();
+    // 连接期间已发生重载/关闭：本次连接结果作废，避免旧连接在 entries 中"复活"出重复子进程
+    if (epoch !== this.epoch) {
+      await client.disconnect().catch(() => {});
+      return;
+    }
     this.entries.set(serverName, {
       client,
       config: serverCfg,
@@ -289,6 +302,7 @@ export class MCPManagerImpl implements MCPManager {
     }
     this.reloadInFlight = true;
     try {
+      this.epoch += 1;
       this.logger.info(t('mcp.reloadingAll'));
       // 断开所有
       const names = Array.from(this.entries.keys());
@@ -568,6 +582,7 @@ export class MCPManagerImpl implements MCPManager {
 
   /** 关闭所有连接（模块销毁时调用） */
   async shutdown(): Promise<void> {
+    this.epoch += 1;
     this.mcpsWatcher?.close();
     this.mcpsWatcher = undefined;
     const names = Array.from(this.entries.keys());

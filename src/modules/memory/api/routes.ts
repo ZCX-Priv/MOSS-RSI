@@ -68,13 +68,15 @@ export function createListMemoryHandler(services: ServicesLike): RouteHandler {
 
     let items;
     if (q !== '') {
-      // BM25 检索优先；无结果回退关键词包含
-      const searched = engine.search(cwd, q, {
+      // BM25 检索优先（带相关度分数供 UI 展示）；无结果回退关键词包含
+      const searched = engine.searchScored(cwd, q, {
         ...(wing ? { wing } : {}),
         ...(room ? { room } : {}),
         ...(hall ? { hall } : {}),
       }, limit);
-      items = searched.length > 0 ? searched : engine.searchContains(cwd, q).slice(0, limit);
+      items = searched.length > 0
+        ? searched.map((hit) => ({ ...hit, score: Math.round(hit.score * 1000) / 1000 }))
+        : engine.searchContains(cwd, q).slice(0, limit);
     } else {
       // 无查询：枚举全量记忆（全局 ∪ 项目），按元数据过滤后 updatedAt 降序
       items = engine.listMemories(

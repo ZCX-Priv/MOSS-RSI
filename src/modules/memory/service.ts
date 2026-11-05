@@ -9,7 +9,7 @@ import { DEFAULT_MEMORY_CONFIG } from '../context/types';
 import type { ContextSessionLike } from '../context/types';
 import type { LLMRouter } from '../contracts';
 import { resolveSummaryModel } from '../context/compressor';
-import { MemoryRetriever, type RecallFilter } from './retriever';
+import { MemoryRetriever, type RecallFilter, type RecallWeights } from './retriever';
 import { distillSession } from './distiller';
 import {
   buildMemoryRecord,
@@ -34,6 +34,7 @@ import type {
   MemoryScope,
   MemoryUpsertInput,
   ScopedMemoryRecord,
+  ScoredMemoryRecord,
 } from './types';
 import type { SessionMemoryState } from '../context/types';
 
@@ -127,6 +128,7 @@ export class MemoryEngineServiceImpl {
     const hits = this.retriever.recallWithTunnel(cwd, query, {
       topK: cfg.recallTopK,
       excludeIds: exclude,
+      weights: this.recallWeights(),
     });
     if (hits.length === 0) {
       return { text: null, count: 0, recalledIds: [], queryChanged };
@@ -265,7 +267,25 @@ export class MemoryEngineServiceImpl {
     filter?: RecallFilter,
     topK?: number,
   ): ScopedMemoryRecord[] {
-    return this.retriever.recall(cwd, query, { filter, topK: topK ?? 10 });
+    return this.retriever.recall(cwd, query, {
+      filter,
+      topK: topK ?? 10,
+      weights: this.recallWeights(),
+    });
+  }
+
+  /** 带相关度分数的检索（REST 搜索 / 记忆工具可观测输出） */
+  searchScored(
+    cwd: string,
+    query: string,
+    filter?: RecallFilter,
+    topK?: number,
+  ): ScoredMemoryRecord[] {
+    return this.retriever.recallScored(cwd, query, {
+      filter,
+      topK: topK ?? 10,
+      weights: this.recallWeights(),
+    });
   }
 
   /**
@@ -420,6 +440,22 @@ export class MemoryEngineServiceImpl {
     } catch {
       return 'unknown';
     }
+  }
+
+  /** 配置 → 召回权重（设置页可调；缺省值由 retriever 兜底） */
+  private recallWeights(): Partial<RecallWeights> {
+    const cfg = this.getConfig();
+    return {
+      insight: cfg.recallInsightWeight,
+      tag: cfg.recallTagWeight,
+      verbatim: cfg.recallVerbatimWeight,
+      importance: 0.3,
+      recencyHalfLifeDays: cfg.recallRecencyHalfLifeDays,
+      pinnedBoost: cfg.recallPinnedBoost,
+      dedupThreshold: cfg.recallDedupThreshold,
+      minScoreRatio: cfg.recallMinScoreRatio,
+      maxPerRoom: cfg.recallMaxPerRoom,
+    };
   }
 
   /** 供 distiller 的 token 工具导出复用（测试用） */

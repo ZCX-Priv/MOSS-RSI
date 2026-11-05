@@ -45,7 +45,6 @@ import {
 } from '../governor';
 import { resolveSummaryModel } from '../compressor';
 import { ensureContextPrompts } from '../prompt-loader';
-import { FileIndexService } from '../file-index';
 
 /** ToolRegistry 鸭子类型（get/listSchemas） */
 interface ToolRegistryLike {
@@ -106,8 +105,6 @@ export class ContextEngineServiceImpl {
   private sessionStore: SessionStoreBridge | null = null;
   /** 图片优化器（发送前压缩；sharp 不可用时自动降级为不压缩） */
   private readonly imageOptimizer: ImageOptimizer;
-  /** 文件索引模块（三引擎；默认关闭，配置打开后激活） */
-  private readonly fileIndex: FileIndexService;
 
   constructor(deps: ContextEngineServiceDeps) {
     this.env = deps.env;
@@ -115,19 +112,12 @@ export class ContextEngineServiceImpl {
     this.services = deps.services;
     this.logger = deps.logger;
     this.imageOptimizer = new ImageOptimizer(deps.logger, () => this.getConfig().imageOptimization);
-    this.fileIndex = new FileIndexService({
-      env: deps.env,
-      config: deps.config,
-      services: deps.services,
-      logger: deps.logger,
-    });
   }
 
   /** 模块初始化：只记录状态；提示词播种移到 onWarmup（启动路径零成本） */
   onInitialize(): void {
     this.logger.info('context: engine initialized', {
       compaction: this.getConfig().compaction.enabled ? 'enabled' : 'disabled',
-      fileIndex: this.getConfig().fileIndex.indexing.enabled ? 'enabled' : 'disabled',
     });
   }
 
@@ -136,30 +126,9 @@ export class ContextEngineServiceImpl {
     ensureContextPrompts(this.env);
   }
 
-  /** 模块销毁：停用文件索引（保数据） */
-  async onDestroy(): Promise<void> {
-    await this.fileIndex.stopAll();
-  }
-
-  /** 文件索引服务访问器（glob/grep 工具 / governor 注入 / API 路由使用） */
-  getFileIndex(): FileIndexService {
-    return this.fileIndex;
-  }
-
   /** 图片优化器访问器 */
   getImageOptimizer(): ImageOptimizer {
     return this.imageOptimizer;
-  }
-
-  /** 配置热重载：文件索引引擎启停（config:changed 时由 server 路由调用） */
-  async onFileIndexConfigChanged(): Promise<void> {
-    await this.fileIndex.applyConfigChange();
-    // 开关刚打开时通常无既有运行时 → 为最近工作目录主动建索引并扫描
-    if (this.getConfig().fileIndex.indexing.enabled && this.lastCwd) {
-      void this.fileIndex.ensureProject(this.lastCwd).catch(() => {
-        // 失败静默（后续任务请求会重试）
-      });
-    }
   }
 
   /** agent 模块注入会话存取桥（依赖方向 agent → context） */
@@ -174,10 +143,8 @@ export class ContextEngineServiceImpl {
     if (!ctx) return DEFAULT_CONTEXT_CONFIG;
     return {
       compaction: { ...DEFAULT_CONTEXT_CONFIG.compaction, ...ctx.compaction },
-      toolPruning: { ...DEFAULT_CONTEXT_CONFIG.toolPruning, ...ctx.toolPruning },
       healer: { ...DEFAULT_CONTEXT_CONFIG.healer, ...ctx.healer },
       telemetry: { ...DEFAULT_CONTEXT_CONFIG.telemetry, ...ctx.telemetry },
-      fileIndex: ctx.fileIndex ?? DEFAULT_CONTEXT_CONFIG.fileIndex,
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules, ...ctx.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks, ...ctx.hooks },
       memory: { ...DEFAULT_CONTEXT_CONFIG.memory, ...ctx.memory },
@@ -575,12 +542,6 @@ export class ContextEngineServiceImpl {
       getLlm: () => this.services.tryResolve<LLMRouter>(ServiceNames.LLM_ROUTER),
       getApiModels: () =>
         flattenModels(this.config.getApiConfig()).map(m => ({ id: m.id, model: m.model })),
-      getProjectOverview: (cwd: string) => this.fileIndex.projectOverview(cwd),
-      ensureFileIndex: (cwd: string) => {
-        void this.fileIndex.ensureProject(cwd).catch(() => {
-          // 单次失败静默（下次请求会重试）
-        });
-      },
       getImageOptimizer: () => this.imageOptimizer,
       getCompactionGuard: (sessionId: string) => this.compactionGuard.get(sessionId),
       setCompactionGuard: (sessionId: string, guard: { at: number; tokens: number }) => {
@@ -670,7 +631,6 @@ export class ContextEngineServiceImpl {
         rulesSection,
       );
       const view = buildRequestView(session, staticSystemPrompt, {
-        toolPruning: this.getConfig().toolPruning,
         includeThinking: this.resolveIncludeThinking(model),
         resolveSkillPrompt: name => this.resolveSkillPrompt(name),
       });

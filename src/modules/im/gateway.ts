@@ -634,7 +634,7 @@ export class ImGateway {
         await this.reply(bot, message.replyTarget, '任务已停止。');
       } else {
         const reason = error instanceof Error ? error.message : String(error);
-        this.deps.logger.error(t('im.runFailed'), { botId: bot.botId, error: reason });
+        this.deps.logger.error(t('im.runFailed', { error: reason }), { botId: bot.botId });
         await this.reply(bot, message.replyTarget, `执行失败：${reason}`);
       }
     } finally {
@@ -849,10 +849,9 @@ export class ImGateway {
       try {
         await this.deps.sendText(bot, target, chunk);
       } catch (error) {
-        this.deps.logger.warn(t('im.replyFailed'), {
-          botId: bot.botId,
+        this.deps.logger.warn(t('im.replyFailed', {
           error: error instanceof Error ? error.message : String(error),
-        });
+        }), { botId: bot.botId });
         return;
       }
     }

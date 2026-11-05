@@ -31,10 +31,10 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 ## 核心特性
 
 - **微内核架构** —— ConfigService / EventBus / ServiceRegistry / Logger 四大核心服务，21 个模组由内核静态注册表按固定顺序加载（被依赖者在前），正向初始化、反向销毁
-- **ReAct Agent 引擎** —— 流式文本与思维链输出、多轮工具调用循环、任务引导/中断、上下文自动压缩与裁剪、工具结果智能折叠
+- **ReAct Agent 引擎** —— 流式文本与思维链输出、多轮工具调用循环、任务引导/中断、上下文自动压缩与溢出兜底裁剪、工具调用自愈
 - **多 LLM Provider 路由** —— 内置 openai-chat / openai-responses / anthropic / gemini 等接口格式，支持 DeepSeek、Anthropic、OpenAI、Gemini、Qwen、GLM、Kimi 等主流模型，按模型自动解析路由，支持 thinking 推理输出
 - **MCP 双向支持** —— 作为客户端接入任意 Model Context Protocol 外部工具服务器；同时通过 `/mcp` 端点与 `moss mcp`（stdio）向外部 Agent 暴露 MOSS 工具
-- **内置工具集** —— 18 个可配置内置工具（read / write / edit / delete / glob / grep / terminal / wait / todo / ask / web / skill / mcp / memory / context / automation / browser / computer）+ `use_command` 斜杠命令执行，写操作与命令执行可配置逐次确认
+- **内置工具集** —— 20 个可配置内置工具（read / write / edit / delete / glob / grep / terminal / wait / todo / ask / web / skill / mcp / memory / context / automation / browser / computer / run_code / set）+ `use_command` 斜杠命令执行，写操作与命令执行可配置逐次确认
 - **Skills 与自定义命令** —— 以 Markdown + YAML front-matter 定义的可复用技能与斜杠命令，支持用户自定义与热重载
 - **子代理（Subagent）** —— `agent` 工具委派一次性子代理：内置 explorer / planner / coder / reviewer 模板、独立隐藏会话、嵌套深度保护与实时过程卡片
 - **持久终端** —— 原生 PTY 会话：人类经 WebSocket 操作，Agent 经 terminal 工具操作，二者共用同一批终端
@@ -43,7 +43,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 - **语音输入** —— 本地 sherpa-onnx（zipformer / SenseVoice / Whisper）、在线服务商与浏览器 WASM 本地推理
 - **远程访问** —— 局域网直连 + cloudflared 公网隧道，8 位密码鉴权与请求门卫
 - **记忆 / 规则 / 钩子** —— 四层记忆栈（L0-L3）BM25 检索与异步蒸馏；用户规则条件注入；生命周期钩子引擎
-- **上下文工程** —— 拼接、压缩、自愈、预算校准、文件索引与遥测
+- **上下文工程** —— 拼接、压缩、自愈、预算校准与遥测
 - **文件历史** —— 编辑追踪、快照、撤回与恢复
 - **自动化任务** —— 基于 cron 表达式与一次性定时（once）的调度，附带完整运行历史与暂停/恢复控制
 - **现代 Web UI** —— React 19 + shadcn/ui + Tailwind 4，中英双语（i18next），PWA 离线可用，主题/字号/密度可调
@@ -108,7 +108,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 | `hooks` | 生命周期钩子引擎 | `hooks.engine` |
 | `memory` | 记忆引擎（存储 / 检索 / 蒸馏） | `memory.engine` |
 | `voice` | 语音识别（本地 sherpa-onnx / 在线服务商 / WASM） | `voice.service` |
-| `context` | 上下文引擎（拼接 / 压缩 / 自愈 / 遥测 / 文件索引） | `context.engine` |
+| `context` | 上下文引擎（拼接 / 压缩 / 自愈 / 遥测） | `context.engine` |
 | `agent` | ReAct 循环、会话与任务管理、事件流 | `agent.engine` |
 | `subagent` | Agent 注册表 + 一次性子代理运行 | `agent.registry`、`subagent.runner` |
 | `file-history` | 文件历史（编辑追踪 / 快照 / 回滚） | `file.history` |
@@ -233,7 +233,7 @@ moss version                # 查看当前版本
 | `fileHistory` | 文件历史备份数量、保留天数、转录开关 |
 | `filesys` | 授权 roots、读缓存上限、终端命令快照检测 |
 | `safety` | 默认权限模式、确认超时、危险命令拦截、规则与保护路径 |
-| `context` | 上下文压缩/修剪/自愈/遥测参数 |
+| `context` | 上下文压缩/自愈/遥测参数 |
 | `web` | 默认联网搜索服务商 |
 | `voice` | 语音输入开关、服务商、本地模型、语言 |
 

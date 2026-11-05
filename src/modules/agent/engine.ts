@@ -41,7 +41,6 @@ import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } 
 import type { PromptExtraSection } from '../context/compiler';
 import { buildCodeModePromptExtras } from '../tools/run_code/sdk';
 import { isPtcForbiddenTool } from '../tools/run_code/forbidden';
-import { DEFAULT_TOOL_PRUNING_CONFIG } from '../context/types';
 import type { RulesEngineServiceImpl } from '../rules/service';
 import type { HooksEngineServiceImpl } from '../hooks/service';
 import type { MemoryEngineServiceImpl } from '../memory/service';
@@ -1304,6 +1303,7 @@ export class AgentEngineImpl implements AgentEngine {
       'day-rollover',
       'active-rules',
       'memory-l1',
+      'project-context',
     ]);
     const nodes: Array<{ id: string; index: number; label: string }> = [];
     for (let i = 0; i < all.length; i++) {
@@ -2692,7 +2692,6 @@ export class AgentEngineImpl implements AgentEngine {
     const skillPrompt = skillName ? this.resolveSkillPrompt(skillName) : null;
     const systemContent = buildStaticSystemPrompt(this.env, skillPrompt, null, promptExtras ?? null);
     const view = buildRequestView(session, systemContent, {
-      toolPruning: DEFAULT_TOOL_PRUNING_CONFIG,
       resolveSkillPrompt: name => this.resolveSkillPrompt(name),
     });
     return view.messages;

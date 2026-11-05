@@ -53,6 +53,28 @@ export interface ScopedMemoryRecord extends MemoryRecord {
   scope: MemoryScope;
 }
 
+/** 召回分数构成（可观测：设置页/记忆搜索展示相关度与分项） */
+export interface MemoryScoreBreakdown {
+  /** 字段加权 BM25 原始分 */
+  bm25: number;
+  /** 短语精确命中倍数（1 = 未命中） */
+  phraseBoost: number;
+  /** 重要性倍数 */
+  importanceBoost: number;
+  /** 时间衰减倍数 */
+  recencyBoost: number;
+  /** 置顶倍数 */
+  pinnedBoost: number;
+  /** 最终分（bm25 × 各倍数） */
+  final: number;
+}
+
+/** 带召回分数的记忆（searchScored / 召回调试返回） */
+export interface ScoredMemoryRecord extends ScopedMemoryRecord {
+  score: number;
+  breakdown: MemoryScoreBreakdown;
+}
+
 /** 记忆写入输入 */
 export interface MemoryUpsertInput {
   wing: string;

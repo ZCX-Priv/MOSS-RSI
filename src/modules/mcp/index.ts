@@ -45,10 +45,18 @@ class McpModule implements Module {
     });
 
     // 监听配置变更，重载 MCP 服务器。
-    // 仅响应 app（config.json）：MCP 服务器定义只存在于 config.json 与 mcps/*.json；
-    // api.json 仅含 LLM providers，与 MCP 无关，避免无关变更触发全量重连。
+    // 仅响应 app（config.json）且仅当 MCP 相关配置（mcp 段 / 已弃用的 mcpServers）变化时才重载：
+    // 服务器定义主要来自 ~/.moss/mcps/*.json，tools/context/logs 等无关配置不应断开重连所有 MCP 连接。
+    const mcpFingerprint = (): string => {
+      const cfg = ctx.config.getAppConfig();
+      return JSON.stringify({ mcp: cfg.mcp ?? null, mcpServers: cfg.mcpServers ?? null });
+    };
+    let lastMcpFingerprint = mcpFingerprint();
     ctx.config.onChange((which) => {
       if (which !== 'app') return;
+      const next = mcpFingerprint();
+      if (next === lastMcpFingerprint) return;
+      lastMcpFingerprint = next;
       this.manager?.reloadAll().catch(err => {
         ctx.logger.error(t('mcp.reloadFailed'), {
           error: err instanceof Error ? err.message : String(err),

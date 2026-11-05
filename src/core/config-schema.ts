@@ -244,7 +244,7 @@ const logsSchema = z.object({
   maxFileMb: z.number().min(1).max(100).default(10),
 });
 
-// context：上下文引擎配置（压缩/工具结果修剪/自愈/遥测）
+// context：上下文引擎配置（压缩/自愈/遥测）
 const contextSchema = z.object({
   compaction: z
     .object({
@@ -260,14 +260,6 @@ const contextSchema = z.object({
       cooldownMs: z.number().int().min(0).default(60000),
     })
     .prefault({}),
-  toolPruning: z
-    .object({
-      enabled: z.boolean().default(true),
-      thresholdChars: z.number().int().positive().default(8192),
-      keepHeadChars: z.number().int().positive().default(4096),
-      keepTailChars: z.number().int().positive().default(1024),
-    })
-    .prefault({}),
   healer: z
     .object({
       enabled: z.boolean().default(true),
@@ -278,20 +270,6 @@ const contextSchema = z.object({
   telemetry: z
     .object({
       enabled: z.boolean().default(true),
-    })
-    .prefault({}),
-  fileIndex: z
-    .object({
-      indexing: z.object({ enabled: z.boolean().default(false) }).prefault({}),
-      graph: z.object({ enabled: z.boolean().default(false) }).prefault({}),
-      sag: z
-        .object({
-          enabled: z.boolean().default(false),
-          llmModel: z.string().default('inherit'),
-          llmMaxChunks: z.number().int().min(0).max(100000).default(2000),
-        })
-        .prefault({}),
-      ignore: z.array(z.string()).default([]),
     })
     .prefault({}),
   rules: z
@@ -316,6 +294,14 @@ const contextSchema = z.object({
       recallTokenBudget: z.number().int().positive().default(2000),
       l1ImportanceThreshold: z.number().min(0).max(1).default(0.75),
       l1MaxEntries: z.number().int().min(1).max(100).default(20),
+      recallInsightWeight: z.number().min(0).max(10).default(2.0),
+      recallTagWeight: z.number().min(0).max(10).default(1.5),
+      recallVerbatimWeight: z.number().min(0).max(10).default(1.0),
+      recallRecencyHalfLifeDays: z.number().min(1).max(3650).default(30),
+      recallPinnedBoost: z.number().min(1).max(10).default(1.15),
+      recallDedupThreshold: z.number().min(0).max(1).default(0.8),
+      recallMinScoreRatio: z.number().min(0).max(1).default(0.25),
+      recallMaxPerRoom: z.number().int().min(0).max(100).default(0),
     })
     .prefault({}),
   imageOptimization: z

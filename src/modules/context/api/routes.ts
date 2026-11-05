@@ -5,8 +5,6 @@
 //   GET  /api/context/:sessionId/compact-preview  手动压缩预览（确认框数据）
 //   POST /api/context/:sessionId/compact          手动压缩（运行中 409；body: { focus? }）
 //   GET  /api/context/summary-models              可选摘要模型列表
-//   GET  /api/context/file-index/status           文件索引三引擎状态（?cwd=）
-//   POST /api/context/file-index/rebuild          手动重建（body: { cwd, engines? }）
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../../server/types';
 import { ServiceNames } from '../../../core/types';
@@ -81,42 +79,5 @@ export function createSummaryModelsHandler(services: ServicesLike): RouteHandler
     const engine = resolveEngine(services);
     if (!engine) return { status: 503, body: { error: 'context engine unavailable' } };
     return { status: 200, body: { models: engine.getSummaryModels() } };
-  };
-}
-
-/** 文件索引状态（?cwd= 缺省取服务进程 cwd；索引开启时顺带主动建运行时/扫描） */
-export function createFileIndexStatusHandler(services: ServicesLike): RouteHandler {
-  return async (req: HttpRequest): Promise<HttpResponse> => {
-    const engine = resolveEngine(services);
-    if (!engine) return { status: 503, body: { error: 'context engine unavailable' } };
-    const url = new URL(req.url, 'http://localhost');
-    const cwd = url.searchParams.get('cwd') || process.cwd();
-    const svc = engine.getFileIndex();
-    if (svc.getConfig().indexing.enabled) {
-      // 无既有运行时则触发建库扫描（幂等、不阻塞本次状态读取；后续 WS/轮询反映进度）
-      void svc.ensureProject(cwd).catch(() => {
-        // 触发失败静默
-      });
-    }
-    const status = await svc.status(cwd);
-    return { status: 200, body: status };
-  };
-}
-
-/** 手动重建文件索引（body: { cwd?, engines?: ('indexing'|'graph'|'sag')[] }） */
-export function createFileIndexRebuildHandler(services: ServicesLike): RouteHandler {
-  return async (req: HttpRequest): Promise<HttpResponse> => {
-    const engine = resolveEngine(services);
-    if (!engine) return { status: 503, body: { error: 'context engine unavailable' } };
-    const body = (req.body ?? {}) as { cwd?: unknown; engines?: unknown };
-    const cwd = typeof body.cwd === 'string' && body.cwd !== '' ? body.cwd : process.cwd();
-    const validEngines = ['indexing', 'graph', 'sag'] as const;
-    const engines = Array.isArray(body.engines)
-      ? body.engines.filter((e): e is (typeof validEngines)[number] =>
-          typeof e === 'string' && (validEngines as readonly string[]).includes(e))
-      : [...validEngines];
-    const ok = await engine.getFileIndex().rebuild(cwd, engines);
-    if (!ok) return { status: 400, body: { ok: false, error: 'file index module disabled' } };
-    return { status: 200, body: { ok: true } };
   };
 }

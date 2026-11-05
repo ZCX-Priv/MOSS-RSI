@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search, ChevronDown } from 'lucide-react';
+import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -20,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import {
   Dialog,
   DialogBody,
@@ -77,6 +78,14 @@ export function MemorySettingsSection() {
       recallTokenBudget: 2000,
       l1ImportanceThreshold: 0.75,
       l1MaxEntries: 20,
+      recallInsightWeight: 2.0,
+      recallTagWeight: 1.5,
+      recallVerbatimWeight: 1.0,
+      recallRecencyHalfLifeDays: 30,
+      recallPinnedBoost: 1.15,
+      recallDedupThreshold: 0.8,
+      recallMinScoreRatio: 0.25,
+      recallMaxPerRoom: 0,
     };
   const models = apiConfig?.providers.flatMap(p => p.models) ?? [];
   // 当前工作目录：记忆按任务 cwd 分项目落盘，列表/宫殿树需带 cwd 才能读到项目翼记忆
@@ -351,6 +360,147 @@ export function MemorySettingsSection() {
               onChange={(e) => patchMemory({ l1MaxEntries: Number(e.target.value) || 20 })}
             />
           </div>
+
+          {/* 召回调优（高级）：字段权重 / 时间衰减 / 去重 / 配额（默认折叠） */}
+          <Collapsible defaultOpen={false}>
+            <CollapsibleTrigger className="group flex w-full items-center gap-1.5 border-t border-border/60 py-3 text-left">
+              <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-sm font-medium text-foreground">{t('settings.memory.recallTuning')}</span>
+                <span className="text-xs text-muted-foreground">{t('settings.memory.recallTuningDesc')}</span>
+              </span>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallInsightWeight')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallInsightWeightDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={10}
+              step={0.1}
+              className="w-24"
+              value={memoryConfig.recallInsightWeight ?? 2.0}
+              onChange={(e) => patchMemory({ recallInsightWeight: Number(e.target.value) })}
+            />
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallTagWeight')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallTagWeightDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={10}
+              step={0.1}
+              className="w-24"
+              value={memoryConfig.recallTagWeight ?? 1.5}
+              onChange={(e) => patchMemory({ recallTagWeight: Number(e.target.value) })}
+            />
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallVerbatimWeight')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallVerbatimWeightDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={10}
+              step={0.1}
+              className="w-24"
+              value={memoryConfig.recallVerbatimWeight ?? 1.0}
+              onChange={(e) => patchMemory({ recallVerbatimWeight: Number(e.target.value) })}
+            />
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallHalfLife')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallHalfLifeDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={3650}
+              className="w-24"
+              value={memoryConfig.recallRecencyHalfLifeDays ?? 30}
+              onChange={(e) => patchMemory({ recallRecencyHalfLifeDays: Number(e.target.value) || 30 })}
+            />
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallPinnedBoost')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallPinnedBoostDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={10}
+              step={0.05}
+              className="w-24"
+              value={memoryConfig.recallPinnedBoost ?? 1.15}
+              onChange={(e) => patchMemory({ recallPinnedBoost: Number(e.target.value) || 1.15 })}
+            />
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallDedup')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallDedupDesc')}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={memoryConfig.recallDedupThreshold ?? 0.8}
+                onChange={(e) => patchMemory({ recallDedupThreshold: Number(e.target.value) })}
+                className="w-32"
+              />
+              <span className="w-8 text-right text-xs tabular-nums text-muted-foreground">
+                {(memoryConfig.recallDedupThreshold ?? 0.8).toFixed(2)}
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 border-b border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallMinScore')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallMinScoreDesc')}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={memoryConfig.recallMinScoreRatio ?? 0.25}
+                onChange={(e) => patchMemory({ recallMinScoreRatio: Number(e.target.value) })}
+                className="w-32"
+              />
+              <span className="w-8 text-right text-xs tabular-nums text-muted-foreground">
+                {(memoryConfig.recallMinScoreRatio ?? 0.25).toFixed(2)}
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.memory.recallMaxPerRoom')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.memory.recallMaxPerRoomDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              className="w-24"
+              value={memoryConfig.recallMaxPerRoom ?? 0}
+              onChange={(e) => patchMemory({ recallMaxPerRoom: Math.max(0, Number(e.target.value) || 0) })}
+            />
+          </div>
+            </CollapsibleContent>
+          </Collapsible>
         </div>
       </div>
 
@@ -473,6 +623,11 @@ export function MemorySettingsSection() {
                       <Badge variant="outline" className="text-[10px] tabular-nums">
                         ★{m.importance.toFixed(2)}
                       </Badge>
+                      {typeof m.score === 'number' && (
+                        <Badge className="bg-emerald-600/15 text-[10px] tabular-nums text-emerald-600">
+                          {t('settings.memory.relevance')} {m.score.toFixed(2)}
+                        </Badge>
+                      )}
                       {m.tags.map(tag => (
                         <Badge key={tag} variant="outline" className="text-[10px] text-muted-foreground">
                           #{tag}

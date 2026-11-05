@@ -595,18 +595,25 @@ export class WsHandler {
           if (currentGuideMessages.length > 0) {
             currentGuideMessages.shift();
           }
-          // 发送旧 run 的 task.done，前端据此结束旧 run 的流式状态
-          this.sendEvent(sessionId, {
-            type: 'task.done',
-            sessionId: result.sessionId,
-            payload: { finishReason: 'aborted', finalText: result.finalText, runId: currentRunId },
-          });
-          // 取前端为引导消息生成的 runId（若无则随机）
+          // 新 run 身份先算出来：task.done 必须携带 nextRunId，前端才能在旧 run 收尾的同一刻
+          // 切换到新 run（否则新 run 的流式分片会被前端旧 runId 过滤全部丢弃）。
           const runIdArr = this.guideRunIds.get(sessionId);
-          currentRunId = runIdArr?.shift() ?? `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const nextRunId = runIdArr?.shift() ?? `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           if (runIdArr && runIdArr.length === 0) {
             this.guideRunIds.delete(sessionId);
           }
+          // 发送旧 run 的 task.done，前端据此结束旧 run 的流式状态并承接新 run
+          this.sendEvent(sessionId, {
+            type: 'task.done',
+            sessionId: result.sessionId,
+            payload: {
+              finishReason: 'aborted',
+              finalText: result.finalText,
+              runId: currentRunId,
+              nextRunId,
+            },
+          });
+          currentRunId = nextRunId;
           currentMessage = result.guideMessage;
           currentAttachments = result.guideAttachments;
           // 新 run 的消息身份：取被消费的那条引导消息自带的 id（避免沿用上一条消息的 id）
@@ -618,16 +625,22 @@ export class WsHandler {
         // 正常完成：检查是否有迟到的引导消息（engine 最后一轮未检测到）
         if (!abortController.signal.aborted && currentGuideMessages.length > 0) {
           const guideMsg = currentGuideMessages.shift()!;
-          this.sendEvent(sessionId, {
-            type: 'task.done',
-            sessionId: result.sessionId,
-            payload: { finishReason: result.finishReason, finalText: result.finalText, runId: currentRunId },
-          });
           const runIdArr = this.guideRunIds.get(sessionId);
-          currentRunId = runIdArr?.shift() ?? `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const nextRunId = runIdArr?.shift() ?? `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           if (runIdArr && runIdArr.length === 0) {
             this.guideRunIds.delete(sessionId);
           }
+          this.sendEvent(sessionId, {
+            type: 'task.done',
+            sessionId: result.sessionId,
+            payload: {
+              finishReason: result.finishReason,
+              finalText: result.finalText,
+              runId: currentRunId,
+              nextRunId,
+            },
+          });
+          currentRunId = nextRunId;
           currentMessage = guideMsg.message;
           currentAttachments = guideMsg.attachments;
           currentClientMessageId = guideMsg.clientMessageId;
