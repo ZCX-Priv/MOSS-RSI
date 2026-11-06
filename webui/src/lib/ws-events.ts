@@ -105,6 +105,13 @@ function eventRunIdOf(msg: WSMessage): string | undefined {
 const RUN_ADOPT_GRACE_MS = 5_000;
 
 /**
+ * 无身份 `task.updated { running:false }` 的宽松期（ms）。
+ * 与 store 里「任务列表 running」的宽限口径一致：刚发起的本地 run 在这段时间内
+ * 绝不能被一条无法指名 run 的空闲广播熄灭/终止（否则新 run 会被列入终止集合）。
+ */
+const RUN_IDLE_GRACE_MS = 60_000;
+
+/**
  * 以服务端权威 runId 对齐本地 activeRun。
  *
  * 为什么必须对齐：前端 runId 过滤（AGENT_STREAM_EVENT_TYPES）只放行与本地 activeRun
@@ -306,6 +313,18 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
   // 「停止后内容继续增长 / 已停止又跳回运行中」。
   const eventRunId = eventRunIdOf(msg);
   if (sessionId && s.isRunTerminated(sessionId, eventRunId)) {
+    // 唯一例外：引导续跑交接。后端已消费引导并在同一 while 中启动了 nextRunId；
+    // 若因「本轮刚被本地停止」而丢掉这条 task.done，新 run 的所有事件都会被旧簿记
+    // 过滤掉（nextRunId 只在这里送达），表现为永久「响应中」且无自愈路径。
+    const nextRunId = (msg.payload as { nextRunId?: unknown } | undefined)?.nextRunId;
+    if (msg.type === 'task.done' && typeof nextRunId === 'string' && nextRunId) {
+      diagAlways('runid-handoff-adopt', { sessionId, eventRunId, nextRunId });
+      pendingRunId.set(sessionId, nextRunId);
+      // 只消费本次交接的一条；后端队列里剩余引导仍会按 FIFO 继续交接
+      pendingGuideRunIds.shift(sessionId);
+      useStore.getState().beginRun(sessionId, nextRunId);
+      return;
+    }
     noteStreamRunIdDrop(sessionId);
     diagAlways('stream-terminated-drop', { type: msg.type, eventRunId, sessionId });
     return;
@@ -315,6 +334,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     if (eventRunId && currentRunId && eventRunId !== currentRunId) {
       noteStreamRunIdDrop(sessionId);
       diagAlways('stream-runid-drop', { type: msg.type, eventRunId, currentRunId, sessionId });
+      // 不静默等死：一次权威对账就能用 /state 的 liveDraft 把内容接回来
+      //（requestStreamResync 自带 1s 冷却，不会形成请求风暴）。
+      requestStreamResync(sessionId);
       return;
     }
     // 账本：先记「收到」（后续是否被 store 应用/丢弃由 stream-buffer 归因）
@@ -699,7 +721,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (sessionId) {
         // 失败终止：未生效的引导不会被执行（后端 run 已结束）
         pendingGuideRunIds.clear(sessionId);
-        s.finalizeStreamingMessages(sessionId);
+        s.finalizeStreamingMessages(sessionId, eventRunId);
         s.addMessage(sessionId, {
           // 稳定身份：与后端持久化 system-error 消息同 id（`<sid>#<turn>#error`）→
           // catchUpTail 合并时原位 patch，实时与刷新后只渲染一条错误卡片。
@@ -728,7 +750,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         nextRunId?: string;
       };
       if (sessionId) {
-        s.finalizeStreamingMessages(sessionId);
+        // 只定稿本轮消息：引导交接时新 run 可能已开始流式，不能把它的消息一并定稿
+        s.finalizeStreamingMessages(sessionId, doneEvent.runId ?? eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -795,7 +818,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       const taskDoneEvent = (msg.payload ?? {}) as { runId?: string; nextRunId?: string };
       if (sessionId) {
-        s.finalizeStreamingMessages(sessionId);
+        // 只定稿本轮消息（同 done：交接瞬间不得定稿下一轮已在流式的消息）
+        s.finalizeStreamingMessages(sessionId, eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -829,7 +853,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (sessionId) {
         // 未生效的引导随停止一并作废（后端已中止，不会再续跑）
         pendingGuideRunIds.clear(sessionId);
-        s.finalizeStreamingMessages(sessionId);
+        s.finalizeStreamingMessages(sessionId, eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -1093,17 +1117,44 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       break;
     }
     case 'task.updated': {
-      const payload = (msg.payload ?? {}) as { task?: TaskItem; taskId?: string; running?: boolean };
+      const payload = (msg.payload ?? {}) as {
+        task?: TaskItem;
+        taskId?: string;
+        running?: boolean;
+        /** 该广播所描述的那一轮 run 身份（后端新增；旧后端缺省） */
+        runId?: string;
+      };
       const st = useStore.getState();
       if (typeof payload.running === 'boolean') {
         const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
-        // 运行态是权威信号（后端 run 生命周期广播）：升只补位、降统一走 terminateRun
-        // （终止集合 + 定稿本轮消息），避免只熄灭一个 UI 标志而留下流式草稿继续增长。
         if (sid) {
+          const localRunId = st.activeRunBySession[sid]?.runId ?? pendingRunId.get(sid);
           if (payload.running) {
             if (!st.activeRunBySession[sid]) st.setGenerating(sid, true);
+            // 权威 runId 对齐：其它标签页 / 自动化发起的 run 也要能被本端正确接收
+            adoptAuthoritativeRunId(sid, payload.runId);
+          } else if (payload.runId !== undefined) {
+            if (localRunId && localRunId !== payload.runId) {
+              // 这条 false 属于已被顶替的旧 run（典型：停止后立刻中断发送、排队自动续发、
+              // 旧 run 收尾广播晚于新 run 发起）。绝不能终止「当前 run」——那会把新 runId
+              // 记入终止集合，使它的全部事件（含终态）在入口被永久丢弃，永远停在「响应中」。
+              diagAlways('runid-terminate-skip', {
+                sessionId: sid,
+                eventRunId: payload.runId,
+                localRunId,
+              });
+              requestStreamResync(sid);
+            } else {
+              st.terminateRun(sid, payload.runId);
+            }
           } else {
-            st.terminateRun(sid);
+            // 旧后端（无身份空闲广播）：本地 run 在宽松期内不降级，只做权威对账。
+            const startedAt = st.activeRunBySession[sid]?.startedAt;
+            if (startedAt !== undefined && Date.now() - startedAt < RUN_IDLE_GRACE_MS) {
+              requestStreamResync(sid);
+            } else {
+              st.terminateRun(sid);
+            }
           }
         }
       }

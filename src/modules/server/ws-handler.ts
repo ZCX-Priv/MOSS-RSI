@@ -211,6 +211,12 @@ export class WsHandler {
   private readonly abortedRunIds = new Map<string, Set<string>>();
   /** 每个 session 保留的已中止 runId 上限 */
   private static readonly MAX_ABORTED_RUN_IDS = 4;
+  /**
+   * 终态事件：即使所属 run 已被显式中止也必须送达客户端。
+   * 否则「用户停止恰好撞上引导续跑」时，携带 nextRunId 的 task.done 会被
+   * isRunAborted 过滤掉，前端永远接不到新 run，表现为永久「响应中」。
+   */
+  private static readonly TERMINAL_EVENT_TYPES = new Set(['task.aborted', 'task.done', 'error']);
   /** 引导消息数组（可变引用，传给 engine.run；handleTaskGuide 在运行期间向其 push 消息） */
   private readonly guideMessageArrays = new Map<string, GuidanceMessage[]>();
   /** 引导消息对应的 runId 队列（前端为每条引导消息生成 runId，用于新 run 的事件隔离） */
@@ -372,13 +378,17 @@ export class WsHandler {
     if (prevController && prevController !== controller) {
       prevController.abort();
     }
-    // 运行态变化 → 广播（侧边栏实时转圈，刷新后也不丢）
+    // 运行态变化 → 广播（侧边栏实时转圈，刷新后也不丢）。
+    // 外部 run（automation/MCP）没有 runId 身份，activeRunIds 里的值可能是上一次用户 run
+    // 的残留 → 此处刻意不传身份，避免前端把本地 run 对齐到一个已结束的 id。
     if (!wasRunning) this.broadcastTaskRunning(sessionId, true);
   }
 
   /** 注销外部活跃 run（仅当注册的 controller 仍是当前活跃 run 时移除，防误删用户新 run） */
   unregisterExternalRun(sessionId: string, controller: AbortController): void {
     if (this.activeRuns.get(sessionId) === controller) {
+      // 外部 run 没有身份（activeRunIds 可能是上次用户 run 的残留），故不携带 runId：
+      // 前端对无身份空闲广播走「宽松期 + 权威对账」分支，不会误终止刚发起的新 run。
       this.activeRuns.delete(sessionId);
       this.activeRunIds.delete(sessionId);
       this.broadcastTaskRunning(sessionId, false);
@@ -395,7 +405,7 @@ export class WsHandler {
    * 所有客户端（含新开的标签页）据此实时更新侧边栏转圈 / 空闲态，无需轮询或刷新。
    * task 元信息由 agent 引擎补齐；隐藏会话（subagent 等）取不到时仅发 taskId + running。
    */
-  private broadcastTaskRunning(sessionId: string, running: boolean): void {
+  private broadcastTaskRunning(sessionId: string, running: boolean, runId?: string): void {
     try {
       const agent = this.services.tryResolve<AgentEngine & { getTask?: (id: string) => unknown }>(
         ServiceNames.AGENT_ENGINE,
@@ -403,7 +413,9 @@ export class WsHandler {
       const task = agent?.getTask?.(sessionId) ?? null;
       this.broadcast({
         type: 'task.updated',
-        payload: { taskId: sessionId, running, ...(task ? { task } : {}) },
+        // runId 是运行态广播的身份：前端据此只终止「该 run」，绝不把刚发起的新 run
+        // 当作被终止对象（否则新 runId 会进终止集合，其全部事件被永久丢弃）。
+        payload: { taskId: sessionId, running, ...(runId ? { runId } : {}), ...(task ? { task } : {}) },
       });
     } catch {
       // 广播失败不影响任务
@@ -467,11 +479,12 @@ export class WsHandler {
 
   /**
    * 发送 agent 事件：高频流式类型进合帧缓冲，其余类型先冲刷缓冲再发（保序）。
-   * 已中止 run 的事件直接丢弃（task.aborted 自身除外），杜绝停止后的残流。
+   * 已中止 run 的**非终态**事件直接丢弃，杜绝停止后的残流；终态事件必须送达，
+   * 否则引导续跑的 nextRunId 交接会丢失（前端永久「响应中」）。
    */
   private sendEvent(sessionId: string, msg: { type: string; sessionId: string; payload: Record<string, unknown> }): void {
     const runId = typeof msg.payload.runId === 'string' ? msg.payload.runId : undefined;
-    if (runId && this.isRunAborted(sessionId, runId) && msg.type !== 'task.aborted') {
+    if (runId && this.isRunAborted(sessionId, runId) && !WsHandler.TERMINAL_EVENT_TYPES.has(msg.type)) {
       return;
     }
     if (this.batcher.isBatchable(msg.type)) {
@@ -555,8 +568,9 @@ export class WsHandler {
       if (prevController) {
         prevController.abort();
       }
-      // 首次进入运行态 → 广播（侧边栏实时转圈；引导续跑不重复广播）
-      if (!wasRunning) this.broadcastTaskRunning(sessionId, true);
+      // 首次进入运行态 → 广播（侧边栏实时转圈；引导续跑不重复广播）。
+      // 携带本轮 runId：其它标签页/客户端据此把本地 run 对齐到真实身份，避免事件被过滤。
+      if (!wasRunning) this.broadcastTaskRunning(sessionId, true, currentRunId);
 
       const onEvent = (event: AgentEvent) => {
         // 用户已停止：不再把 engine 收尾阶段的分片/工具事件发往前端。
@@ -692,7 +706,13 @@ export class WsHandler {
 
     // while 结束 = 本次运行收尾；若期间没有新 run 顶替则广播空闲态
     // （放在循环外：引导续跑会 continue，避免每次续跑都抖动一次运行态广播）
-    this.broadcastTaskRunning(sessionId, this.activeRuns.has(sessionId));
+    // 广播必须带身份：running=true 指向当前活跃 run，running=false 指向本 handler 最后结束的 run。
+    const stillRunning = this.activeRuns.has(sessionId);
+    this.broadcastTaskRunning(
+      sessionId,
+      stillRunning,
+      stillRunning ? this.activeRunIds.get(sessionId) : currentRunId,
+    );
 
     // 清理引导消息相关状态
     this.guideMessageArrays.delete(sessionId);

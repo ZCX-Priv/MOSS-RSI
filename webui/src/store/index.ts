@@ -43,6 +43,7 @@ import {
   appendTerminatedRunId,
   finalizeMessage,
   isRunTerminated,
+  withoutTerminatedRunId,
 } from '../lib/run-state';
 
 // ============================================================================
@@ -1314,6 +1315,11 @@ export const useStore = create<Store>((set, get) => ({
   beginRun: (sessionId, runId) =>
     set((state) => {
       const prev = state.activeRunBySession[sessionId];
+      // 根因防线：刚开始运行的 run 不可能合法地已在终止集合中，同名记录必是旧 run 的
+      // 无身份 running:false 广播留下的簿记污染。不在这里清洗，该 run 的全部事件会在
+      // ws-events 入口被永久丢弃（停在「响应中」且看门狗无法自愈）。
+      const prevTerminated = state.terminatedRunIdsBySession[sessionId];
+      const nextTerminated = withoutTerminatedRunId(prevTerminated, runId);
       return {
         activeRunBySession: {
           ...state.activeRunBySession,
@@ -1323,6 +1329,14 @@ export const useStore = create<Store>((set, get) => ({
             startedAt: Date.now(),
           },
         },
+        ...(nextTerminated !== prevTerminated
+          ? {
+              terminatedRunIdsBySession: {
+                ...state.terminatedRunIdsBySession,
+                [sessionId]: nextTerminated,
+              },
+            }
+          : {}),
         generatingBySession: { ...state.generatingBySession, [sessionId]: true },
         stoppingBySession: { ...state.stoppingBySession, [sessionId]: false },
         errorBySession: { ...state.errorBySession, [sessionId]: false },

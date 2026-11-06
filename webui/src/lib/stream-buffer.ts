@@ -145,6 +145,8 @@ interface StreamAccount {
   droppedRunId: number;
 }
 const accounts = new Map<string, StreamAccount>();
+/** 最近一次「分片真正写入 store」的时刻（sessionId → ms）：看门狗零进展自愈判定用 */
+const lastAppliedAt = new Map<string, number>();
 function accountOf(sessionId: string): StreamAccount {
   let a = accounts.get(sessionId);
   if (!a) {
@@ -164,12 +166,27 @@ export function noteStreamRunIdDrop(sessionId: string): void {
   accountOf(sessionId).droppedRunId++;
 }
 
+/** 记录一次成功落库（高频路径：仅 Map.set，无额外分配） */
+export function noteStreamApplied(sessionId: string): void {
+  lastAppliedAt.set(sessionId, Date.now());
+}
+
+/**
+ * 读取最近一次成功落库时刻。
+ * undefined = 本会话在此期间没有任何分片落地 → 看门狗据此触发一次权威对账，
+ * 把「流被静默丢弃」造成的永久「响应中」降级为最多一个 tick 的延迟。
+ */
+export function getLastStreamAppliedAt(sessionId: string): number | undefined {
+  return lastAppliedAt.get(sessionId);
+}
+
 /**
  * 一轮结束时输出账本（生产也输出：仅在异常/对账时触发，低频）。
  * 判定口径：received==0 → 后端没发/WS 没到；received>0 且 applied==0 → 前端丢流（看 dropped* 归因）。
  */
 export function dumpStreamAccounting(sessionId: string): void {
   const a = accounts.get(sessionId);
+  lastAppliedAt.delete(sessionId);
   if (!a) return;
   accounts.delete(sessionId);
   if (a.received === 0 && a.droppedRunId === 0) return; // 无流式事件（纯工具/错误轮）：不产生噪音
@@ -286,6 +303,7 @@ export function resetStreamBuffer(
     // resync 冷却 / 缺口暂存 / 重试计数：仅当没有需要保留的消息时才整体清理
     // （否则会丢掉新一轮正在等待对齐的暂存分片）
     if (preserve.size === 0) {
+      lastAppliedAt.delete(sessionId);
       for (const key of Array.from(resyncRequestedAt.keys())) {
         if (key.startsWith(`${sessionId}|`)) resyncRequestedAt.delete(key);
       }
@@ -304,6 +322,7 @@ export function resetStreamBuffer(
   resyncRequestedAt.clear();
   pendingAfterResync.clear();
   resyncReplayRetries.clear();
+  lastAppliedAt.clear();
 }
 
 /** 用服务端草稿/历史恢复出的长度回填缓存（刷新恢复后接流的关键一步） */
@@ -549,6 +568,7 @@ function applyText(op: PendingText): void {
       st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, op.text, op.thinkingStreaming);
       lengthCache.set(rk, (known ?? 0) + op.text.length);
       accountOf(op.sessionId).applied++;
+      noteStreamApplied(op.sessionId);
       const pendingForced = pendingAssistant.get(op.sessionId);
       if (pendingForced && pendingForced.id === op.messageId) {
         pendingAssistant.set(op.sessionId, {
@@ -576,6 +596,7 @@ function applyText(op: PendingText): void {
   st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, slice, op.thinkingStreaming);
   lengthCache.set(rk, (known ?? 0) + slice.length);
   accountOf(op.sessionId).applied++;
+  noteStreamApplied(op.sessionId);
   const pending = pendingAssistant.get(op.sessionId);
   if (pending && pending.id === op.messageId) {
     pendingAssistant.set(op.sessionId, {
@@ -607,6 +628,7 @@ function applyToolArgs(op: PendingToolArgs): void {
     : [...toolCalls, { id: op.toolCallId, name: '', arguments: slice, status: 'generating' as const }];
   st.updateMessage(op.sessionId, op.messageId, { toolCalls: updated });
   accountOf(op.sessionId).applied++;
+  noteStreamApplied(op.sessionId);
   if (pending && pending.id === op.messageId) {
     pendingAssistant.set(op.sessionId, { ...pending, toolCalls: updated });
   }

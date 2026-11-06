@@ -18,7 +18,13 @@ import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { useStore } from '../store';
 import { pendingAssistant, pendingGuideRunIds, pendingRunId } from '../lib/pending-assistant';
-import { flushPending, finishResync, onStreamResyncNeeded, resetStreamBuffer } from '../lib/stream-buffer';
+import {
+  flushPending,
+  finishResync,
+  getLastStreamAppliedAt,
+  onStreamResyncNeeded,
+  resetStreamBuffer,
+} from '../lib/stream-buffer';
 import {
   adoptAuthoritativeRunId,
   attachLiveDraft,
@@ -70,6 +76,11 @@ const WATCHDOG_INTERVAL_MS = 15_000;
 const WATCHDOG_GRACE_MS = 20_000;
 /** 连续 N 次读到后端「非运行」才判定终态事件丢失（防止单次抖动误收尾） */
 const WATCHDOG_FALSE_STREAK = 2;
+/**
+ * 生成中「零进展」阈值（ms）：后端确认在跑、但本地超过该时长没有任何分片落地，
+ * 或服务端草稿明显领先本地 → 用 /state 草稿做一次权威对账（最多一个 tick 的延迟）。
+ */
+const STREAM_IDLE_RECONCILE_MS = 10_000;
 /**
  * 本地 run 的「新鲜窗口」：超过该时长仍没有任何进展，才允许被旧快照/看门狗收敛。
  * 覆盖「发送后后端注册 run 的竞态」与「长工具执行期间无流式分片」的两种情况。
@@ -275,6 +286,15 @@ export function useSessionHistory(
       // 权威 runId 对齐：本地 activeRun 指向旧 run 时，新 run 的流式分片会被 runId 过滤全部丢弃
       adoptAuthoritativeRunId(sessionId, state.runId);
     } else if (opts?.allowIdleConverge && !state.liveDraft && st.generatingBySession[sessionId]) {
+      // 刚发起、后端尚未注册 run 的窗口内不得按空闲态收敛：否则会把新 runId 记入
+      // 终止集合，使该轮全部事件被永久丢弃（这是「响应中」永挂的第二处入口）。
+      // 与 session.subscribed 快照的 RUN_STALE_GRACE_MS 同口径。
+      const activeRun = st.activeRunBySession[sessionId];
+      const fresh = !!activeRun && Date.now() - activeRun.startedAt < RUN_STALE_GRACE_MS;
+      if (fresh) {
+        finishResync(sessionId);
+        return;
+      }
       // 后端已空闲且无半截草稿：先补齐服务端正式消息（保留半截内容），再做权威收敛
       await catchUpTail(sessionId, false);
       const cur = useStore.getState();
@@ -582,17 +602,38 @@ export function useSessionHistory(
       if (disposed) return;
       if (useStore.getState().generatingBySession[taskId] !== true) return;
       if (Date.now() - startedAt < WATCHDOG_GRACE_MS) return;
-      let running: boolean;
+      let state: SessionState;
       try {
-        const state = await api.getSessionState(taskId);
+        state = await api.getSessionState(taskId);
         if (disposed) return;
-        running = state.running;
       } catch {
         // /state 不可用（后端重启窗口）：保持现状，下个周期再试
         return;
       }
-      if (running) {
+      if (state.running) {
         falseStreak = 0;
+        // 后端确认在跑，但本地长时间没有分片落地 / 服务端草稿领先：说明流被静默丢弃
+        //（runId 误过滤、慢客户端丢帧等）。用权威草稿全量对齐一次，把「永久响应中」
+        // 降级为最多一个 tick 的延迟；草稿与本地等长时不触发，避免无意义覆盖。
+        const draft = state.liveDraft;
+        if (draft && draft.messageId) {
+          const local = (useStore.getState().messagesBySession[taskId] ?? []).find(
+            (m) => m.id === draft.messageId,
+          );
+          const localLen = local ? local.content.length + (local.thinking ?? '').length : 0;
+          const serverLen = draft.contentLength + draft.thinkingLength;
+          const lastApplied = getLastStreamAppliedAt(taskId);
+          const idleMs = lastApplied === undefined ? Infinity : Date.now() - lastApplied;
+          if (idleMs > STREAM_IDLE_RECONCILE_MS && serverLen > localLen) {
+            diagAlways('generation-watchdog-reconcile', {
+              sessionId: taskId,
+              localLen,
+              serverLen,
+              idleMs,
+            });
+            void reconcileFromState(taskId).catch(() => {});
+          }
+        }
         return;
       }
       falseStreak++;
@@ -628,7 +669,7 @@ export function useSessionHistory(
       if (timer !== null) clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [taskId, isGenerating, catchUpTail]);
+  }, [taskId, isGenerating, catchUpTail, reconcileFromState]);
 
   // ==========================================================================
   // WS 重连：重新对齐（覆盖断线期间错过的消息 / 草稿推进 / 运行态变化）

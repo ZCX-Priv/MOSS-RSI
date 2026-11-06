@@ -30,6 +30,22 @@ export function isRunTerminated(
   return Array.isArray(list) && list.includes(runId);
 }
 
+/**
+ * 从终止集合中移除指定 runId（无需变更时返回原引用）。
+ *
+ * 用于「新一轮开始」：一个刚开始运行的 run 不可能合法地已被终止，出现同名记录
+ * 只可能是旧 run 的无身份 running:false 广播留下的簿记污染。不清掉它，该 run 的
+ * 全部事件（含终态）都会在 ws-events 入口被永久丢弃 —— 表现为永远停在「响应中」。
+ */
+export function withoutTerminatedRunId(
+  list: string[] | undefined,
+  runId: string,
+): string[] | undefined {
+  if (!Array.isArray(list) || !list.includes(runId)) return list;
+  const next = list.filter((id) => id !== runId);
+  return next.length > 0 ? next : undefined;
+}
+
 /** 追加终止 runId（去重 + FIFO 截断）；无需变更时返回原引用 */
 export function appendTerminatedRunId(
   list: string[] | undefined,
