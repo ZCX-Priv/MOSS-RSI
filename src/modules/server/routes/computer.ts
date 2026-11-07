@@ -1,11 +1,12 @@
 // src/modules/server/routes/computer.ts
 // GET  /api/computer/status     - 驱动/连接/暂停状态 + 最近活动
 // GET  /api/computer/windows    - 窗口列表（面板目标选择器）
+// GET  /api/computer/health     - 驱动健康检查（权限/平台能力诊断）
 // GET  /api/computer/screenshot - 面板实时画面（PNG 字节）
-// POST /api/computer/install    - 安装 cua-driver（仅 Windows；用户显式触发）
+// POST /api/computer/install    - 安装 cua-driver（用户显式触发）
 // POST /api/computer/control    - pause / resume / reconnect
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
 import type { ConfigService, ServiceRegistry } from '../../../core/types';
 import { ServiceNames } from '../../../core/types';
@@ -16,6 +17,14 @@ const DEFAULT_MAX_IMAGE_DIMENSION = 1280;
 
 function resolveComputer(services: ServiceRegistry): ComputerService | null {
   return services.tryResolve<ComputerService>(ServiceNames.COMPUTER);
+}
+
+/** Android 等平台无法运行桌面驱动：直接拒绝，避免无谓拉起进程 */
+function unsupportedPlatform(service: ComputerService): HttpResponse | null {
+  return service.getStatus().supported ? null : {
+    status: 409,
+    body: { error: 'COMPUTER_UNSUPPORTED_PLATFORM' },
+  };
 }
 
 function computerMaxImageDimension(config: ConfigService): number {
@@ -99,12 +108,14 @@ export function createComputerStatusHandler(
     if (!service) {
       return { status: 503, body: { error: 'computer service unavailable' } };
     }
-    const sessionId = (req.query.sessionId ?? '').trim() || undefined;
+    const sessionId = (req.query.sessionId ?? '').trim();
     return {
       status: 200,
       body: {
         ...service.getStatus(),
-        activities: service.getActivities(sessionId),
+        // 无会话（新建对话 taskId 为空）时没有任何归属活动：
+        // 不能回退成全局列表，否则新会话面板会显示上一个会话的步骤。
+        activities: sessionId ? service.getActivities(sessionId) : [],
       },
     };
   };
@@ -117,6 +128,8 @@ export function createComputerWindowsHandler(services: ServiceRegistry): RouteHa
     if (!service) {
       return { status: 503, body: { error: 'computer service unavailable' } };
     }
+    const unsupported = unsupportedPlatform(service);
+    if (unsupported) return unsupported;
     const onScreenOnly = req.query.onScreenOnly !== '0';
     try {
       const result = await service.callTool(
@@ -137,6 +150,27 @@ export function createComputerWindowsHandler(services: ServiceRegistry): RouteHa
   };
 }
 
+/** GET /api/computer/health：驱动健康检查（权限/平台能力） */
+export function createComputerHealthHandler(services: ServiceRegistry): RouteHandler {
+  return async (): Promise<HttpResponse> => {
+    const service = resolveComputer(services);
+    if (!service) {
+      return { status: 503, body: { error: 'computer service unavailable' } };
+    }
+    const unsupported = unsupportedPlatform(service);
+    if (unsupported) return unsupported;
+    try {
+      const health = await service.checkHealth();
+      return { status: 200, body: { health } };
+    } catch (err) {
+      return {
+        status: 502,
+        body: { error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  };
+}
+
 /** GET /api/computer/screenshot?target=desktop|window&pid=&windowId=&maxDimension= */
 export function createComputerScreenshotHandler(
   services: ServiceRegistry,
@@ -147,6 +181,8 @@ export function createComputerScreenshotHandler(
     if (!service) {
       return { status: 503, body: { error: 'computer service unavailable' } };
     }
+    const unsupported = unsupportedPlatform(service);
+    if (unsupported) return unsupported;
 
     const target = (req.query.target ?? 'desktop').trim();
     const requestedMax = parseNumber(req.query.maxDimension);
@@ -171,6 +207,14 @@ export function createComputerScreenshotHandler(
       }
 
       const file = readFileSync(capture.path);
+      // 面板实时画面是临时产物：读入内存后立即删除，避免每 1.5s 堆积一个 PNG
+      if (capture.transient) {
+        try {
+          unlinkSync(capture.path);
+        } catch {
+          // 删除失败交给 live 目录的定期清理
+        }
+      }
       return {
         status: 200,
         headers: {

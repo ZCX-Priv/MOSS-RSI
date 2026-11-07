@@ -29,6 +29,8 @@ export interface BrowserToolConfig {
   autoDownloadChromeForTesting: boolean;
   autoInstallExtensions: boolean;
   allowEvaluate: boolean;
+  /** 操作前自动聚焦目标窗口（已在前台时 no-op；默认 true） */
+  autoFocus: boolean;
 }
 
 /** 桥接 WebSocket 服务状态 */
@@ -146,8 +148,19 @@ export interface BrowserOpenOptions {
   target?: BrowserTarget;
   url?: string;
   timeoutMs?: number;
+  /** 是否在打开后聚焦新标签页/窗口（缺省取工具配置 autoFocus；false 时后台建页，不抢焦点） */
+  focus?: boolean;
   /** 临时 CDP 端点；传入时本次及后续调用使用该端点（覆盖目标为 cdp） */
   cdpEndpoint?: string;
+}
+
+/** 聚焦结果（自动焦点/显式 focus 共用） */
+export interface BrowserFocusResult {
+  tab: string;
+  focused: boolean;
+  /** 目标无法聚焦，已回退到上一级标签页/窗口 */
+  fallback: boolean;
+  reason?: string;
 }
 
 /** 导航参数 */
@@ -179,12 +192,44 @@ export interface BrowserSnapshot {
   truncated: boolean;
 }
 
+export interface BrowserRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 标签页内的 iframe / OOPIF 子会话 */
+export interface BrowserFrameInfo {
+  /** 稳定标识：OOPIF=targetId；同进程 iframe=frameId */
+  frame: string;
+  frameId: string;
+  /** oopif=独立 CDP target；context=同进程 iframe（用隔离世界 contextId） */
+  mode: 'oopif' | 'context';
+  targetId?: string;
+  sessionId?: string;
+  contextId?: number;
+  url: string;
+  title: string;
+  active: boolean;
+  rect?: BrowserRect;
+}
+
 export interface BrowserScreenshot {
   path: string;
   data: string;
   mimeType: 'image/png';
   width?: number;
   height?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  dpr?: number;
+  /** 图像像素 / CSS 像素 */
+  scale?: number;
+  /** 截图所属 frame（顶层为 undefined） */
+  frame?: string;
+  /** 截图裁剪区域（CSS 像素） */
+  region?: BrowserRect;
 }
 
 export interface BrowserClickOptions {
@@ -196,6 +241,10 @@ export interface BrowserClickOptions {
   clickCount?: number;
   modifiers?: string[];
   timeoutMs?: number;
+  /** 目标 iframe（auto / targetId / URL 子串）；缺省顶层页面 */
+  frame?: string;
+  /** x/y 坐标系：viewport=CSS 视口；screenshot=最近一次截图上的像素 */
+  coordSpace?: 'viewport' | 'screenshot';
 }
 
 export interface BrowserHoverOptions {
@@ -217,6 +266,57 @@ export interface BrowserPressKeyOptions {
   key: string;
   modifiers?: string[];
   timeoutMs?: number;
+  frame?: string;
+}
+
+export interface BrowserHoldOptions {
+  keys: string[];
+  durationMs: number;
+  modifiers?: string[];
+  frame?: string;
+  timeoutMs?: number;
+}
+
+/** macro 单步：action + 该动作参数 */
+export interface BrowserMacroStep {
+  action: string;
+  [key: string]: unknown;
+}
+
+export interface BrowserMacroStepResult {
+  index: number;
+  action: string;
+  ok: boolean;
+  durationMs: number;
+  detail?: string;
+  error?: string;
+}
+
+export interface BrowserMacroResult {
+  steps: BrowserMacroStepResult[];
+  elapsedMs: number;
+  effect: 'changed' | 'no-change' | 'unknown';
+  diffPercent?: number;
+  lastScreenshot?: BrowserScreenshot;
+}
+
+export interface BrowserFrameWaitOptions {
+  frame?: string;
+  region?: BrowserRect;
+  timeoutMs?: number;
+  intervalMs?: number;
+  threshold?: number;
+  stableSamples?: number;
+  signal?: AbortSignal;
+}
+
+export interface BrowserFrameWaitResult {
+  matched: boolean;
+  diffPercent: number;
+  samples: number;
+  elapsedMs: number;
+  reason: 'stable' | 'changed' | 'timeout';
+  frame?: string;
 }
 
 export interface BrowserSelectOptions {
@@ -252,6 +352,8 @@ export interface BrowserDragOptions {
 export interface BrowserEvaluateOptions {
   expression: string;
   timeoutMs?: number;
+  /** 在指定 iframe 子会话执行（auto / targetId / URL 子串） */
+  frame?: string;
 }
 
 export interface BrowserWaitOptions {
@@ -360,19 +462,36 @@ export interface BrowserService {
   /** 列出该实例的原生标签页（all=true 用） */
   listNativeTabs(target?: BrowserTarget): Promise<NativeTabInfo[]>;
   focusTab(tab?: string): Promise<BrowserTabInfo>;
+  /**
+   * 自动聚焦目标标签页/窗口（含新标签页/弹窗）。
+   * 目标已在前台时直接 no-op，避免每次操作都前置导致闪屏；失败时回退到 opener/当前标签。
+   */
+  ensureFocused(tab?: string, options?: { force?: boolean }): Promise<BrowserFocusResult>;
   closeTab(tab?: string): Promise<void>;
 
   navigate(tab: string | undefined, options: BrowserNavigateOptions): Promise<BrowserPageInfo>;
   snapshot(tab: string | undefined, maxNodes?: number): Promise<BrowserSnapshot>;
-  screenshot(tab: string | undefined, fullPage?: boolean): Promise<BrowserScreenshot>;
+  screenshot(
+    tab: string | undefined,
+    options?: { fullPage?: boolean; frame?: string; region?: BrowserRect },
+  ): Promise<BrowserScreenshot>;
+  /** 列出标签页内的 iframe / OOPIF 子会话 */
+  listFrames(tab: string | undefined): Promise<BrowserFrameInfo[]>;
   click(tab: string | undefined, options: BrowserClickOptions): Promise<BrowserPageInfo>;
   hover(tab: string | undefined, options: BrowserHoverOptions): Promise<BrowserPageInfo>;
   typeText(tab: string | undefined, options: BrowserTypeOptions): Promise<BrowserPageInfo>;
   pressKey(tab: string | undefined, options: BrowserPressKeyOptions): Promise<BrowserPageInfo>;
+  keyDown(tab: string | undefined, key: string, options?: { frame?: string; modifiers?: string[] }): Promise<BrowserPageInfo>;
+  keyUp(tab: string | undefined, key: string, options?: { frame?: string; modifiers?: string[] }): Promise<BrowserPageInfo>;
+  hold(tab: string | undefined, options: BrowserHoldOptions): Promise<BrowserPageInfo>;
+  /** 单次调用内执行有先后顺序/等待的输入宏 */
+  macro(tab: string | undefined, steps: BrowserMacroStep[], options?: { verify?: boolean }): Promise<BrowserMacroResult>;
   selectOption(tab: string | undefined, options: BrowserSelectOptions): Promise<BrowserPageInfo>;
   scroll(tab: string | undefined, options: BrowserScrollOptions): Promise<BrowserPageInfo>;
   drag(tab: string | undefined, options: BrowserDragOptions): Promise<BrowserPageInfo>;
   evaluate(tab: string | undefined, options: BrowserEvaluateOptions): Promise<{ result: string; type: string }>;
   waitFor(tab: string | undefined, options: BrowserWaitOptions): Promise<BrowserPageInfo>;
+  waitStable(tab: string | undefined, options: BrowserFrameWaitOptions): Promise<BrowserFrameWaitResult>;
+  waitChange(tab: string | undefined, options: BrowserFrameWaitOptions): Promise<BrowserFrameWaitResult>;
   consoleLogs(tab: string | undefined, clear?: boolean): Promise<BrowserConsoleResult>;
 }

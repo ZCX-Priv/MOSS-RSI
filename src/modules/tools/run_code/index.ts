@@ -11,9 +11,10 @@
 //
 // 硬限制：程序内禁止调用 ask / agent / todo；这三项不会注入子进程 tools，访问即报错。
 
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { ServiceNames, type ConfigService } from '../../../core/types';
 import type { MCPManager, ToolRegistry } from '../../contracts';
-import type { ToolContext, ToolResult } from '../types';
+import type { ToolContext, ToolResult, ToolResultContent } from '../types';
 import { isPtcForbiddenTool } from './forbidden';
 import { runCodeProgram, type CodeRunCallRecord } from './runtime/host';
 import type { CodeFailureKind, CodeValue } from './runtime/protocol';
@@ -38,9 +39,14 @@ export interface CodeRunMetadata {
   uiDiagnostics?: UIDiagnostic[];
   /** 完整返回值文本（供结果区展示，不再按长度裁剪） */
   valuePreview?: string;
+  /** 嵌套工具回传的截图路径（最多 2 张） */
+  images?: Array<{ path: string; mimeType: string }>;
   durationMs: number;
   truncated?: boolean;
 }
+
+/** 单张回传截图上限：超过只保留路径，避免请求体膨胀 */
+const MAX_NESTED_IMAGE_BYTES = 1.5 * 1024 * 1024;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -175,12 +181,35 @@ export default {
       ...(uiSpec ? { uiSpec } : {}),
       ...(uiDiagnostics.length > 0 ? { uiDiagnostics } : {}),
       ...(valuePreview ? { valuePreview } : {}),
+      ...(hostResult.images && hostResult.images.length > 0 ? { images: hostResult.images } : {}),
       durationMs: hostResult.durationMs,
       ...(hostResult.truncated ? { truncated: true } : {}),
     };
 
+    // 嵌套截图回传：让模型在 run_code 结果里直接看到最后一帧
+    const content: ToolResultContent[] = [{ type: 'text', text }];
+    let attached = 0;
+    for (const image of hostResult.images ?? []) {
+      try {
+        if (!existsSync(image.path)) continue;
+        const st = statSync(image.path);
+        if (!st.isFile() || st.size <= 0 || st.size > MAX_NESTED_IMAGE_BYTES) continue;
+        content.push({
+          type: 'image',
+          source: { data: readFileSync(image.path).toString('base64'), mimeType: image.mimeType },
+          path: image.path,
+        });
+        attached += 1;
+      } catch {
+        // 单张图片读取失败不影响程序结果
+      }
+    }
+    if (attached > 0) {
+      content[0] = { type: 'text', text: `${text}\n（附带回传截图 ${attached} 张）` };
+    }
+
     return {
-      content: [{ type: 'text', text }],
+      content,
       isError: hostFailed,
       metadata: { codeRun: metadata },
     };

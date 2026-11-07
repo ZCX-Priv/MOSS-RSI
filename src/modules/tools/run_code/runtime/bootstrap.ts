@@ -76,6 +76,22 @@ const WRAPPER_EXTRA_LINES = calibrateWrapperExtraLines();
 const pending = new Map<string, PendingCall>();
 let callSeq = 0;
 
+/**
+ * 注入给程序的定时能力：
+ * - 沙箱内禁用 setTimeout，但交互/游戏脚本需要「动作→等待→观察」。
+ * - 实现放在 bootstrap 外层（真实 setTimeout），只暴露受控的 sleep/now。
+ */
+function sandboxSleep(ms: number): Promise<void> {
+  const value = typeof ms === 'number' && Number.isFinite(ms) ? ms : 0;
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, Math.max(0, Math.min(600_000, Math.trunc(value))));
+  });
+}
+
+function sandboxNow(): number {
+  return Date.now();
+}
+
 /** 构造 tools Proxy：属性访问时校验 allowlist，调用时发 call 帧并等待宿主结果。 */
 function createToolsProxy(allowlist: string[]): Record<string, (args?: unknown) => Promise<CodeValue>> {
   const allowed = new Set(allowlist);
@@ -232,6 +248,8 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
       blockedCallable('setInterval'),
       blockedCallable('clearTimeout'),
       blockedCallable('clearInterval'),
+      sandboxSleep,
+      sandboxNow,
     );
   } catch (err) {
     const rawStack = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
@@ -291,7 +309,7 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
 
 /** 程序包裹函数头（转译与执行共用，保证定位一致） */
 const PROGRAM_FUNCTION_HEADER =
-  'async function __moss_run_program_2026__(tools, ui, console, process, require, fetch, Bun, globalThis, Function, setTimeout, setInterval, clearTimeout, clearInterval) {';
+  'async function __moss_run_program_2026__(tools, ui, console, process, require, fetch, Bun, globalThis, Function, setTimeout, setInterval, clearTimeout, clearInterval, sleep, now) {';
 
 function wrapProgram(program: string): string {
   return [PROGRAM_FUNCTION_HEADER, program, '}'].join('\n');

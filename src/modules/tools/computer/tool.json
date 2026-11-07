@@ -1,7 +1,7 @@
 {
   "name": "computer",
-  "description": "计算机操作工具（集成 cua-driver，后台操作当前桌面）。默认不抢用户焦点、不移动真实鼠标：cua-driver 通过 UI Automation 与窗口消息在后台点击/输入，并返回每次动作的 effect（confirmed/unverifiable/suspected_noop/refused）、verified 与 escalation 建议。推荐流程：先 action='list_windows' 找到窗口，再用 action='get_window_state'（pid + window_id）同时拿到 UIA 元素树与截图；元素树中的 element_token 用于 click/type_text/press_key/set_value（优先语义元素），像素 x/y 只用于画布/自绘界面。动作后可用 get_window_state + since='latest' 增量读取验证。连续动作已知时用 action='run_steps'（steps 为 [{tool,args}]，最多 32 步）减少往返。delivery_mode 默认 background；仅当后台投递返回 unverifiable/refused 且确实需要时才显式 delivery_mode='foreground'（会短暂前置窗口）。action='status' 可查看驱动安装/连接/暂停状态；action='wait' 在本地等待。依赖外部 cua-driver（MIT，trycua/cua），未安装时请在右侧 Computer 面板安装。",
-  "description_en": "Computer use tool (cua-driver integration; drives the current desktop in the background). By default it does not steal focus or move the real pointer: cua-driver delivers clicks/typing in the background via UI Automation and window messages, and reports per-action effect (confirmed/unverifiable/suspected_noop/refused), verified, and escalation hints. Recommended loop: action='list_windows' to find a window, then action='get_window_state' (pid + window_id) to get the UIA tree and a screenshot together; use element_token from the tree for click/type_text/press_key/set_value (semantic elements first), and pixel x/y only for canvas/custom-drawn surfaces. Verify after acting with get_window_state + since='latest'. Use action='run_steps' (steps=[{tool,args}], max 32) to batch known actions. delivery_mode defaults to background; use delivery_mode='foreground' only when a background attempt returns unverifiable/refused and the action truly needs it (it briefly fronts the window). action='status' reports install/connection/pause state; action='wait' waits locally. Requires the external cua-driver (MIT, trycua/cua); install it from the Computer panel on the right if missing.",
+  "description": "计算机操作工具（集成 cua-driver，后台操作当前桌面）。默认不抢用户焦点、不移动真实鼠标：cua-driver 通过 UI Automation 与窗口消息在后台点击/输入，并返回每次动作的 effect（confirmed/unverifiable/suspected_noop/refused）、verified 与 escalation 建议。推荐流程：先 action='list_windows' 找到窗口，再用 action='get_window_state'（pid + window_id）同时拿到 UIA 元素树与截图；元素树中的 element_token 用于 click/type_text/press_key/set_value（优先语义元素），像素 x/y 只用于画布/自绘界面。动作后可用 get_window_state + since='latest' 增量读取验证。连续动作已知时用 action='run_steps'（steps 为 [{tool,args}]，最多 32 步）减少往返。delivery_mode 默认 background；仅当驱动明确返回 background_unavailable（表示未投递）时，工具才会自动用 foreground 重试一次；effect=unverifiable 或 foreground_unavailable 表示动作可能已生效，工具不会重复投递（避免重复输入/重复点击），并会自动读取当前前台/浮层窗口的状态。自动目标：同一应用弹出浮层/对话框（同进程新顶层窗口，如 WPS 新建面板）时，工具会把目标自动切换到最前面的浮层，截图与 UIA 树都来自该浮层；auto_focus=false 可关闭。坐标：x/y 直接使用对应截图的像素，不要按窗口物理尺寸或屏幕分辨率换算；scope=desktop 时使用 get_desktop_state 截图像素。action='status' 可查看驱动安装/连接/暂停状态；action='wait' 在本地等待。桌面连续操作优先 action='run_script'（cua 自带脚本：循环、条件、cua.sleep、app.query/verify，一次调用内完成多步），确定性断言用 action='verify'（cua verify_state）。画面优先用整屏：action='get_desktop_state' 的整屏截图是首选画面来源，自绘浮层/弹出层/浮动工具栏（如 Qt 弹层）可能完全不在窗口截图内；窗口截图只用于元素树定位与像素坐标。动作失败或疑似未生效时，工具会自动补一张整屏截图（路径会写在结果里），排查界面时以它为准。依赖外部 cua-driver（MIT，trycua/cua），未安装时请在右侧「电脑操作」面板安装。",
+  "description_en": "Computer use tool (cua-driver integration; drives the current desktop in the background). By default it does not steal focus or move the real pointer: cua-driver delivers clicks/typing in the background via UI Automation and window messages, and reports per-action effect (confirmed/unverifiable/suspected_noop/refused), verified, and escalation hints. Recommended loop: action='list_windows' to find a window, then action='get_window_state' (pid + window_id) to get the UIA tree and a screenshot together; use element_token from the tree for click/type_text/press_key/set_value (semantic elements first), and pixel x/y only for canvas/custom-drawn surfaces. Verify after acting with get_window_state + since='latest'. Use action='run_steps' (steps=[{tool,args}], max 32) to batch known actions. delivery_mode defaults to background; the tool only auto-escalates to foreground when the driver explicitly reports background_unavailable (nothing was delivered). effect=unverifiable or foreground_unavailable means the action MAY already have taken effect; the tool never re-sends it (avoiding duplicate typing/clicks) and automatically reads the current foreground/overlay window instead. Auto target: when the same app opens an overlay/dialog (a new top-level window in the same process, e.g. the WPS New panel), the target switches to the frontmost overlay so both the screenshot and the UIA tree come from it; set auto_focus=false to disable. Coordinates: use the x/y of the corresponding screenshot directly; do not rescale by window size or screen resolution. With scope=desktop, x/y are get_desktop_state screenshot pixels. Prefer the full-screen capture: the action='get_desktop_state' screenshot is the primary visual source, because self-drawn overlays/popups/floating toolbars (e.g. Qt popups) may be entirely outside a window capture; window screenshots are for element-tree addressing and pixel coordinates. When an action fails or looks ineffective the tool automatically adds a full-screen capture (its path is included in the result). Requires the external cua-driver (MIT, trycua/cua); install it from the Computer Control panel on the right if missing.",
   "icon": "square-mouse-pointer",
   "annotations": {
     "destructiveHint": true,
@@ -21,6 +21,7 @@
           "get_screen_size",
           "get_cursor_position",
           "zoom",
+          "focus",
           "click",
           "double_click",
           "right_click",
@@ -35,10 +36,12 @@
           "clipboard_read",
           "clipboard_write",
           "run_steps",
+          "run_script",
+          "verify",
           "wait"
         ],
-        "description": "操作类型。观察：status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom；动作：click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write；批量：run_steps；本地：wait。",
-        "description_en": "Operation. Observe: status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom. Act: click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write. Batch: run_steps. Local: wait."
+        "description": "操作类型。观察：status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom；焦点：focus；动作：click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write；批量：run_steps；本地：wait。",
+        "description_en": "Operation. Observe: status/list_apps/list_windows/get_window_state/get_desktop_state/get_screen_size/get_cursor_position/zoom. Focus: focus. Act: click/double_click/right_click/drag/scroll/type_text/press_key/hotkey/set_value/launch_app/kill_app/clipboard_read/clipboard_write. Batch: run_steps. Local: wait."
       },
       "pid": {
         "type": "integer",
@@ -47,8 +50,8 @@
       },
       "window_id": {
         "type": "integer",
-        "description": "目标窗口 ID（来自 list_windows；get_window_state/zoom 等必填）",
-        "description_en": "Target window ID (from list_windows; required for get_window_state/zoom etc.)"
+        "description": "目标窗口 ID（来自 list_windows）；get_window_state/zoom 等需要；省略时自动选择该应用主窗口（有浮层时选浮层）",
+        "description_en": "Target window ID (from list_windows; required for get_window_state/zoom etc.); when omitted the app's main window is auto-selected (or its overlay if one is present)"
       },
       "element_token": {
         "type": "string",
@@ -57,13 +60,13 @@
       },
       "x": {
         "type": "number",
-        "description": "窗口截图内的像素 X（get_window_state 截图的坐标系）；scope=desktop 时为屏幕像素",
-        "description_en": "Pixel X inside the window screenshot (same space as get_window_state); screen pixels when scope=desktop"
+        "description": "窗口截图内的像素 X（get_window_state 截图的坐标系）；scope=desktop 时为 get_desktop_state 截图像素（不是屏幕物理像素）",
+        "description_en": "Pixel X inside the window screenshot (same space as get_window_state); with scope=desktop it is a get_desktop_state screenshot pixel (NOT a physical screen pixel)"
       },
       "y": {
         "type": "number",
-        "description": "窗口截图内的像素 Y（get_window_state 截图的坐标系）；scope=desktop 时为屏幕像素",
-        "description_en": "Pixel Y inside the window screenshot (same space as get_window_state); screen pixels when scope=desktop"
+        "description": "窗口截图内的像素 Y（get_window_state 截图的坐标系）；scope=desktop 时为 get_desktop_state 截图像素（不是屏幕物理像素）",
+        "description_en": "Pixel Y inside the window screenshot (same space as get_window_state); with scope=desktop it is a get_desktop_state screenshot pixel (NOT a physical screen pixel)"
       },
       "display_id": {
         "type": "string",
@@ -157,11 +160,16 @@
         "description": "拖拽终点 Y（窗口截图像素）",
         "description_en": "Drag end Y (window screenshot pixels)"
       },
+      "auto_focus": {
+        "type": "boolean",
+        "description": "自动识别并切换到该应用最前面的浮层/弹层窗口（截图与元素树同步）；不会无条件前置主窗口；false 时严格使用传入的 pid/window_id",
+        "description_en": "Auto-detect and switch to the app's frontmost overlay/popup window (screenshot and element tree follow it); never fronts the main window unconditionally; false uses the given pid/window_id as-is."
+      },
       "delivery_mode": {
         "type": "string",
         "enum": ["background", "foreground"],
-        "description": "输入投递方式：background（缺省，不抢焦点）/ foreground（短暂前置窗口；仅后台失败时使用）",
-        "description_en": "Input delivery: background (default, no focus steal) / foreground (briefly fronts the window; only after background fails)"
+        "description": "输入投递方式：background（缺省，不抢焦点）/ foreground（短暂前置窗口）。只有 background_unavailable（明确未投递）才会自动升级；unverifiable/foreground_unavailable 不会重投。",
+        "description_en": "Input delivery: background (default, no focus steal) / foreground (briefly fronts the window). Only background_unavailable (explicitly not delivered) is auto-escalated; unverifiable/foreground_unavailable are never re-sent."
       },
       "include_screenshot": {
         "type": "boolean",
@@ -257,10 +265,37 @@
         "description": "run_steps 每步之间的停顿（毫秒，最大 2000）",
         "description_en": "Pause between run_steps steps in ms (max 2000)"
       },
+      "script": {
+        "type": "string",
+        "maxLength": 65536,
+        "description": "run_script 的 JavaScript 函数体（async；可用 cua SDK：cua.getApp / app.getState / app.query / app.waitFor / app.verify / app.click / app.pressKey / cua.sleep / cua.call）。适合循环、条件、重试与动作间读取；一次调用内完成。",
+        "description_en": "run_script JavaScript async function body (cua SDK: cua.getApp / app.getState / app.query / app.waitFor / app.verify / app.click / app.pressKey / cua.sleep / cua.call). Use for loops, conditions, retries and read-between-actions in one call."
+      },
+      "max_calls": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500,
+        "description": "run_script 最多驱动调用次数（缺省 100）",
+        "description_en": "Max driver calls for run_script (default 100)"
+      },
+      "expect": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "description": "verify 的断言谓词数组（cua verify_state expect；每项可含 element/window 断言）",
+        "description_en": "Predicates for verify (cua verify_state expect; element/window assertions)."
+      },
+      "stable_samples": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "verify 连续满足采样次数（缺省 2）",
+        "description_en": "Consecutive satisfied samples for verify (default 2)"
+      },
       "observe": {
         "type": "object",
-        "description": "run_steps 结束后追加一次 get_window_state 的参数（如 {include_screenshot:true}）",
-        "description_en": "Optional get_window_state arguments for one observation after run_steps (e.g. {include_screenshot:true})"
+        "description": "run_steps 结束后追加一次 get_window_state 的参数（如 {include_screenshot:true}）；缺省继承 run_steps 的 pid/window_id",
+        "description_en": "Optional get_window_state arguments for one observation after run_steps (e.g. {include_screenshot:true}); defaults to the run_steps pid/window_id"
       },
       "x1": {
         "type": "number",
@@ -308,7 +343,8 @@
       "timeout": 120000,
       "maxImageDimension": 1280,
       "maxTreeElements": 250,
-      "allowForeground": true
+      "allowForeground": true,
+      "autoFocus": true
     },
     "schema": {
       "timeout": {
@@ -325,6 +361,9 @@
         "type": "integer",
         "min": 10,
         "max": 2000
+      },
+      "autoFocus": {
+        "type": "boolean"
       }
     }
   }

@@ -2693,6 +2693,8 @@ export class AgentEngineImpl implements AgentEngine {
     const systemContent = buildStaticSystemPrompt(this.env, skillPrompt, null, promptExtras ?? null);
     const view = buildRequestView(session, systemContent, {
       resolveSkillPrompt: name => this.resolveSkillPrompt(name),
+      // 降级路径同样保留当前轮工具调用 thinking：DeepSeek 思考模式缺 reasoning_content 会 400
+      includeToolCallThinking: true,
     });
     return view.messages;
   }

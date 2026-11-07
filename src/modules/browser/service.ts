@@ -19,18 +19,28 @@ import {
   captureScreenshot,
   clickElement,
   ConsoleBuffer,
+  diffPercent,
   dragElement,
   enablePageDomains,
   evaluateExpression,
+  frameSignature,
   getPageInfo,
+  holdKeys,
   hoverElement,
+  keyDown as dispatchKeyDown,
+  keyUp as dispatchKeyUp,
   navigatePage,
   pressKey,
   scrollPage,
   selectOption,
   typeInto,
+  waitChange as waitFrameChange,
   waitCondition,
+  waitStable as waitFrameStable,
   type CdpSession,
+  type FrameSignature,
+  type ScreenshotRegion,
+  type ScreenshotResult,
 } from './page';
 import {
   downloadChromeForTesting,
@@ -53,15 +63,24 @@ import type {
   BrowserDragOptions,
   BrowserEvaluateOptions,
   BrowserExtensionStatus,
+  BrowserFocusResult,
+  BrowserFrameInfo,
+  BrowserFrameWaitOptions,
+  BrowserFrameWaitResult,
+  BrowserHoldOptions,
   BrowserHoverOptions,
   BrowserInstanceInfo,
   BrowserInstanceKind,
   BrowserInstallerStatus,
+  BrowserMacroResult,
+  BrowserMacroStep,
+  BrowserMacroStepResult,
   BrowserMode,
   BrowserNavigateOptions,
   BrowserOpenOptions,
   BrowserPageInfo,
   BrowserPressKeyOptions,
+  BrowserRect,
   BrowserScreenshot,
   BrowserScrollOptions,
   BrowserSelectOptions,
@@ -97,6 +116,7 @@ const DEFAULT_CONFIG: BrowserToolConfig = {
   autoDownloadChromeForTesting: false,
   autoInstallExtensions: false,
   allowEvaluate: true,
+  autoFocus: true,
 };
 
 /** 旧版标签组名：用于接管历史分组 */
@@ -114,6 +134,63 @@ const GROUP_COLORS = new Set([
   'orange',
 ]);
 
+interface FrameRecord {
+  /** 稳定 key：OOPIF=targetId；同进程 iframe=frameId */
+  frame: string;
+  mode: 'oopif' | 'context';
+  frameId: string;
+  targetId?: string;
+  sessionId?: string;
+  contextId?: number;
+  url: string;
+  title: string;
+  /** 帧在 frame tree 中的深度（auto 选最深/最内层） */
+  depth: number;
+  /** 顶层 iframe 的页面坐标（嵌套 frame 继承最外层祖先） */
+  rect?: BrowserRect;
+  session: CdpSession | null;
+}
+
+interface FrameTreeNode {
+  frame?: {
+    id?: string;
+    parentId?: string;
+    url?: string;
+    name?: string;
+  };
+  childFrames?: FrameTreeNode[];
+}
+
+interface FlatFrame {
+  id: string;
+  parentId?: string;
+  url: string;
+  name: string;
+  depth: number;
+}
+
+/** 展平 Page.getFrameTree（包含同进程/嵌套 iframe） */
+function flattenFrameTree(root: FrameTreeNode | undefined): FlatFrame[] {
+  const out: FlatFrame[] = [];
+  const walk = (node: FrameTreeNode | undefined, depth: number, parentId?: string): void => {
+    const frame = node?.frame;
+    const frameId = frame?.id;
+    if (!frame || typeof frameId !== 'string') return;
+    out.push({
+      id: frameId,
+      ...(parentId ? { parentId } : {}),
+      url: typeof frame.url === 'string' ? frame.url : '',
+      name: typeof frame.name === 'string' ? frame.name : '',
+      depth,
+    });
+    for (const child of node.childFrames ?? []) {
+      walk(child, depth + 1, frameId);
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+
 interface TabRecord {
   key: string;
   instanceId: string;
@@ -122,6 +199,8 @@ interface TabRecord {
   browserVersion: string;
   nativeTabId: number;
   windowId?: number;
+  /** 打开该标签页的源标签页（弹窗/新标签页聚焦回退用） */
+  openerTabId?: number;
   groupId: number | null;
   targetId?: string;
   sessionId?: string;
@@ -130,11 +209,35 @@ interface TabRecord {
   sessionDead: boolean;
   refs: Map<string, number>;
   console: ConsoleBuffer;
-  listeners: Set<(method: string, params: unknown) => void>;
+  listeners: Set<(method: string, params: unknown, sessionId?: string) => void>;
+  /** 会话级事件解绑函数（frame 追踪等） */
+  sessionCleanup: Array<() => void>;
+  /** iframe / OOPIF 子会话（key = targetId） */
+  frames: Map<string, FrameRecord>;
+  /** 最近一次截图的尺寸信息（供 coord_space=screenshot 换算） */
+  lastShot?: {
+    imageWidth?: number;
+    imageHeight?: number;
+    viewportWidth?: number;
+    viewportHeight?: number;
+    scale?: number;
+    frame?: string;
+    region?: BrowserRect;
+  };
   url: string;
   title: string;
   active: boolean;
   createdAt: number;
+}
+
+/** 已失效但保留 URL 的标签页记录，用于按 URL 重新接管 */
+interface RetiredTab {
+  key: string;
+  instanceId: string;
+  nativeTabId: number;
+  url: string;
+  title: string;
+  at: number;
 }
 
 interface ResolvedTarget {
@@ -151,16 +254,152 @@ interface ResolvedTarget {
 
 class RelaySession implements CdpSession {
   constructor(
-    private readonly sendFn: (method: string, params: Record<string, unknown>) => Promise<unknown>,
-    private readonly onEventFn: (handler: (method: string, params: unknown) => void) => () => void,
+    private readonly sendFn: (
+      method: string,
+      params: Record<string, unknown>,
+      sessionId?: string,
+    ) => Promise<unknown>,
+    private readonly onEventFn: (
+      handler: (method: string, params: unknown, sessionId?: string) => void,
+      sessionId?: string,
+    ) => () => void,
+    private readonly sessionId?: string,
   ) {}
 
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    return (await this.sendFn(method, params)) as T;
+    return (await this.sendFn(method, params, this.sessionId)) as T;
   }
 
   onEvent(handler: (method: string, params: unknown) => void): () => void {
-    return this.onEventFn(handler);
+    return this.onEventFn((method, params) => handler(method, params), this.sessionId);
+  }
+}
+
+/**
+ * 同进程 iframe 会话：跨域但同站点的 iframe（如 poki.com 的 games.poki.com）
+ * 不会生成独立 CDP target，无法用 Input.dispatchKeyEvent 定向。
+ * 这里用 Page.createIsolatedWorld 拿到该 frame 的 executionContextId：
+ * - Runtime.evaluate 直接在该 frame 执行（合成键盘/读取 canvas）；
+ * - 鼠标事件转发到根会话并加上 iframe 偏移（浏览器 hit-test 会进入 iframe）；
+ * - 截图转发到根会话并用 iframe rect 裁剪。
+ */
+class ContextFrameSession implements CdpSession {
+  constructor(
+    private readonly root: CdpSession,
+    private readonly frame: FrameRecord,
+  ) {}
+
+  async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    switch (method) {
+      case 'Runtime.evaluate':
+        return (await this.evaluateInFrame(params)) as T;
+      case 'Input.dispatchKeyEvent':
+        return (await this.dispatchSyntheticKey(params)) as T;
+      case 'Input.insertText':
+        return (await this.insertTextInFrame(params)) as T;
+      case 'Input.dispatchMouseEvent':
+        return (await this.forwardMouse(params)) as T;
+      case 'Page.captureScreenshot':
+        return (await this.captureFrame(params)) as T;
+      case 'Page.getLayoutMetrics':
+        return this.root.send<T>(method, params);
+      default:
+        return this.root.send<T>(method, params);
+    }
+  }
+
+  onEvent(handler: (method: string, params: unknown) => void): () => void {
+    // 同进程 frame 的事件从根会话发出；保留接口与根会话一致
+    return this.root.onEvent(handler);
+  }
+
+  private async ensureContextId(): Promise<number> {
+    if (this.frame.contextId !== undefined) return this.frame.contextId;
+    const created = await this.root.send<{ executionContextId?: number }>('Page.createIsolatedWorld', {
+      frameId: this.frame.frameId,
+      worldName: 'moss_frame',
+    });
+    if (typeof created.executionContextId !== 'number') {
+      throw new Error('无法为 iframe 创建隔离执行上下文');
+    }
+    this.frame.contextId = created.executionContextId;
+    return created.executionContextId;
+  }
+
+  private async evaluateInFrame(params: Record<string, unknown>): Promise<unknown> {
+    const contextId = await this.ensureContextId();
+    try {
+      return await this.root.send('Runtime.evaluate', { ...params, contextId });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/context|Cannot find|not found/i.test(message)) throw err;
+      // frame 导航后旧 context 失效：重建一次
+      this.frame.contextId = undefined;
+      const fresh = await this.ensureContextId();
+      return this.root.send('Runtime.evaluate', { ...params, contextId: fresh });
+    }
+  }
+
+  private async dispatchSyntheticKey(params: Record<string, unknown>): Promise<unknown> {
+    const type = typeof params.type === 'string' ? params.type : '';
+    const eventType = type === 'keyUp' ? 'keyup' : type === 'char' ? 'keypress' : 'keydown';
+    const key = String(params.key ?? '');
+    const code = String(params.code ?? '');
+    const keyCode = typeof params.windowsVirtualKeyCode === 'number' ? params.windowsVirtualKeyCode : 0;
+    const expression = `(() => {
+      const init = ${JSON.stringify({
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      })};
+      init.view = window;
+      const event = new KeyboardEvent(${JSON.stringify(eventType)}, init);
+      const target = document.querySelector('canvas') || document.body || document.documentElement || window;
+      try { target.dispatchEvent(event); } catch { window.dispatchEvent(event); }
+      return true;
+    })()`;
+    return this.evaluateInFrame({ expression, returnByValue: true, awaitPromise: false });
+  }
+
+  private async insertTextInFrame(params: Record<string, unknown>): Promise<unknown> {
+    const text = typeof params.text === 'string' ? params.text : '';
+    const expression = `(() => {
+      const el = document.activeElement;
+      if (!el) return false;
+      if (el.isContentEditable) el.textContent = (el.textContent || '') + ${JSON.stringify(text)};
+      else if ('value' in el) el.value = (el.value || '') + ${JSON.stringify(text)};
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`;
+    return this.evaluateInFrame({ expression, returnByValue: true });
+  }
+
+  private async forwardMouse(params: Record<string, unknown>): Promise<unknown> {
+    const rect = this.frame.rect;
+    if (!rect) return this.root.send('Input.dispatchMouseEvent', params);
+    const x = typeof params.x === 'number' ? params.x + rect.x : params.x;
+    const y = typeof params.y === 'number' ? params.y + rect.y : params.y;
+    return this.root.send('Input.dispatchMouseEvent', { ...params, x, y });
+  }
+
+  private async captureFrame(params: Record<string, unknown>): Promise<unknown> {
+    const rect = this.frame.rect;
+    if (!rect) return this.root.send('Page.captureScreenshot', params);
+    const clip = isRecord(params.clip) ? params.clip : undefined;
+    const x = typeof clip?.x === 'number' ? clip.x + rect.x : rect.x;
+    const y = typeof clip?.y === 'number' ? clip.y + rect.y : rect.y;
+    const width = typeof clip?.width === 'number' ? clip.width : rect.width;
+    const height = typeof clip?.height === 'number' ? clip.height : rect.height;
+    const scale = typeof clip?.scale === 'number' ? clip.scale : 1;
+    return this.root.send('Page.captureScreenshot', {
+      ...params,
+      clip: { x, y, width, height, scale },
+    });
   }
 }
 
@@ -211,6 +450,8 @@ export class BrowserServiceImpl implements BrowserService {
 
   private extensionStatus: BrowserExtensionStatus;
   private readonly tabs = new Map<string, TabRecord>();
+  /** 已失效标签页的 URL 快照：用于按 URL 恢复同一个 tN key */
+  private readonly retiredTabs = new Map<string, RetiredTab>();
   private tabSeq = 0;
   private currentTabKey: string | null = null;
   private lastTargetKey: string | null = null;
@@ -220,7 +461,12 @@ export class BrowserServiceImpl implements BrowserService {
   private readonly pendingNewTabUntil = new Map<string, number>();
   /** 最近自动接管的新标签页（供 click 结果提示） */
   private lastAdoptedTab: { instanceId: string; tab: string; at: number } | null = null;
-  private readonly reloadedInstances = new Set<string>();
+  /** 扩展 reload 冷却（key = extensionId）：避免版本不一致时反复 reload 导致闪屏/断连 */
+  private readonly extensionReloadAt = new Map<string, number>();
+  /** 已请求过 reload 的「扩展 + 版本对」：同一版本组合只 reload 一次，绝不循环 */
+  private readonly reloadRequestedPairs = new Set<string>();
+  /** 已告警过「reload 后版本仍未更新」的扩展（每个扩展只提示一次） */
+  private readonly warnedExtensionVersions = new Set<string>();
 
   private cftDownloading = false;
   private cftProgress: { received: number; total: number; percent: number } | null = null;
@@ -292,8 +538,10 @@ export class BrowserServiceImpl implements BrowserService {
 
   async destroy(): Promise<void> {
     for (const record of this.tabs.values()) {
+      record.sessionCleanup.splice(0).forEach((fn) => fn());
       record.console.dispose();
       record.listeners.clear();
+      record.frames.clear();
     }
     this.tabs.clear();
     await this.builtin.close();
@@ -334,6 +582,7 @@ export class BrowserServiceImpl implements BrowserService {
           DEFAULT_CONFIG.autoInstallExtensions,
         ),
         allowEvaluate: booleanValue(raw.allowEvaluate, DEFAULT_CONFIG.allowEvaluate),
+        autoFocus: booleanValue(raw.autoFocus, DEFAULT_CONFIG.autoFocus),
       };
     } catch {
       return { ...DEFAULT_CONFIG };
@@ -673,12 +922,29 @@ export class BrowserServiceImpl implements BrowserService {
     });
   }
 
-  /** 扩展文件由 MOSS 播种；版本不一致时让扩展自行 reload（0.2.0+ 支持） */
+  /**
+   * 扩展文件由 MOSS 播种；版本不一致时最多请求一次 reload 让新代码生效。
+   * 关键：去重键是「扩展 + 当前版本 → 内置版本」，而不是每次重连的 instanceId，
+   * 否则 reload → 断连 → 新实例 → 再 reload 会形成死循环（外部浏览器会持续闪屏）。
+   */
   private maybeReloadExtension(info: BrowserInstanceInfo): void {
     const bundled = this.extensionStatus.version;
     if (!bundled || info.extensionVersion === bundled) return;
-    if (this.reloadedInstances.has(info.id)) return;
-    this.reloadedInstances.add(info.id);
+    const pairKey = `${info.extensionId}:${info.extensionVersion}->${bundled}`;
+    if (this.reloadRequestedPairs.has(pairKey)) {
+      // 已经 reload 过但版本仍未变化：只提示一次，避免循环
+      if (info.kind !== 'builtin' && !this.warnedExtensionVersions.has(info.extensionId)) {
+        this.warnedExtensionVersions.add(info.extensionId);
+        this.logger.warn(
+          `[browser] 扩展版本仍未更新（当前 ${info.extensionVersion}，内置 ${bundled}）：请在设置→浏览器重新安装/手动重载扩展`,
+        );
+      }
+      return;
+    }
+    const last = this.extensionReloadAt.get(info.extensionId) ?? 0;
+    if (Date.now() - last < 60_000) return;
+    this.extensionReloadAt.set(info.extensionId, Date.now());
+    this.reloadRequestedPairs.add(pairKey);
     setTimeout(() => {
       void this.bridge
         .send(info.id, 'extension.reload', {}, 5000)
@@ -690,7 +956,6 @@ export class BrowserServiceImpl implements BrowserService {
 
   private onInstanceDisconnected(instanceId: string): void {
     this.removeTabsOfInstance(instanceId);
-    this.reloadedInstances.delete(instanceId);
     if (this.builtinInstanceId === instanceId) this.builtinInstanceId = null;
   }
 
@@ -720,7 +985,7 @@ export class BrowserServiceImpl implements BrowserService {
     }
     for (const listener of record.listeners) {
       try {
-        listener(payload.method, payload.params);
+        listener(payload.method, payload.params, payload.sessionId);
       } catch {
         // 单个监听器异常不影响其它监听器
       }
@@ -776,6 +1041,7 @@ export class BrowserServiceImpl implements BrowserService {
       browserVersion: info?.browserVersion ?? '',
       nativeTabId: tab.tabId,
       ...(tab.windowId >= 0 ? { windowId: tab.windowId } : {}),
+      ...(typeof tab.openerTabId === 'number' ? { openerTabId: tab.openerTabId } : {}),
       groupId,
       session: null,
       sessionPromise: null,
@@ -783,6 +1049,8 @@ export class BrowserServiceImpl implements BrowserService {
       refs: new Map(),
       console: new ConsoleBuffer(),
       listeners: new Set(),
+      sessionCleanup: [],
+      frames: new Map(),
       url: tab.url,
       title: tab.title,
       active: tab.active,
@@ -794,13 +1062,17 @@ export class BrowserServiceImpl implements BrowserService {
     this.lastAdoptedTab = { instanceId, tab: key, at: Date.now() };
     this.pendingNewTabUntil.delete(instanceId);
     // 页面会话延迟到首次操作时建立：新标签页的 target 可能尚未就绪
+    // 是否聚焦新标签页由工具层根据 auto_focus 决定（见 withOpenedTab 结果）。
   }
 
   private removeTabByNative(instanceId: string, nativeTabId: number): void {
     const record = this.findTabByNative(instanceId, nativeTabId);
     if (!record) return;
+    this.rememberRetiredTab(record);
+    record.sessionCleanup.splice(0).forEach((fn) => fn());
     record.console.dispose();
     record.listeners.clear();
+    record.frames.clear();
     this.tabs.delete(record.key);
     if (this.currentTabKey === record.key) {
       const remaining = Array.from(this.tabs.values()).sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -879,6 +1151,8 @@ export class BrowserServiceImpl implements BrowserService {
         refs: new Map(),
         console: new ConsoleBuffer(),
         listeners: new Set(),
+        sessionCleanup: [],
+        frames: new Map(),
         url: typeof raw.url === 'string' ? raw.url : '',
         title: typeof raw.title === 'string' ? raw.title : '',
         active: raw.active === true,
@@ -903,8 +1177,10 @@ export class BrowserServiceImpl implements BrowserService {
     for (const [key, record] of Array.from(this.tabs.entries())) {
       if (key === keep.key) continue;
       if (record.instanceId !== keep.instanceId || record.nativeTabId !== keep.nativeTabId) continue;
+      record.sessionCleanup.splice(0).forEach((fn) => fn());
       record.console.dispose();
       record.listeners.clear();
+      record.frames.clear();
       this.tabs.delete(key);
       if (this.currentTabKey === key) this.currentTabKey = keep.key;
     }
@@ -913,10 +1189,14 @@ export class BrowserServiceImpl implements BrowserService {
   private removeTabsOfInstance(instanceId: string): void {
     for (const [key, record] of Array.from(this.tabs.entries())) {
       if (record.instanceId !== instanceId) continue;
+      this.rememberRetiredTab(record);
+      record.sessionCleanup.splice(0).forEach((fn) => fn());
       record.console.dispose();
       record.listeners.clear();
+      record.frames.clear();
       record.session = null;
-      void this.detachRecord(record);
+      // 不 detach debugger：桥接断开不等于标签关闭。主动 detach 会让扩展的调试提示条
+      // 反复消失/出现（页面闪白 + 失焦），由 Chrome 在标签真正关闭时自动回收。
       this.tabs.delete(key);
       if (this.currentTabKey === key) this.currentTabKey = null;
     }
@@ -1013,6 +1293,7 @@ export class BrowserServiceImpl implements BrowserService {
 
   async openTab(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
     const cfg = this.getToolConfig();
+    const focus = options.focus ?? cfg.autoFocus;
     const cdpEndpoint = options.cdpEndpoint?.trim();
     if (cdpEndpoint) await this.ensureCdp(cdpEndpoint);
     const resolved = await this.resolveTarget(cdpEndpoint ? 'cdp' : options.target);
@@ -1034,9 +1315,9 @@ export class BrowserServiceImpl implements BrowserService {
       // 外部浏览器：首次建页时新开后台 MOSS 窗口（focused:false），后续复用该窗口
       const created =
         resolved.kind === 'external'
-          ? await this.ensureExternalMossTab(resolved.bridgeId, cfg, marker, timeout)
+          ? await this.ensureExternalMossTab(resolved.bridgeId, cfg, marker, timeout, focus)
           : null;
-      const tab = created ?? (await this.createLegacyMossTab(resolved.bridgeId, marker, timeout, cfg));
+      const tab = created ?? (await this.createLegacyMossTab(resolved.bridgeId, marker, timeout, cfg, focus));
       nativeTabId = tab.tabId;
       if (tab.windowId !== undefined) windowId = tab.windowId;
       groupId = tab.groupId;
@@ -1081,6 +1362,8 @@ export class BrowserServiceImpl implements BrowserService {
       refs: new Map(),
       console: new ConsoleBuffer(),
       listeners: new Set(),
+      sessionCleanup: [],
+      frames: new Map(),
       url: marker,
       title: '',
       active: true,
@@ -1103,6 +1386,10 @@ export class BrowserServiceImpl implements BrowserService {
     } else {
       await this.refreshRecordInfo(record);
     }
+    // 打开后聚焦：默认跟随 autoFocus；focus=false 时保持后台
+    if (focus) {
+      await this.ensureFocused(key, { force: true }).catch(() => undefined);
+    }
     return this.toTabInfo(record);
   }
 
@@ -1115,6 +1402,7 @@ export class BrowserServiceImpl implements BrowserService {
     cfg: BrowserToolConfig,
     marker: string,
     timeout: number,
+    focus: boolean,
   ): Promise<{ tabId: number; windowId?: number; groupId: number | null; createdWindow: boolean } | null> {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -1124,7 +1412,8 @@ export class BrowserServiceImpl implements BrowserService {
           'windows.ensureMoss',
           {
             url: marker,
-            active: true,
+            active: focus,
+            focus,
             title: cfg.tabGroupTitle,
             color: cfg.tabGroupColor,
             legacyTitles: LEGACY_GROUP_TITLES,
@@ -1159,11 +1448,12 @@ export class BrowserServiceImpl implements BrowserService {
     marker: string,
     timeout: number,
     cfg: BrowserToolConfig,
+    focus: boolean,
   ): Promise<{ tabId: number; windowId?: number; groupId: number | null }> {
     const created = await this.bridge.send(
       bridgeId,
       'tabs.create',
-      { url: marker, active: true },
+      { url: marker, active: focus, focus },
       timeout,
     );
     if (!isRecord(created) || typeof created.tabId !== 'number') {
@@ -1196,28 +1486,92 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async focusTab(tab?: string): Promise<BrowserTabInfo> {
-    const record = this.requireTab(tab);
-    if (record.kind === 'cdp') {
-      if (record.targetId) await this.cdp.activate(record.targetId);
-    } else if (record.instanceId !== 'builtin' && record.nativeTabId >= 0) {
-      try {
-        await this.bridge.send(record.instanceId, 'tabs.activate', { tabId: record.nativeTabId }, 10_000);
-      } catch {
-        // 扩展不可用时尝试 CDP
+    const result = await this.ensureFocused(tab, { force: true });
+    return this.toTabInfo(await this.requireTab(result.tab));
+  }
+
+  /**
+   * 自动聚焦目标标签页/窗口。
+   * - 扩展实例：`tabs.activate` 内部会判断「标签已激活且窗口已聚焦」并 no-op，
+   *   因此重复调用不会造成窗口反复前置/闪屏。
+   * - 失败时回退到 opener 标签页 → 当前标签页（上一级窗口）。
+   */
+  async ensureFocused(
+    tab?: string,
+    _options: { force?: boolean } = {},
+  ): Promise<BrowserFocusResult> {
+    const record = await this.requireTab(tab);
+    const focusOne = async (target: TabRecord): Promise<boolean> => {
+      if (target.kind === 'cdp') {
+        if (!target.targetId) return false;
+        await this.cdp.activate(target.targetId);
+        return true;
       }
-    } else if (record.targetId) {
-      const cdp = this.builtin.getCdp();
-      await cdp?.send('Target.activateTarget', { targetId: record.targetId });
+      if (target.instanceId !== 'builtin' && target.nativeTabId >= 0) {
+        try {
+          await this.bridge.send(
+            target.instanceId,
+            'tabs.activate',
+            { tabId: target.nativeTabId },
+            10_000,
+          );
+          return true;
+        } catch {
+          // 扩展不可用：继续尝试内置 CDP
+        }
+      }
+      if (target.targetId) {
+        const cdp = this.builtin.getCdp();
+        if (!cdp) return false;
+        await cdp.send('Target.activateTarget', { targetId: target.targetId });
+        return true;
+      }
+      return false;
+    };
+
+    let reason = '';
+    try {
+      if (await focusOne(record)) {
+        record.active = true;
+        this.currentTabKey = record.key;
+        this.lastTargetKey = record.instanceId;
+        return { tab: record.key, focused: true, fallback: false };
+      }
+      reason = '目标标签页不支持激活';
+    } catch (err) {
+      reason = err instanceof Error ? err.message : String(err);
     }
-    record.active = true;
-    this.currentTabKey = record.key;
-    this.lastTargetKey = record.instanceId;
-    return this.toTabInfo(record);
+
+    // 回退：弹窗/新标签页的 opener → 当前标签页（上一级窗口）
+    const opener =
+      record.openerTabId !== undefined
+        ? this.findTabByNative(record.instanceId, record.openerTabId)
+        : null;
+    const current =
+      this.currentTabKey && this.currentTabKey !== record.key
+        ? this.tabs.get(this.currentTabKey) ?? null
+        : null;
+    const fallback = opener ?? current;
+    if (fallback) {
+      try {
+        if (await focusOne(fallback)) {
+          fallback.active = true;
+          this.currentTabKey = fallback.key;
+          this.lastTargetKey = fallback.instanceId;
+          this.logger.warn(
+            `[browser] 标签页 ${record.key} 无法聚焦，已回退到 ${fallback.key}（${reason}）`,
+          );
+          return { tab: record.key, focused: true, fallback: true, reason };
+        }
+      } catch (err) {
+        reason = err instanceof Error ? err.message : String(err);
+      }
+    }
+    return { tab: record.key, focused: false, fallback: false, reason };
   }
 
   async closeTab(tab?: string): Promise<void> {
-    const record = this.requireTab(tab);
-    await this.detachRecord(record);
+    const record = await this.requireTab(tab);
     try {
       if (record.kind === 'cdp') {
         if (record.targetId) await this.cdp.closeTarget(record.targetId);
@@ -1230,8 +1584,11 @@ export class BrowserServiceImpl implements BrowserService {
     } catch {
       // 标签页可能已被用户关闭
     }
+    // 标签关闭后浏览器会自动 detach debugger，无需再显式 detach（显式 detach 会触发额外闪屏）。
+    record.sessionCleanup.splice(0).forEach((fn) => fn());
     record.console.dispose();
     record.listeners.clear();
+    record.frames.clear();
     this.tabs.delete(record.key);
     if (this.currentTabKey === record.key) {
       const remaining = Array.from(this.tabs.values()).sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -1239,29 +1596,85 @@ export class BrowserServiceImpl implements BrowserService {
     }
   }
 
-  private requireTab(tab?: string): TabRecord {
-    const key = tab ?? this.currentTabKey;
-    if (!key) throw new Error(t('browser.noTab'));
-    const record = this.tabs.get(key);
-    if (!record) throw new Error(t('browser.tabNotFound', { tab: key }));
-    return record;
+  /** 记录失效标签页的 URL，供后续按 URL 恢复同一个 tN key */
+  private rememberRetiredTab(record: TabRecord): void {
+    if (!record.url) return;
+    this.retiredTabs.set(record.key, {
+      key: record.key,
+      instanceId: record.instanceId,
+      nativeTabId: record.nativeTabId,
+      url: record.url,
+      title: record.title,
+      at: Date.now(),
+    });
+    if (this.retiredTabs.size > 20) {
+      const oldest = Array.from(this.retiredTabs.values()).sort((a, b) => a.at - b.at)[0];
+      if (oldest) this.retiredTabs.delete(oldest.key);
+    }
   }
 
-  private async detachRecord(record: TabRecord): Promise<void> {
-    if (record.kind === 'cdp') {
-      if (record.sessionId) await this.cdp.detach(record.sessionId);
-    } else if (record.kind === 'builtin' || record.instanceId === 'builtin') {
-      if (record.sessionId) await this.builtin.detach(record.sessionId);
-    } else if (record.nativeTabId >= 0) {
-      try {
-        await this.bridge.send(record.instanceId, 'debugger.detach', { tabId: record.nativeTabId }, 5000);
-      } catch {
-        // 浏览器已断开
-      }
+  /**
+   * 取标签页记录；key 失效时尝试在仍连接的原生标签页里按 URL 重新接管。
+   * 这样扩展重连/标签被移动后，模型仍可继续使用 t1，而不是直接报「标签页不存在」。
+   */
+  private async requireTab(tab?: string): Promise<TabRecord> {
+    const key = tab ?? this.currentTabKey;
+    if (!key) throw new Error(t('browser.noTab'));
+    const existing = this.tabs.get(key);
+    if (existing) return existing;
+
+    const retired = this.retiredTabs.get(key);
+    if (retired) {
+      const revived = await this.tryReviveTab(key, retired).catch(() => null);
+      if (revived) return revived;
     }
-    record.sessionId = undefined;
-    record.session = null;
-    record.sessionDead = false;
+
+    const available = this.tabs.size > 0 ? Array.from(this.tabs.keys()).join(', ') : '（无）';
+    throw new Error(
+      `${t('browser.tabNotFound', { tab: key })}；可用标签页：${available}。请执行 action=tabs 查看，或 action=open 重新打开。`,
+    );
+  }
+
+  private async tryReviveTab(key: string, retired: RetiredTab): Promise<TabRecord | null> {
+    const info = this.bridge.getInstance(retired.instanceId);
+    if (!info) return null;
+    const raw = await this.bridge.send(retired.instanceId, 'tabs.list', {}, 10_000);
+    if (!Array.isArray(raw)) return null;
+    const match = raw.filter(isRecord).find((item) => {
+      const url = typeof item.url === 'string' ? item.url : '';
+      if (!url || !retired.url) return false;
+      return url === retired.url || url.startsWith(retired.url.split('#')[0]);
+    });
+    if (!match || typeof match.tabId !== 'number' || match.tabId < 0) return null;
+
+    const record: TabRecord = {
+      key,
+      instanceId: retired.instanceId,
+      kind: info.kind === 'builtin' ? 'builtin' : 'external',
+      browserName: info.browserName,
+      browserVersion: info.browserVersion,
+      nativeTabId: match.tabId,
+      ...(typeof match.windowId === 'number' && match.windowId >= 0
+        ? { windowId: match.windowId }
+        : {}),
+      groupId: typeof match.groupId === 'number' ? match.groupId : null,
+      session: null,
+      sessionPromise: null,
+      sessionDead: false,
+      refs: new Map(),
+      console: new ConsoleBuffer(),
+      listeners: new Set(),
+      sessionCleanup: [],
+      frames: new Map(),
+      url: typeof match.url === 'string' ? match.url : retired.url,
+      title: typeof match.title === 'string' ? match.title : retired.title,
+      active: match.active === true,
+      createdAt: Date.now(),
+    };
+    this.tabs.set(key, record);
+    this.currentTabKey = key;
+    this.retiredTabs.delete(key);
+    return record;
   }
 
   // ==========================================================================
@@ -1286,22 +1699,24 @@ export class BrowserServiceImpl implements BrowserService {
       record.sessionId = sessionId;
       record.sessionDead = false;
       const session = new RelaySession(
-        (method, params) => {
+        (method, params, childSessionId) => {
           const conn = this.cdp.getCdp();
           if (!conn) throw new Error(t('browser.cdpNotConnected'));
-          return conn.send(method, params, sessionId);
+          return conn.send(method, params, childSessionId ?? sessionId);
         },
-        (handler) => {
+        (handler, childSessionId) => {
           const conn = this.cdp.getCdp();
           if (!conn) return () => {};
+          const wanted = childSessionId ?? sessionId;
           return conn.onEvent((method, params, eventSessionId) => {
-            if (eventSessionId === sessionId) handler(method, params);
+            if (eventSessionId === wanted) handler(method, params);
           });
         },
       );
       await enablePageDomains(session);
       record.session = session;
       record.console.attach(session);
+      this.autoAttachFrames(record, session);
       return session;
     }
 
@@ -1320,21 +1735,23 @@ export class BrowserServiceImpl implements BrowserService {
       record.sessionId = sessionId;
       record.sessionDead = false;
       const session = new RelaySession(
-        (method, params) => {
+        (method, params, childSessionId) => {
           if (!this.builtin.getCdp()) throw new Error(t('browser.builtinNotRunning'));
-          return this.builtin.getCdp()!.send(method, params, sessionId);
+          return this.builtin.getCdp()!.send(method, params, childSessionId ?? sessionId);
         },
-        (handler) => {
+        (handler, childSessionId) => {
           const connection = this.builtin.getCdp();
           if (!connection) return () => {};
+          const wanted = childSessionId ?? sessionId;
           return connection.onEvent((method, params, eventSessionId) => {
-            if (eventSessionId === sessionId) handler(method, params);
+            if (eventSessionId === wanted) handler(method, params);
           });
         },
       );
       await enablePageDomains(session);
       record.session = session;
       record.console.attach(session);
+      this.autoAttachFrames(record, session);
       return session;
     }
 
@@ -1342,22 +1759,406 @@ export class BrowserServiceImpl implements BrowserService {
     await this.bridge.send(record.instanceId, 'debugger.attach', { tabId: record.nativeTabId }, 10_000);
     record.sessionDead = false;
     const session = new RelaySession(
-      (method, params) =>
+      (method, params, childSessionId) =>
         this.bridge.send(
           record.instanceId,
           'debugger.send',
-          { tabId: record.nativeTabId, method, params },
+          {
+            tabId: record.nativeTabId,
+            method,
+            params,
+            ...(childSessionId ? { sessionId: childSessionId } : {}),
+          },
           this.getToolConfig().timeoutMs,
         ),
-      (handler) => {
-        record.listeners.add(handler);
-        return () => record.listeners.delete(handler);
+      (handler, childSessionId) => {
+        const wrapped = (
+          method: string,
+          params: unknown,
+          eventSessionId?: string,
+        ): void => {
+          if (eventSessionId === childSessionId) handler(method, params);
+        };
+        record.listeners.add(wrapped);
+        return () => record.listeners.delete(wrapped);
       },
     );
     await enablePageDomains(session);
     record.session = session;
     record.console.attach(session);
+    this.autoAttachFrames(record, session);
     return session;
+  }
+
+  /** 为一帧建立子会话（extension: debugger.send + sessionId；builtin/cdp: CdpConnection） */
+  private createFrameSession(record: TabRecord, frame: FrameRecord, root: CdpSession): CdpSession {
+    if (frame.session) return frame.session;
+    if (frame.mode === 'context') {
+      frame.session = new ContextFrameSession(root, frame);
+      return frame.session;
+    }
+    if (record.kind === 'builtin' || record.instanceId === 'builtin') {
+      const connection = this.builtin.getCdp();
+      if (!connection) throw new Error(t('browser.builtinNotRunning'));
+      const childSessionId = frame.sessionId;
+      frame.session = new RelaySession(
+        (method, params, sid) => connection.send(method, params, sid ?? childSessionId),
+        (handler, sid) =>
+          connection.onEvent((method, params, eventSessionId) => {
+            if (eventSessionId === (sid ?? childSessionId)) handler(method, params);
+          }),
+      );
+      return frame.session;
+    }
+    if (record.kind === 'cdp') {
+      const connection = this.cdp.getCdp();
+      if (!connection) throw new Error(t('browser.cdpNotConnected'));
+      const childSessionId = frame.sessionId;
+      frame.session = new RelaySession(
+        (method, params, sid) => connection.send(method, params, sid ?? childSessionId),
+        (handler, sid) =>
+          connection.onEvent((method, params, eventSessionId) => {
+            if (eventSessionId === (sid ?? childSessionId)) handler(method, params);
+          }),
+      );
+      return frame.session;
+    }
+    const childSessionId = frame.sessionId;
+    frame.session = new RelaySession(
+      (method, params, sid) =>
+        this.bridge.send(
+          record.instanceId,
+          'debugger.send',
+          {
+            tabId: record.nativeTabId,
+            method,
+            params,
+            ...(sid ? { sessionId: sid } : {}),
+          },
+          this.getToolConfig().timeoutMs,
+        ),
+      (handler, sid) => {
+        const wrapped = (method: string, params: unknown, eventSessionId?: string): void => {
+          if (eventSessionId === (sid ?? childSessionId)) handler(method, params);
+        };
+        record.listeners.add(wrapped);
+        return () => record.listeners.delete(wrapped);
+      },
+    );
+    return frame.session;
+  }
+
+  /** 自动附着 iframe/OOPIF 子目标；失败只记录日志，不影响主页面操作 */
+  private autoAttachFrames(record: TabRecord, session: CdpSession): void {
+    void this.refreshFrames(record, session).catch(() => undefined);
+    // 监听子目标创建/销毁（事件由根会话发出，sessionId 为 undefined）
+    const off = session.onEvent((method, params) => {
+      if (method === 'Target.attachedToTarget' && isRecord(params) && isRecord(params.targetInfo)) {
+        const info = params.targetInfo;
+        const targetId = typeof info.targetId === 'string' ? info.targetId : '';
+        const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
+        if (!targetId || !sessionId) return;
+        const type = typeof info.type === 'string' ? info.type : '';
+        if (type !== 'iframe' && type !== 'page') return;
+        record.frames.set(targetId, {
+          frame: targetId,
+          mode: 'oopif',
+          frameId: targetId,
+          targetId,
+          sessionId,
+          url: typeof info.url === 'string' ? info.url : '',
+          title: typeof info.title === 'string' ? info.title : '',
+          depth: 1,
+          session: null,
+        });
+        return;
+      }
+      if (method === 'Target.detachedFromTarget' && isRecord(params)) {
+        const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
+        for (const [key, frame] of record.frames) {
+          if (frame.sessionId === sessionId) record.frames.delete(key);
+        }
+      }
+    });
+    record.sessionCleanup.push(off);
+  }
+
+  private async attachFrameTarget(
+    record: TabRecord,
+    session: CdpSession,
+    targetId: string,
+    url: unknown,
+    title: unknown,
+  ): Promise<void> {
+    if (record.frames.has(targetId)) return;
+    try {
+      const attached = await session.send<{ sessionId?: string }>('Target.attachToTarget', {
+        targetId,
+        flatten: true,
+      });
+      if (typeof attached.sessionId !== 'string' || !attached.sessionId) return;
+      record.frames.set(targetId, {
+        frame: targetId,
+        mode: 'oopif',
+        frameId: targetId,
+        targetId,
+        sessionId: attached.sessionId,
+        url: typeof url === 'string' ? url : '',
+        title: typeof title === 'string' ? title : '',
+        depth: 1,
+        session: null,
+      });
+    } catch {
+      // 单个 frame attach 失败不阻断
+    }
+  }
+
+  /** 重新枚举 iframe 子会话：优先独立 target（OOPIF），否则用同进程隔离上下文 */
+  private async refreshFrames(record: TabRecord, session: CdpSession): Promise<void> {
+    let autoAttachError = '';
+    try {
+      await session.send('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      });
+    } catch (err) {
+      autoAttachError = err instanceof Error ? err.message : String(err);
+    }
+    try {
+      const rects = await this.topFrameRects(record);
+      const rectByUrl = new Map(
+        rects
+          .filter((item) => item.src)
+          .map((item) => [item.src.split('?')[0], item] as const),
+      );
+
+      // 1) 独立 target（跨站点 iframe / OOPIF）
+      let targetCount = 0;
+      let iframeTargets = 0;
+      try {
+        const targets = await session.send<{ targetInfos?: Array<Record<string, unknown>> }>(
+          'Target.getTargets',
+          {},
+        );
+        targetCount = targets.targetInfos?.length ?? 0;
+        for (const info of targets.targetInfos ?? []) {
+          if (!isRecord(info) || info.type !== 'iframe' || typeof info.targetId !== 'string') continue;
+          iframeTargets += 1;
+          const url = typeof info.url === 'string' ? info.url : '';
+          await this.attachFrameTarget(record, session, info.targetId, url, info.title);
+        }
+      } catch {
+        // Target 域不可用时依赖 frame tree
+      }
+
+      // 2) 同进程 iframe：Page.getFrameTree + Page.createIsolatedWorld
+      const tree = await session.send<{ frameTree?: FrameTreeNode }>('Page.getFrameTree');
+      const flat = flattenFrameTree(tree.frameTree);
+      const parentById = new Map(flat.map((item) => [item.id, item.parentId] as const));
+      for (const item of flat) {
+        if (item.depth === 0) continue;
+        const existing = Array.from(record.frames.values()).find(
+          (frame) =>
+            (frame.mode === 'oopif' && frame.url.split('?')[0] === item.url.split('?')[0]) ||
+            (frame.mode === 'context' && frame.frameId === item.id),
+        );
+        // 顶层 iframe 的 rect 用于嵌套 frame 继承
+        let topId = item.id;
+        while (parentById.get(topId) && parentById.get(topId) !== tree.frameTree?.frame?.id) {
+          topId = parentById.get(topId) ?? topId;
+        }
+        const topFrame = flat.find((frame) => frame.id === topId);
+        const rectInfo = topFrame ? rectByUrl.get(topFrame.url.split('?')[0]) : undefined;
+        if (existing) {
+          existing.frameId = item.id;
+          existing.depth = Math.max(existing.depth, item.depth);
+          if (rectInfo && !existing.rect) existing.rect = rectInfo.rect;
+          continue;
+        }
+        try {
+          const created = await session.send<{ executionContextId?: number }>(
+            'Page.createIsolatedWorld',
+            { frameId: item.id, worldName: 'moss_frame' },
+          );
+          if (typeof created.executionContextId !== 'number') continue;
+          record.frames.set(item.id, {
+            frame: item.id,
+            mode: 'context',
+            frameId: item.id,
+            contextId: created.executionContextId,
+            url: item.url,
+            title: item.name,
+            depth: item.depth,
+            ...(rectInfo ? { rect: rectInfo.rect } : {}),
+            session: null,
+          });
+        } catch {
+          // 跨进程 frame 若 createIsolatedWorld 失败，应由上面的 OOPIF target 覆盖
+        }
+      }
+
+      this.logger.info('[browser] frames refresh', {
+        tab: record.key,
+        kind: record.kind,
+        targetCount,
+        iframeTargets,
+        frameNodes: flat.length,
+        attached: record.frames.size,
+        iframeRects: rects.length,
+        ...(autoAttachError ? { autoAttachError } : {}),
+      });
+    } catch (err) {
+      this.logger.warn('[browser] frames refresh failed', {
+        tab: record.key,
+        kind: record.kind,
+        error: err instanceof Error ? err.message : String(err),
+        ...(autoAttachError ? { autoAttachError } : {}),
+      });
+    }
+  }
+
+  /** 顶层页面里的 iframe 布局信息（用于 auto 选择与截图回退） */
+  private async topFrameRects(
+    record: TabRecord,
+  ): Promise<Array<{ src: string; rect: BrowserRect; active: boolean }>> {
+    try {
+      const session = await this.ensureTabSession(record);
+      const result = await session.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
+        expression: `(() => {
+          const list = Array.from(document.querySelectorAll('iframe'));
+          return JSON.stringify(list.map((el) => {
+            const r = el.getBoundingClientRect();
+            return { src: el.src || '', x: r.x, y: r.y, width: r.width, height: r.height, active: document.activeElement === el };
+          }));
+        })()`,
+        returnByValue: true,
+      });
+      const raw = result.result?.value;
+      if (typeof raw !== 'string') return [];
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(isRecord).map((item) => ({
+        src: typeof item.src === 'string' ? item.src : '',
+        rect: {
+          x: typeof item.x === 'number' ? item.x : 0,
+          y: typeof item.y === 'number' ? item.y : 0,
+          width: typeof item.width === 'number' ? item.width : 0,
+          height: typeof item.height === 'number' ? item.height : 0,
+        },
+        active: item.active === true,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** 列出标签页内的 iframe / OOPIF 子会话 */
+  async listFrames(tab: string | undefined): Promise<BrowserFrameInfo[]> {
+    const record = await this.requireTab(tab);
+    const session = await this.ensureTabSession(record);
+    await this.refreshFrames(record, session);
+    const rects = await this.topFrameRects(record);
+    const out: BrowserFrameInfo[] = [];
+    for (const frame of record.frames.values()) {
+      const topRect = rects.find(
+        (item) =>
+          frame.rect &&
+          Math.abs(item.rect.x - frame.rect.x) < 1 &&
+          Math.abs(item.rect.y - frame.rect.y) < 1 &&
+          Math.abs(item.rect.width - frame.rect.width) < 1,
+      );
+      out.push({
+        frame: frame.frame,
+        frameId: frame.frameId,
+        mode: frame.mode,
+        ...(frame.targetId ? { targetId: frame.targetId } : {}),
+        ...(frame.sessionId ? { sessionId: frame.sessionId } : {}),
+        ...(frame.contextId !== undefined ? { contextId: frame.contextId } : {}),
+        url: frame.url,
+        title: frame.title,
+        active: topRect?.active === true,
+        ...(frame.rect ? { rect: frame.rect } : {}),
+      });
+    }
+    // active 优先；其次选更深的 frame（游戏通常在最内层）
+    return out.sort((a, b) => {
+      const activeDiff = Number(b.active) - Number(a.active);
+      if (activeDiff !== 0) return activeDiff;
+      const aRecord = record.frames.get(a.frame);
+      const bRecord = record.frames.get(b.frame);
+      return (bRecord?.depth ?? 0) - (aRecord?.depth ?? 0);
+    });
+  }
+
+  /** 选择 iframe 子会话：auto / targetId / URL 子串；顶层返回 null */
+  private async resolveFrame(
+    record: TabRecord,
+    frame: string | undefined,
+  ): Promise<FrameRecord | null> {
+    if (!frame || frame === 'all') return null;
+    if (record.frames.size === 0) {
+      const session = await this.ensureTabSession(record);
+      await this.refreshFrames(record, session);
+    }
+    if (record.frames.size === 0) return null;
+    const wanted = frame.trim();
+    if (wanted !== 'auto') {
+      const direct =
+        record.frames.get(wanted) ??
+        Array.from(record.frames.values()).find(
+          (item) => item.frameId === wanted || item.targetId === wanted,
+        );
+      if (direct) return direct;
+      const byUrl = Array.from(record.frames.values()).find((item) =>
+        item.url.toLowerCase().includes(wanted.toLowerCase()),
+      );
+      if (byUrl) return byUrl;
+      throw new Error(`未找到 iframe：${wanted}。可先执行 action=frames 查看可用 frame。`);
+    }
+    const rects = await this.topFrameRects(record);
+    const frames = Array.from(record.frames.values());
+    const score = (item: FrameRecord): number => {
+      const topRect = item.rect
+        ? rects.find(
+            (candidate) =>
+              Math.abs(candidate.rect.x - item.rect!.x) < 1 &&
+              Math.abs(candidate.rect.y - item.rect!.y) < 1 &&
+              Math.abs(candidate.rect.width - item.rect!.width) < 1,
+          )
+        : undefined;
+      const area = item.rect ? item.rect.width * item.rect.height : 0;
+      return (topRect?.active ? 1_000_000 : 0) + item.depth * 10_000 + area;
+    };
+    return frames.sort((a, b) => score(b) - score(a))[0] ?? null;
+  }
+
+  /** 取 frame 的会话（无 frame 时返回顶层会话；显式指定但不存在时报错，避免误发到父页面） */
+  private async frameSession(
+    record: TabRecord,
+    frame: string | undefined,
+  ): Promise<{ session: CdpSession; frame: FrameRecord | null }> {
+    const root = await this.ensureTabSession(record);
+    const resolved = await this.resolveFrame(record, frame);
+    if (!resolved) {
+      if (frame && frame !== 'auto' && frame !== 'all') {
+        throw new Error(`未找到 iframe 子会话：${frame}。请先执行 action=frames 查看可用 frame。`);
+      }
+      return { session: root, frame: null };
+    }
+    // 后台标签页/窗口通常是 hidden+blur，游戏会暂停输入；让页面以为自己可见且聚焦
+    if (resolved.mode === 'context') {
+      await root
+        .send('Emulation.setFocusEmulationEnabled', { enabled: true })
+        .catch(() => undefined);
+    }
+    const child = this.createFrameSession(record, resolved, root);
+    if (child !== root) {
+      void child
+        .send('Emulation.setFocusEmulationEnabled', { enabled: true })
+        .catch(() => undefined);
+    }
+    return { session: child, frame: resolved };
   }
 
   private async refreshRecordInfo(record: TabRecord): Promise<void> {
@@ -1396,7 +2197,7 @@ export class BrowserServiceImpl implements BrowserService {
   // ==========================================================================
 
   async navigate(tab: string | undefined, options: BrowserNavigateOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     const cfg = this.getToolConfig();
     const result = await navigatePage(session, options, {
@@ -1413,7 +2214,7 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async snapshot(tab: string | undefined, maxNodes?: number): Promise<BrowserSnapshot> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     const cfg = this.getToolConfig();
     const tree = await buildSnapshot(session, Math.max(50, maxNodes ?? cfg.maxSnapshotNodes));
@@ -1432,45 +2233,101 @@ export class BrowserServiceImpl implements BrowserService {
     };
   }
 
-  async screenshot(tab: string | undefined, fullPage?: boolean): Promise<BrowserScreenshot> {
-    const record = this.requireTab(tab);
-    const session = await this.ensureTabSession(record);
+  async screenshot(
+    tab: string | undefined,
+    options: { fullPage?: boolean; frame?: string; region?: BrowserRect } = {},
+  ): Promise<BrowserScreenshot> {
+    const record = await this.requireTab(tab);
     const cfg = this.getToolConfig();
-    const shot = await captureScreenshot(session, fullPage === true, cfg.maxImageDimension);
+    const { session, frame } = await this.frameSession(record, options.frame);
+    let shot: ScreenshotResult;
+    try {
+      shot = await captureScreenshot(
+        session,
+        options.fullPage === true,
+        cfg.maxImageDimension,
+        options.region ? { region: options.region } : {},
+      );
+    } catch (err) {
+      if (!frame) throw err;
+      // iframe 子会话不支持 Page.captureScreenshot 时：截顶层并按 iframe rect 裁剪
+      const rects = await this.topFrameRects(record);
+      const rect =
+        rects.find(
+          (item) => item.src && frame.url && item.src.split('?')[0] === frame.url.split('?')[0],
+        ) ??
+        rects
+          .filter((item) => item.rect.width > 0 && item.rect.height > 0)
+          .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0];
+      if (!rect) throw err;
+      const root = await this.ensureTabSession(record);
+      shot = await captureScreenshot(root, false, cfg.maxImageDimension, { region: rect.rect });
+    }
     const path = newScreenshotPath(this.dirs, record.key);
     await Bun.write(path, shot.buffer);
     pruneScreenshots(this.dirs);
     await this.refreshRecordInfo(record);
+    record.lastShot = {
+      ...(shot.width !== undefined ? { imageWidth: shot.width } : {}),
+      ...(shot.height !== undefined ? { imageHeight: shot.height } : {}),
+      ...(shot.viewportWidth !== undefined ? { viewportWidth: shot.viewportWidth } : {}),
+      ...(shot.viewportHeight !== undefined ? { viewportHeight: shot.viewportHeight } : {}),
+      ...(shot.scale !== undefined ? { scale: shot.scale } : {}),
+      ...(frame ? { frame: frame.frame } : {}),
+      ...(shot.region ? { region: shot.region } : {}),
+    };
     return {
       path,
       data: shot.buffer.toString('base64'),
       mimeType: 'image/png',
       ...(shot.width !== undefined ? { width: shot.width } : {}),
       ...(shot.height !== undefined ? { height: shot.height } : {}),
+      ...(shot.viewportWidth !== undefined ? { viewportWidth: shot.viewportWidth } : {}),
+      ...(shot.viewportHeight !== undefined ? { viewportHeight: shot.viewportHeight } : {}),
+      ...(shot.dpr !== undefined ? { dpr: shot.dpr } : {}),
+      ...(shot.scale !== undefined ? { scale: shot.scale } : {}),
+      ...(frame ? { frame: frame.frame } : {}),
+      ...(shot.region ? { region: shot.region } : {}),
     };
   }
 
   async click(tab: string | undefined, options: BrowserClickOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
-    const session = await this.ensureTabSession(record);
+    const record = await this.requireTab(tab);
+    const { session, frame } = await this.frameSession(record, options.frame);
+    if (frame && (options.ref || options.selector)) {
+      throw new Error('frame 内点击请使用 x/y 坐标（frame 内 CSS 像素）；元素 ref 仅适用于顶层页面');
+    }
+    let x = options.x;
+    let y = options.y;
+    if (typeof x === 'number' && typeof y === 'number' && options.coordSpace === 'screenshot') {
+      const shot = record.lastShot;
+      const scale =
+        shot && shot.imageWidth && shot.viewportWidth && shot.viewportWidth > 0
+          ? shot.imageWidth / shot.viewportWidth
+          : shot?.scale;
+      if (!scale || scale <= 0) {
+        throw new Error('尚未截图，无法使用 coord_space=screenshot；请先执行 action=screenshot');
+      }
+      x = x / scale;
+      y = y / scale;
+    }
     const started = Date.now();
     this.pendingNewTabUntil.set(record.instanceId, started + 2500);
     await clickElement(session, {
       ...(options.ref ? { ref: options.ref } : {}),
       ...(options.selector ? { selector: options.selector } : {}),
-      ...(typeof options.x === 'number' ? { x: options.x } : {}),
-      ...(typeof options.y === 'number' ? { y: options.y } : {}),
+      ...(typeof x === 'number' ? { x } : {}),
+      ...(typeof y === 'number' ? { y } : {}),
       ...(options.button ? { button: options.button } : {}),
       ...(options.clickCount !== undefined ? { clickCount: options.clickCount } : {}),
       ...(options.modifiers ? { modifiers: options.modifiers } : {}),
     }, record.refs);
-    await sleep(350);
     await this.refreshRecordInfo(record);
     return this.withOpenedTab(this.pageResult(record), record.instanceId, started);
   }
 
   async hover(tab: string | undefined, options: BrowserHoverOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     await hoverElement(session, {
       ...(options.ref ? { ref: options.ref } : {}),
@@ -1480,7 +2337,7 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async typeText(tab: string | undefined, options: BrowserTypeOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     await typeInto(session, {
       ...(options.ref ? { ref: options.ref } : {}),
@@ -1494,18 +2351,223 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async pressKey(tab: string | undefined, options: BrowserPressKeyOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
-    const session = await this.ensureTabSession(record);
+    const record = await this.requireTab(tab);
+    const { session } = await this.frameSession(record, options.frame);
     const started = Date.now();
     this.pendingNewTabUntil.set(record.instanceId, started + 2500);
     await pressKey(session, options.key, options.modifiers);
-    await sleep(250);
     await this.refreshRecordInfo(record);
     return this.withOpenedTab(this.pageResult(record), record.instanceId, started);
   }
 
+  async keyDown(
+    tab: string | undefined,
+    key: string,
+    options: { frame?: string; modifiers?: string[] } = {},
+  ): Promise<BrowserPageInfo> {
+    const record = await this.requireTab(tab);
+    const { session } = await this.frameSession(record, options.frame);
+    await dispatchKeyDown(session, key, options.modifiers);
+    this.currentTabKey = record.key;
+    return this.pageResult(record);
+  }
+
+  async keyUp(
+    tab: string | undefined,
+    key: string,
+    options: { frame?: string; modifiers?: string[] } = {},
+  ): Promise<BrowserPageInfo> {
+    const record = await this.requireTab(tab);
+    const { session } = await this.frameSession(record, options.frame);
+    await dispatchKeyUp(session, key, options.modifiers);
+    this.currentTabKey = record.key;
+    return this.pageResult(record);
+  }
+
+  async hold(tab: string | undefined, options: BrowserHoldOptions): Promise<BrowserPageInfo> {
+    const record = await this.requireTab(tab);
+    const { session } = await this.frameSession(record, options.frame);
+    await holdKeys(session, options.keys, options.durationMs, options.modifiers);
+    this.currentTabKey = record.key;
+    return this.pageResult(record);
+  }
+
+  /**
+   * 单次调用内执行有先后顺序/等待的输入宏：把「按住 → 等待 → 抬起 → 观察」压进一次往返。
+   * 支持 key_down/key_up/hold/press_key/click/drag/scroll/wait/screenshot/wait_stable/wait_change。
+   */
+  async macro(
+    tab: string | undefined,
+    steps: BrowserMacroStep[],
+    options: { verify?: boolean } = {},
+  ): Promise<BrowserMacroResult> {
+    const record = await this.requireTab(tab);
+    if (!Array.isArray(steps) || steps.length === 0) throw new Error('macro 需要至少一个步骤');
+    if (steps.length > 32) throw new Error('macro 最多 32 个步骤');
+    const started = Date.now();
+    const results: BrowserMacroStepResult[] = [];
+    let lastScreenshot: BrowserScreenshot | undefined;
+    let signatureBefore: FrameSignature | null = null;
+    if (options.verify !== false) {
+      try {
+        const { session } = await this.frameSession(record, undefined);
+        signatureBefore = await frameSignature(session);
+      } catch {
+        signatureBefore = null;
+      }
+    }
+
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      const action = typeof step.action === 'string' ? step.action : '';
+      const stepStarted = Date.now();
+      try {
+        if (!action) throw new Error('步骤缺少 action');
+        switch (action) {
+          case 'wait': {
+            const ms = Math.max(0, Math.min(5000, Math.trunc(Number(step.wait_ms ?? step.ms ?? 0) || 0)));
+            await sleep(ms);
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted, detail: `wait ${ms}ms` });
+            break;
+          }
+          case 'key_down':
+            await this.keyDown(record.key, String(step.key ?? ''), {
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(Array.isArray(step.modifiers) ? { modifiers: step.modifiers.map(String) } : {}),
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          case 'key_up':
+            await this.keyUp(record.key, String(step.key ?? ''), {
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(Array.isArray(step.modifiers) ? { modifiers: step.modifiers.map(String) } : {}),
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          case 'hold': {
+            const keys = Array.isArray(step.keys)
+              ? step.keys.map(String)
+              : typeof step.key === 'string'
+                ? [step.key]
+                : [];
+            await this.hold(record.key, {
+              keys,
+              durationMs: Math.max(0, Math.min(5000, Math.trunc(Number(step.duration_ms ?? 0) || 0))),
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(Array.isArray(step.modifiers) ? { modifiers: step.modifiers.map(String) } : {}),
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          }
+          case 'press_key':
+            await this.pressKey(record.key, {
+              key: String(step.key ?? ''),
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(Array.isArray(step.modifiers) ? { modifiers: step.modifiers.map(String) } : {}),
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          case 'click':
+            await this.click(record.key, {
+              ...(typeof step.ref === 'string' ? { ref: step.ref } : {}),
+              ...(typeof step.selector === 'string' ? { selector: step.selector } : {}),
+              ...(typeof step.x === 'number' ? { x: step.x } : {}),
+              ...(typeof step.y === 'number' ? { y: step.y } : {}),
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(step.coord_space === 'screenshot' ? { coordSpace: 'screenshot' } : {}),
+              ...(step.button === 'left' || step.button === 'right' || step.button === 'middle'
+                ? { button: step.button }
+                : {}),
+              ...(typeof step.click_count === 'number' ? { clickCount: step.click_count } : {}),
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          case 'scroll':
+            await this.scroll(record.key, {
+              deltaX: typeof step.delta_x === 'number' ? step.delta_x : 0,
+              deltaY: typeof step.delta_y === 'number' ? step.delta_y : 600,
+            });
+            results.push({ index, action, ok: true, durationMs: Date.now() - stepStarted });
+            break;
+          case 'screenshot': {
+            lastScreenshot = await this.screenshot(record.key, {
+              ...(typeof step.frame === 'string' ? { frame: step.frame } : {}),
+              ...(isRecord(step.region) ? { region: step.region as unknown as BrowserRect } : {}),
+            });
+            results.push({
+              index,
+              action,
+              ok: true,
+              durationMs: Date.now() - stepStarted,
+              detail: lastScreenshot.path,
+            });
+            break;
+          }
+          case 'wait_stable':
+          case 'wait_change': {
+            const { session } = await this.frameSession(
+              record,
+              typeof step.frame === 'string' ? step.frame : undefined,
+            );
+            const waitOptions = {
+              ...(isRecord(step.region) ? { region: step.region as unknown as BrowserRect } : {}),
+              ...(typeof step.timeout_ms === 'number' ? { timeoutMs: step.timeout_ms } : {}),
+              ...(typeof step.interval_ms === 'number' ? { intervalMs: step.interval_ms } : {}),
+              ...(typeof step.threshold === 'number' ? { threshold: step.threshold } : {}),
+              ...(typeof step.stable_samples === 'number' ? { stableSamples: step.stable_samples } : {}),
+            };
+            const waited =
+              action === 'wait_stable'
+                ? await waitFrameStable(session, waitOptions)
+                : await waitFrameChange(session, waitOptions);
+            results.push({
+              index,
+              action,
+              ok: waited.matched,
+              durationMs: Date.now() - stepStarted,
+              detail: `${waited.reason} diff=${waited.diffPercent}% samples=${waited.samples}`,
+              ...(waited.matched ? {} : { error: '等待超时' }),
+            });
+            break;
+          }
+          default:
+            throw new Error(`macro 不支持的步骤：${action}`);
+        }
+      } catch (err) {
+        results.push({
+          index,
+          action: action || `#${index}`,
+          ok: false,
+          durationMs: Date.now() - stepStarted,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        break;
+      }
+    }
+
+    let effect: BrowserMacroResult['effect'] = 'unknown';
+    let diff = undefined as number | undefined;
+    if (signatureBefore) {
+      try {
+        const { session } = await this.frameSession(record, undefined);
+        const after = await frameSignature(session);
+        diff = diffPercent(signatureBefore, after);
+        effect = diff > 1.5 ? 'changed' : 'no-change';
+      } catch {
+        effect = 'unknown';
+      }
+    }
+    return {
+      steps: results,
+      elapsedMs: Date.now() - started,
+      effect,
+      ...(diff !== undefined ? { diffPercent: diff } : {}),
+      ...(lastScreenshot ? { lastScreenshot } : {}),
+    };
+  }
+
   async selectOption(tab: string | undefined, options: BrowserSelectOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     await selectOption(session, {
       ...(options.ref ? { ref: options.ref } : {}),
@@ -1517,7 +2579,7 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async scroll(tab: string | undefined, options: BrowserScrollOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     await scrollPage(session, {
       ...(options.ref ? { ref: options.ref } : {}),
@@ -1529,7 +2591,7 @@ export class BrowserServiceImpl implements BrowserService {
   }
 
   async drag(tab: string | undefined, options: BrowserDragOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const hasFrom = Boolean(
       options.fromRef ||
         options.fromSelector ||
@@ -1569,14 +2631,14 @@ export class BrowserServiceImpl implements BrowserService {
     tab: string | undefined,
     options: BrowserEvaluateOptions,
   ): Promise<{ result: string; type: string }> {
-    const record = this.requireTab(tab);
-    const session = await this.ensureTabSession(record);
+    const record = await this.requireTab(tab);
+    const { session } = await this.frameSession(record, options.frame);
     const cfg = this.getToolConfig();
     return evaluateExpression(session, options.expression, cfg.allowEvaluate);
   }
 
   async waitFor(tab: string | undefined, options: BrowserWaitOptions): Promise<BrowserPageInfo> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     const session = await this.ensureTabSession(record);
     const cfg = this.getToolConfig();
     await waitCondition(session, {
@@ -1593,8 +2655,42 @@ export class BrowserServiceImpl implements BrowserService {
     return this.pageResult(record);
   }
 
+  async waitStable(
+    tab: string | undefined,
+    options: BrowserFrameWaitOptions,
+  ): Promise<BrowserFrameWaitResult> {
+    const record = await this.requireTab(tab);
+    const { session, frame } = await this.frameSession(record, options.frame);
+    const result = await waitFrameStable(session, {
+      ...(options.region ? { region: options.region } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.intervalMs !== undefined ? { intervalMs: options.intervalMs } : {}),
+      ...(options.threshold !== undefined ? { threshold: options.threshold } : {}),
+      ...(options.stableSamples !== undefined ? { stableSamples: options.stableSamples } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return { ...result, ...(frame ? { frame: frame.frame } : {}) };
+  }
+
+  async waitChange(
+    tab: string | undefined,
+    options: BrowserFrameWaitOptions,
+  ): Promise<BrowserFrameWaitResult> {
+    const record = await this.requireTab(tab);
+    const { session, frame } = await this.frameSession(record, options.frame);
+    const result = await waitFrameChange(session, {
+      ...(options.region ? { region: options.region } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.intervalMs !== undefined ? { intervalMs: options.intervalMs } : {}),
+      ...(options.threshold !== undefined ? { threshold: options.threshold } : {}),
+      ...(options.stableSamples !== undefined ? { stableSamples: options.stableSamples } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return { ...result, ...(frame ? { frame: frame.frame } : {}) };
+  }
+
   async consoleLogs(tab: string | undefined, clear?: boolean): Promise<BrowserConsoleResult> {
-    const record = this.requireTab(tab);
+    const record = await this.requireTab(tab);
     await this.ensureTabSession(record);
     return { entries: record.console.list(clear === true), cleared: clear === true };
   }

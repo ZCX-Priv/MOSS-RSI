@@ -1,6 +1,6 @@
 {
   "name": "browser",
-  "description": "浏览器操作工具（CDP + MOSS 浏览器扩展）：可操作加载了 MOSS 扩展的任意 Chromium 浏览器（Chrome/Edge/Brave 等），也可启动 MOSS 内置 Chrome。MOSS 启动时不会打开或打扰浏览器；扩展仅在用户在「设置 → 浏览器」点击安装（或调用 action='setup'）时安装，并保留现有登录态。首次 action='open' 会新建独立的 MOSS 浏览器窗口：窗口在后台打开、不抢当前窗口焦点，标签仍自动归入「MOSS」标签组；后续 open 复用该窗口。绝不接管用户已有标签页。推荐循环：先 action='status' 查看桥接/实例与安装状态；页面操作前先 action='snapshot' 获取带 ref=eN 的可交互元素树，再用 click/type/press_key/select/hover/scroll/drag 按 ref 操作，页面变化后重新 snapshot；drag 用于滑块/地图/画布等按住拖拽；screenshot 返回截图；tabs 列出 AI 标签页；evaluate 可执行页面 JS（受配置限制）。支持三种控制模式（设置→浏览器切换）：内置 Chrome / 浏览器扩展 / 外部 CDP 直连；CDP 模式可连接任意以 --remote-debugging-port 启动的 Chromium 浏览器或 Electron 应用（按次用 cdp_endpoint 指定端点）。",
+  "description": "浏览器操作工具（CDP + MOSS 浏览器扩展）：可操作加载了 MOSS 扩展的任意 Chromium 浏览器（Chrome/Edge/Brave 等），也可启动 MOSS 内置 Chrome。MOSS 启动时不会打开或打扰浏览器；扩展仅在用户在「设置 → 浏览器」点击安装（或调用 action='setup'）时安装，并保留现有登录态。首次 action='open' 会新建独立的 MOSS 浏览器窗口：窗口在后台打开、不抢当前窗口焦点，标签仍自动归入「MOSS」标签组；后续 open 复用该窗口。绝不接管用户已有标签页。推荐循环：先 action='status' 查看桥接/实例与安装状态；页面操作前先 action='snapshot' 获取带 ref=eN 的可交互元素树，再用 click/type/press_key/select/hover/scroll/drag 按 ref 操作，页面变化后重新 snapshot；drag 用于滑块/地图/画布等按住拖拽；screenshot 返回截图；tabs 列出 AI 标签页；evaluate 可执行页面 JS（受配置限制）。跨域 iframe/游戏：先 action='frames' 列出子会话，再用 frame='auto' 或 targetId；frame 子会话可单独截图/按键。连续输入：action='hold'（按住指定毫秒）或 action='macro'（一次调用内执行 key_down/key_up/hold/click/wait/screenshot/wait_stable 序列），不要连发瞬时 press_key。验证：macro 默认返回首尾画面差分 effect=changed/no-change；wait_stable/wait_change 用于等待画面稳定/确认动作生效。click 支持 coord_space='screenshot'（直接使用截图上的像素，自动按缩放换算）。支持三种控制模式（设置→浏览器切换）：内置 Chrome / 浏览器扩展 / 外部 CDP 直连；CDP 模式可连接任意以 --remote-debugging-port 启动的 Chromium 浏览器或 Electron 应用（按次用 cdp_endpoint 指定端点）。",
   "description_en": "Browser automation tool (CDP + MOSS browser extension): drives any Chromium browser with the MOSS extension installed (Chrome/Edge/Brave etc.), or launches MOSS built-in Chrome. Startup never opens or disturbs browsers; the extension is installed only when the user clicks install in Settings → Browser (or calls action='setup'), preserving existing logins. The first action='open' creates a dedicated MOSS browser window in the background (without stealing focus from the current window); tabs are still grouped under the \"MOSS\" tab group, and later opens reuse that window. It never takes over existing user tabs. Recommended loop: action='status' to inspect bridge/instances and installer state; before page actions call action='snapshot' to get the accessible element tree with ref=eN, then click/type/press_key/select/hover/scroll/drag by ref, and re-snapshot after page changes. drag performs press-move-release gestures for sliders/maps/canvases. screenshot returns an image; tabs lists AI tabs; evaluate runs page JS (subject to config). Three control modes (Settings → Browser): built-in Chrome / browser extension / external CDP. CDP mode can attach to any Chromium browser or Electron app started with --remote-debugging-port (use cdp_endpoint per call).",
   "icon": "earth",
   "annotations": {
@@ -22,15 +22,22 @@
           "navigate",
           "snapshot",
           "screenshot",
+          "frames",
           "click",
           "hover",
           "type",
           "press_key",
+          "key_down",
+          "key_up",
+          "hold",
+          "macro",
           "select",
           "scroll",
           "drag",
           "evaluate",
           "wait",
+          "wait_stable",
+          "wait_change",
           "console"
         ],
         "description": "操作类型。观察：status/snapshot/screenshot/tabs/console/wait；建页与管理：setup/open/focus/close；页面操作：navigate/click/hover/type/press_key/select/scroll/drag/evaluate。",
@@ -40,6 +47,11 @@
         "type": "string",
         "description": "AI 标签页 id（如 t1；来自 open/tabs 的返回）。缺省使用当前 AI 标签页",
         "description_en": "AI tab id (e.g. t1; from open/tabs). Defaults to the current AI tab."
+      },
+      "auto_focus": {
+        "type": "boolean",
+        "description": "操作前自动聚焦目标标签页/窗口（缺省 true）；目标已在前台时不重复激活，避免闪屏；false 时保持后台",
+        "description_en": "Auto-focus the target tab/window before acting (default true); no-op when already foreground to avoid flicker; false keeps it in the background."
       },
       "browser": {
         "type": "string",
@@ -75,6 +87,66 @@
         "type": "string",
         "description": "snapshot 返回的元素引用（如 e3），用于 click/hover/type/select/scroll",
         "description_en": "Element ref from snapshot (e.g. e3) for click/hover/type/select/scroll."
+      },
+      "frame": {
+        "type": "string",
+        "description": "目标 iframe 子会话：auto / targetId / URL 子串（先用 action=frames 查看）。指定 frame 时 click 的 x/y 使用该 iframe 的 CSS 坐标；screenshot 只截该 iframe 画面。",
+        "description_en": "Target iframe sub-session: auto / targetId / URL substring (list with action=frames). When frame is set, click x/y are iframe-local CSS pixels and screenshot captures only that iframe."
+      },
+      "coord_space": {
+        "type": "string",
+        "enum": ["viewport", "screenshot"],
+        "description": "click 的 x/y 坐标系：viewport（缺省，CSS 视口像素）/ screenshot（最近一次截图的像素，工具自动按缩放换算）",
+        "description_en": "Coordinate space for click x/y: viewport (default, CSS pixels) / screenshot (pixels on the last screenshot; converted automatically)."
+      },
+      "region": {
+        "type": "object",
+        "description": "截图/帧差裁剪区域（CSS 像素）：{x,y,width,height}",
+        "description_en": "Crop region for screenshot/frame diff in CSS pixels: {x,y,width,height}."
+      },
+      "keys": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "hold 要同时按住的按键列表（如 [\"ArrowRight\"]）",
+        "description_en": "Keys to hold simultaneously (e.g. [\"ArrowRight\"])."
+      },
+      "duration_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5000,
+        "description": "hold 按住时长（毫秒，最大 5000）；drag 的总时长也使用该字段",
+        "description_en": "Hold duration in ms (max 5000); drag also uses this field."
+      },
+      "actions": {
+        "type": "array",
+        "description": "macro 的动作序列（1-32 步）：[{action:'key_down'|'key_up'|'hold'|'press_key'|'click'|'scroll'|'wait'|'screenshot'|'wait_stable'|'wait_change', ...}]",
+        "description_en": "Macro action list (1-32 steps): [{action:'key_down'|'key_up'|'hold'|'press_key'|'click'|'scroll'|'wait'|'screenshot'|'wait_stable'|'wait_change', ...}]."
+      },
+      "verify": {
+        "type": "boolean",
+        "description": "macro 是否在首尾做画面差分（缺省 true）；返回 effect=changed/no-change",
+        "description_en": "Whether macro compares frames before/after (default true); returns effect=changed/no-change."
+      },
+      "threshold": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "帧差阈值（百分比，缺省 1.5）",
+        "description_en": "Frame-diff threshold in percent (default 1.5)."
+      },
+      "stable_samples": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "description": "wait_stable 连续稳定采样次数（缺省 2）",
+        "description_en": "Consecutive stable samples required by wait_stable (default 2)."
+      },
+      "interval_ms": {
+        "type": "integer",
+        "minimum": 30,
+        "maximum": 1000,
+        "description": "wait_stable/wait_change 采样间隔（缺省 80ms）",
+        "description_en": "Polling interval for wait_stable/wait_change (default 80ms)."
       },
       "selector": {
         "type": "string",
@@ -137,13 +209,6 @@
         "maximum": 60,
         "description": "拖动插值步数（drag；缺省 12，越多越接近真实手势）",
         "description_en": "Drag interpolation steps (drag; default 12, higher is closer to a real gesture)."
-      },
-      "duration_ms": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 5000,
-        "description": "拖动总时长毫秒（drag；缺省 300）",
-        "description_en": "Total drag duration in ms (drag; default 300)."
       },
       "button": {
         "type": "string",
@@ -271,7 +336,8 @@
       "browserPath": "",
       "autoDownloadChromeForTesting": false,
       "autoInstallExtensions": false,
-      "allowEvaluate": true
+      "allowEvaluate": true,
+      "autoFocus": true
     },
     "schema": {
       "mode": {
@@ -299,6 +365,9 @@
         "type": "integer",
         "min": 0,
         "max": 4096
+      },
+      "autoFocus": {
+        "type": "boolean"
       }
     }
   }

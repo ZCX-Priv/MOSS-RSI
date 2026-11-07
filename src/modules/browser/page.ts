@@ -14,6 +14,12 @@ export interface PageInfo {
   url: string;
   title: string;
   readyState: string;
+  /** 视口 CSS 宽度（截图坐标换算用） */
+  viewportWidth?: number;
+  /** 视口 CSS 高度 */
+  viewportHeight?: number;
+  /** 设备像素比（截图设备像素 / CSS 像素） */
+  dpr?: number;
 }
 
 export interface SnapshotBuild {
@@ -90,17 +96,28 @@ export async function enablePageDomains(session: CdpSession): Promise<void> {
 /** 读取当前页面信息 */
 export async function getPageInfo(session: CdpSession): Promise<PageInfo> {
   const result = await session.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
-    expression: 'JSON.stringify({url: location.href, title: document.title, readyState: document.readyState})',
+    expression:
+      'JSON.stringify({url: location.href, title: document.title, readyState: document.readyState, w: innerWidth, h: innerHeight, dpr: devicePixelRatio})',
     returnByValue: true,
   });
   const raw = result.result?.value;
   if (typeof raw === 'string') {
     try {
-      const parsed = JSON.parse(raw) as { url?: unknown; title?: unknown; readyState?: unknown };
+      const parsed = JSON.parse(raw) as {
+        url?: unknown;
+        title?: unknown;
+        readyState?: unknown;
+        w?: unknown;
+        h?: unknown;
+        dpr?: unknown;
+      };
       return {
         url: typeof parsed.url === 'string' ? parsed.url : '',
         title: typeof parsed.title === 'string' ? parsed.title : '',
         readyState: typeof parsed.readyState === 'string' ? parsed.readyState : 'unknown',
+        ...(typeof parsed.w === 'number' ? { viewportWidth: parsed.w } : {}),
+        ...(typeof parsed.h === 'number' ? { viewportHeight: parsed.h } : {}),
+        ...(typeof parsed.dpr === 'number' ? { dpr: parsed.dpr } : {}),
       };
     } catch {
       // fall through
@@ -667,6 +684,84 @@ for (let i = 1; i <= 12; i += 1) {
   KEY_MAP[`f${i}`] = { key: `F${i}`, code: `F${i}`, vk: 111 + i };
 }
 
+interface KeySpec {
+  key: string;
+  code: string;
+  vk: number;
+  text?: string;
+}
+
+function resolveKeySpec(key: string): KeySpec {
+  const normalized = key.trim();
+  if (!normalized) throw new Error('按键不能为空');
+  const mapped = KEY_MAP[normalized.toLowerCase()];
+  if (mapped) return mapped;
+  return {
+    key: normalized,
+    code: normalized.length === 1 ? `Key${normalized.toUpperCase()}` : normalized,
+    vk: normalized.length === 1 ? normalized.toUpperCase().charCodeAt(0) : 0,
+    ...(normalized.length === 1 ? { text: normalized } : {}),
+  };
+}
+
+function keyEventBase(spec: KeySpec, mask: number, autoRepeat = false): Record<string, unknown> {
+  return {
+    key: spec.key,
+    code: spec.code,
+    windowsVirtualKeyCode: spec.vk,
+    nativeVirtualKeyCode: spec.vk,
+    modifiers: mask,
+    ...(autoRepeat ? { autoRepeat: true } : {}),
+  };
+}
+
+/** 只按下按键（游戏/需要持续移动时配合 key_up 使用） */
+export async function keyDown(
+  session: CdpSession,
+  key: string,
+  modifiers?: string[],
+  autoRepeat = false,
+): Promise<void> {
+  const spec = resolveKeySpec(key);
+  const mask = modifierMask(modifiers);
+  await session.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    ...keyEventBase(spec, mask, autoRepeat),
+    ...(spec.text && mask === 0 ? { text: spec.text, unmodifiedText: spec.text } : {}),
+  });
+}
+
+/** 抬起按键（与 keyDown 成对） */
+export async function keyUp(session: CdpSession, key: string, modifiers?: string[]): Promise<void> {
+  const spec = resolveKeySpec(key);
+  await session.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    ...keyEventBase(spec, modifierMask(modifiers)),
+  });
+}
+
+/** 同时按住多个键 durationMs 后全部抬起（一次调用完成持续移动/组合键） */
+export async function holdKeys(
+  session: CdpSession,
+  keys: string[],
+  durationMs: number,
+  modifiers?: string[],
+  signal?: AbortSignal,
+): Promise<{ keys: string[]; durationMs: number }> {
+  const normalized = keys.map((key) => key.trim()).filter((key) => key.length > 0);
+  if (normalized.length === 0) throw new Error('按住操作至少需要一个按键');
+  const duration = Math.max(0, Math.min(5000, Math.trunc(durationMs)));
+  for (const key of normalized) await keyDown(session, key, modifiers);
+  try {
+    await sleep(duration, signal);
+  } finally {
+    for (const key of normalized.slice().reverse()) {
+      await keyUp(session, key, modifiers).catch(() => undefined);
+    }
+  }
+  return { keys: normalized, durationMs: duration };
+}
+
 async function dispatchKey(session: CdpSession, key: string, modifiers?: string[]): Promise<void> {
   const normalized = key.trim();
   if (!normalized) throw new Error('按键不能为空');
@@ -676,25 +771,13 @@ async function dispatchKey(session: CdpSession, key: string, modifiers?: string[
     await session.send('Input.insertText', { text: normalized });
     return;
   }
-  const spec = mapped ?? {
-    key: normalized.length === 1 ? normalized : normalized,
-    code: normalized.length === 1 ? `Key${normalized.toUpperCase()}` : normalized,
-    vk: normalized.length === 1 ? normalized.toUpperCase().charCodeAt(0) : 0,
-    text: normalized.length === 1 ? normalized : undefined,
-  };
-  const base = {
-    key: spec.key,
-    code: spec.code,
-    windowsVirtualKeyCode: spec.vk,
-    nativeVirtualKeyCode: spec.vk,
-    modifiers: mask,
-  };
+  const spec = resolveKeySpec(normalized);
   await session.send('Input.dispatchKeyEvent', {
     type: 'keyDown',
-    ...base,
+    ...keyEventBase(spec, mask),
     ...(spec.text && mask === 0 ? { text: spec.text, unmodifiedText: spec.text } : {}),
   });
-  await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...keyEventBase(spec, mask) });
 }
 
 export interface TypeOptions {
@@ -974,6 +1057,8 @@ function formatRemoteObject(value: unknown): string {
 interface SharpLike {
   resize: (options: Record<string, unknown>) => SharpLike;
   png: () => SharpLike;
+  greyscale: () => SharpLike;
+  raw: () => SharpLike;
   metadata: () => Promise<{ width?: number; height?: number }>;
   toBuffer: () => Promise<Buffer>;
 }
@@ -994,13 +1079,73 @@ async function loadSharp(): Promise<SharpFactory | null> {
   return sharpPromise;
 }
 
+/**
+ * 截图长边硬上限：与上下文图片优化 maxEdgePx(1568) 对齐。
+ * 超过该值会被图片优化器再次缩放，导致工具回报尺寸与模型看到的图片不一致，
+ * 坐标换算随之中断；因此工具层先统一到 ≤1568。
+ */
+const MAX_INLINE_EDGE = 1568;
+
+export interface ScreenshotRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ScreenshotResult {
+  buffer: Buffer<ArrayBufferLike>;
+  width?: number;
+  height?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  dpr?: number;
+  /** 图像像素 / CSS 像素（坐标换算用） */
+  scale?: number;
+  region?: ScreenshotRegion;
+}
+
+function clampEdge(value: number): number {
+  if (value <= 0) return 0;
+  return Math.min(value, MAX_INLINE_EDGE);
+}
+
+/** 读取视口尺寸与 DPR（失败不阻断截图） */
+async function readViewport(session: CdpSession): Promise<{
+  viewportWidth?: number;
+  viewportHeight?: number;
+  dpr?: number;
+}> {
+  try {
+    const info = await getPageInfo(session);
+    return {
+      ...(info.viewportWidth !== undefined ? { viewportWidth: info.viewportWidth } : {}),
+      ...(info.viewportHeight !== undefined ? { viewportHeight: info.viewportHeight } : {}),
+      ...(info.dpr !== undefined ? { dpr: info.dpr } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function captureScreenshot(
   session: CdpSession,
   fullPage: boolean,
   maxImageDimension: number,
-): Promise<{ buffer: Buffer<ArrayBufferLike>; width?: number; height?: number }> {
+  options: { region?: ScreenshotRegion } = {},
+): Promise<ScreenshotResult> {
+  const viewport = await readViewport(session);
+  const edgeCap = clampEdge(maxImageDimension);
   let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
-  if (fullPage) {
+  if (options.region) {
+    const region = {
+      x: Math.max(0, Math.trunc(options.region.x)),
+      y: Math.max(0, Math.trunc(options.region.y)),
+      width: Math.max(1, Math.trunc(options.region.width)),
+      height: Math.max(1, Math.trunc(options.region.height)),
+    };
+    clip = { ...region, scale: 1 };
+  } else if (fullPage) {
     const metrics = await session.send<{
       cssContentSize?: { width?: number; height?: number };
       contentSize?: { width?: number; height?: number };
@@ -1008,7 +1153,7 @@ export async function captureScreenshot(
     const size = metrics.cssContentSize ?? metrics.contentSize;
     const width = Math.max(1, Math.ceil(size?.width ?? 0));
     const height = Math.max(1, Math.min(20_000, Math.ceil(size?.height ?? 0)));
-    const scale = maxImageDimension > 0 ? Math.min(1, maxImageDimension / width) : 1;
+    const scale = edgeCap > 0 ? Math.min(1, edgeCap / width) : 1;
     clip = { x: 0, y: 0, width, height, scale };
   }
   const capture = await session.send<{ data?: string }>('Page.captureScreenshot', {
@@ -1021,7 +1166,7 @@ export async function captureScreenshot(
   let buffer: Buffer<ArrayBufferLike> = Buffer.from(capture.data, 'base64');
   let width: number | undefined;
   let height: number | undefined;
-  if (maxImageDimension > 0 && !clip) {
+  if (edgeCap > 0) {
     const sharp = await loadSharp();
     if (sharp) {
       try {
@@ -1029,9 +1174,9 @@ export async function captureScreenshot(
         width = meta.width;
         height = meta.height;
         const longEdge = Math.max(meta.width ?? 0, meta.height ?? 0);
-        if (longEdge > maxImageDimension) {
+        if (longEdge > edgeCap) {
           buffer = await sharp(buffer)
-            .resize({ width: maxImageDimension, height: maxImageDimension, fit: 'inside', withoutEnlargement: true })
+            .resize({ width: edgeCap, height: edgeCap, fit: 'inside', withoutEnlargement: true })
             .png()
             .toBuffer();
           const resized = await sharp(buffer).metadata();
@@ -1043,5 +1188,158 @@ export async function captureScreenshot(
       }
     }
   }
-  return { buffer, width, height };
+  const referenceWidth = options.region?.width ?? (clip ? clip.width : viewport.viewportWidth);
+  const scale =
+    width !== undefined && referenceWidth !== undefined && referenceWidth > 0
+      ? width / referenceWidth
+      : viewport.dpr;
+  return {
+    buffer,
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
+    ...viewport,
+    ...(scale !== undefined ? { scale } : {}),
+    ...(options.region ? { region: options.region } : {}),
+  };
+}
+
+// ============================================================================
+// 画面变化检测（低分辨率灰度帧差；不返回图片，只返回变化百分比）
+// ============================================================================
+
+export interface FrameSignature {
+  width: number;
+  height: number;
+  data: Buffer;
+}
+
+/** 抓取一帧低分辨率灰度签名（默认 96px 宽），用于判断画面是否发生变化 */
+export async function frameSignature(
+  session: CdpSession,
+  options: { region?: ScreenshotRegion; maxWidth?: number } = {},
+): Promise<FrameSignature> {
+  const viewport = await readViewport(session);
+  const maxWidth = Math.max(32, Math.min(320, Math.trunc(options.maxWidth ?? 96)));
+  const region = options.region;
+  let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
+  if (region) {
+    clip = { ...region, scale: maxWidth / Math.max(1, region.width) };
+  } else if (viewport.viewportWidth && viewport.viewportWidth > 0) {
+    clip = {
+      x: 0,
+      y: 0,
+      width: viewport.viewportWidth,
+      height: Math.max(1, viewport.viewportHeight ?? viewport.viewportWidth),
+      scale: maxWidth / viewport.viewportWidth,
+    };
+  }
+  const capture = await session.send<{ data?: string }>('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+    ...(clip ? { clip } : {}),
+  });
+  if (typeof capture.data !== 'string' || !capture.data) throw new Error('帧签名失败（无数据）');
+  const buffer = Buffer.from(capture.data, 'base64');
+  const sharp = await loadSharp();
+  if (!sharp) throw new Error('帧差需要 sharp 但不可用');
+  const raw = await sharp(buffer).resize({ width: maxWidth, fit: 'inside' }).greyscale().raw().toBuffer();
+  return { width: maxWidth, height: 0, data: raw };
+}
+
+/** 两帧签名的平均绝对差（百分比 0-100） */
+export function diffPercent(a: FrameSignature, b: FrameSignature): number {
+  const length = Math.min(a.data.length, b.data.length);
+  if (length === 0) return 0;
+  let total = 0;
+  for (let i = 0; i < length; i += 1) {
+    total += Math.abs(a.data[i] - b.data[i]);
+  }
+  return Number(((total / length / 255) * 100).toFixed(2));
+}
+
+export interface FrameWaitOptions {
+  region?: ScreenshotRegion;
+  timeoutMs?: number;
+  intervalMs?: number;
+  /** 变化阈值（百分比）；默认 1.5 */
+  threshold?: number;
+  /** wait_stable 需要连续稳定采样次数；默认 2 */
+  stableSamples?: number;
+  signal?: AbortSignal;
+}
+
+export interface FrameWaitResult {
+  matched: boolean;
+  diffPercent: number;
+  samples: number;
+  elapsedMs: number;
+  reason: 'stable' | 'changed' | 'timeout';
+}
+
+async function captureSignatureForWait(session: CdpSession, options: FrameWaitOptions): Promise<FrameSignature> {
+  return frameSignature(session, options.region ? { region: options.region } : {});
+}
+
+/** 等待画面稳定（连续 stableSamples 次变化低于阈值） */
+export async function waitStable(session: CdpSession, options: FrameWaitOptions = {}): Promise<FrameWaitResult> {
+  const timeoutMs = Math.max(100, Math.min(10_000, options.timeoutMs ?? 3000));
+  const intervalMs = Math.max(30, Math.min(1000, options.intervalMs ?? 80));
+  const threshold = Math.max(0, Math.min(100, options.threshold ?? 1.5));
+  const required = Math.max(1, Math.min(10, Math.trunc(options.stableSamples ?? 2)));
+  const started = Date.now();
+  let previous = await captureSignatureForWait(session, options);
+  let samples = 1;
+  let stable = 0;
+  let delta = 0;
+  while (Date.now() - started < timeoutMs) {
+    if (options.signal?.aborted) throw new Error('操作已中断');
+    await sleep(intervalMs, options.signal);
+    const current = await captureSignatureForWait(session, options);
+    samples += 1;
+    delta = diffPercent(previous, current);
+    previous = current;
+    if (delta <= threshold) {
+      stable += 1;
+      if (stable >= required) {
+        return { matched: true, diffPercent: delta, samples, elapsedMs: Date.now() - started, reason: 'stable' };
+      }
+    } else {
+      stable = 0;
+    }
+  }
+  return {
+    matched: false,
+    diffPercent: delta,
+    samples,
+    elapsedMs: Date.now() - started,
+    reason: 'timeout',
+  };
+}
+
+/** 等待画面发生变化（变化超过阈值即返回） */
+export async function waitChange(session: CdpSession, options: FrameWaitOptions = {}): Promise<FrameWaitResult> {
+  const timeoutMs = Math.max(100, Math.min(10_000, options.timeoutMs ?? 3000));
+  const intervalMs = Math.max(30, Math.min(1000, options.intervalMs ?? 80));
+  const threshold = Math.max(0, Math.min(100, options.threshold ?? 1.5));
+  const started = Date.now();
+  const baseline = await captureSignatureForWait(session, options);
+  let samples = 1;
+  let delta = 0;
+  while (Date.now() - started < timeoutMs) {
+    if (options.signal?.aborted) throw new Error('操作已中断');
+    await sleep(intervalMs, options.signal);
+    const current = await captureSignatureForWait(session, options);
+    samples += 1;
+    delta = diffPercent(baseline, current);
+    if (delta > threshold) {
+      return { matched: true, diffPercent: delta, samples, elapsedMs: Date.now() - started, reason: 'changed' };
+    }
+  }
+  return {
+    matched: false,
+    diffPercent: delta,
+    samples,
+    elapsedMs: Date.now() - started,
+    reason: 'timeout',
+  };
 }

@@ -37,6 +37,7 @@ export function resolveCuaDriverPath(env: Environment): string | null {
     candidates.push(join(env.homeDir, '.cua-driver', 'packages', 'current', 'cua-driver.exe'));
   } else {
     candidates.push(join(env.homeDir, '.local', 'bin', 'cua-driver'));
+    candidates.push(join(env.homeDir, '.cua-driver', 'packages', 'current', 'cua-driver'));
     candidates.push('/usr/local/bin/cua-driver');
     candidates.push('/opt/homebrew/bin/cua-driver');
     candidates.push('/usr/bin/cua-driver');

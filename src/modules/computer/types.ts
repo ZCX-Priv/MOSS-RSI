@@ -17,6 +17,22 @@ export interface ComputerScreenInfo {
   scale: number | null;
 }
 
+/** 健康检查单项（cua health_report） */
+export interface ComputerHealthCheck {
+  name: string;
+  status: 'pass' | 'fail' | 'skip';
+  message: string;
+  /** 失败时的修复指引（如 macOS 辅助功能/屏幕录制授权） */
+  hint?: string;
+}
+
+/** 驱动健康检查结果（连接失败或手动诊断时填充） */
+export interface ComputerHealth {
+  overall: 'ok' | 'degraded' | 'failed';
+  checks: ComputerHealthCheck[];
+  checkedAt: number;
+}
+
 /** 对外状态快照（面板 / 工具错误提示共用） */
 export interface ComputerStatus {
   /** 是否找到 cua-driver 可执行文件 */
@@ -31,6 +47,19 @@ export interface ComputerStatus {
   screen: ComputerScreenInfo | null;
   /** 用户是否暂停了 Agent 的 computer 控制 */
   paused: boolean;
+  /** 后端运行平台 */
+  platform: 'win32' | 'darwin' | 'linux' | 'android' | 'other';
+  /** 当前平台是否支持电脑控制（Android 为 false） */
+  supported: boolean;
+  /** 当前驱动版本具备的关键能力（用于面板降级提示） */
+  capabilities: {
+    startSession: boolean;
+    healthReport: boolean;
+    desktopCapture: boolean;
+    windowCapture: boolean;
+  };
+  /** 最近一次健康检查（未检查为 null） */
+  health: ComputerHealth | null;
   /** 当前工具配置中的截图上限与前台开关（面板展示 / 截图请求默认值） */
   config: {
     maxImageDimension: number;
@@ -73,6 +102,40 @@ export interface ComputerCapture {
   path: string;
   width?: number;
   height?: number;
+  /** 临时画面（HTTP 读取后即可删除，避免面板轮询堆积文件） */
+  transient?: boolean;
+}
+
+/** 进程顶层窗口（原生枚举；含 cua list_windows 不返回的无标题浮层） */
+export interface ComputerProcessWindow {
+  windowId: number;
+  pid: number;
+  className: string;
+  title: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  visible: boolean;
+  minimized: boolean;
+  isForeground: boolean;
+  /** owner HWND（无 owner 为 0） */
+  owner: number;
+  isPopup: boolean;
+  isToolWindow: boolean;
+  /** EnumWindows 顺序（0 = Z 序最前） */
+  zOrder: number;
+}
+
+/** 自动目标解析结果（浮层优先） */
+export interface ComputerWindowTarget {
+  windowId: number;
+  /** 是否切换到了同进程的浮层/弹出窗口 */
+  isOverlay: boolean;
+  /** 该 pid 的主窗口（面积最大） */
+  mainWindowId?: number;
+  className?: string;
+  title?: string;
+  bounds?: { x: number; y: number; width: number; height: number };
+  /** native：Win32 EnumWindows；cua：cua list_windows 回退 */
+  source: 'native' | 'cua';
 }
 
 /** cua 工具调用归一化结果 */
@@ -81,6 +144,18 @@ export interface ComputerToolResult {
   images: Array<{ data: string; mimeType: string; path: string }>;
   structured?: unknown;
   isError: boolean;
+}
+
+/** 窗口聚焦结果（自动焦点 / action=focus 共用） */
+export interface ComputerFocusResult {
+  ok: boolean;
+  /** 实际聚焦到的窗口 id（回退时与请求的 windowId 不同） */
+  focusedWindowId?: number;
+  /** 目标窗口无法聚焦，已回退到同 pid 的主窗口 */
+  fallback: boolean;
+  /** 实际聚焦的是同进程的浮层/弹出窗口 */
+  overlay?: boolean;
+  error?: string;
 }
 
 /** 调用选项（工具层提供 action/summary/target 供活动记录；面板 source=panel 跳过暂停检查） */
@@ -148,6 +223,9 @@ export interface ComputerService {
     opts?: { maxImageDimension?: number },
   ): Promise<ComputerCapture>;
 
+  /** 驱动健康检查（cua health_report）；未连接或驱动不支持时返回 null */
+  checkHealth(): Promise<ComputerHealth | null>;
+
   /** 最近活动（按 sessionId 过滤；无 sessionId 返回全部） */
   getActivities(sessionId?: string): ComputerActivity[];
 
@@ -156,4 +234,26 @@ export interface ComputerService {
 
   /** 分配一次工具截图的落盘路径（由工具在调用前创建，cua 写入） */
   createScreenshotPath(kind: string, pid?: number, windowId?: number): string;
+
+  /** 列出某进程的顶层窗口（Windows 原生枚举；不可用时回退 cua list_windows） */
+  listProcessWindows(pid: number): Promise<ComputerProcessWindow[]>;
+
+  /**
+   * 自动目标解析：同一进程弹出浮层/对话框时，返回最前面的浮层窗口，
+   * 让截图与 UIA 树都针对该窗口；没有浮层时返回请求窗口（或主窗口）。
+   */
+  resolveWindowTarget(pid: number, requestedWindowId?: number): Promise<ComputerWindowTarget>;
+
+  /** 当前系统前台窗口（原生枚举不可用时返回 null） */
+  getForegroundWindowInfo(): ComputerProcessWindow | null;
+
+  /**
+   * 聚焦窗口（bring_to_front）。目标窗口失效/无法聚焦时回退到同 pid 的主窗口；
+   * 失败不抛错，返回 ok=false 供调用方继续后台执行。
+   */
+  focusWindow(
+    pid: number,
+    windowId?: number,
+    opts?: { force?: boolean },
+  ): Promise<ComputerFocusResult>;
 }

@@ -82,17 +82,23 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0];
     if (!input || input.length === 0) return true;
-    // 声道下混：设备可能是立体声，语音落在任一通道都不能丢
+    // 多通道：取能量最大的通道。多麦阵列通道间存在相位差，平均混音会互相抵消。
     let ch;
     if (input.length === 1) {
       ch = input[0];
     } else {
-      ch = new Float32Array(input[0].length);
+      let best = 0;
+      let bestEnergy = -1;
       for (let c = 0; c < input.length; c++) {
         const src = input[c];
-        for (let i = 0; i < ch.length; i++) ch[i] += src[i];
+        let energy = 0;
+        for (let i = 0; i < src.length; i++) energy += src[i] * src[i];
+        if (energy > bestEnergy) {
+          bestEnergy = energy;
+          best = c;
+        }
       }
-      for (let i = 0; i < ch.length; i++) ch[i] /= input.length;
+      ch = input[best];
     }
     if (this.target && sampleRate !== this.target) {
       ch = this._resample(ch);

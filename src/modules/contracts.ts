@@ -35,6 +35,9 @@ export type {
   ComputerCapture,
   ComputerToolResult,
   ComputerCallOptions,
+  ComputerFocusResult,
+  ComputerProcessWindow,
+  ComputerWindowTarget,
 } from './computer/types';
 export type {
   BrowserService,
@@ -49,6 +52,14 @@ export type {
   BrowserBridgeStatus,
   BrowserSnapshot,
   BrowserScreenshot,
+  BrowserRect,
+  BrowserFrameInfo,
+  BrowserFrameWaitOptions,
+  BrowserFrameWaitResult,
+  BrowserHoldOptions,
+  BrowserMacroStep,
+  BrowserMacroStepResult,
+  BrowserMacroResult,
   BrowserPageInfo,
   BrowserConsoleEntry,
   BrowserConsoleResult,
@@ -56,6 +67,7 @@ export type {
   BrowserInstallerStatus,
   BrowserInstallerBrowser,
   BrowserInstallerState,
+  BrowserFocusResult,
 } from './browser/types';
 import type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
 export type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';

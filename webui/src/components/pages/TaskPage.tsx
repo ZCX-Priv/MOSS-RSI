@@ -70,6 +70,7 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/component
 import { SystemErrorCard, MessageActions } from '@/components/pages/SystemErrorCard';
 import { InsightDialog } from '@/components/insight/InsightDialog';
 import { useIsMobile, useWindowWidth } from '@/hooks/use-mobile';
+import { usePlatform } from '@/hooks/usePlatform';
 import { useResizable } from '@/hooks/use-resizable';
 import { useOpenFilePreview } from '@/hooks/useOpenFilePreview';
 import {
@@ -238,6 +239,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const setRightPanelRatio = useStore((s) => s.setRightPanelRatio);
   const isMobile = useIsMobile();
   const windowWidth = useWindowWidth();
+  // 移动端（Android 后端）：电脑控制不可用 → 入口置灰/隐藏
+  const { platform } = usePlatform();
+  const computerUnavailable = platform.isAndroid;
   // 移动端侧边栏抽屉开合态：展开时顶栏「新建对话」快捷按钮自动隐藏（抽屉内已有同名按钮）
   const { openMobile } = useSidebar();
 
@@ -1005,7 +1009,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 {t('task.fileChanges')}
               </DropdownMenuItem>
             )}
-            {!hasComputerTab && (
+            {!hasComputerTab && !computerUnavailable && (
               <DropdownMenuItem
                 onSelect={() => addSidebarTab(taskId, 'computer', 'computer.title')}
               >
@@ -1019,7 +1023,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
 
       {/* 标签内容路由 */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {activeTab?.type === 'start' && <StartPanel onOpen={openTabType} />}
+        {activeTab?.type === 'start' && (
+          <StartPanel onOpen={openTabType} computerUnavailable={computerUnavailable} />
+        )}
         {activeTab?.type === 'summary' && (
           <>
             <TodoProgressCard
@@ -2111,6 +2117,8 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
         <Folder className="size-3.5" />
       ) : tab.type === 'changes' ? (
         <FileDiff className="size-3.5" />
+      ) : tab.type === 'computer' ? (
+        <SquareMousePointer className="size-3.5" />
       ) : tab.type === 'file' ? (
         <FileTypeIcon fileName={tab.title} size={14} className="shrink-0" />
       ) : (
@@ -2163,8 +2171,10 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
 interface StartPanelProps {
   /** 点击某行：已开该类型标签则激活，未开则新建（title 为 i18n key） */
   onOpen: (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer', titleKey: string) => void;
+  /** 移动端（Android 后端）：电脑操作不可用 */
+  computerUnavailable?: boolean;
 }
-function StartPanel({ onOpen }: StartPanelProps) {
+function StartPanel({ onOpen, computerUnavailable = false }: StartPanelProps) {
   const { t } = useTranslation();
   const rows: Array<{
     type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer';
@@ -2209,20 +2219,33 @@ function StartPanel({ onOpen }: StartPanelProps) {
         <Compass className="mb-3 size-10 text-muted-foreground/40" strokeWidth={1.5} />
         <p className="mb-8 text-xs text-muted-foreground">{t('start.hint')}</p>
         <div className="flex w-full flex-col gap-3">
-          {rows.map(({ type, titleKey, descKey, Icon }) => (
-            <button
-              key={type}
-              type="button"
-              onClick={() => onOpen(type, titleKey)}
-              className="flex w-full cursor-pointer items-center gap-3 rounded-xl border border-border bg-muted/30 px-3.5 py-3 text-left transition-colors hover:bg-muted"
-            >
-              <Icon className="size-5 shrink-0 text-muted-foreground" />
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate text-sm font-medium text-foreground">{t(titleKey)}</span>
-                <span className="truncate text-xs text-muted-foreground">{t(descKey)}</span>
-              </span>
-            </button>
-          ))}
+          {rows.map(({ type, titleKey, descKey, Icon }) => {
+            const unavailable = type === 'computer' && computerUnavailable;
+            return (
+              <button
+                key={type}
+                type="button"
+                disabled={unavailable}
+                title={unavailable ? t('common.mobileUnavailable') : undefined}
+                onClick={() => {
+                  if (!unavailable) onOpen(type, titleKey);
+                }}
+                className={
+                  unavailable
+                    ? 'flex w-full cursor-not-allowed items-center gap-3 rounded-xl border border-border bg-muted/30 px-3.5 py-3 text-left opacity-50'
+                    : 'flex w-full cursor-pointer items-center gap-3 rounded-xl border border-border bg-muted/30 px-3.5 py-3 text-left transition-colors hover:bg-muted'
+                }
+              >
+                <Icon className="size-5 shrink-0 text-muted-foreground" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-sm font-medium text-foreground">{t(titleKey)}</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {unavailable ? t('common.mobileUnavailableDesc') : t(descKey)}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>

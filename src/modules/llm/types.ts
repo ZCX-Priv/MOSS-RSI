@@ -89,7 +89,8 @@ export interface UnifiedRequest {
   toolChoice?: 'auto' | 'none' | 'required';
   /**
    * 是否把历史 assistant 的思考内容回传给模型（仅 OpenAI 兼容 provider 消费）。
-   * 默认 false —— DeepSeek 官方规范：多轮回写 assistant 只需 content，不应传 reasoning_content。
+   * 默认 false（历史轮次不回传）；但 DeepSeek 思考模式要求当前轮 assistant 工具调用消息
+   * 必须回传 reasoning_content，provider 会按 endpoint/model 自动补齐（缺失时用空串兜底）。
    * 由 agent engine 依据 config.context.thinking.replayOpenAICompat 设置。
    */
   replayThinking?: boolean;

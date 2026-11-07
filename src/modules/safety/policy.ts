@@ -45,6 +45,7 @@ const COMPUTER_OBSERVE_ACTIONS = new Set([
   'get_screen_size',
   'get_cursor_position',
   'zoom',
+  'focus',
   'wait',
 ]);
 

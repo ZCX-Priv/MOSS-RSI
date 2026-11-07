@@ -24,6 +24,10 @@ export function createVersionHandler(env: Environment): RouteHandler {
         version,
         channel,
         buildDate: env.runtimeVersion ? `bun-${env.runtimeVersion}` : undefined,
+        // 后端运行平台：前端据此禁用移动端（Android）专属不可用能力
+        platform: env.platform,
+        arch: env.arch,
+        isAndroid: env.isAndroid,
       },
     };
   };

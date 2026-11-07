@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { api } from '@/api/http';
 import { useTools } from '@/hooks/useTools';
+import { usePlatform } from '@/hooks/usePlatform';
 import type { ComputerConnectionState, ComputerStatus } from '@/types/api';
 import { Row, Section } from './browser-shared';
 
@@ -64,6 +65,8 @@ function readBoolean(
 
 export function ComputerSettingsSection() {
   const { t } = useTranslation();
+  const { platform } = usePlatform();
+  const mobileUnavailable = platform.isAndroid;
   const { tools, saveToolConfig } = useTools();
   const computerTool = tools.find((tool) => tool.name === 'computer');
   const values = computerTool?.configValues ?? {};
@@ -96,13 +99,14 @@ export function ComputerSettingsSection() {
   }, []);
 
   useEffect(() => {
+    if (mobileUnavailable) return;
     void refresh();
     const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       void refresh();
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, mobileUnavailable]);
 
   const saveConfig = useCallback(
     (patch: Record<string, unknown>) => {
@@ -140,6 +144,21 @@ export function ComputerSettingsSection() {
       if (mountedRef.current) setBusy(null);
     }
   }, [refresh, t]);
+
+  const runHealth = useCallback(async () => {
+    setBusy('health');
+    try {
+      const result = await api.getComputerHealth();
+      if (result.health) {
+        setStatus((prev) => (prev ? { ...prev, health: result.health } : prev));
+      }
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (mountedRef.current) setBusy(null);
+    }
+  }, [refresh]);
 
   const enabled = readBoolean(values, 'enabled', COMPUTER_DEFAULTS.enabled);
   const requireConfirmation = readBoolean(
@@ -197,6 +216,20 @@ export function ComputerSettingsSection() {
 
   const installDisabled = status?.installed === true || busy === 'install';
   const paused = status?.paused === true;
+
+  // 移动端（Android 后端）：电脑控制整体不可用
+  if (mobileUnavailable) {
+    return (
+      <div className="flex min-w-0 flex-col gap-6 p-6">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-semibold text-foreground">{t('settings.computer.title')}</h1>
+          <p className="text-sm text-muted-foreground">{t('common.mobileUnavailableDesc')}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const failedChecks = (status?.health?.checks ?? []).filter((item) => item.status === 'fail');
 
   return (
     <div className="flex min-w-0 flex-col gap-6 p-6">
@@ -337,6 +370,43 @@ export function ComputerSettingsSection() {
                 </span>
                 {status.error && <span className="break-all text-destructive">{status.error}</span>}
               </div>
+            </Row>
+          </Section>
+
+          <Section title={t('computer.healthTitle')} desc={t('settings.computer.healthDesc')}>
+            <Row last>
+              <div className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+                <span>
+                  {t('settings.computer.connection')}:{' '}
+                  <span className="text-foreground">
+                    {status.health?.overall ?? '—'}
+                  </span>
+                </span>
+                {failedChecks.length === 0 ? null : (
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-destructive">{t('computer.healthFailed')}</span>
+                    {failedChecks.map((item) => (
+                      <span key={item.name} className="break-all">
+                        {item.name}: {item.message}
+                        {item.hint ? ` · ${item.hint}` : ''}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy === 'health' || status.connection !== 'connected'}
+                onClick={() => void runHealth()}
+              >
+                {busy === 'health' ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                {t('computer.healthRun')}
+              </Button>
             </Row>
           </Section>
 

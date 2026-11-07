@@ -232,51 +232,49 @@ async function connect() {
     await reportStatus();
     return;
   }
+  // 先关闭旧连接：避免同一 offscreen 同时持有多个 WebSocket（服务端会产生多个实例）
+  if (socket) {
+    try {
+      socket.close();
+    } catch {
+      /* ignore */
+    }
+    socket = null;
+  }
   connecting = true;
   const seq = ++connectSeq;
   try {
-    const results = await Promise.all(candidatePorts().map((port) => tryPort(port, seq)));
-    if (seq !== connectSeq || manuallyDisconnected) {
-      for (const result of results) {
-        if (result) {
-          try {
-            result.close();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-      return;
-    }
-    const won = results.find((result) => result);
-    if (!won) {
-      scheduleReconnect();
-      return;
-    }
-    for (const result of results) {
-      if (result && result !== won) {
+    // 串行探测：优先当前端口，其次配置端口，最后少量扫描；
+    // 绝不并发打开全部端口（否则每个成功握手都会在服务端创建一个实例）。
+    for (const port of candidatePorts()) {
+      if (seq !== connectSeq || manuallyDisconnected) return;
+      const won = await tryPort(port, seq);
+      if (!won) continue;
+      if (seq !== connectSeq || manuallyDisconnected) {
         try {
-          result.close();
+          won.close();
         } catch {
           /* ignore */
         }
+        return;
       }
-    }
-    socket = won;
-    if (won.readyState !== WebSocket.OPEN) {
-      socket = null;
-      scheduleReconnect();
+      socket = won;
+      if (won.readyState !== WebSocket.OPEN) {
+        socket = null;
+        continue;
+      }
+      socket.onmessage = onServerMessage;
+      socket.onclose = onSocketClose;
+      socket.onerror = () => {};
+      connected = true;
+      activePort = Number(new URL(socket.url).port);
+      startWsKeepAlive();
+      startSwKeepAlive();
+      log(`connected on port ${activePort}`);
+      await reportStatus();
       return;
     }
-    socket.onmessage = onServerMessage;
-    socket.onclose = onSocketClose;
-    socket.onerror = () => {};
-    connected = true;
-    activePort = Number(new URL(socket.url).port);
-    startWsKeepAlive();
-    startSwKeepAlive();
-    log(`connected on port ${activePort}`);
-    await reportStatus();
+    scheduleReconnect();
   } catch (err) {
     log('connect failed', err instanceof Error ? err.message : String(err));
     scheduleReconnect();

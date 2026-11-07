@@ -82,6 +82,11 @@ export interface PrepareRequestInput {
   promptExtras?: PromptExtraSection[] | null;
   /** 是否把 thinking 纳入发送视图（provider 会回传 reasoning_content 时才为 true） */
   includeThinking?: boolean;
+  /**
+   * 是否保留当前轮工具调用的 thinking（DeepSeek 思考模式要求 assistant 工具调用消息回传 reasoning_content）。
+   * 只保留最后一条 user 之后、带 toolCalls 的 assistant 消息，避免历史思考撑大上下文。
+   */
+  includeToolCallThinking?: boolean;
 }
 
 /** 解析 skill prompt（SkillRegistry 运行时解析；禁用/缺失返回 null） */
@@ -169,6 +174,7 @@ export async function prepareRequest(
 ): Promise<PreparedRequest> {
   const { session, cwd, model, modelDisplayName, windowTokens } = input;
   const includeThinking = input.includeThinking === true;
+  const includeToolCallThinking = input.includeToolCallThinking === true;
   const config = deps.getConfig();
 
   // ===== 1. 环境上下文保障（跨天追加 / 旧会话补建；模型信息随消息锚定）=====
@@ -283,6 +289,7 @@ export async function prepareRequest(
   const buildView = (budgetTokens?: number, budgetBytes?: number) =>
     buildRequestView(session, staticSystemPrompt, {
       includeThinking,
+      includeToolCallThinking,
       resolveSkillPrompt: resolveSkill,
       budgetTokens,
       budgetBytes,

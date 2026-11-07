@@ -172,4 +172,95 @@ describe('多模态图片映射', () => {
     ) as { messages: Array<{ content: unknown }> };
     expect(body.messages[0].content).toBe('hi');
   });
+
+  test('DeepSeek 思考模式：当前轮工具调用回传 reasoning_content，空 assistant 被丢弃', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      req([
+        { role: 'user', content: '开始' },
+        // 被中断的 assistant：只有 thinking，没有正文/工具调用 → 不应进入请求
+        { role: 'assistant', content: '', thinking: '被中断的思考' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '工具轮思考',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'k',
+        model: 'deepseek-flash',
+        thinking: { enabled: true, effort: 'max' },
+      },
+    ) as { messages: Array<Record<string, unknown>> };
+
+    expect(
+      body.messages.some(
+        m => m.role === 'assistant' && m.content === '' && !m.tool_calls,
+      ),
+    ).toBe(false);
+    const assistantTool = body.messages.find(m => m.tool_calls);
+    expect(assistantTool?.reasoning_content).toBe('工具轮思考');
+  });
+
+  test('DeepSeek 思考模式：历史轮工具调用不回传 reasoning_content（只回传最后一条 user 之后）', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      req([
+        { role: 'user', content: '第一轮' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '旧思考',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+        { role: 'user', content: '第二轮' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '新思考',
+          toolCalls: [{ id: 'tc2', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc2' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'k',
+        model: 'deepseek-flash',
+        thinking: { enabled: true, effort: 'max' },
+      },
+    ) as { messages: Array<Record<string, unknown>> };
+
+    const tools = body.messages.filter(m => m.tool_calls);
+    expect(tools[0]?.reasoning_content).toBeUndefined();
+    expect(tools[1]?.reasoning_content).toBe('新思考');
+  });
+
+  test('非 DeepSeek 端点不回传 reasoning_content（避免严格 provider 拒绝未知字段）', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      req([
+        { role: 'user', content: '开始' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '思考',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.openai.com/v1',
+        apiKey: 'k',
+        model: 'gpt-x',
+        thinking: { enabled: true, effort: 'high' },
+      },
+    ) as { messages: Array<Record<string, unknown>> };
+
+    const assistantTool = body.messages.find(m => m.tool_calls);
+    expect(assistantTool?.reasoning_content).toBeUndefined();
+  });
 });

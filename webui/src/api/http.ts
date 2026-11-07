@@ -74,6 +74,7 @@ import type {
   VoiceStatus,
   VoiceModelStatus,
   ResourceSnapshot,
+  ComputerHealth,
   ComputerStatus,
   ComputerWindowInfo,
   BrowserStatus,
@@ -363,6 +364,9 @@ export const api = {
       'GET',
       `/api/computer/windows?onScreenOnly=${onScreenOnly ? '1' : '0'}`,
     ),
+  /** 驱动健康检查（权限/平台能力）；未连接时 health 为 null */
+  getComputerHealth: () =>
+    request<{ health: ComputerHealth | null }>('GET', '/api/computer/health'),
   installComputerDriver: () =>
     request<{ ok: boolean; output: string }>('POST', '/api/computer/install'),
   controlComputer: (action: 'pause' | 'resume' | 'reconnect') =>
@@ -858,10 +862,17 @@ export const api = {
   // 版本（见文档 3.2.11）
   // ==========================================================================
   getVersion: () =>
-    request<{ version: string; commit?: string; buildDate?: string; channel: string }>(
-      'GET',
-      '/api/version',
-    ),
+    request<{
+      version: string;
+      commit?: string;
+      buildDate?: string;
+      channel: string;
+      /** 后端运行平台（win32 / darwin / linux / android / other） */
+      platform?: string;
+      arch?: string;
+      /** Android（Termux 等）：电脑控制/浏览器控制/语音输入不可用 */
+      isAndroid?: boolean;
+    }>('GET', '/api/version'),
 
   // ==========================================================================
   // 文件系统（前端文件夹/文件选择器：drives/list/suggest-paths；附件：解析已选路径 + 粘贴落盘）

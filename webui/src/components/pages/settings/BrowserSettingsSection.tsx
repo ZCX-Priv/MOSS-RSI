@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { Earth, Loader2, PlugZap, Puzzle } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/api/http';
+import { usePlatform } from '@/hooks/usePlatform';
 import type { BrowserMode } from '@/types/api';
 import { useBrowserToolConfig } from './useBrowserStatus';
 
@@ -28,9 +29,12 @@ export function BrowserSettingsSection() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const { save } = useBrowserToolConfig();
+  const { platform } = usePlatform();
+  const mobileUnavailable = platform.isAndroid;
   const [savedMode, setSavedMode] = useState<BrowserMode | null>(null);
 
   useEffect(() => {
+    if (mobileUnavailable) return;
     let alive = true;
     void api
       .getBrowserStatus()
@@ -43,7 +47,7 @@ export function BrowserSettingsSection() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [mobileUnavailable]);
 
   const suffix = pathname.startsWith('/settings/browser/')
     ? pathname.slice('/settings/browser/'.length)
@@ -69,8 +73,10 @@ export function BrowserSettingsSection() {
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex flex-col gap-1 px-6 py-4">
         <h1 className="text-xl font-semibold text-foreground">{t('settings.browser.title')}</h1>
-        <p className="text-sm text-muted-foreground">{t('settings.browser.subtitle')}</p>
-        {savedMode && (
+        <p className="text-sm text-muted-foreground">
+          {mobileUnavailable ? t('common.mobileUnavailableDesc') : t('settings.browser.subtitle')}
+        </p>
+        {!mobileUnavailable && savedMode && (
           <p className="text-xs text-muted-foreground">
             {t('settings.browser.currentMode', {
               mode: t(`settings.browser.modeTabs.${savedMode}`),
@@ -79,26 +85,36 @@ export function BrowserSettingsSection() {
         )}
       </div>
 
-      <Tabs value={tab} onValueChange={(value) => switchMode(value as BrowserMode)}>
-        <div className="px-6 py-3">
-          <TabsList>
-            {MODE_TABS.map(({ id, Icon }) => (
-              <TabsTrigger key={id} value={id} className="gap-1.5">
-                <Icon className="size-3.5" />
-                {t(`settings.browser.modeTabs.${id}`)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+      {mobileUnavailable ? (
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="flex w-full max-w-md items-center justify-center rounded-xl border border-border bg-muted/30 px-4 py-6 text-center text-xs text-muted-foreground">
+            {t('common.mobileUnavailable')}
+          </div>
         </div>
-      </Tabs>
+      ) : (
+        <>
+          <Tabs value={tab} onValueChange={(value) => switchMode(value as BrowserMode)}>
+            <div className="px-6 py-3">
+              <TabsList>
+                {MODE_TABS.map(({ id, Icon }) => (
+                  <TabsTrigger key={id} value={id} className="gap-1.5">
+                    <Icon className="size-3.5" />
+                    {t(`settings.browser.modeTabs.${id}`)}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </div>
+          </Tabs>
 
-      {/* 子页切换入场动画（key=pathname：Tab 切换时重播） */}
-      <div
-        key={pathname}
-        className="anim-route animate-in fade-in slide-in-from-bottom-1 duration-200 flex-1 overflow-auto"
-      >
-        <Outlet />
-      </div>
+          {/* 子页切换入场动画（key=pathname：Tab 切换时重播） */}
+          <div
+            key={pathname}
+            className="anim-route animate-in fade-in slide-in-from-bottom-1 duration-200 flex-1 overflow-auto"
+          >
+            <Outlet />
+          </div>
+        </>
+      )}
     </div>
   );
 }

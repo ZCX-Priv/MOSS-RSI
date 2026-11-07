@@ -26,6 +26,7 @@ export type ComputerAction =
   | 'get_screen_size'
   | 'get_cursor_position'
   | 'zoom'
+  | 'focus'
   | 'click'
   | 'double_click'
   | 'right_click'
@@ -39,6 +40,8 @@ export type ComputerAction =
   | 'kill_app'
   | 'clipboard_read'
   | 'clipboard_write'
+  | 'run_script'
+  | 'verify'
   | 'run_steps'
   | 'wait';
 
@@ -72,6 +75,8 @@ export interface ComputerParams {
   to_x?: number;
   to_y?: number;
   delivery_mode?: 'background' | 'foreground';
+  /** 操作前自动聚焦目标窗口（缺省取工具配置 autoFocus；false 时保持后台） */
+  auto_focus?: boolean;
   include_screenshot?: boolean;
   include_accessibility_tree?: boolean;
   max_elements?: number;
@@ -93,6 +98,14 @@ export interface ComputerParams {
   include_text?: boolean;
   image_path?: string;
   file_path?: string;
+  /** run_script：cua 脚本函数体（async function body） */
+  script?: string;
+  /** run_script：最多驱动调用次数（1-500） */
+  max_calls?: number;
+  /** verify：1-8 个断言谓词 */
+  expect?: unknown;
+  /** verify：连续满足采样次数（1-5） */
+  stable_samples?: number;
 }
 
 export interface BuildContext {
@@ -112,6 +125,9 @@ export function needsScreenshot(p: ComputerParams): boolean {
 export function mapActionToCua(action: ComputerAction): string[] {
   if (action === 'run_steps') return ['run_actions', 'run_steps'];
   if (action === 'status') return ['health_report'];
+  if (action === 'verify') return ['verify_state'];
+  if (action === 'run_script') return ['run_script'];
+  if (action === 'focus') return ['bring_to_front'];
   return [action];
 }
 
@@ -170,19 +186,24 @@ function deliveryMode(
   return mode;
 }
 
-/** 构造 cua 的 target / legacy 目标参数 */
+/**
+ * 构造 cua 的 legacy 目标参数。
+ * 不使用 target 对象：cua 的 target 与 legacy scope/pid/window_id 互斥，
+ * 混用会直接报 "target cannot be combined with legacy scope, pid, or window_id fields"。
+ * 桌面坐标优先级最高：scope=desktop 时忽略 pid/window_id。
+ */
 function targetArgs(p: ComputerParams): Record<string, unknown> {
+  if (p.scope === 'desktop' || p.display_id) {
+    return { scope: 'desktop' };
+  }
   if (p.element_token) {
     return compact({ element_token: p.element_token, pid: p.pid });
   }
   if (typeof p.pid === 'number' && typeof p.window_id === 'number') {
-    return { target: { kind: 'window', pid: p.pid, window_id: p.window_id } };
+    return { pid: p.pid, window_id: p.window_id };
   }
   if (typeof p.pid === 'number') {
     return { pid: p.pid };
-  }
-  if (p.scope === 'desktop' || p.display_id) {
-    return { target: { kind: 'desktop', display_id: p.display_id ?? 'primary' } };
   }
   return {};
 }
@@ -198,12 +219,13 @@ function clickArgs(
   ctx: BuildContext,
   kind: 'click' | 'double_click' | 'right_click',
 ): Record<string, unknown> {
-  const target = targetArgs(p);
-  const hasElement = !!p.element_token;
+  const isDesktop = p.scope === 'desktop' || !!p.display_id;
+  const hasElement = !!p.element_token && !isDesktop;
   const hasPixel = typeof p.x === 'number' && typeof p.y === 'number';
   if (!hasElement && !hasPixel && typeof p.pid !== 'number') {
     throw new Error(t('tools.computerElementOrPixelRequired'));
   }
+  const target = targetArgs(p);
   return compact({
     ...target,
     ...(hasElement ? {} : { x: p.x, y: p.y }),
@@ -211,7 +233,6 @@ function clickArgs(
     ...(kind === 'click' && typeof p.count === 'number' ? { count: p.count } : {}),
     ...(p.modifier ? { modifier: p.modifier } : {}),
     ...(p.from_zoom ? { from_zoom: true } : {}),
-    ...(p.scope ? { scope: p.scope } : {}),
     delivery_mode: deliveryMode(p, ctx.toolConfig),
   });
 }
@@ -233,6 +254,7 @@ export function buildCuaCall(
       };
     case 'get_window_state': {
       requireWindow(p);
+      // 窗口截图看不到窗口外的自绘浮层（Qt 弹层/浮动工具栏）；整屏截图请用 get_desktop_state
       return {
         tool,
         args: compact({
@@ -283,6 +305,12 @@ export function buildCuaCall(
           y2: p.y2,
         }),
       };
+    case 'focus':
+      if (typeof p.pid !== 'number') throw new Error(t('tools.computerPidRequired'));
+      return {
+        tool,
+        args: compact({ pid: p.pid, window_id: p.window_id }),
+      };
     case 'click':
     case 'double_click':
     case 'right_click':
@@ -324,25 +352,29 @@ export function buildCuaCall(
     }
     case 'type_text': {
       if (!p.text) throw new Error(t('tools.computerTextRequired'));
+      const isDesktop = p.scope === 'desktop' || !!p.display_id;
+      const hasElement = !!p.element_token && !isDesktop;
       return {
         tool,
         args: compact({
           ...targetArgs(p),
           text: p.text,
-          ...(p.element_token ? {} : { x: p.x, y: p.y }),
+          ...(hasElement ? {} : { x: p.x, y: p.y }),
           delivery_mode: deliveryMode(p, ctx.toolConfig),
         }),
       };
     }
     case 'press_key': {
       if (!p.key) throw new Error(t('tools.computerKeyRequired'));
+      const isDesktop = p.scope === 'desktop' || !!p.display_id;
+      const hasElement = !!p.element_token && !isDesktop;
       return {
         tool,
         args: compact({
           ...targetArgs(p),
           key: p.key,
           modifiers: p.modifiers,
-          ...(p.element_token ? {} : { x: p.x, y: p.y }),
+          ...(hasElement ? {} : { x: p.x, y: p.y }),
           delivery_mode: deliveryMode(p, ctx.toolConfig),
         }),
       };
@@ -351,12 +383,14 @@ export function buildCuaCall(
       if (!Array.isArray(p.keys) || p.keys.length < 2) {
         throw new Error(t('tools.computerKeysRequired'));
       }
+      const isDesktop = p.scope === 'desktop' || !!p.display_id;
+      const hasElement = !!p.element_token && !isDesktop;
       return {
         tool,
         args: compact({
           ...targetArgs(p),
           keys: p.keys,
-          ...(p.element_token ? {} : { x: p.x, y: p.y }),
+          ...(hasElement ? {} : { x: p.x, y: p.y }),
           delivery_mode: deliveryMode(p, ctx.toolConfig),
         }),
       };
@@ -406,6 +440,35 @@ export function buildCuaCall(
         }),
       };
     }
+    case 'run_script': {
+      if (!p.script || !p.script.trim()) throw new Error('run_script 需要 script（async 函数体）');
+      return {
+        tool,
+        args: compact({
+          script: p.script,
+          max_calls: p.max_calls,
+          timeout_ms: p.timeout_ms,
+        }),
+      };
+    }
+    case 'verify': {
+      if (typeof p.pid !== 'number' || typeof p.window_id !== 'number') {
+        throw new Error(t('tools.computerWindowTargetRequired'));
+      }
+      if (!Array.isArray(p.expect) || p.expect.length === 0) {
+        throw new Error('verify 需要 expect 谓词数组');
+      }
+      return {
+        tool,
+        args: compact({
+          pid: p.pid,
+          window_id: p.window_id,
+          expect: p.expect,
+          stable_samples: p.stable_samples,
+          timeout_ms: p.timeout_ms,
+        }),
+      };
+    }
     case 'run_steps': {
       if (!Array.isArray(p.steps) || p.steps.length === 0) {
         throw new Error(t('tools.computerStepsRequired'));
@@ -437,12 +500,21 @@ export function buildCuaCall(
           args: compact({ ...args, delivery_mode: args.delivery_mode ?? deliveryMode(p, ctx.toolConfig) }),
         };
       });
+      // run_steps 的 steps 默认继承 run_steps 自身的 pid/window_id；
+      // observe 缺省为 {}（cua 会继承同一个窗口），否则无 observe 时传空对象也不会报错。
+      const observe =
+        p.observe ??
+        (typeof p.pid === 'number'
+          ? { pid: p.pid, ...(typeof p.window_id === 'number' ? { window_id: p.window_id } : {}) }
+          : undefined);
       return {
         tool,
         args: compact({
           steps,
           delay_ms: p.delay_ms,
-          observe: p.observe,
+          pid: p.pid,
+          window_id: p.window_id,
+          observe,
         }),
       };
     }
@@ -463,6 +535,8 @@ export function buildCuaCall(
 /** 动作摘要（不含输入的完整文本，避免敏感内容进入时间线） */
 export function summarizeAction(p: ComputerParams): string {
   switch (p.action) {
+    case 'focus':
+      return `window ${p.pid ?? '?'}/${p.window_id ?? '?'}`;
     case 'get_window_state':
       return `window ${p.pid ?? '?'}/${p.window_id ?? '?'}`;
     case 'click':
@@ -481,6 +555,10 @@ export function summarizeAction(p: ComputerParams): string {
       return p.app ?? 'app';
     case 'run_steps':
       return `${p.steps?.length ?? 0} steps`;
+    case 'run_script':
+      return `script ${p.script?.length ?? 0} chars`;
+    case 'verify':
+      return `${Array.isArray(p.expect) ? p.expect.length : 0} predicates`;
     case 'wait':
       return `${p.wait_ms ?? 0}ms`;
     default:

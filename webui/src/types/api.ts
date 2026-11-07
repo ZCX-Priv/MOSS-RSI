@@ -1750,6 +1750,19 @@ export interface ComputerScreenInfo {
   scale: number | null;
 }
 
+export interface ComputerHealthCheck {
+  name: string;
+  status: 'pass' | 'fail' | 'skip';
+  message: string;
+  hint?: string;
+}
+
+export interface ComputerHealth {
+  overall: 'ok' | 'degraded' | 'failed';
+  checks: ComputerHealthCheck[];
+  checkedAt: number;
+}
+
 export interface ComputerStatus {
   installed: boolean;
   driverPath: string | null;
@@ -1758,6 +1771,17 @@ export interface ComputerStatus {
   toolCount: number;
   screen: ComputerScreenInfo | null;
   paused: boolean;
+  /** 后端运行平台 */
+  platform: 'win32' | 'darwin' | 'linux' | 'android' | 'other';
+  /** 当前平台是否支持电脑控制（Android 为 false） */
+  supported: boolean;
+  capabilities: {
+    startSession: boolean;
+    healthReport: boolean;
+    desktopCapture: boolean;
+    windowCapture: boolean;
+  };
+  health: ComputerHealth | null;
   config: {
     maxImageDimension: number;
     allowForeground: boolean;

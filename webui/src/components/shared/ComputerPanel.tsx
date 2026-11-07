@@ -29,6 +29,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { api } from '../../api/http';
 import { wsClient } from '../../api/ws';
+import { usePlatform } from '../../hooks/usePlatform';
 import { cn } from '@/lib/utils';
 import type {
   ComputerActivity,
@@ -45,7 +46,8 @@ interface ComputerPanelProps {
 }
 
 const STATUS_POLL_MS = 5000;
-const SCREENSHOT_POLL_MS = 2000;
+/** 整屏画面轮询：1.5s + 单飞（上一次未返回则跳过），兼顾观感与驱动压力 */
+const SCREENSHOT_POLL_MS = 1500;
 
 /** 目标选择值：desktop 或 window:<pid>:<window_id> */
 const DESKTOP_TARGET = 'desktop';
@@ -62,13 +64,6 @@ function parseTargetKey(key: string): { target: 'desktop' | 'window'; pid?: numb
   const windowId = Number(parts[2]);
   if (!Number.isFinite(pid) || !Number.isFinite(windowId)) return { target: 'desktop' };
   return { target: 'window', pid, windowId };
-}
-
-/** 从 activity.target（如 "window pid=1 id=2"）解析跟随目标 */
-function parseActivityTarget(target: string): string | null {
-  const match = /pid=(\d+)\s+id=(\d+)/.exec(target);
-  if (!match) return null;
-  return windowTargetKey(Number(match[1]), Number(match[2]));
 }
 
 function windowLabel(w: ComputerWindowInfo, fallback: string): string {
@@ -89,6 +84,11 @@ function formatClock(ts: number | null): string {
 
 export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
   const { t } = useTranslation();
+  // 后端平台为准：Android 上电脑控制整体置灰
+  const { platform } = usePlatform();
+  const mobileUnavailable = platform.isAndroid;
+  /** 真正启用的轮询：标签可见且平台支持 */
+  const enabled = active && !mobileUnavailable;
 
   const [status, setStatus] = useState<ComputerStatus | null>(null);
   const [windows, setWindows] = useState<ComputerWindowInfo[]>([]);
@@ -111,9 +111,11 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
   const followRef = useRef(followAgent);
   followRef.current = followAgent;
   const activeRef = useRef(active);
-  activeRef.current = active;
+  activeRef.current = enabled;
   const shotUrlRef = useRef<string | null>(null);
   const shotSeqRef = useRef(0);
+  /** 单飞：上一次截图未返回时跳过本次轮询，避免请求堆积 */
+  const shotBusyRef = useRef(false);
 
   const connected = status?.installed === true && status.connection === 'connected';
 
@@ -140,12 +142,14 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
 
   const refreshShot = useCallback(async () => {
     if (!activeRef.current) return;
+    if (shotBusyRef.current) return;
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     const current = statusRef.current;
     if (!current?.installed || current.connection !== 'connected') return;
 
     const target = parseTargetKey(targetRef.current);
     const seq = ++shotSeqRef.current;
+    shotBusyRef.current = true;
     try {
       const blob = await api.fetchComputerScreenshot({
         ...target,
@@ -162,40 +166,47 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
     } catch (err) {
       if (seq !== shotSeqRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      shotBusyRef.current = false;
     }
   }, []);
 
-  // 状态轮询（仅面板 active）
+  // 状态轮询（仅面板 active 且平台支持）
   useEffect(() => {
-    if (!active) return;
+    if (!enabled) return;
     void refreshStatus();
     const timer = setInterval(() => {
       void refreshStatus();
     }, STATUS_POLL_MS);
     return () => clearInterval(timer);
-  }, [active, refreshStatus]);
+  }, [enabled, refreshStatus]);
 
   // 连接后加载窗口列表（仅在屏幕可见范围变化时重新拉取）
   useEffect(() => {
-    if (!active || !connected) return;
+    if (!enabled || !connected) return;
     void loadWindows();
-  }, [active, connected, loadWindows]);
+  }, [enabled, connected, loadWindows]);
 
   // 实时画面轮询（连接后启动；隐藏时停止）
   useEffect(() => {
-    if (!active || !connected) return;
+    if (!enabled || !connected) return;
     void refreshShot();
     const timer = setInterval(() => {
       void refreshShot();
     }, SCREENSHOT_POLL_MS);
     return () => clearInterval(timer);
-  }, [active, connected, refreshShot]);
+  }, [enabled, connected, refreshShot]);
 
   // 目标切换立即刷新
   useEffect(() => {
-    if (!active || !connected) return;
+    if (!enabled || !connected) return;
     void refreshShot();
-  }, [targetKey, active, connected, refreshShot]);
+  }, [targetKey, enabled, connected, refreshShot]);
+
+  // 跟随 Agent = 始终整屏（窗口截图会漏掉自绘浮层）
+  useEffect(() => {
+    if (followAgent && targetKey !== DESKTOP_TARGET) setTargetKey(DESKTOP_TARGET);
+  }, [followAgent, targetKey]);
 
   // WS：活动/状态即时刷新
   useEffect(() => {
@@ -207,18 +218,17 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
       if (msg.type !== 'computer.activity') return;
       const payload = msg.payload as ComputerActivity | undefined;
       if (!payload) return;
-      if (payload.sessionId && payload.sessionId !== sessionId) return;
+      // 严格按会话隔离：新建对话（sessionId 为空）不接收任何会话的活动
+      if (!sessionId || payload.sessionId !== sessionId) return;
 
       setActivities((prev) => {
         const rest = prev.filter((item) => item.id !== payload.id);
         return [payload, ...rest].slice(0, 20);
       });
 
-      if (followRef.current) {
-        const nextTarget = parseActivityTarget(payload.target ?? '');
-        if (nextTarget && nextTarget !== targetRef.current) {
-          setTargetKey(nextTarget);
-        }
+      if (followRef.current && targetRef.current !== DESKTOP_TARGET) {
+        // 整屏优先：窗口截图看不到自绘浮层，跟随 Agent 时不再切到窗口
+        setTargetKey(DESKTOP_TARGET);
       }
       // Agent 动作后立即刷新画面
       void refreshShot();
@@ -303,6 +313,20 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
         ? 'destructive'
         : 'secondary';
 
+  // 移动端（Android 后端）：整体不可用，不请求任何驱动接口
+  if (mobileUnavailable) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+        <div className="flex w-full max-w-md flex-col items-center gap-2 rounded-xl border border-border bg-muted/30 px-4 py-6 text-center">
+          <SquareMousePointer className="size-6 text-muted-foreground/60" />
+          <span className="text-xs text-muted-foreground">{t('common.mobileUnavailableDesc')}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const failedChecks = (status?.health?.checks ?? []).filter((item) => item.status === 'fail');
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* 头部：状态 / 版本 / 安装 / 刷新 */}
@@ -379,6 +403,22 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
         </div>
       )}
 
+      {/* 健康检查失败项（macOS 权限等）：给出可操作提示 */}
+      {failedChecks.length > 0 && (
+        <div className="flex flex-col gap-1 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+          <div className="flex items-center gap-1.5 font-medium">
+            <CircleAlert className="size-3.5 shrink-0" />
+            {t('computer.healthFailed')}
+          </div>
+          {failedChecks.slice(0, 4).map((item) => (
+            <div key={item.name} className="break-all pl-5">
+              {item.name}: {item.message}
+              {item.hint ? ` · ${item.hint}` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* 未安装：安装引导；状态读取中先显示加载 */}
       {!status ? (
         <div className="flex min-h-0 flex-1 items-center justify-center">
@@ -400,10 +440,14 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
             </Button>
             <div className="rounded-lg border border-border bg-muted/30 p-2.5">
               <div className="mb-1 text-[11px] text-muted-foreground">
-                {t('computer.manualInstall')}
+                {status.platform === 'win32'
+                  ? t('computer.manualInstall')
+                  : t('computer.manualInstallShell')}
               </div>
               <code className="mono block break-all text-[11px] text-foreground">
-                irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex
+                {status.platform === 'win32'
+                  ? 'irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex'
+                  : 'curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh | bash -s -- --no-modify-path'}
               </code>
             </div>
             <a
@@ -449,7 +493,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
         // 已连接：目标选择 + 画面 + 时间线
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
-            <Select value={targetKey} onValueChange={setTargetKey}>
+            <Select value={targetKey} onValueChange={setTargetKey} disabled={followAgent}>
               <SelectTrigger size="sm" className="max-w-[260px]">
                 <SelectValue placeholder={t('computer.target')} />
               </SelectTrigger>
@@ -484,6 +528,11 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
               {t('computer.captureAt', { time: formatClock(shotAt) })}
             </span>
           </div>
+          {targetKey !== DESKTOP_TARGET && (
+            <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+              {t('computer.windowOverlayWarning')}
+            </div>
+          )}
 
           <div className="relative min-h-0 flex-1 overflow-hidden bg-black/85">
             {shotUrl ? (
@@ -493,12 +542,22 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
                 className="size-full object-contain"
                 draggable={false}
               />
+            ) : error ? (
+              // 截图失败：不再空转，直接给出错误与重试入口（轮询仍会自动恢复）
+              <div className="flex size-full flex-col items-center justify-center gap-2 px-6 text-center">
+                <CircleAlert className="size-6 text-destructive" />
+                <span className="break-all text-[11px] text-white/80">{error}</span>
+                <Button size="sm" variant="outline" onClick={() => void refreshShot()}>
+                  <RefreshCw />
+                  {t('computer.retryCapture')}
+                </Button>
+              </div>
             ) : (
               <div className="flex size-full items-center justify-center">
                 <Loader2 className="size-5 animate-spin text-white/50" />
               </div>
             )}
-            {error && (
+            {shotUrl && error && (
               <div className="absolute inset-x-2 bottom-2 flex items-start gap-1.5 rounded-md bg-destructive/90 px-2 py-1.5 text-[11px] text-white">
                 <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
                 <span className="break-all">{error}</span>

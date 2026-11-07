@@ -2,7 +2,8 @@
 // 语音输入 hook：麦克风采集（AudioWorklet，16kHz 单声道）→ WS 二进制音频 →
 // 后端流式识别 → partial/final 回调（供编辑器实时上屏）。
 //
-// 本地推理：音频经本机 WS 发往后端 sherpa-onnx 识别，全程不出本机、不调云 API。
+// 识别统一在后端运行（sherpa-onnx 本地模型或在线语音服务商），浏览器不做 WASM 推理；
+// 音频经本机 WS 发往后端，全程不出本机、不调云 API（在线服务商除外）。
 //
 // 健壮性设计（三端 + 移动端兼容）：
 //   - 前置环境校验（安全上下文 / mediaDevices 可用性），失败给出可读错误码；
@@ -15,7 +16,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/http';
 import { wsClient } from '../api/ws';
 import { runWhenIdle } from '../lib/idle';
-import { createLocalAsrEngine, isLocalAsrSupported, type LocalAsrSession } from '../lib/asr-local';
 import type { VoiceModelStatus, VoiceStatus } from '../types/api';
 
 /** AudioWorklet 处理器源码（仅作 blob 兜底；首选静态资源 /voice-capture-worklet.js） */
@@ -76,16 +76,22 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0];
     if (!input || input.length === 0) return true;
-    // 声道下混：设备可能是立体声，语音落在任一通道都不能丢
+    // 多通道：取能量最大的通道。多麦阵列通道间存在相位差，平均混音会互相抵消。
     let ch;
     if (input.length === 1) ch = input[0];
     else {
-      ch = new Float32Array(input[0].length);
+      let best = 0;
+      let bestEnergy = -1;
       for (let c = 0; c < input.length; c++) {
         const src = input[c];
-        for (let i = 0; i < ch.length; i++) ch[i] += src[i];
+        let energy = 0;
+        for (let i = 0; i < src.length; i++) energy += src[i] * src[i];
+        if (energy > bestEnergy) {
+          bestEnergy = energy;
+          best = c;
+        }
       }
-      for (let i = 0; i < ch.length; i++) ch[i] /= input.length;
+      ch = input[best];
     }
     if (this.target && sampleRate !== this.target) {
       ch = this._resample(ch);
@@ -132,9 +138,7 @@ export type VoiceErrorCode =
   | 'NOT_SUPPORTED'
   | 'AUDIO_WORKLET_UNAVAILABLE'
   | 'WS_NOT_CONNECTED'
-  | 'READY_TIMEOUT'
-  | 'LOCAL_MODEL_UNAVAILABLE'
-  | 'LOCAL_ENGINE_FAILED';
+  | 'READY_TIMEOUT';
 
 /** 带错误码的启动异常 */
 class VoiceStartError extends Error {
@@ -152,10 +156,11 @@ class VoiceSessionError extends Error {
   }
 }
 
-/** getUserMedia 渐进降级约束序列（从严到宽） */
+/** getUserMedia 渐进降级约束序列（从「浏览器默认处理」到最宽松） */
 const AUDIO_CONSTRAINTS: MediaTrackConstraints[] = [
-  // 听写需要原始波形：关闭浏览器音频处理，避免 AEC/NS/AGC 破坏识别
-  { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  // 默认处理（AEC/NS/AGC）能显著改善 Windows 麦克风阵列的可懂度；
+  // 关闭它们会拿到未处理的原始阵列信号，语音容易被低频轰鸣淹没。
+  { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   { channelCount: 1 },
   {},
 ];
@@ -240,11 +245,7 @@ export function useVoiceModels(): UseVoiceModelsResult {
 }
 
 export interface UseVoiceInputOptions {
-  /** 识别执行位置：server = 后端本地引擎（WS 传输音频）；local = 浏览器端 WASM 本地推理 */
-  engine?: 'server' | 'local';
-  /** local 模式使用的模型 id */
-  localModelId?: string;
-  /** 提示（如 local 模式准备模型耗时时的告知）：参数为 i18n 文案键 */
+  /** 提示（i18n 文案键，如长时间无识别结果） */
   onNotice?: (key: string) => void;
   /** 中间态文本（可被覆盖） */
   onPartial: (text: string) => void;
@@ -267,24 +268,20 @@ export interface UseVoiceInputResult {
 
 /** 语音输入：点击开始/再次点击停止，识别文本实时上屏 */
 export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResult {
-  const { onPartial, onFinal, onError, onNotice, engine = 'server', localModelId } = options;
+  const { onPartial, onFinal, onError, onNotice } = options;
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [level, setLevel] = useState(0);
 
-  // 回调/reffs（避免因回调变化重建采集链路）
+  // 回调 ref（避免因回调变化重建采集链路）
   const onPartialRef = useRef(onPartial);
   const onFinalRef = useRef(onFinal);
   const onErrorRef = useRef(onError);
   const onNoticeRef = useRef(onNotice);
-  const engineRef = useRef<'server' | 'local'>(engine);
-  const localModelIdRef = useRef<string | undefined>(localModelId);
   onPartialRef.current = onPartial;
   onFinalRef.current = onFinal;
   onErrorRef.current = onError;
   onNoticeRef.current = onNotice;
-  engineRef.current = engine;
-  localModelIdRef.current = localModelId;
 
   const streamRef = useRef<MediaStream | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
@@ -304,10 +301,21 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const hasResultRef = useRef(false);
   /** 是否已向服务端发起会话（用于异常时取消） */
   const sessionStartedRef = useRef(false);
-  /** 浏览器本地推理会话（engine=local 时） */
-  const sessionRef = useRef<LocalAsrSession | null>(null);
-  /** 本地推理轮询定时器 */
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 录音状态 ref（供 WS 状态回调读取最新值） */
+  const recordingRef = useRef(false);
+  recordingRef.current = recording;
+  /** WS 断线导致当前录音会话已丢失（重连后会重新建会话） */
+  const sessionLostRef = useRef(false);
+  /** 当前采集设备 label（诊断用） */
+  const deviceLabelRef = useRef('');
+  /** 本轮录音的峰值（用于判断是否真的没有输入信号） */
+  const levelPeakRef = useRef(0);
+  /** 上一次输出电平诊断日志的时间 */
+  const levelLogAtRef = useRef(0);
+  /** 是否已提示过「麦克风音量过低」 */
+  const silentNoticeRef = useRef(false);
+  /** 采集开始时间（用于延迟判定静音） */
+  const captureStartedAtRef = useRef(0);
 
   /** 释放采集资源（幂等） */
   const releaseCapture = useCallback(() => {
@@ -333,21 +341,9 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     setLevel(0);
   }, []);
 
-  /** 释放全部资源（幂等）：采集、会话、挂起的就绪等待与定时器一并清理 */
+  /** 释放全部资源（幂等）：采集、挂起的就绪等待与定时器一并清理 */
   const teardown = useCallback(() => {
     releaseCapture();
-    if (pollRef.current !== null) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (sessionRef.current) {
-      try {
-        sessionRef.current.close();
-      } catch {
-        // 忽略
-      }
-      sessionRef.current = null;
-    }
     if (readyTimerRef.current !== null) {
       clearTimeout(readyTimerRef.current);
       readyTimerRef.current = null;
@@ -362,6 +358,10 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     waiter?.reject(CANCEL_ERROR);
     sessionStartedRef.current = false;
     hasResultRef.current = false;
+    sessionLostRef.current = false;
+    levelPeakRef.current = 0;
+    silentNoticeRef.current = false;
+    captureStartedAtRef.current = 0;
   }, [releaseCapture]);
 
   /** WS 语音事件订阅 */
@@ -421,20 +421,12 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
   /** 停止：释放采集并结束会话 */
   const stop = useCallback(() => {
-    console.info('[voice-diag] stop requested', { recording, engine: engineRef.current });
-    if (recording) {
-      if (engineRef.current === 'local') {
-        // 本地推理：冲刷剩余结果并上屏（teardown 会关闭会话，故先取结果）
-        const session = sessionRef.current;
-        if (session) {
-          try {
-            const res = session.finish();
-            if (res?.text) onFinalRef.current(res.text);
-          } catch {
-            // 忽略
-          }
-        }
-      } else if (sessionStartedRef.current) {
+    console.info('[voice-diag] stop requested', { recording, sessionLost: sessionLostRef.current });
+    if (recording && sessionStartedRef.current) {
+      if (sessionLostRef.current && !wsClient.isOpen()) {
+        // 断线期间录音没有送达后端：明确告知，避免静默无结果
+        onErrorRef.current?.('WS_NOT_CONNECTED');
+      } else {
         wsClient.send({ type: 'voice.stop' });
       }
     }
@@ -491,10 +483,45 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     }, NO_RESULT_NOTICE_MS);
   }, []);
 
+  /**
+   * WS 断线恢复：语音会话绑定在连接上，重连后必须重新 voice.start，
+   * 否则后续音频会被后端丢弃、停止时也拿不到结果。
+   */
+  useEffect(() => {
+    const off = wsClient.onStatus((info) => {
+      if (!sessionStartedRef.current || !recordingRef.current) return;
+      if (info.status === 'open' && info.restored) {
+        sessionLostRef.current = false;
+        hasResultRef.current = false;
+        armNoResultWatchdog();
+        wsClient.send({ type: 'voice.start' });
+        console.info('[voice-diag] ws reconnected, voice session restarted');
+        onNoticeRef.current?.('taskInput.voiceReconnecting');
+        return;
+      }
+      if (info.status === 'closed' || info.status === 'error') {
+        sessionLostRef.current = true;
+      }
+    });
+    return off;
+  }, [armNoResultWatchdog]);
+
   /** 建立采集链路（会话已就绪后才调用）：AudioContext + AudioWorklet + 音量波形 */
   const beginCapture = useCallback(
-    async (stream: MediaStream, isLocal: boolean) => {
+    async (stream: MediaStream) => {
       streamRef.current = stream;
+
+      // 设备诊断：录音不成功时先确认用的是哪个输入设备、处理开关是否生效
+      const track = stream.getAudioTracks()[0];
+      deviceLabelRef.current = track?.label ?? '';
+      levelPeakRef.current = 0;
+      levelLogAtRef.current = 0;
+      silentNoticeRef.current = false;
+      captureStartedAtRef.current = performance.now();
+      console.info('[voice-diag] device', {
+        label: track?.label,
+        settings: track?.getSettings?.(),
+      });
 
       // AudioContext：优先 16k；不支持则用系统采样率（worklet 会重采样回 16k）
       let ctx: AudioContext;
@@ -535,14 +562,12 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       analyser.fftSize = 512;
       analyserRef.current = analyser;
 
-      // 显式单声道：由浏览器在进入 worklet 前完成立体声→单声道下混
+      // 多通道原样进入 worklet：由 worklet 选能量最大的通道（平均混音会因相位差抵消）
       const worklet = new AudioWorkletNode(ctx, 'voice-capture', {
         numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [1],
-        channelCount: 1,
-        channelCountMode: 'explicit',
-        channelInterpretation: 'speakers',
+        channelCountMode: 'max',
         processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE },
       });
       workletRef.current = worklet;
@@ -550,22 +575,38 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         const samples = event.data;
         if (!samples || samples.length === 0) return;
-        if (!firstFrameLogged) {
-          firstFrameLogged = true;
-          console.info('[voice-diag] first capture frame', {
-            samples: samples.length,
-            nonZero: samples.some((sample) => sample !== 0),
-          });
-        }
-        if (isLocal) {
-          // 本地推理：Float32 直接喂给 WASM 会话（无需 int16/WS）
-          sessionRef.current?.acceptSamples(samples);
-          return;
-        }
+        let sum = 0;
+        let peak = 0;
         const i16 = new Int16Array(samples.length);
         for (let i = 0; i < samples.length; i++) {
-          const s = Math.max(-1, Math.min(1, samples[i]));
+          const raw = samples[i];
+          sum += raw * raw;
+          const abs = Math.abs(raw);
+          if (abs > peak) peak = abs;
+          const s = Math.max(-1, Math.min(1, raw));
           i16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        if (peak > levelPeakRef.current) levelPeakRef.current = peak;
+        if (!firstFrameLogged) {
+          firstFrameLogged = true;
+          console.info('[voice-diag] first capture frame', { samples: samples.length, nonZero: peak > 0 });
+        }
+        const now = performance.now();
+        if (now - levelLogAtRef.current >= 2000) {
+          levelLogAtRef.current = now;
+          console.info('[voice-diag] capture level', {
+            rms: Math.sqrt(sum / samples.length),
+            peak,
+            device: deviceLabelRef.current,
+          });
+        }
+        if (
+          !silentNoticeRef.current &&
+          now - captureStartedAtRef.current >= 3000 &&
+          levelPeakRef.current < 0.002
+        ) {
+          silentNoticeRef.current = true;
+          onNoticeRef.current?.('taskInput.voiceSilentInput');
         }
         wsClient.sendBinary(i16.buffer);
       };
@@ -596,19 +637,6 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       };
       rafRef.current = requestAnimationFrame(tick);
 
-      if (isLocal) {
-        // 本地推理：定时轮询会话产出（partial / final）
-        pollRef.current = setInterval(() => {
-          const session = sessionRef.current;
-          if (!session) return;
-          const res = session.poll();
-          if (!res) return;
-          hasResultRef.current = true;
-          if (res.isFinal) onFinalRef.current(res.text);
-          else onPartialRef.current(res.text);
-        }, 100);
-      }
-
       setRecording(true);
       setBusy(false);
       armNoResultWatchdog();
@@ -627,19 +655,6 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       cancelled: false,
     };
     try {
-      const isLocal = engineRef.current === 'local';
-      if (isLocal) {
-        // 浏览器本地推理：先备好引擎（可能需下载模型），再采集
-        if (!isLocalAsrSupported()) throw new VoiceStartError('LOCAL_MODEL_UNAVAILABLE');
-        const modelId = localModelIdRef.current;
-        if (!modelId) throw new VoiceStartError('LOCAL_MODEL_UNAVAILABLE');
-        onNoticeRef.current?.('taskInput.voiceLocalPreparing');
-        const [eng, stream] = await Promise.all([createLocalAsrEngine(modelId), acquireStream()]);
-        sessionRef.current = eng.createSession();
-        await beginCapture(stream, true);
-        return;
-      }
-
       if (!wsClient.isOpen()) throw new VoiceStartError('WS_NOT_CONNECTED');
 
       // 并行：尽早弹出麦克风授权 + 创建服务端会话；就绪后才开始采集与录音
@@ -666,7 +681,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
       const [stream] = await Promise.all([streamPromise, readyPromise]);
       pending.stream = null;
-      await beginCapture(stream, false);
+      await beginCapture(stream);
     } catch (err) {
       pending.cancelled = true;
       pending.stream?.getTracks().forEach((t) => t.stop());

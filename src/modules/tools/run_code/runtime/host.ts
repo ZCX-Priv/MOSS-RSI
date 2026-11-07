@@ -71,6 +71,8 @@ export interface RunCodeHostResult {
   hasUi: boolean;
   calls: CodeRunCallRecord[];
   callsTruncated: boolean;
+  /** 嵌套工具返回的图片路径（最多 2 张；由工具层读取并内联） */
+  images?: Array<{ path: string; mimeType: string }>;
   error?: { kind: CodeFailureKind; message: string };
   durationMs: number;
   truncated: boolean;
@@ -135,6 +137,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   const runController = new AbortController();
   const logs: string[] = [];
   const calls: CodeRunCallRecord[] = [];
+  /** 嵌套工具产生的图片（只保留最后 2 张，随 run_code 结果回到模型） */
+  const nestedImages: Array<{ path: string; mimeType: string }> = [];
   /** 调用开始序号：每次 runCall 开始时递增（与并行/完成顺序无关） */
   let callSeq = 0;
   let callsTruncated = false;
@@ -504,6 +508,14 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           });
           return;
         }
+        // 收集图片供最终 run_code 结果内联（模型无需再单独调用 screenshot）
+        for (const part of result.content) {
+          if (part.type !== 'image' || !part.path) continue;
+          if (nestedImages.some((item) => item.path === part.path)) continue;
+          nestedImages.push({ path: part.path, mimeType: part.source.mimeType });
+        }
+        while (nestedImages.length > 2) nestedImages.shift();
+
         const value = toolResultToCodeValue(result);
         const frame = { v: 1 as const, type: 'tool-result' as const, id: call.id, ok: true as const, value };
         const line = encodeFrame(frame);
@@ -609,7 +621,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
         // 已关闭
       }
       await terminateChild(child);
-      resolvePromise({ ...result, durationMs: Math.round(performance.now() - startedAt) });
+      resolvePromise({
+        ...result,
+        ...(nestedImages.length > 0 ? { images: nestedImages.slice() } : {}),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
     };
 
     const onAbort = (): void => {

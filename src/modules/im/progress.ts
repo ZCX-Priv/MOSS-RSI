@@ -178,6 +178,7 @@ function computerText(args: Record<string, unknown>): string | null {
     case 'get_screen_size': return '已获取屏幕尺寸';
     case 'get_cursor_position': return '已获取光标位置';
     case 'zoom': return '已放大查看';
+    case 'focus': return `已聚焦${target}`;
     case 'click': return `已点击${target}`;
     case 'double_click': return `已双击${target}`;
     case 'right_click': return `已右键点击${target}`;

@@ -41,6 +41,9 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '并行任务优先使用 PTC：多个独立的只读调用（例如同时搜索多个关键词、并行读取多个文件或网页、批量抓取）应放在同一个程序中用 `Promise.all` 并发执行，不要拆成多轮原生工具调用。单步操作或需要即时确认的交互可直接使用原生工具。',
   );
   parts.push(
+    '连续/实时操作优先使用 PTC：需要「动作 → 等待 → 截图 → 判断 → 再动作」的浏览器或桌面任务（游戏、拖拽、连续按键、逐步表单），写一段程序在单次调用内完成一小段闭环，再用返回截图/帧差决定下一步；不要每按一个键就单独调用一次工具。',
+  );
+  parts.push(
     tools.length > 0
       ? `程序内的 \`tools\` 镜像当前原生工具（参数签名见请求中的原生工具 schema）：\n${tools
           .map((tool) => `\`${tool.name}\``)
@@ -60,12 +63,23 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     ']);',
     'return { a, b };',
     '```',
+    '',
+    '交互闭环示例（游戏/连续 UI：一次程序内按住 → 等待 → 截图）：',
+    '```ts',
+    "const before = await tools.browser({ action: 'screenshot', tab: 't1', frame: 'auto' });",
+    "await tools.browser({ action: 'hold', tab: 't1', frame: 'auto', keys: ['ArrowRight'], duration_ms: 600 });",
+    'await sleep(250);',
+    "const after = await tools.browser({ action: 'wait_change', tab: 't1', frame: 'auto', timeout_ms: 800 });",
+    'return { after, note: before.text };',
+    '```',
+    '嵌套工具返回的截图会自动附加到 run_code 结果（最多 2 张）；不需要再单独调用 screenshot 取图。',
   );
 
   parts.push(
     '',
     '### 使用规则',
     '- `code` 是一个 async TypeScript 函数体；支持顶层 `await` 与 `return`，类型注解会被剥离。',
+    '- 定时用注入的 `sleep(ms)` 与 `now()`；沙箱内 `setTimeout` 不可用（不要尝试）。',
     '- 工具失败会在程序内抛出可 `try/catch` 的 `ToolCallError`；错误对象带 `toolName`。',
     '- 只有 `return` 的值与 `console.log` 的文本会回到模型上下文；中间结果不会自动回灌，请主动裁剪。',
     '- 只读工具可以用 `Promise.all` 并发；写操作/终端等会按提交顺序独占执行。',

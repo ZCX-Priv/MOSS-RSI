@@ -159,6 +159,11 @@ function readImages(
 export interface BuildViewOptions {
   /** 是否把 thinking 纳入发送视图与 token/字节核算（OpenAI 兼容默认 false；Anthropic 带签名时 true） */
   includeThinking?: boolean;
+  /**
+   * 是否保留「当前轮工具调用」的 thinking（DeepSeek 思考模式要求 assistant 工具调用消息回传 reasoning_content）。
+   * 仅保留最后一条 user 消息之后、带 toolCalls 的 assistant 消息的 thinking，避免历史思考撑大上下文。
+   */
+  includeToolCallThinking?: boolean;
   /** skill 内容解析回调（message 模式占位替换 / system 模式由调用方拼进 staticSystemPrompt） */
   resolveSkillPrompt?: (name: string) => string | null;
   /** 溢出兜底预算（窗口 token；undefined = 不做兜底裁剪） */
@@ -214,7 +219,12 @@ export function buildRequestView(
   opts: BuildViewOptions,
 ): BuiltView {
   const optimized = opts.optimizedImages;
-  const includeThinking = opts.includeThinking === true;
+  // keepAllThinking：provider 回传全部历史 thinking（Anthropic）
+  const keepAllThinking = opts.includeThinking === true;
+  // includeToolCallThinking：只保留当前轮工具调用的 thinking（DeepSeek 思考模式）
+  const includeToolCallThinking = opts.includeToolCallThinking === true;
+  // 估算口径与实际保留内容一致（视图里只剩要发送的 thinking）
+  const includeThinking = keepAllThinking || includeToolCallThinking;
 
   // ===== 1. 可见消息（未软删、未压缩；触顶提示/系统错误消息纯 UI 不发 LLM） =====
   const visible = session.messages.filter(
@@ -222,14 +232,27 @@ export function buildRequestView(
       !m.deletedAt &&
       !m.compacted &&
       m.name !== MAX_TURNS_NOTICE_MSG_NAME &&
-      m.name !== SYSTEM_ERROR_MSG_NAME,
+      m.name !== SYSTEM_ERROR_MSG_NAME &&
+      // 丢弃「只有 thinking、没有正文/工具调用/图片」的中断 assistant 消息：
+      // thinking 被裁掉后会变成空 assistant 消息，DeepSeek 思考模式会因此报 400。
+      !(
+        m.role === 'assistant' &&
+        m.content.trim() === '' &&
+        !(m.toolCalls && m.toolCalls.length > 0) &&
+        !(m.images && m.images.length > 0)
+      ),
   );
+  // 当前轮起点：最后一条 user 消息之后（工具调用 thinking 只回传这一段）
+  let lastUserIndex = -1;
+  for (let i = 0; i < visible.length; i += 1) {
+    if (visible[i].role === 'user') lastUserIndex = i;
+  }
 
   // ===== 2. 视图消息准备（skill 占位替换；全部新建对象不动原消息） =====
   // originalOf：视图对象 → 原始 session 消息。视图可能被复制（图片淘汰等），
   // 而标记 imagesSentAt 必须落在原始 session 对象上才能持久化生效。
   const originalOf = new WeakMap<ContextMessage, ContextMessage>();
-  const prepared: ContextMessage[] = visible.map(raw => {
+  const prepared: ContextMessage[] = visible.map((raw, index) => {
     let next: ContextMessage = raw;
 
     // 2b. skill message 模式占位消息 → 注册表全文
@@ -247,8 +270,17 @@ export function buildRequestView(
     // 2c. provider 不回传 thinking 时，从发送视图彻底移除（不只估算排除）：
     // DeepSeek/OpenAI 兼容默认不回传 reasoning_content，若仍留在视图里，
     // 既不会被 provider 发送，又会让 breakdown/字节预算虚高。
-    if (!opts.includeThinking && (next.thinking || next.thinkingSignature)) {
-      next = { ...next, thinking: undefined, thinkingSignature: undefined };
+    // 例外：DeepSeek 思考模式要求当前轮 assistant 工具调用消息回传 reasoning_content，
+    // 因此 includeToolCallThinking 为 true 时保留「最后一条 user 之后 + 带 toolCalls」的 thinking。
+    if (!keepAllThinking && (next.thinking || next.thinkingSignature)) {
+      const keepForToolCall =
+        includeToolCallThinking &&
+        next.role === 'assistant' &&
+        (next.toolCalls?.length ?? 0) > 0 &&
+        index > lastUserIndex;
+      if (!keepForToolCall) {
+        next = { ...next, thinking: undefined, thinkingSignature: undefined };
+      }
     }
 
     originalOf.set(next, raw);

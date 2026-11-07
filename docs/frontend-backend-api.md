@@ -24,7 +24,7 @@
 - 配置项：`config.security.authToken`（空字符串表示无需鉴权）
 - HTTP：请求头 `Authorization: Bearer <token>`；前端从 `localStorage['moss-token']` 读取并自动注入
 - WebSocket：同源信任，不强制 Token；远程访问开启时由 `RemoteGuard` 在升级握手前校验远程密码 cookie
-- 免鉴权例外：`GET /api/health`、`GET /api/version`、`GET /api/filesystem/media`（query token 校验）、`GET /api/voice/wasm/*`（浏览器加载器直接请求）
+- 免鉴权例外：`GET /api/health`、`GET /api/version`、`GET /api/filesystem/media`（query token 校验）
 
 ### 1.3 统一响应格式
 
@@ -291,8 +291,6 @@
 | PUT | `/api/voice/provider` | 是 | 设置在线语音服务商 |
 | POST | `/api/voice/models/:id/install` | 是 | 下载并安装模型 |
 | DELETE | `/api/voice/models/:id` | 是 | 卸载模型 |
-| GET | `/api/voice/wasm/manifest` | 否 | 浏览器 WASM 推理文件表 |
-| GET | `/api/voice/wasm/data` | 否 | 模型字节流（Emscripten 加载器直接 GET） |
 
 ### 2.17 远程访问
 

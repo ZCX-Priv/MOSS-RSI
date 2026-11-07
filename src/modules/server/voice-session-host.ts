@@ -28,6 +28,10 @@ interface VoiceEntry {
   send: (msg: unknown) => void;
   frames: number;
   samples: number;
+  /** 输入能量统计：用于区分「麦克风没声音」与「有声音但没识别出文字」 */
+  peak: number;
+  rmsSum: number;
+  rmsCount: number;
 }
 
 /** 创建中的会话（模型加载期间 stop/dispose 需要被记录，避免会话泄漏或丢停止请求） */
@@ -82,7 +86,16 @@ export class VoiceSessionHost {
         return;
       }
       const timer = setInterval(() => this.tick(connId), TICK_INTERVAL_MS);
-      this.entries.set(connId, { session, timer, send, frames: 0, samples: 0 });
+      this.entries.set(connId, {
+        session,
+        timer,
+        send,
+        frames: 0,
+        samples: 0,
+        peak: 0,
+        rmsSum: 0,
+        rmsCount: 0,
+      });
       send({ type: 'voice.ready' });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -100,9 +113,20 @@ export class VoiceSessionHost {
     const count = Math.floor(buf.byteLength / 2);
     if (count === 0) return;
     const samples = new Float32Array(count);
-    for (let i = 0; i < count; i++) samples[i] = buf.readInt16LE(i * 2) / 32768;
+    let sum = 0;
+    let peak = 0;
+    for (let i = 0; i < count; i++) {
+      const value = buf.readInt16LE(i * 2) / 32768;
+      samples[i] = value;
+      sum += value * value;
+      const abs = Math.abs(value);
+      if (abs > peak) peak = abs;
+    }
     entry.frames += 1;
     entry.samples += count;
+    entry.rmsSum += sum;
+    entry.rmsCount += count;
+    if (peak > entry.peak) entry.peak = peak;
     if (entry.frames === 1) {
       this.logger.info('[voice-diag] first binary frame', {
         connId,
@@ -127,23 +151,35 @@ export class VoiceSessionHost {
     this.entries.delete(connId);
     clearInterval(entry.timer);
     const finishStartedAt = Date.now();
+    const rms = entry.rmsCount > 0 ? Math.sqrt(entry.rmsSum / entry.rmsCount) : 0;
     this.logger.info('[voice-diag] finish started', {
       connId,
       frames: entry.frames,
       samples: entry.samples,
+      rms: Number(rms.toFixed(4)),
+      peak: Number(entry.peak.toFixed(4)),
     });
+    let final: Awaited<ReturnType<VoiceSession['finish']>> = null;
     try {
-      const final = await entry.session.finish();
+      final = await entry.session.finish();
       this.logger.info('[voice-diag] finish returned', {
         connId,
         elapsedMs: Date.now() - finishStartedAt,
         textLength: final?.text.length ?? 0,
+        rms: Number(rms.toFixed(4)),
+        peak: Number(entry.peak.toFixed(4)),
       });
       if (final) entry.send({ type: 'voice.final', payload: { text: final.text } });
     } catch (err) {
       this.logger.warn('voice session finish failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+    // 无文本时区分「没收到声音」与「有声音但没识别出来」，避免误导用户去换设备
+    if (!final && entry.peak < 0.01) {
+      entry.send({ type: 'voice.error', payload: { error: 'VOICE_SILENT_INPUT' } });
+    } else if (!final) {
+      entry.send({ type: 'voice.error', payload: { error: 'VOICE_NO_SPEECH' } });
     }
     entry.session.close();
     this.logger.info('[voice-diag] session closed', { connId });

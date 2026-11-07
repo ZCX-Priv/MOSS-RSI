@@ -105,6 +105,8 @@ export interface McpSamplingResult {
 interface McpSdkClient {
   connect(transport: unknown): Promise<void>;
   close(): Promise<void>;
+  onerror?: (error: Error) => void;
+  onclose?: () => void;
   setElicitationHandler?(handler: (req: McpElicitRequest) => Promise<McpElicitOutcome>): void;
   setSamplingHandler?(handler: (req: McpSamplingRequest) => Promise<McpSamplingResult>): void;
   listTools(): Promise<{
@@ -137,7 +139,8 @@ interface McpSdkClient {
 }
 
 interface McpSdkTransport {
-  // 仅作占位，具体构造由 SDK 完成
+  // 仅作占位，具体构造由 SDK 完成；close 用于超时/中止时清理子进程
+  close?(): Promise<void>;
 }
 
 interface McpSdkModule {
@@ -168,6 +171,10 @@ export interface McpClientHooks {
 
 export class McpClient {
   private sdkClient: McpSdkClient | null = null;
+  /** 当前传输：超时/断连时显式 close，确保子进程被回收 */
+  private transport: McpSdkTransport | null = null;
+  /** 连接代次：超时后自增，迟到的连接完成会自行关闭，避免“超时后又变成已连接” */
+  private connectGeneration = 0;
   private tools: McpToolInfo[] = [];
   private readonly name: string;
   private readonly config: ServerConfig;
@@ -188,7 +195,33 @@ export class McpClient {
     this.hooks = hooks;
   }
 
-  async connect(): Promise<void> {
+  /**
+   * 连接 MCP 服务器。
+   * @param timeoutMs 连接超时（含 create/listTools）；超时会显式关闭 transport，避免孤儿进程
+   */
+  async connect(timeoutMs?: number): Promise<void> {
+    if (timeoutMs === undefined || timeoutMs <= 0) {
+      await this.connectInternal();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`connect timeout after ${timeoutMs}ms`)), timeoutMs);
+    });
+    try {
+      await Promise.race([this.connectInternal(), timeout]);
+    } catch (err) {
+      // 让迟到的连接完成失效，并强制关闭 transport
+      this.connectGeneration += 1;
+      await this.disconnect().catch(() => {});
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async connectInternal(): Promise<void> {
+    const generation = ++this.connectGeneration;
     // 分别从子路径动态 import（SDK 不存在根 index.js）
     const clientMod = (await import('@modelcontextprotocol/sdk/client')) as McpSdkModule;
     const Client = clientMod.Client;
@@ -218,12 +251,15 @@ export class McpClient {
     } else {
       throw new Error(t('mcp.unknownTransport', { transport: this.config.transport }));
     }
+    this.transport = transport;
 
     // 创建 client 实例（elicitation 始终声明——agent 通道支持，无桥时 decline；sampling 按钩子注入声明）
     this.sdkClient = new Client(
       { name: 'moss', version: '1.1.0' },
       { capabilities: this.buildCapabilities() },
     );
+    // 本次连接拥有的 client（超时后迟到的完成只允许关闭自己的 client，不能误关新连接）
+    let ownedClient = this.sdkClient;
     this.registerClientHandlers();
 
     // 连接（http 若失败也尝试回退 SSE）
@@ -238,16 +274,25 @@ export class McpClient {
         await this.sdkClient.close().catch(() => {});
         this.sdkClient = null;
         transport = await this.createSseTransport();
+        this.transport = transport;
         this.effectiveTransport = 'sse';
         this.sdkClient = new Client(
           { name: 'moss', version: '1.1.0' },
           { capabilities: this.buildCapabilities() },
         );
+        ownedClient = this.sdkClient;
         this.registerClientHandlers();
         await this.sdkClient.connect(transport);
       } else {
         throw err;
       }
+    }
+
+    // 超时后迟到的连接：立刻关闭本次拥有的 client，避免“超时后客户端又悄悄连上”
+    if (generation !== this.connectGeneration) {
+      await ownedClient.close().catch(() => {});
+      if (this.sdkClient === ownedClient) this.sdkClient = null;
+      throw new Error('connect aborted');
     }
 
     this.logger.info(t('mcp.clientConnected', { name: this.name }), {
@@ -260,15 +305,25 @@ export class McpClient {
   }
 
   async disconnect(): Promise<void> {
-    if (this.sdkClient) {
+    const client = this.sdkClient;
+    this.sdkClient = null;
+    this.tools = [];
+    this.effectiveTransport = null;
+    if (client) {
       try {
-        await this.sdkClient.close();
+        await client.close();
       } catch {
         // 静默
       }
-      this.sdkClient = null;
-      this.tools = [];
-      this.effectiveTransport = null;
+    }
+    const transport = this.transport;
+    this.transport = null;
+    if (transport?.close) {
+      try {
+        await transport.close();
+      } catch {
+        // 已随 client.close 关闭时再关一次可能报错，忽略
+      }
     }
   }
 
@@ -402,6 +457,15 @@ export class McpClient {
   /** 在 SDK client 上注册 elicitation / sampling handler（每次 new Client 后调用） */
   private registerClientHandlers(): void {
     if (!this.sdkClient) return;
+    // 协议错误/连接关闭：必须兜底，否则 EventEmitter 的 error 事件可能逃逸成进程级异常
+    this.sdkClient.onerror = (error: Error) => {
+      this.logger.warn(t('mcp.clientError', { name: this.name }), {
+        error: error.message,
+      });
+    };
+    this.sdkClient.onclose = () => {
+      this.logger.warn(t('mcp.clientClosed', { name: this.name }));
+    };
     // elicitation：动态桥（callTool 期间设置；无桥时 decline）
     if (this.sdkClient.setElicitationHandler) {
       this.sdkClient.setElicitationHandler(async req => {

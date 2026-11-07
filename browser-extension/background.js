@@ -18,9 +18,42 @@ let cachedBridgeStatus = {
   tokenConfigured: false,
   autoConnect: true,
 };
-/** 已 attach debugger 的标签页 */
+/** 已 attach debugger 的标签页（内存缓存；真实状态以 chrome.debugger.getTargets 为准） */
 const attachedTabs = new Set();
 let creatingOffscreen = null;
+
+void restoreAttachedTabs();
+
+async function restoreAttachedTabs() {
+  try {
+    const stored = await chrome.storage.session.get('mossAttachedTabs');
+    const list = Array.isArray(stored.mossAttachedTabs) ? stored.mossAttachedTabs : [];
+    for (const id of list) {
+      if (typeof id === 'number' && Number.isFinite(id)) attachedTabs.add(id);
+    }
+  } catch {
+    // storage.session 不可用：忽略
+  }
+}
+
+async function persistAttachedTabs() {
+  try {
+    await chrome.storage.session.set({ mossAttachedTabs: Array.from(attachedTabs) });
+  } catch {
+    // 忽略
+  }
+}
+
+/** 真实附着状态：MV3 Service Worker 重启后内存集合会丢失，必须向浏览器查询 */
+async function isDebuggerAttached(tabId) {
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const hit = targets.find((target) => target.tabId === tabId);
+    return !!(hit && hit.attached);
+  } catch {
+    return false;
+  }
+}
 
 function parseBrowserInfo() {
   const ua = navigator.userAgent || '';
@@ -159,8 +192,15 @@ async function dispatch(method, params) {
       return attachDebugger(Number(params.tabId));
     case 'debugger.detach':
       return detachDebugger(Number(params.tabId));
+    case 'debugger.autoAttach':
+      return autoAttachFrames(Number(params.tabId));
     case 'debugger.send':
-      return sendCdp(Number(params.tabId), String(params.method), params.params);
+      return sendCdp(
+        Number(params.tabId),
+        String(params.method),
+        params.params,
+        typeof params.sessionId === 'string' && params.sessionId ? params.sessionId : undefined,
+      );
     case 'extension.reload':
       setTimeout(() => {
         try {
@@ -177,7 +217,8 @@ async function dispatch(method, params) {
 
 async function createTab(params) {
   const url = typeof params.url === 'string' && params.url ? params.url : 'about:blank';
-  const active = params.active !== false;
+  // focus=false：后台建页，不激活标签/不前置窗口（避免闪屏）
+  const active = params.focus !== undefined ? params.focus !== false : params.active !== false;
   let windowId;
   if (typeof params.windowId === 'number') {
     windowId = params.windowId;
@@ -211,7 +252,7 @@ async function ensureMossWindow(params) {
   const legacyTitles = Array.isArray(params.legacyTitles)
     ? params.legacyTitles.filter((value) => typeof value === 'string' && value.trim())
     : [];
-  const active = params.active !== false;
+  const active = params.focus !== undefined ? params.focus !== false : params.active !== false;
 
   const groups = await chrome.tabGroups.query({ title });
   for (const legacyTitle of legacyTitles) {
@@ -281,16 +322,32 @@ async function listTabs() {
 }
 
 async function activateTab(tabId) {
-  const tab = await chrome.tabs.update(tabId, { active: true });
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab) throw new Error(`标签页不存在：${tabId}`);
+  // 已激活且窗口已在前台 → 不做任何 update（避免每次操作都前置/刷新导致闪屏）
+  let windowFocused = false;
   if (typeof tab.windowId === 'number') {
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    try {
+      const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+      windowFocused = win.id === tab.windowId && win.focused === true;
+    } catch {
+      windowFocused = false;
+    }
   }
-  return { tabId, windowId: tab.windowId };
+  if (tab.active === true && windowFocused) {
+    return { tabId, windowId: tab.windowId, focused: true, noop: true };
+  }
+  const updated = await chrome.tabs.update(tabId, { active: true });
+  if (typeof updated.windowId === 'number') {
+    await chrome.windows.update(updated.windowId, { focused: true }).catch(() => {});
+  }
+  return { tabId, windowId: updated.windowId, focused: true, noop: false };
 }
 
 async function closeTab(tabId) {
   await chrome.tabs.remove(tabId);
   attachedTabs.delete(tabId);
+  void persistAttachedTabs();
   return { tabId, closed: true };
 }
 
@@ -349,15 +406,22 @@ async function updateGroup(params) {
 
 async function attachDebugger(tabId) {
   if (!Number.isFinite(tabId)) throw new Error('tabId is required');
-  if (attachedTabs.has(tabId)) return { tabId, attached: true };
+  // 以浏览器真实状态为准：避免 SW 重启后重复 attach 导致调试提示条反复出现/页面闪白
+  if (await isDebuggerAttached(tabId)) {
+    attachedTabs.add(tabId);
+    void persistAttachedTabs();
+    return { tabId, attached: true };
+  }
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
     attachedTabs.add(tabId);
+    void persistAttachedTabs();
     return { tabId, attached: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/already attached/i.test(message)) {
       attachedTabs.add(tabId);
+      void persistAttachedTabs();
       return { tabId, attached: true };
     }
     throw new Error(`无法附加调试器：${message}`);
@@ -374,26 +438,92 @@ async function detachDebugger(tabId) {
     if (!/not attached/i.test(message)) throw new Error(message);
   }
   attachedTabs.delete(tabId);
+  void persistAttachedTabs();
   return { tabId, detached: true };
 }
 
-async function sendCdp(tabId, method, params) {
+async function sendCdp(tabId, method, params, sessionId) {
   if (!Number.isFinite(tabId)) throw new Error('tabId is required');
   if (typeof method !== 'string' || !method) throw new Error('CDP method is required');
+  // 热路径只查内存集合；集合缺失时再向浏览器确认真实附着状态（SW 重启后）
   if (!attachedTabs.has(tabId)) {
-    await attachDebugger(tabId);
+    if (await isDebuggerAttached(tabId)) {
+      attachedTabs.add(tabId);
+      void persistAttachedTabs();
+    } else {
+      await attachDebugger(tabId);
+    }
   }
+  // 子会话（跨域 iframe / OOPIF）：chrome.debugger 目标支持 { tabId, sessionId }
+  const target = sessionId ? { tabId, sessionId } : { tabId };
   try {
-    return await chrome.debugger.sendCommand({ tabId }, method, params || {});
+    return await chrome.debugger.sendCommand(target, method, params || {});
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/not attached/i.test(message)) {
       attachedTabs.delete(tabId);
+      void persistAttachedTabs();
       await attachDebugger(tabId);
-      return chrome.debugger.sendCommand({ tabId }, method, params || {});
+      return chrome.debugger.sendCommand(target, method, params || {});
     }
     throw new Error(`${method} 失败：${message}`);
   }
+}
+
+/**
+ * 自动附着跨域 iframe 子目标（OOPIF）。
+ * chrome.debugger 自 Chrome 125 起支持 sessionId；子会话命令走 sendCdp 的 sessionId 参数。
+ * 单个 target 失败不阻断其余 frame。
+ */
+async function autoAttachFrames(tabId) {
+  if (!Number.isFinite(tabId)) throw new Error('tabId is required');
+  if (!attachedTabs.has(tabId)) {
+    await attachDebugger(tabId);
+  }
+  const frames = [];
+  let autoAttachError = '';
+  try {
+    await sendCdp(tabId, 'Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+    });
+  } catch (err) {
+    autoAttachError = err instanceof Error ? err.message : String(err);
+  }
+  let targets = [];
+  try {
+    const result = await sendCdp(tabId, 'Target.getTargets', {});
+    targets = Array.isArray(result && result.targetInfos) ? result.targetInfos : [];
+  } catch (err) {
+    autoAttachError = autoAttachError || (err instanceof Error ? err.message : String(err));
+  }
+  for (const info of targets) {
+    if (!info || info.type !== 'iframe' || typeof info.targetId !== 'string') continue;
+    try {
+      const attached = await sendCdp(tabId, 'Target.attachToTarget', {
+        targetId: info.targetId,
+        flatten: true,
+      });
+      frames.push({
+        targetId: info.targetId,
+        sessionId: attached && typeof attached.sessionId === 'string' ? attached.sessionId : '',
+        url: typeof info.url === 'string' ? info.url : '',
+        title: typeof info.title === 'string' ? info.title : '',
+      });
+    } catch (err) {
+      frames.push({
+        targetId: info.targetId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return {
+    tabId,
+    attached: true,
+    frames,
+    ...(autoAttachError ? { autoAttachError } : {}),
+  };
 }
 
 // ============================================================================
@@ -402,12 +532,19 @@ async function sendCdp(tabId, method, params) {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!source || typeof source.tabId !== 'number') return;
-  forwardEvent('debugger', { tabId: source.tabId, method, params });
+  // source.sessionId：子会话（OOPIF）事件；父会话为 undefined
+  forwardEvent('debugger', {
+    tabId: source.tabId,
+    ...(typeof source.sessionId === 'string' && source.sessionId ? { sessionId: source.sessionId } : {}),
+    method,
+    params,
+  });
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (!source || typeof source.tabId !== 'number') return;
   attachedTabs.delete(source.tabId);
+  void persistAttachedTabs();
   forwardEvent('debugger.detached', { tabId: source.tabId, reason });
 });
 
@@ -431,6 +568,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId, info) => {
   attachedTabs.delete(tabId);
+  void persistAttachedTabs();
   forwardEvent('tab.removed', { tabId, windowId: info.windowId });
 });
 

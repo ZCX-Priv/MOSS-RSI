@@ -58,6 +58,7 @@ import { createListToolsHandler, createUpdateToolHandler } from './routes/tools'
 import {
   createComputerStatusHandler,
   createComputerWindowsHandler,
+  createComputerHealthHandler,
   createComputerScreenshotHandler,
   createComputerInstallHandler,
   createComputerControlHandler,
@@ -192,10 +193,6 @@ import {
   createVoiceInstallHandler,
   createVoiceUninstallHandler,
 } from './routes/voice';
-import {
-  createVoiceWasmManifestHandler,
-  createVoiceWasmDataHandler,
-} from './routes/voice-wasm';
 import { McpExpose } from '../mcp/expose';
 import { resolveStartupPort, LiveMossPortError } from '../../utils/port-guard';
 import {
@@ -470,6 +467,7 @@ class ServerModule implements Module {
     // Computer：cua-driver 状态/窗口/实时截图/安装/暂停（computer 模块注册服务；请求时解析）
     this.router.addRoute({ method: 'GET', pattern: '/api/computer/status', handler: createComputerStatusHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/computer/windows', handler: createComputerWindowsHandler(services), auth: true });
+    this.router.addRoute({ method: 'GET', pattern: '/api/computer/health', handler: createComputerHealthHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/computer/screenshot', handler: createComputerScreenshotHandler(services, config), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/computer/install', handler: createComputerInstallHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/computer/control', handler: createComputerControlHandler(services), auth: true });
@@ -550,9 +548,6 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'PUT', pattern: '/api/voice/provider', handler: createVoiceSetProviderHandler(services, config), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/voice/models/:id/install', handler: createVoiceInstallHandler(services, this.ctx.logger), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/voice/models/:id', handler: createVoiceUninstallHandler(services), auth: true });
-    // voice-wasm（浏览器本地推理：模型字节流 + 文件表；Emscripten 加载器直接 GET，故 auth:false）
-    this.router.addRoute({ method: 'GET', pattern: '/api/voice/wasm/manifest', handler: createVoiceWasmManifestHandler(env.dataDir, this.ctx.logger), auth: false });
-    this.router.addRoute({ method: 'GET', pattern: '/api/voice/wasm/data', handler: createVoiceWasmDataHandler(env.dataDir, this.ctx.logger), auth: false });
   }
 
   private async startServer(): Promise<void> {

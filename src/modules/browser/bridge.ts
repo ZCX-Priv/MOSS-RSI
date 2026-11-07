@@ -10,6 +10,8 @@ const PROTOCOL_VERSION = 1;
 const PORT_SCAN_COUNT = 10;
 const HELLO_TIMEOUT_MS = 8000;
 const SERVER_PING_MS = 20_000;
+/** 超过该时长未收到任何帧（含 pong）视为连接假死，主动关闭避免幽灵实例 */
+const INSTANCE_IDLE_MS = 60_000;
 
 export interface BridgeSocketData {
   connectionId: string;
@@ -30,6 +32,10 @@ interface BridgeInstance {
   pending: Map<number, PendingCommand>;
   seq: number;
   pingTimer: ReturnType<typeof setInterval>;
+  /** 扩展侧稳定实例 id（hello.instanceId）：用于同一浏览器重连去重 */
+  clientInstanceId: string;
+  /** 最近一次收到任意帧的时间（含 pong） */
+  lastSeenAt: number;
 }
 
 export type BridgeEventPayload =
@@ -37,6 +43,8 @@ export type BridgeEventPayload =
       instanceId: string;
       event: 'debugger';
       tabId: number;
+      /** 子会话（跨域 iframe / OOPIF）的 CDP sessionId；父会话为 undefined */
+      sessionId?: string;
       method: string;
       params?: unknown;
     }
@@ -245,6 +253,8 @@ export class BrowserBridgeServer {
     if (!instanceId) return;
     const instance = this.instances.get(instanceId);
     if (!instance) return;
+    // 任意帧（含 pong）都视为存活
+    instance.lastSeenAt = Date.now();
 
     if (message.type === 'reply') {
       const id = typeof message.id === 'number' ? message.id : -1;
@@ -290,6 +300,9 @@ export class BrowserBridgeServer {
           instanceId,
           tabId,
           event: 'debugger',
+          ...(typeof message.sessionId === 'string' && message.sessionId
+            ? { sessionId: message.sessionId }
+            : {}),
           method: message.method,
           params: message.params,
         });
@@ -322,6 +335,34 @@ export class BrowserBridgeServer {
       status: typeof raw.status === 'string' ? raw.status : '',
       pinned: raw.pinned === true,
     };
+  }
+
+  /**
+   * 解析实例 id：同一浏览器（extensionId + 扩展实例 id + builtinTag）重连时复用旧 id。
+   * 复用可以保留 TabRecord / currentTab，避免每次重连都重建标签记录与服务端实例。
+   */
+  private resolveInstanceId(hello: BridgeHello): string {
+    const clientId = typeof hello.instanceId === 'string' ? hello.instanceId : '';
+    const builtinTag = typeof hello.builtinTag === 'string' ? hello.builtinTag : '';
+    if (!clientId) return crypto.randomUUID();
+    for (const [id, existing] of this.instances) {
+      if (existing.clientInstanceId !== clientId) continue;
+      if (existing.info.extensionId !== hello.extensionId) continue;
+      if ((existing.info.builtinTag ?? '') !== builtinTag) continue;
+      // 同一浏览器重连：关闭旧 socket。先清空 instanceId，避免旧 close 事件把新实例/标签记录移除。
+      clearInterval(existing.pingTimer);
+      this.rejectAll(existing, new Error('浏览器实例已重连'));
+      existing.socket.data = { ...existing.socket.data, instanceId: null };
+      try {
+        existing.socket.close();
+      } catch {
+        // ignore
+      }
+      this.instances.delete(id);
+      this.deps.logger.info(`[browser] 扩展重连，复用实例 ${id}`);
+      return id;
+    }
+    return crypto.randomUUID();
   }
 
   private handleHello(ws: ServerWebSocket<BridgeSocketData>, hello: BridgeHello): void {
@@ -360,7 +401,7 @@ export class BrowserBridgeServer {
       return;
     }
 
-    const instanceId = crypto.randomUUID();
+    const instanceId = this.resolveInstanceId(hello);
     const tag = this.deps.getBuiltinTag();
     const builtinTag = typeof hello.builtinTag === 'string' ? hello.builtinTag : '';
     const kind: BrowserInstanceKind = tag && builtinTag && builtinTag === tag ? 'builtin' : 'external';
@@ -383,7 +424,18 @@ export class BrowserBridgeServer {
       socket: ws,
       pending: new Map(),
       seq: 0,
+      clientInstanceId: typeof hello.instanceId === 'string' ? hello.instanceId : '',
+      lastSeenAt: Date.now(),
       pingTimer: setInterval(() => {
+        // 假死检测：超过 60s 没有任何帧（扩展应回 pong）则主动关闭
+        if (Date.now() - instance.lastSeenAt > INSTANCE_IDLE_MS) {
+          try {
+            ws.close();
+          } catch {
+            // close 触发统一清理
+          }
+          return;
+        }
         try {
           ws.send(JSON.stringify({ type: 'ping' }));
         } catch {

@@ -233,5 +233,14 @@ function describeHttpError(status: number, body: string, logger: Logger): string
     logger.warn(t('llm.moderationBlocked'), { status, raw: truncate(body, 300) });
     return `HTTP ${status}: ${t('llm.moderationBlocked')}`;
   }
+  // DeepSeek 思考模式：工具轮必须回传 reasoning_content（常见于中断后继续/上下文裁剪）
+  if (
+    status === 400 &&
+    /reasoning_content/i.test(body) &&
+    /must be passed back/i.test(body)
+  ) {
+    logger.warn(t('llm.reasoningContentMissing'), { status, raw: truncate(body, 300) });
+    return `HTTP ${status}: ${t('llm.reasoningContentMissing')}（${truncate(body, 300)}）`;
+  }
   return `HTTP ${status}: ${truncate(body, 500)}`;
 }

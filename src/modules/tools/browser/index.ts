@@ -5,7 +5,11 @@
 import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
 import type {
+  BrowserFrameInfo,
+  BrowserMacroStep,
   BrowserPageInfo,
+  BrowserRect,
+  BrowserScreenshot,
   BrowserService,
   BrowserStatus,
   BrowserTabInfo,
@@ -107,6 +111,35 @@ function formatInstaller(status: BrowserStatus['installer']): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 解析截图/等待用的区域（CSS 像素） */
+function pickRegion(params: Record<string, unknown>): BrowserRect | undefined {
+  const raw = params.region;
+  if (!isObject(raw)) return undefined;
+  const x = Number(raw.x);
+  const y = Number(raw.y);
+  const width = Number(raw.width);
+  const height = Number(raw.height);
+  if (![x, y, width, height].every((value) => Number.isFinite(value))) return undefined;
+  if (width <= 0 || height <= 0) return undefined;
+  return { x, y, width, height };
+}
+
+/** 截图元信息文本：图像/视口/DPR/缩放/frame */
+function formatShotMeta(shot: BrowserScreenshot): string {
+  const parts: string[] = [];
+  if (shot.width !== undefined && shot.height !== undefined) parts.push(`图像 ${shot.width}x${shot.height}`);
+  if (shot.viewportWidth !== undefined && shot.viewportHeight !== undefined) {
+    parts.push(`视口 ${shot.viewportWidth}x${shot.viewportHeight}`);
+  }
+  if (shot.dpr !== undefined) parts.push(`dpr ${shot.dpr}`);
+  if (shot.scale !== undefined) parts.push(`缩放 ${Number(shot.scale.toFixed(3))}`);
+  if (shot.frame) parts.push(`frame=${shot.frame}`);
+  if (shot.region) {
+    parts.push(`region=(${shot.region.x},${shot.region.y},${shot.region.width},${shot.region.height})`);
+  }
+  return parts.join(' · ');
 }
 
 function formatStatus(status: BrowserStatus): string {
@@ -230,11 +263,22 @@ export default {
     const browser = pickString(params, 'browser');
     const cdpEndpoint = pickString(params, 'cdp_endpoint');
     const timeoutMs = pickNumber(params, 'timeout_ms');
+    // 自动焦点：操作前把目标标签页/窗口带到前台；已在前台时扩展内部 no-op（不闪屏）
+    const autoFocus =
+      pickBoolean(params, 'auto_focus') ?? (ctx.toolConfig?.autoFocus !== false);
 
     try {
       // CDP 按次端点：先连接，再执行本次动作（后续调用沿用该连接）
       if (cdpEndpoint && (action === 'open' || action === 'status' || action === 'tabs')) {
         await service.connectCdp(cdpEndpoint);
+      }
+
+      // 自动聚焦（open 在服务内按 focus 参数处理；focus 动作本身即聚焦）
+      if (autoFocus && !['status', 'setup', 'tabs', 'close', 'open', 'focus'].includes(action)) {
+        const key = tab ?? service.getStatus().currentTab;
+        if (key) {
+          await service.ensureFocused(key).catch(() => undefined);
+        }
       }
 
       switch (action) {
@@ -260,6 +304,7 @@ export default {
             ...(cdpEndpoint ? { cdpEndpoint } : {}),
             ...(pickString(params, 'url') ? { url: pickString(params, 'url') } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+            focus: autoFocus,
           });
           const groupTitle = service.getStatus().config.tabGroupTitle;
           return textResult(
@@ -328,15 +373,24 @@ export default {
         }
 
         case 'screenshot': {
-          const shot = await service.screenshot(tab, pickBoolean(params, 'full_page') === true);
+          const shot = await service.screenshot(tab, {
+            fullPage: pickBoolean(params, 'full_page') === true,
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+            ...(pickRegion(params) ? { region: pickRegion(params) } : {}),
+          });
+          const meta = formatShotMeta(shot);
           const content: ToolResultContent[] = [
             {
               type: 'text',
-              text: t('browserTool.screenshotLine', {
+              text: `${t('browserTool.screenshotLine', {
                 path: shot.path,
                 width: shot.width ?? '?',
                 height: shot.height ?? '?',
-              }),
+              })}${meta ? `（${meta}）` : ''}${
+                shot.scale !== undefined
+                  ? `\n坐标换算：截图坐标 ÷ ${Number(shot.scale.toFixed(3))} = CSS 坐标`
+                  : ''
+              }`,
             },
           ];
           addImage(content, shot.path, shot.data, shot.mimeType);
@@ -354,7 +408,14 @@ export default {
               ? { clickCount: pickNumber(params, 'click_count') }
               : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+            ...(pickString(params, 'coord_space') === 'screenshot'
+              ? { coordSpace: 'screenshot' as const }
+              : {}),
           });
+          if (autoFocus && info.openedTab) {
+            await service.ensureFocused(info.openedTab.tab, { force: true }).catch(() => undefined);
+          }
           return textResult(`${t('browserTool.clicked')}\n${formatPageInfo(info)}`);
         }
 
@@ -383,8 +444,117 @@ export default {
           const info = await service.pressKey(tab, {
             key,
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
           });
+          if (autoFocus && info.openedTab) {
+            await service.ensureFocused(info.openedTab.tab, { force: true }).catch(() => undefined);
+          }
           return textResult(`${t('browserTool.keyPressed', { key })}\n${formatPageInfo(info)}`);
+        }
+
+        case 'frames': {
+          const frames = await service.listFrames(tab);
+          if (frames.length === 0) {
+            return textResult(
+              '当前标签页没有可用的 iframe 子会话（可能没有跨域 iframe，或浏览器不支持子会话）。可先用 action=screenshot 查看页面。',
+            );
+          }
+          const lines = [`iframe 子会话（${frames.length} 个；key=targetId，可传给 frame 参数）：`];
+          for (const frame of frames) {
+            const rect = frame.rect
+              ? ` rect=(${Math.round(frame.rect.x)},${Math.round(frame.rect.y)},${Math.round(frame.rect.width)},${Math.round(frame.rect.height)})`
+              : '';
+            lines.push(
+              `- ${frame.frame}${frame.active ? ' [active]' : ''}${rect}\n  ${frame.title || '(no title)'}\n  ${frame.url}`,
+            );
+          }
+          lines.push('提示：游戏/画布优先用 frame=auto 或上述 key；frame 内坐标使用该 iframe 的 CSS 坐标。');
+          return textResult(lines.join('\n'));
+        }
+
+        case 'key_down': {
+          const key = requireString(params, 'key');
+          const info = await service.keyDown(tab, key, {
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+            ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
+          });
+          return textResult(`已按下 ${key}\n${formatPageInfo(info)}`);
+        }
+
+        case 'key_up': {
+          const key = requireString(params, 'key');
+          const info = await service.keyUp(tab, key, {
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+            ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
+          });
+          return textResult(`已抬起 ${key}\n${formatPageInfo(info)}`);
+        }
+
+        case 'hold': {
+          const keys = pickStringArray(params, 'keys') ?? (pickString(params, 'key') ? [pickString(params, 'key')!] : []);
+          if (keys.length === 0) return errorResult('hold 需要 keys 或 key');
+          const duration = pickNumber(params, 'duration_ms') ?? 500;
+          const info = await service.hold(tab, {
+            keys,
+            durationMs: duration,
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+            ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
+          });
+          return textResult(`已按住 ${keys.join('+')} ${duration}ms\n${formatPageInfo(info)}`);
+        }
+
+        case 'macro': {
+          const rawSteps = params.actions;
+          if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+            return errorResult('macro 需要 actions 数组（1-32 步）');
+          }
+          const steps = rawSteps.filter(isObject) as unknown as BrowserMacroStep[];
+          const result = await service.macro(tab, steps, {
+            verify: pickBoolean(params, 'verify') !== false,
+          });
+          const lines = [
+            `macro 完成（${result.elapsedMs}ms）：${result.steps.filter((step) => step.ok).length}/${result.steps.length} 步`,
+          ];
+          for (const step of result.steps) {
+            lines.push(
+              `- ${step.ok ? '✓' : '✗'} ${step.action}${step.detail ? `：${step.detail}` : ''}${step.error ? `：${step.error}` : ''}`,
+            );
+          }
+          if (result.effect !== 'unknown') {
+            lines.push(
+              `effect=${result.effect}${result.diffPercent !== undefined ? ` diff=${result.diffPercent}%` : ''}${
+                result.effect === 'no-change' ? '（未检测到画面变化，请确认动作是否真的生效）' : ''
+              }`,
+            );
+          }
+          const content: ToolResultContent[] = [{ type: 'text', text: lines.join('\n') }];
+          if (result.lastScreenshot) {
+            addImage(content, result.lastScreenshot.path, result.lastScreenshot.data, result.lastScreenshot.mimeType);
+          }
+          return { content, isError: result.steps.every((step) => step.ok) ? false : true };
+        }
+
+        case 'wait_stable':
+        case 'wait_change': {
+          const frame = pickString(params, 'frame');
+          const region = pickRegion(params);
+          const waitOptions = {
+            ...(frame ? { frame } : {}),
+            ...(region ? { region } : {}),
+            ...(pickNumber(params, 'timeout_ms') !== undefined ? { timeoutMs: pickNumber(params, 'timeout_ms') } : {}),
+            ...(pickNumber(params, 'interval_ms') !== undefined ? { intervalMs: pickNumber(params, 'interval_ms') } : {}),
+            ...(pickNumber(params, 'threshold') !== undefined ? { threshold: pickNumber(params, 'threshold') } : {}),
+            ...(pickNumber(params, 'stable_samples') !== undefined ? { stableSamples: pickNumber(params, 'stable_samples') } : {}),
+          };
+          const result =
+            action === 'wait_stable'
+              ? await service.waitStable(tab, waitOptions)
+              : await service.waitChange(tab, waitOptions);
+          return textResult(
+            `wait_${result.reason}（${result.elapsedMs}ms，采样 ${result.samples} 次，diff=${result.diffPercent}%）${
+              result.matched ? '' : '：超时未满足条件'
+            }${result.frame ? ` · frame=${result.frame}` : ''}`,
+          );
         }
 
         case 'select': {
@@ -434,7 +604,10 @@ export default {
 
         case 'evaluate': {
           const expression = requireString(params, 'expression');
-          const result = await service.evaluate(tab, { expression });
+          const result = await service.evaluate(tab, {
+            expression,
+            ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
+          });
           return textResult(t('browserTool.evaluated', { type: result.type, result: result.result }));
         }
 

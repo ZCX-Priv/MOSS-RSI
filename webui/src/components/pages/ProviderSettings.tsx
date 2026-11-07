@@ -77,7 +77,7 @@ import { Switch } from '@/components/ui/switch';
 import { Progress } from '@/components/ui/progress';
 import { useProviders, type UseProvidersResult } from '../../hooks/useProviders';
 import { useVoiceStatus, useVoiceModels } from '../../hooks/useVoiceInput';
-import { isLocalAsrSupported } from '@/lib/asr-local';
+import { usePlatform } from '../../hooks/usePlatform';
 import { api } from '../../api/http';
 import { useStore } from '../../store';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
@@ -163,15 +163,16 @@ export function ProviderSettings() {
     : 'model';
   const { status: voiceStatus, refresh: refreshVoiceStatus } = useVoiceStatus();
   const { models: voiceModels, refresh: refreshVoiceModels } = useVoiceModels();
-  // 推理位置标签：在线服务商 / 服务端本地引擎 / 浏览器端 WASM / 不可用
-  const voiceLocalModel = voiceModels.find((m) => m.state === 'installed' && m.engine === 'zipformer');
-  const voiceInferLabel =
-    voiceStatus?.providerId ||
-    (voiceStatus?.runtimeAvailable && (voiceStatus.installed?.length ?? 0) > 0)
+  // 语音统一在后端运行；移动端（Android）按产品策略整体置灰
+  const { platform } = usePlatform();
+  const voiceMobileUnavailable = platform.isAndroid;
+  // 推理位置标签：在线服务商 / 服务端本地引擎 / 不可用
+  const voiceInferLabel = voiceMobileUnavailable
+    ? t('common.mobileUnavailable')
+    : voiceStatus?.providerId ||
+        (voiceStatus?.runtimeAvailable && (voiceStatus.installed?.length ?? 0) > 0)
       ? t('settings.provider.voiceInferServer')
-      : isLocalAsrSupported() && voiceLocalModel
-        ? t('settings.provider.voiceInferLocal')
-        : t('settings.provider.voiceInferUnavailable');
+      : t('settings.provider.voiceInferUnavailable');
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderItem | null>(null);
   const [pickProvider, setPickProvider] = useState<ProviderItem | null>(null);
@@ -448,6 +449,11 @@ export function ProviderSettings() {
       {/* 语音类别：能力开关 + 默认服务商 + 本地模型管理 */}
       {category === 'voice' && (
         <div className="flex flex-col gap-4">
+          {voiceMobileUnavailable && (
+            <div className="rounded-xl border border-border bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
+              {t('common.mobileUnavailableDesc')}
+            </div>
+          )}
           {/* 总开关（默认关闭；关闭时输入框麦克风按钮隐藏） */}
           <div className="flex items-start justify-between gap-4 rounded-xl border border-border p-4">
             <div className="flex flex-col gap-0.5">
@@ -479,11 +485,12 @@ export function ProviderSettings() {
             </div>
             <Switch
               checked={Boolean(voiceStatus?.enabled)}
+              disabled={voiceMobileUnavailable}
               onCheckedChange={(v) => void toggleVoiceEnabled(v)}
             />
           </div>
 
-          {/* 推理位置（服务端本地引擎 / 浏览器端 WASM） */}
+          {/* 推理位置（在线服务商 / 服务端本地引擎） */}
           <div className="flex items-center justify-between rounded-xl border border-border p-4">
             <span className="text-sm font-medium text-foreground">
               {t('settings.provider.voiceInferLocation')}
@@ -524,7 +531,13 @@ export function ProviderSettings() {
           </div>
 
           {/* 本地模型：三类引擎（Zipformer / SenseVoice / Whisper）模型管理 */}
-          <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
+          <div
+            className={
+              voiceMobileUnavailable
+                ? 'pointer-events-none flex flex-col gap-3 rounded-xl border border-border p-4 opacity-50'
+                : 'flex flex-col gap-3 rounded-xl border border-border p-4'
+            }
+          >
             <div className="flex flex-col gap-0.5">
               <span className="text-sm font-medium text-foreground">
                 {t('settings.provider.voiceLocalModels')}

@@ -176,6 +176,7 @@ export class ContextEngineServiceImpl {
     const windowTokens = opts.windowTokens ?? this.resolveWindowTokens(opts.model);
     this.noteCwd(opts.cwd);
     const includeThinking = this.resolveIncludeThinking(opts.model);
+    const includeToolCallThinking = this.resolveIncludeToolCallThinking(opts.model);
     const deps = this.buildGovernorDeps();
     const prepared = await governorPrepare(deps, {
       session,
@@ -185,6 +186,7 @@ export class ContextEngineServiceImpl {
       windowTokens,
       promptExtras: opts.promptExtras ?? null,
       includeThinking,
+      includeToolCallThinking,
     });
 
     // 图片「只发一次」：缓存本轮内联发送的图片消息引用（等待调用方确认/丢弃）
@@ -220,7 +222,7 @@ export class ContextEngineServiceImpl {
             }
           : {}),
       })),
-      includeThinking,
+      includeThinking || includeToolCallThinking,
     );
     const t = this.ensureTelemetry(session.id);
     t.lastBreakdown = prepared.breakdown;
@@ -632,6 +634,7 @@ export class ContextEngineServiceImpl {
       );
       const view = buildRequestView(session, staticSystemPrompt, {
         includeThinking: this.resolveIncludeThinking(model),
+        includeToolCallThinking: this.resolveIncludeToolCallThinking(model),
         resolveSkillPrompt: name => this.resolveSkillPrompt(name),
       });
       t.lastBreakdown = view.breakdown;
@@ -699,6 +702,25 @@ export class ContextEngineServiceImpl {
         context?: { thinking?: { replayOpenAICompat?: boolean } };
       };
       return app.context?.thinking?.replayOpenAICompat === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 是否需要保留「当前轮工具调用」的 thinking：
+   * DeepSeek 思考模式（openai-chat）要求 assistant 工具调用消息回传 reasoning_content，
+   * 否则工具轮次的下一轮请求会返回 400。其他 provider 保持默认（不回传）。
+   */
+  private resolveIncludeToolCallThinking(model: string): boolean {
+    try {
+      const models = flattenModels(this.config.getApiConfig());
+      const found = models.find(m => m.id === model || m.model === model);
+      if (!found) return false;
+      if (found.format !== 'openai-chat') return false;
+      if (found.thinking?.enabled !== true) return false;
+      const target = `${found.model} ${found.endpoint}`.toLowerCase();
+      return target.includes('deepseek');
     } catch {
       return false;
     }

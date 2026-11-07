@@ -768,9 +768,10 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         </span>
         {summary && (
           toolCall.name === 'terminal' ? (
-            /* 终端命令：折叠行也保持单行横向滚动，不省略任何字符 */
+            /* 终端命令：折叠行也保持单行横向滚动，不省略任何字符
+               nowrap 会把命令中的换行折叠为空格，避免多行命令撑高工具行 */
             <span
-              className="min-w-0 max-w-[60%] overflow-x-auto no-scrollbar whitespace-pre text-muted-foreground/70"
+              className="min-w-0 max-w-[60%] overflow-x-auto no-scrollbar whitespace-nowrap text-muted-foreground/70"
               title={summary}
             >
               {summary}

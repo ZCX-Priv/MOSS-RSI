@@ -102,6 +102,7 @@ import {
 import { UserMenu } from '../overlays/UserMenu';
 import { ConfirmDialog } from '../overlays/ConfirmDialog';
 import { useTasks } from '../../hooks/useTasks';
+import { usePlatform } from '../../hooks/usePlatform';
 import { api } from '../../api/http';
 import { settingsNavItems, settingsSearchIndex } from '../pages/SettingsPage';
 
@@ -124,6 +125,8 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const isSettingsRoute = pathname.startsWith('/settings');
   const [settingsSearch, setSettingsSearch] = useState('');
   const { isMobile, setOpenMobile } = useSidebar();
+  const { platform } = usePlatform();
+  const mobileUnavailable = platform.isAndroid;
 
   // 移动端点击导航后关闭 Sheet 抽屉，避免 z-50 遮罩持续覆盖屏幕
   const closeMobile = useCallback(() => {
@@ -583,15 +586,28 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                       pathname === `/settings/${item.id}` ||
                       pathname.startsWith(`/settings/${item.id}/`);
                     const label = t(item.labelKey);
+                    // 移动端（Android 后端）：浏览器控制与电脑控制不可用 → 置灰
+                    const unavailable =
+                      mobileUnavailable && (item.id === 'browser' || item.id === 'computer');
                     return (
                       <SidebarMenuItem key={item.id}>
                         <SidebarMenuButton
                           isActive={isActive}
-                          tooltip={label}
-                          onClick={() => { closeMobile(); navigate(`/settings/${item.id}`); }}
+                          disabled={unavailable}
+                          tooltip={unavailable ? t('common.mobileUnavailable') : label}
+                          onClick={() => {
+                            if (unavailable) return;
+                            closeMobile();
+                            navigate(`/settings/${item.id}`);
+                          }}
                         >
                           <item.Icon className="size-4" />
-                          <span>{label}</span>
+                          <span className={cn(unavailable && 'opacity-50')}>{label}</span>
+                          {unavailable && (
+                            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                              {t('common.mobileUnavailable')}
+                            </span>
+                          )}
                         </SidebarMenuButton>
                       </SidebarMenuItem>
                     );
@@ -790,13 +806,6 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                       <CollapsibleContent>
                         {/* 组级 droppable：拖入组内任意位置（含空白/空组）即移入该组 */}
                         <GroupDropZone groupId={group.id} empty={groupTasks.length === 0}>
-                          {/* 分组首次加载占位：只在拉取第 1 页时出现（标题行不再转圈） */}
-                          {meta?.loading && !meta?.loaded && (
-                            <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground">
-                              <Loader2 className="size-3.5 animate-spin" />
-                              <span>{t('common.loading')}</span>
-                            </div>
-                          )}
                           <SidebarMenuSub className="mr-0 pr-0">
                             <SortableContext items={groupTaskIds} strategy={verticalListSortingStrategy}>
                               {groupTasks.map((task) => (
@@ -814,6 +823,14 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                               ))}
                             </SortableContext>
                           </SidebarMenuSub>
+                          {/* 分组首次加载占位：只在拉取第 1 页时出现（标题行不再转圈）；
+                              置于任务列表之后，避免盖在已建立的会话上方 */}
+                          {meta?.loading && !meta?.loaded && (
+                            <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground">
+                              <Loader2 className="size-3.5 animate-spin" />
+                              <span>{t('common.loading')}</span>
+                            </div>
+                          )}
                         </GroupDropZone>
                         {/* 组内续载哨兵：仅在该组仍有下一页时置于组内底部，进入视口即续载 */}
                         {meta?.hasMore && (

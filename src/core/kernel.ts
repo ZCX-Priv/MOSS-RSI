@@ -8,6 +8,7 @@ import { startupProfiler } from './startup-profiler';
 import { watch, existsSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { createRootLogger, type RootLogger } from './logger';
+import { installProcessGuards } from './process-guards';
 import { createEventBus } from './event-bus';
 import { createServiceRegistry } from './service-registry';
 import { createConfigService } from './config-service';
@@ -130,6 +131,11 @@ export interface KernelStartOptions {
    * 不能起 server/remote（会与常驻 MOSS 抢端口），也不需要 daemon/automation/update。
    */
   disabledModules?: string[];
+  /**
+   * 是否注册进程级异常兜底（常驻服务传 true）。
+   * 必须在模块初始化/预热之前生效，否则启动阶段的未处理拒绝仍会让进程退出。
+   */
+  processGuards?: boolean;
 }
 
 export class Microkernel {
@@ -161,6 +167,10 @@ export class Microkernel {
     // 启动阶段控制台先缓存，ready 后一次性输出（避免逐行同步输出拖慢启动）
     this.rootLogger.console.startBuffering();
     this.logger = this.rootLogger.logger;
+    // 进程级兜底必须尽早安装：配置加载 / 模块初始化 / 预热阶段的未处理拒绝也不能杀死后端
+    if (options.processGuards === true) {
+      installProcessGuards(this.logger);
+    }
     this.logger.info(t('kernel.starting'), {
       platform: this.env.platform,
       arch: this.env.arch,
