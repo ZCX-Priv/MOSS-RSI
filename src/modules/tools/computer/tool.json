@@ -1,7 +1,7 @@
 {
   "name": "computer",
-  "description": "计算机操作工具（集成 cua-driver，后台操作当前桌面）。默认不抢用户焦点、不移动真实鼠标：cua-driver 通过 UI Automation 与窗口消息在后台点击/输入，并返回每次动作的 effect（confirmed/unverifiable/suspected_noop/refused）、verified 与 escalation 建议。推荐流程：先 action='list_windows' 找到窗口，再用 action='get_window_state'（pid + window_id）同时拿到 UIA 元素树与截图；元素树中的 element_token 用于 click/type_text/press_key/set_value（优先语义元素），像素 x/y 只用于画布/自绘界面。动作后可用 get_window_state + since='latest' 增量读取验证。连续动作已知时用 action='run_steps'（steps 为 [{tool,args}]，最多 32 步）减少往返。delivery_mode 默认 background；仅当驱动明确返回 background_unavailable（表示未投递）时，工具才会自动用 foreground 重试一次；effect=unverifiable 或 foreground_unavailable 表示动作可能已生效，工具不会重复投递（避免重复输入/重复点击），并会自动读取当前前台/浮层窗口的状态。自动目标：同一应用弹出浮层/对话框（同进程新顶层窗口，如 WPS 新建面板）时，工具会把目标自动切换到最前面的浮层，截图与 UIA 树都来自该浮层；auto_focus=false 可关闭。坐标：x/y 直接使用对应截图的像素，不要按窗口物理尺寸或屏幕分辨率换算；scope=desktop 时使用 get_desktop_state 截图像素。action='status' 可查看驱动安装/连接/暂停状态；action='wait' 在本地等待。桌面连续操作优先 action='run_script'（cua 自带脚本：循环、条件、cua.sleep、app.query/verify，一次调用内完成多步），确定性断言用 action='verify'（cua verify_state）。画面优先用整屏：action='get_desktop_state' 的整屏截图是首选画面来源，自绘浮层/弹出层/浮动工具栏（如 Qt 弹层）可能完全不在窗口截图内；窗口截图只用于元素树定位与像素坐标。动作失败或疑似未生效时，工具会自动补一张整屏截图（路径会写在结果里），排查界面时以它为准。依赖外部 cua-driver（MIT，trycua/cua），未安装时请在右侧「电脑操作」面板安装。",
-  "description_en": "Computer use tool (cua-driver integration; drives the current desktop in the background). By default it does not steal focus or move the real pointer: cua-driver delivers clicks/typing in the background via UI Automation and window messages, and reports per-action effect (confirmed/unverifiable/suspected_noop/refused), verified, and escalation hints. Recommended loop: action='list_windows' to find a window, then action='get_window_state' (pid + window_id) to get the UIA tree and a screenshot together; use element_token from the tree for click/type_text/press_key/set_value (semantic elements first), and pixel x/y only for canvas/custom-drawn surfaces. Verify after acting with get_window_state + since='latest'. Use action='run_steps' (steps=[{tool,args}], max 32) to batch known actions. delivery_mode defaults to background; the tool only auto-escalates to foreground when the driver explicitly reports background_unavailable (nothing was delivered). effect=unverifiable or foreground_unavailable means the action MAY already have taken effect; the tool never re-sends it (avoiding duplicate typing/clicks) and automatically reads the current foreground/overlay window instead. Auto target: when the same app opens an overlay/dialog (a new top-level window in the same process, e.g. the WPS New panel), the target switches to the frontmost overlay so both the screenshot and the UIA tree come from it; set auto_focus=false to disable. Coordinates: use the x/y of the corresponding screenshot directly; do not rescale by window size or screen resolution. With scope=desktop, x/y are get_desktop_state screenshot pixels. Prefer the full-screen capture: the action='get_desktop_state' screenshot is the primary visual source, because self-drawn overlays/popups/floating toolbars (e.g. Qt popups) may be entirely outside a window capture; window screenshots are for element-tree addressing and pixel coordinates. When an action fails or looks ineffective the tool automatically adds a full-screen capture (its path is included in the result). Requires the external cua-driver (MIT, trycua/cua); install it from the Computer Control panel on the right if missing.",
+  "description": "计算机操作工具（集成 cua-driver，后台操作当前桌面）。默认不抢用户焦点、不移动真实鼠标：cua-driver 通过 UI Automation 与窗口消息在后台点击/输入，并返回每次动作的 effect（confirmed/unverifiable/suspected_noop/refused）、verified 与 escalation 建议。推荐流程：先 action='list_windows' 找到窗口，再用 action='get_window_state'（pid + window_id）同时拿到 UIA 元素树与截图；元素树中的 element_token 用于 click/type_text/press_key/set_value（优先语义元素），像素 x/y 只用于画布/自绘界面。动作后可用 get_window_state + since='latest' 增量读取验证。连续动作已知时用 action='run_steps'（steps 为 [{tool,args}]，最多 32 步）减少往返。delivery_mode 默认 background；仅当驱动明确返回 background_unavailable（表示未投递）时，工具才会自动用 foreground 重试一次；effect=unverifiable 或 foreground_unavailable 表示动作可能已生效，工具不会重复投递（避免重复输入/重复点击），并会自动读取当前前台/浮层窗口的状态。自动目标：同一应用弹出浮层/对话框时，若驱动登记过该窗口，工具会把目标自动切换到最前面的浮层（截图与 UIA 树都来自浮层）；若浮层是 Qt 自绘/无标题弹层（驱动未登记），工具不会切换 window_id，而是返回整屏截图 + Windows 原生 UIA，并提示用 scope='desktop' 的 x/y 操作。auto_focus=false 可关闭。坐标：x/y 直接使用对应截图的像素，不要按窗口物理尺寸或屏幕分辨率换算；scope=desktop 时使用 get_desktop_state 截图像素。action='status' 可查看驱动安装/连接/暂停状态；action='wait' 在本地等待。桌面连续操作优先 action='run_script'（cua 自带脚本：循环、条件、cua.sleep、app.query/verify，一次调用内完成多步），确定性断言用 action='verify'（cua verify_state）。画面默认使用目标程序窗口截图：action='get_window_state' 的窗口截图是首选画面来源；整屏截图只在 scope=desktop、窗口截图失败，或 capture_coverage 报告自绘浮层/弹出层在窗口外时使用。动作失败或疑似未生效时，优先补拍程序窗口截图，最后才回退整屏。滚动：direction 可省略（由 delta_y/delta_x 推导），amount 为 tick 数（1-50，缺省 3），by=line|page；scroll 会自动做前后帧校验，画面无变化时用整页滚动/PageDown 重试；Chromium/Electron 的后台投递不可用会自动升级 foreground，并对同一窗口记住该能力；run_steps 默认开启 foreground_fallback。依赖外部 cua-driver（MIT，trycua/cua），未安装时请在右侧「电脑操作」面板安装。",
+  "description_en": "Computer use tool (cua-driver integration; drives the current desktop in the background). By default it does not steal focus or move the real pointer: cua-driver delivers clicks/typing in the background via UI Automation and window messages, and reports per-action effect (confirmed/unverifiable/suspected_noop/refused), verified, and escalation hints. Recommended loop: action='list_windows' to find a window, then action='get_window_state' (pid + window_id) to get the UIA tree and a screenshot together; use element_token from the tree for click/type_text/press_key/set_value (semantic elements first), and pixel x/y only for canvas/custom-drawn surfaces. Verify after acting with get_window_state + since='latest'. Use action='run_steps' (steps=[{tool,args}], max 32) to batch known actions. delivery_mode defaults to background; the tool only auto-escalates to foreground when the driver explicitly reports background_unavailable (nothing was delivered). effect=unverifiable or foreground_unavailable means the action MAY already have taken effect; the tool never re-sends it (avoiding duplicate typing/clicks) and automatically reads the current foreground/overlay window instead. Auto target: when the same app opens an overlay/dialog and the driver registers that window, the target switches to the frontmost overlay so both the screenshot and the UIA tree come from it. A Qt custom-drawn/titleless popup is NOT registered by the driver: the tool keeps the addressable window as the action target and returns a full-screen screenshot plus the native Windows UIA tree, with scope='desktop' x/y to act on it. Set auto_focus=false to disable. Coordinates: use the x/y of the corresponding screenshot directly; do not rescale by window size or screen resolution. With scope=desktop, x/y are get_desktop_state screenshot pixels. Program window captures are the default visual source: the action='get_window_state' screenshot comes first; use a full-screen capture only with scope=desktop, when the window capture fails, or when capture_coverage reports a self-drawn overlay outside the window. When an action fails or looks ineffective the tool captures the program window first and only falls back to the full screen as a last resort. Scrolling: direction may be omitted (derived from delta_y/delta_x); amount is in ticks (1-50, default 3); by=line|page. scroll verifies the before/after frame and retries once with a page scroll / PageDown when the pixels did not change. Chromium/Electron background delivery automatically escalates to foreground and the capability is remembered per window; run_steps enables foreground_fallback by default. Requires the external cua-driver (MIT, trycua/cua); install it from the Computer Control panel on the right if missing.",
   "icon": "square-mouse-pointer",
   "annotations": {
     "destructiveHint": true,
@@ -50,8 +50,8 @@
       },
       "window_id": {
         "type": "integer",
-        "description": "目标窗口 ID（来自 list_windows）；get_window_state/zoom 等需要；省略时自动选择该应用主窗口（有浮层时选浮层）",
-        "description_en": "Target window ID (from list_windows; required for get_window_state/zoom etc.); when omitted the app's main window is auto-selected (or its overlay if one is present)"
+        "description": "目标窗口 ID（来自 list_windows）；get_window_state/zoom 等需要；省略时自动选择该应用主窗口（有驱动可寻址的浮层时选浮层）。驱动未登记的 Qt 自绘浮层不会作为 window_id 返回，其内容通过整屏截图 + 原生 UIA 提供。",
+        "description_en": "Target window ID (from list_windows; required for get_window_state/zoom etc.); when omitted the app's main window is auto-selected (or an overlay the driver can address). Qt custom-drawn popups the driver does not register are never returned as window_id; their content is exposed via a full-screen screenshot + native UIA."
       },
       "element_token": {
         "type": "string",
@@ -132,13 +132,38 @@
       "direction": {
         "type": "string",
         "enum": ["up", "down", "left", "right"],
-        "description": "滚动方向（scroll 必填）",
-        "description_en": "Scroll direction (required for scroll)"
+        "description": "滚动方向；可省略，由 delta_y / delta_x 推导（正数向下/右）",
+        "description_en": "Scroll direction; may be omitted and derived from delta_y / delta_x (positive = down/right)"
       },
       "amount": {
         "type": "number",
-        "description": "滚动量（scroll；具体单位由 cua 决定）",
-        "description_en": "Scroll amount (scroll; units determined by cua)"
+        "minimum": 1,
+        "maximum": 50,
+        "description": "滚动 tick 数（scroll；1-50，缺省 3）",
+        "description_en": "Scroll ticks (scroll; 1-50, default 3)"
+      },
+      "by": {
+        "type": "string",
+        "enum": ["line", "page"],
+        "description": "滚动粒度（scroll）：line 按行（缺省），page 按页；Chromium 页面用 page 更可靠",
+        "description_en": "Scroll granularity (scroll): line (default) or page; page is more reliable for Chromium content"
+      },
+      "delta_x": {
+        "type": "number",
+        "description": "滚动像素增量别名（正数向右；120px≈1 tick，工具会换算为 amount 并推导 direction）",
+        "description_en": "Pixel delta alias for horizontal scroll (positive = right; 120px ≈ 1 tick; converted to amount and direction)"
+      },
+      "delta_y": {
+        "type": "number",
+        "description": "滚动像素增量别名（正数向下；120px≈1 tick，工具会换算为 amount 并推导 direction）",
+        "description_en": "Pixel delta alias for vertical scroll (positive = down; 120px ≈ 1 tick; converted to amount and direction)"
+      },
+      "scroll_amount": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "amount 的别名（scroll tick 数）",
+        "description_en": "Alias of amount (scroll ticks)"
       },
       "from_x": {
         "type": "number",
@@ -162,14 +187,14 @@
       },
       "auto_focus": {
         "type": "boolean",
-        "description": "自动识别并切换到该应用最前面的浮层/弹层窗口（截图与元素树同步）；不会无条件前置主窗口；false 时严格使用传入的 pid/window_id",
-        "description_en": "Auto-detect and switch to the app's frontmost overlay/popup window (screenshot and element tree follow it); never fronts the main window unconditionally; false uses the given pid/window_id as-is."
+        "description": "自动跟随 Agent 当前操作的窗口（会话粘性）；同一应用弹出浮层/对话框时优先锚点窗口的 last-active popup，截图与元素树同步；浮层无法被驱动寻址时保持锚点窗口并改用整屏截图 + 原生 UIA；不会无条件抢占系统焦点；false 时严格使用传入的 pid/window_id",
+        "description_en": "Follow the window the agent is operating on (session-sticky); when the same app opens an overlay/dialog, prefer the anchor window's last-active popup so the screenshot and element tree follow it. If the driver cannot address the overlay, keep the anchor target and switch to a full-screen screenshot + native UIA. Never steals focus unconditionally; false uses the given pid/window_id as-is."
       },
       "delivery_mode": {
         "type": "string",
         "enum": ["background", "foreground"],
-        "description": "输入投递方式：background（缺省，不抢焦点）/ foreground（短暂前置窗口）。只有 background_unavailable（明确未投递）才会自动升级；unverifiable/foreground_unavailable 不会重投。",
-        "description_en": "Input delivery: background (default, no focus steal) / foreground (briefly fronts the window). Only background_unavailable (explicitly not delivered) is auto-escalated; unverifiable/foreground_unavailable are never re-sent."
+        "description": "输入投递方式：background（缺省，不抢焦点）/ foreground（短暂前置窗口）。只有 background_unavailable（明确未投递）才会自动升级；工具会记住同一窗口的该能力，后续 scroll/按键直接 foreground；unverifiable/foreground_unavailable 不会重投。",
+        "description_en": "Input delivery: background (default, no focus steal) / foreground (briefly fronts the window). Only background_unavailable (explicitly not delivered) is auto-escalated; the tool remembers this capability per window so later scroll/key actions go foreground directly; unverifiable/foreground_unavailable are never re-sent."
       },
       "include_screenshot": {
         "type": "boolean",

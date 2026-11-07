@@ -33,6 +33,7 @@ import { usePlatform } from '../../hooks/usePlatform';
 import { cn } from '@/lib/utils';
 import type {
   ComputerActivity,
+  ComputerCaptureMeta,
   ComputerStatus,
   ComputerWindowInfo,
   WSMessage,
@@ -46,24 +47,48 @@ interface ComputerPanelProps {
 }
 
 const STATUS_POLL_MS = 5000;
-/** 整屏画面轮询：1.5s + 单飞（上一次未返回则跳过），兼顾观感与驱动压力 */
-const SCREENSHOT_POLL_MS = 1500;
+/** 自动目标轮询：800ms + 单飞（窗口截图比整屏轻，画面更连续） */
+const SCREENSHOT_POLL_AUTO_MS = 800;
+/** 手动目标轮询：1200ms */
+const SCREENSHOT_POLL_MANUAL_MS = 1200;
+/** 窗口列表刷新间隔（手动选择时） */
+const WINDOW_LIST_POLL_MS = 10_000;
 
-/** 目标选择值：desktop 或 window:<pid>:<window_id> */
+/** 目标选择值：auto / desktop / window:<pid>:<window_id> */
+const AUTO_TARGET = 'auto';
 const DESKTOP_TARGET = 'desktop';
+
+interface ScreenshotFrame {
+  url: string;
+  meta: ComputerCaptureMeta;
+  at: number;
+}
 
 function windowTargetKey(pid: number, windowId: number): string {
   return `window:${pid}:${windowId}`;
 }
 
-function parseTargetKey(key: string): { target: 'desktop' | 'window'; pid?: number; windowId?: number } {
+function parseTargetKey(
+  key: string,
+): { target: 'auto' | 'desktop' | 'window'; pid?: number; windowId?: number } {
+  if (key === AUTO_TARGET) return { target: 'auto' };
   if (key === DESKTOP_TARGET) return { target: 'desktop' };
   const parts = key.split(':');
-  if (parts.length !== 3 || parts[0] !== 'window') return { target: 'desktop' };
+  if (parts.length !== 3 || parts[0] !== 'window') return { target: 'auto' };
   const pid = Number(parts[1]);
   const windowId = Number(parts[2]);
-  if (!Number.isFinite(pid) || !Number.isFinite(windowId)) return { target: 'desktop' };
+  if (!Number.isFinite(pid) || !Number.isFinite(windowId)) return { target: 'auto' };
   return { target: 'window', pid, windowId };
+}
+
+/** 预解码 objectURL：解码成功后再切换画面，避免闪白/跳变 */
+function preloadImage(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('image decode failed'));
+    img.src = url;
+  });
 }
 
 function windowLabel(w: ComputerWindowInfo, fallback: string): string {
@@ -93,10 +118,12 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
   const [status, setStatus] = useState<ComputerStatus | null>(null);
   const [windows, setWindows] = useState<ComputerWindowInfo[]>([]);
   const [activities, setActivities] = useState<ComputerActivity[]>([]);
-  const [targetKey, setTargetKey] = useState<string>(DESKTOP_TARGET);
+  const [targetKey, setTargetKey] = useState<string>(AUTO_TARGET);
   const [followAgent, setFollowAgent] = useState(true);
   const [onScreenOnly, setOnScreenOnly] = useState(true);
-  const [shotUrl, setShotUrl] = useState<string | null>(null);
+  const [frame, setFrame] = useState<ScreenshotFrame | null>(null);
+  const [prevFrame, setPrevFrame] = useState<ScreenshotFrame | null>(null);
+  const [frameVisible, setFrameVisible] = useState(false);
   const [shotAt, setShotAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -108,11 +135,12 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
   statusRef.current = status;
   const targetRef = useRef(targetKey);
   targetRef.current = targetKey;
-  const followRef = useRef(followAgent);
-  followRef.current = followAgent;
   const activeRef = useRef(active);
   activeRef.current = enabled;
-  const shotUrlRef = useRef<string | null>(null);
+  const frameRef = useRef<ScreenshotFrame | null>(null);
+  frameRef.current = frame;
+  const prevFrameRef = useRef<ScreenshotFrame | null>(null);
+  prevFrameRef.current = prevFrame;
   const shotSeqRef = useRef(0);
   /** 单飞：上一次截图未返回时跳过本次轮询，避免请求堆积 */
   const shotBusyRef = useRef(false);
@@ -151,25 +179,48 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
     const seq = ++shotSeqRef.current;
     shotBusyRef.current = true;
     try {
-      const blob = await api.fetchComputerScreenshot({
+      const { blob, meta } = await api.fetchComputerScreenshot({
         ...target,
+        sessionId,
         maxDimension: current.config.maxImageDimension,
       });
       // 丢弃过期响应（用户已切换目标/连续刷新）
       if (seq !== shotSeqRef.current) return;
       const url = URL.createObjectURL(blob);
-      if (shotUrlRef.current) URL.revokeObjectURL(shotUrlRef.current);
-      shotUrlRef.current = url;
-      setShotUrl(url);
-      setShotAt(Date.now());
+      try {
+        await preloadImage(url);
+      } catch {
+        URL.revokeObjectURL(url);
+        throw new Error('image decode failed');
+      }
+      if (seq !== shotSeqRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      const now = Date.now();
+      const previous = frameRef.current;
+      const next: ScreenshotFrame = { url, meta, at: now };
+      // 先隐藏新帧，再在下一帧淡入；旧帧保留在底层，避免闪白/跳变
+      setFrameVisible(false);
+      setPrevFrame(previous);
+      setFrame(next);
+      frameRef.current = next;
+      requestAnimationFrame(() => setFrameVisible(true));
+      setShotAt(now);
       setError(null);
+      if (previous) {
+        window.setTimeout(() => {
+          URL.revokeObjectURL(previous.url);
+          setPrevFrame(prev => (prev?.url === previous.url ? null : prev));
+        }, 260);
+      }
     } catch (err) {
       if (seq !== shotSeqRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       shotBusyRef.current = false;
     }
-  }, []);
+  }, [sessionId, t]);
 
   // 状态轮询（仅面板 active 且平台支持）
   useEffect(() => {
@@ -187,15 +238,27 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
     void loadWindows();
   }, [enabled, connected, loadWindows]);
 
-  // 实时画面轮询（连接后启动；隐藏时停止）
+  // 手动选择目标时定期刷新窗口列表（新窗口/关闭窗口及时可见）
+  useEffect(() => {
+    if (!enabled || !connected) return;
+    if (followAgent || targetKey === AUTO_TARGET) return;
+    const timer = setInterval(() => {
+      void loadWindows();
+    }, WINDOW_LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [enabled, connected, followAgent, targetKey, loadWindows]);
+
+  // 实时画面轮询（连接后启动；隐藏时停止；自动目标更频繁以保持画面连续）
   useEffect(() => {
     if (!enabled || !connected) return;
     void refreshShot();
+    const interval =
+      followAgent || targetKey === AUTO_TARGET ? SCREENSHOT_POLL_AUTO_MS : SCREENSHOT_POLL_MANUAL_MS;
     const timer = setInterval(() => {
       void refreshShot();
-    }, SCREENSHOT_POLL_MS);
+    }, interval);
     return () => clearInterval(timer);
-  }, [enabled, connected, refreshShot]);
+  }, [enabled, connected, followAgent, targetKey, refreshShot]);
 
   // 目标切换立即刷新
   useEffect(() => {
@@ -203,9 +266,9 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
     void refreshShot();
   }, [targetKey, enabled, connected, refreshShot]);
 
-  // 跟随 Agent = 始终整屏（窗口截图会漏掉自绘浮层）
+  // 自动跟随 = 目标固定 auto（Agent 操作窗优先，空闲跟前台）
   useEffect(() => {
-    if (followAgent && targetKey !== DESKTOP_TARGET) setTargetKey(DESKTOP_TARGET);
+    if (followAgent && targetKey !== AUTO_TARGET) setTargetKey(AUTO_TARGET);
   }, [followAgent, targetKey]);
 
   // WS：活动/状态即时刷新
@@ -226,11 +289,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
         return [payload, ...rest].slice(0, 20);
       });
 
-      if (followRef.current && targetRef.current !== DESKTOP_TARGET) {
-        // 整屏优先：窗口截图看不到自绘浮层，跟随 Agent 时不再切到窗口
-        setTargetKey(DESKTOP_TARGET);
-      }
-      // Agent 动作后立即刷新画面
+      // Agent 动作后立即刷新画面（目标由后端 resolvePreviewTarget 决定）
       void refreshShot();
     });
     return unsub;
@@ -239,10 +298,12 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
   // 卸载：释放 objectURL
   useEffect(() => {
     return () => {
-      if (shotUrlRef.current) {
-        URL.revokeObjectURL(shotUrlRef.current);
-        shotUrlRef.current = null;
-      }
+      const current = frameRef.current;
+      if (current) URL.revokeObjectURL(current.url);
+      const previous = prevFrameRef.current;
+      if (previous) URL.revokeObjectURL(previous.url);
+      frameRef.current = null;
+      prevFrameRef.current = null;
     };
   }, []);
 
@@ -251,6 +312,21 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
       .filter((w) => w.window_id > 0)
       .sort((a, b) => (a.is_on_screen === b.is_on_screen ? 0 : a.is_on_screen ? -1 : 1));
   }, [windows]);
+
+  /** 当前画面目标标签（来自响应头） */
+  const targetLabel = useMemo(() => {
+    const meta = frame?.meta;
+    if (!meta) return t('computer.target');
+    const title = (meta.title ?? '').trim();
+    const fallbackName = `#${meta.windowId ?? '?'}`;
+    if (meta.source === 'agent') {
+      return `${t('computer.sourceAgent')} · ${title || fallbackName}`;
+    }
+    if (meta.source === 'desktop') return t('computer.fallbackDesktop');
+    return title || t('computer.unknownWindow');
+  }, [frame, t]);
+
+  const isWindowTarget = parseTargetKey(targetKey).target === 'window';
 
   const handleInstall = useCallback(async () => {
     setInstalling(true);
@@ -493,11 +569,18 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
         // 已连接：目标选择 + 画面 + 时间线
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
-            <Select value={targetKey} onValueChange={setTargetKey} disabled={followAgent}>
+            <Select
+              value={targetKey}
+              onValueChange={(value) => {
+                setTargetKey(value);
+                if (value !== AUTO_TARGET) setFollowAgent(false);
+              }}
+            >
               <SelectTrigger size="sm" className="max-w-[260px]">
                 <SelectValue placeholder={t('computer.target')} />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={AUTO_TARGET}>{t('computer.auto')}</SelectItem>
                 <SelectItem value={DESKTOP_TARGET}>{t('computer.desktop')}</SelectItem>
                 {sortedWindows.map((w) => (
                   <SelectItem
@@ -511,8 +594,15 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
             </Select>
 
             <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
-              <Switch size="sm" checked={followAgent} onCheckedChange={setFollowAgent} />
-              {t('computer.followAgent')}
+              <Switch
+                size="sm"
+                checked={followAgent}
+                onCheckedChange={(v) => {
+                  setFollowAgent(v);
+                  setTargetKey(v ? AUTO_TARGET : DESKTOP_TARGET);
+                }}
+              />
+              {t('computer.autoFollow')}
             </label>
 
             <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -524,27 +614,45 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
               {t('computer.showAllWindows')}
             </label>
 
-            <span className="ml-auto text-[11px] text-muted-foreground">
-              {t('computer.captureAt', { time: formatClock(shotAt) })}
+            <span className="ml-auto flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+              <span className="max-w-[240px] truncate" title={targetLabel}>
+                {targetLabel}
+              </span>
+              <span className="shrink-0">{t('computer.captureAt', { time: formatClock(shotAt) })}</span>
             </span>
           </div>
-          {targetKey !== DESKTOP_TARGET && (
+          {isWindowTarget && (
             <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400">
               {t('computer.windowOverlayWarning')}
             </div>
           )}
+          {targetKey === AUTO_TARGET && frame?.meta.source === 'desktop' && (
+            <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+              {t('computer.fallbackDesktop')}
+            </div>
+          )}
 
           <div className="relative min-h-0 flex-1 overflow-hidden bg-black/85">
-            {shotUrl ? (
+            {prevFrame && (
               <img
-                src={shotUrl}
+                src={prevFrame.url}
+                alt=""
+                className="absolute inset-0 size-full object-contain"
+                draggable={false}
+              />
+            )}
+            {frame ? (
+              <img
+                key={frame.url}
+                src={frame.url}
                 alt={t('computer.title')}
-                className="size-full object-contain"
+                className="absolute inset-0 size-full object-contain"
+                style={{ opacity: frameVisible ? 1 : 0, transition: 'opacity 180ms ease-out' }}
                 draggable={false}
               />
             ) : error ? (
               // 截图失败：不再空转，直接给出错误与重试入口（轮询仍会自动恢复）
-              <div className="flex size-full flex-col items-center justify-center gap-2 px-6 text-center">
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
                 <CircleAlert className="size-6 text-destructive" />
                 <span className="break-all text-[11px] text-white/80">{error}</span>
                 <Button size="sm" variant="outline" onClick={() => void refreshShot()}>
@@ -553,11 +661,11 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
                 </Button>
               </div>
             ) : (
-              <div className="flex size-full items-center justify-center">
+              <div className="absolute inset-0 flex items-center justify-center">
                 <Loader2 className="size-5 animate-spin text-white/50" />
               </div>
             )}
-            {shotUrl && error && (
+            {frame && error && (
               <div className="absolute inset-x-2 bottom-2 flex items-start gap-1.5 rounded-md bg-destructive/90 px-2 py-1.5 text-[11px] text-white">
                 <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
                 <span className="break-all">{error}</span>

@@ -70,6 +70,14 @@ export interface ComputerParams {
   value?: string;
   direction?: 'up' | 'down' | 'left' | 'right';
   amount?: number;
+  /** 滚动粒度：line（按行，缺省）或 page（按页） */
+  by?: 'line' | 'page';
+  /** 像素增量别名：正数向下（会换算为 amount 并推导 direction） */
+  delta_y?: number;
+  /** 像素增量别名：正数向右 */
+  delta_x?: number;
+  /** amount 的别名 */
+  scroll_amount?: number;
   from_x?: number;
   from_y?: number;
   to_x?: number;
@@ -157,6 +165,92 @@ function compact(obj: Record<string, unknown>): Record<string, unknown> {
 function numberConfig(cfg: Record<string, unknown>, key: string, fallback: number): number {
   const value = cfg[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** cua 工具 schema 是否声明某个参数（旧驱动 additionalProperties:false，不能乱传） */
+function schemaHasProp(service: ComputerService, tool: string, prop: string): boolean {
+  const schema = service.getToolSchema(tool) as
+    | { properties?: Record<string, unknown> }
+    | null;
+  return !!schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, prop);
+}
+
+interface ScrollLike {
+  direction?: string;
+  amount?: number;
+  by?: string;
+  delta_x?: number;
+  delta_y?: number;
+  scroll_amount?: number;
+}
+
+/**
+ * 归一化 scroll 参数：
+ * - direction 缺省时由 delta_y（正下负上）/ delta_x（正右负左）推导；
+ * - amount 优先级 scroll_amount → amount → ceil(|delta| / 120)；
+ * - amount 限制在 1–50；by 仅接受 line/page。
+ */
+export function normalizeScrollParams(p: ScrollLike): {
+  direction: 'up' | 'down' | 'left' | 'right';
+  amount?: number;
+  by?: 'line' | 'page';
+} {
+  const validDirections = new Set(['up', 'down', 'left', 'right']);
+  let direction =
+    typeof p.direction === 'string' && validDirections.has(p.direction)
+      ? (p.direction as 'up' | 'down' | 'left' | 'right')
+      : undefined;
+
+  const deltaY = typeof p.delta_y === 'number' && Number.isFinite(p.delta_y) ? p.delta_y : undefined;
+  const deltaX = typeof p.delta_x === 'number' && Number.isFinite(p.delta_x) ? p.delta_x : undefined;
+  if (!direction && deltaY !== undefined && deltaY !== 0) {
+    direction = deltaY > 0 ? 'down' : 'up';
+  }
+  if (!direction && deltaX !== undefined && deltaX !== 0) {
+    direction = deltaX > 0 ? 'right' : 'left';
+  }
+  if (!direction) {
+    throw new Error(t('tools.computerElementOrPixelRequired'));
+  }
+
+  const rawAmount =
+    typeof p.scroll_amount === 'number' && Number.isFinite(p.scroll_amount)
+      ? p.scroll_amount
+      : typeof p.amount === 'number' && Number.isFinite(p.amount)
+        ? p.amount
+        : deltaY !== undefined
+          ? Math.ceil(Math.abs(deltaY) / 120)
+          : deltaX !== undefined
+            ? Math.ceil(Math.abs(deltaX) / 120)
+            : undefined;
+  const amount =
+    rawAmount === undefined
+      ? undefined
+      : Math.max(1, Math.min(50, Math.round(rawAmount)));
+
+  const by = p.by === 'line' || p.by === 'page' ? p.by : undefined;
+  return { direction, ...(amount !== undefined ? { amount } : {}), ...(by ? { by } : {}) };
+}
+
+/** run_steps 内的 scroll step：归一化并移除 cua 不认识的别名 */
+function normalizeScrollStepArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const normalized = normalizeScrollParams({
+    direction: typeof args.direction === 'string' ? args.direction : undefined,
+    amount: typeof args.amount === 'number' ? args.amount : undefined,
+    by: typeof args.by === 'string' ? args.by : undefined,
+    delta_x: typeof args.delta_x === 'number' ? args.delta_x : undefined,
+    delta_y: typeof args.delta_y === 'number' ? args.delta_y : undefined,
+    scroll_amount: typeof args.scroll_amount === 'number' ? args.scroll_amount : undefined,
+  });
+  const out: Record<string, unknown> = { ...args };
+  delete out.delta_x;
+  delete out.delta_y;
+  delete out.scroll_amount;
+  delete out.by;
+  out.direction = normalized.direction;
+  if (normalized.amount !== undefined) out.amount = normalized.amount;
+  if (normalized.by !== undefined) out.by = normalized.by;
+  return out;
 }
 
 function imageDimension(p: ComputerParams, cfg: Record<string, unknown>): number | undefined {
@@ -337,13 +431,16 @@ export function buildCuaCall(
       };
     }
     case 'scroll': {
-      if (!p.direction) throw new Error(t('tools.computerElementOrPixelRequired'));
+      const normalized = normalizeScrollParams(p);
       return {
         tool,
         args: compact({
           ...targetArgs(p),
-          direction: p.direction,
-          amount: p.amount,
+          direction: normalized.direction,
+          amount: normalized.amount,
+          ...(normalized.by && schemaHasProp(ctx.service, tool, 'by')
+            ? { by: normalized.by }
+            : {}),
           x: p.x,
           y: p.y,
           delivery_mode: deliveryMode(p, ctx.toolConfig),
@@ -494,10 +591,25 @@ export function buildCuaCall(
             }),
           );
         }
-        const args = step.args && typeof step.args === 'object' ? step.args : {};
+        const rawArgs = step.args && typeof step.args === 'object' ? step.args : {};
+        const args = step.tool === 'scroll' ? normalizeScrollStepArgs(rawArgs) : rawArgs;
+        const rawMode = args.delivery_mode;
+        const rest: Record<string, unknown> = { ...args };
+        delete rest.delivery_mode;
+        // 只有用户显式指定 delivery_mode 时才写进 step；
+        // 否则保留缺省，让 cua 的 foreground_fallback 能在 background_unavailable 时逐 step 升级。
+        const stepMode =
+          typeof rawMode === 'string'
+            ? rawMode
+            : p.delivery_mode
+              ? deliveryMode(p, ctx.toolConfig)
+              : undefined;
         return {
           tool: step.tool,
-          args: compact({ ...args, delivery_mode: args.delivery_mode ?? deliveryMode(p, ctx.toolConfig) }),
+          args: compact({
+            ...rest,
+            ...(stepMode ? { delivery_mode: stepMode } : {}),
+          }),
         };
       });
       // run_steps 的 steps 默认继承 run_steps 自身的 pid/window_id；
@@ -507,6 +619,7 @@ export function buildCuaCall(
         (typeof p.pid === 'number'
           ? { pid: p.pid, ...(typeof p.window_id === 'number' ? { window_id: p.window_id } : {}) }
           : undefined);
+      const allowForeground = ctx.toolConfig.allowForeground !== false;
       return {
         tool,
         args: compact({
@@ -515,6 +628,13 @@ export function buildCuaCall(
           pid: p.pid,
           window_id: p.window_id,
           observe,
+          // Electron/Chromium 的 scroll/keystroke 后台投递不可用时，由 cua 逐 step 升级 foreground
+          ...(allowForeground && schemaHasProp(ctx.service, tool, 'foreground_fallback')
+            ? { foreground_fallback: true }
+            : {}),
+          ...(p.delivery_mode && schemaHasProp(ctx.service, tool, 'delivery_mode')
+            ? { delivery_mode: p.delivery_mode }
+            : {}),
         }),
       };
     }
@@ -559,6 +679,16 @@ export function summarizeAction(p: ComputerParams): string {
       return `script ${p.script?.length ?? 0} chars`;
     case 'verify':
       return `${Array.isArray(p.expect) ? p.expect.length : 0} predicates`;
+    case 'scroll': {
+      try {
+        const normalized = normalizeScrollParams(p);
+        return `scroll ${normalized.direction}${normalized.amount ? ` x${normalized.amount}` : ''}${
+          normalized.by ? ` (${normalized.by})` : ''
+        }`;
+      } catch {
+        return 'scroll';
+      }
+    }
     case 'wait':
       return `${p.wait_ms ?? 0}ms`;
     default:

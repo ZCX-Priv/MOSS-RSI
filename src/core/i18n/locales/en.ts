@@ -454,7 +454,31 @@ export const en = {
     computerOverlayWindowLine: 'Overlay/popup windows (not listed by cua; auto-detected):',
     computerSelfDrawnHint:
       'This overlay is custom-drawn/Chromium; its UIA tree may be incomplete. Use pixel x/y from the overlay screenshot.',
+    computerNativeOverlayHeader:
+      'Overlay observation (the driver cannot address it directly; using the full-screen screenshot + native UIA):',
+    computerOverlayNotAddressable:
+      'Detected overlay 0x{{windowId}} (class={{className}}, {{width}}x{{height}}), but the driver does not register that window. The main window stays the action target; the overlay is exposed through the full-screen screenshot + native UIA.',
+    computerNativeOverlayLine:
+      '- Overlay 0x{{windowId}} class={{className}}, desktop-screenshot rect x={{x}} y={{y}} w={{width}} h={{height}}; {{elements}} native UIA element(s)',
+    computerNativeShotDims:
+      '(screenshot {{shotWidth}}x{{shotHeight}}; screen {{screenWidth}}x{{screenHeight}})',
+    computerNativeUiaCoordinates:
+      'Native UIA (coordinates are desktop-screenshot pixels, usable directly as scope="desktop" x/y):',
+    computerNativeUiaCoordinatesPhysical:
+      'Native UIA (coordinates are physical screen pixels; re-read with include_screenshot:true for pixel actions):',
+    computerNativeUiaEmpty:
+      'This overlay exposes no usable UIA elements (fully custom-drawn); operate with desktop-screenshot pixels.',
+    computerNativeOverlayOperate:
+      'Hint: pass scope="desktop" plus the center/x,y above for click/type_text; do NOT pass window_id or element_token.',
     computerScreenshotFrameRetry: '(Captured a fresh window screenshot and retried once)',
+    computerScrollVerified: 'The frame changed after scrolling; the action took effect.',
+    computerScrollRetryPage: 'The frame did not change after scrolling; retried with a page scroll.',
+    computerScrollRetryKey: 'The wheel still had no effect; retried with PageDown/PageUp.',
+    computerScrollNoChange: 'The frame still did not change after scrolling (possibly at the boundary).',
+    computerScrollForegroundKnown: 'Background delivery is known to be unavailable for this window; used foreground directly.',
+    computerScrollCoordinateFixed: 'The scroll coordinates were outside the current screenshot; used the window center.',
+    computerProgramScreenshot: 'Program window screenshot (preferred view): {{path}}',
+    computerDesktopFallback: 'Window capture unavailable; fell back to a full-screen screenshot: {{path}}',
     todoSessionIdRequired: 'sessionId is required for todo operations',
     todoReplaceItemsRequired: 'items (non-empty array of {text, status?, priority?, id?}) is required for create mode=replace',
     todoItemsMissingText: 'items[{{indexes}}] missing non-empty text. Nothing was modified.',

@@ -171,7 +171,7 @@ export function createComputerHealthHandler(services: ServiceRegistry): RouteHan
   };
 }
 
-/** GET /api/computer/screenshot?target=desktop|window&pid=&windowId=&maxDimension= */
+/** GET /api/computer/screenshot?target=auto|desktop|window&sessionId=&pid=&windowId=&maxDimension= */
 export function createComputerScreenshotHandler(
   services: ServiceRegistry,
   config: ConfigService,
@@ -184,27 +184,67 @@ export function createComputerScreenshotHandler(
     const unsupported = unsupportedPlatform(service);
     if (unsupported) return unsupported;
 
-    const target = (req.query.target ?? 'desktop').trim();
+    const target = (req.query.target ?? 'auto').trim();
+    const sessionId = (req.query.sessionId ?? '').trim() || undefined;
     const requestedMax = parseNumber(req.query.maxDimension);
     const maxDimension =
       requestedMax !== undefined && requestedMax >= 0
         ? requestedMax
         : computerMaxImageDimension(config);
 
+    let previewSource: 'agent' | 'desktop' | 'window' = 'desktop';
+    let previewPid: number | undefined;
+    let previewWindowId: number | undefined;
+    let previewTitle: string | undefined;
+    let previewClass: string | undefined;
+
     try {
       let capture: ComputerCapture;
-      if (target === 'window') {
+      if (target === 'auto') {
+        const preview = await service.resolvePreviewTarget(sessionId);
+        previewPid = preview.pid;
+        previewWindowId = preview.windowId;
+        previewTitle = preview.title;
+        previewClass = preview.className;
+        if (
+          preview.source !== 'desktop' &&
+          typeof preview.pid === 'number' &&
+          typeof preview.windowId === 'number'
+        ) {
+          try {
+            capture = await service.captureWindow(preview.pid, preview.windowId, {
+              maxImageDimension: maxDimension,
+            });
+            previewSource = preview.source;
+          } catch {
+            // 窗口截图失败（窗口重建/被驱动拒绝）：回退整屏，保证面板仍有画面
+            capture = await service.captureDesktop({ maxImageDimension: maxDimension });
+            previewSource = 'desktop';
+          }
+        } else {
+          capture = await service.captureDesktop({ maxImageDimension: maxDimension });
+          previewSource = 'desktop';
+        }
+      } else if (target === 'window') {
         const pid = parseNumber(req.query.pid);
         const windowId = parseNumber(req.query.windowId);
         if (pid === undefined || windowId === undefined) {
           return { status: 400, body: { error: 'pid and windowId are required for target=window' } };
         }
         capture = await service.captureWindow(pid, windowId, { maxImageDimension: maxDimension });
+        previewSource = 'window';
+        previewPid = pid;
+        previewWindowId = windowId;
       } else if (target === 'desktop') {
         capture = await service.captureDesktop({ maxImageDimension: maxDimension });
+        previewSource = 'desktop';
       } else {
-        return { status: 400, body: { error: 'target must be desktop or window' } };
+        return { status: 400, body: { error: 'target must be auto, desktop or window' } };
       }
+
+      // 窗口截图驱动可能返回标题；优先用它作为面板目标标签
+      if (capture.title) previewTitle = capture.title;
+      if (capture.className) previewClass = capture.className;
 
       const file = readFileSync(capture.path);
       // 面板实时画面是临时产物：读入内存后立即删除，避免每 1.5s 堆积一个 PNG
@@ -215,13 +255,28 @@ export function createComputerScreenshotHandler(
           // 删除失败交给 live 目录的定期清理
         }
       }
+      const headers: Record<string, string> = {
+        'Content-Type': 'image/png',
+        'Content-Length': String(file.length),
+        'Cache-Control': 'no-store',
+        // 跨域（远程访问）时允许前端读取目标元信息头
+        'Access-Control-Expose-Headers':
+          'X-Computer-Target-Source, X-Computer-Target-Pid, X-Computer-Target-Window-Id, X-Computer-Target-Title, X-Computer-Target-Class',
+        'X-Computer-Target-Source': previewSource,
+        ...(previewPid !== undefined ? { 'X-Computer-Target-Pid': String(previewPid) } : {}),
+        ...(previewWindowId !== undefined
+          ? { 'X-Computer-Target-Window-Id': String(previewWindowId) }
+          : {}),
+        ...(previewTitle
+          ? { 'X-Computer-Target-Title': encodeURIComponent(previewTitle) }
+          : {}),
+        ...(previewClass
+          ? { 'X-Computer-Target-Class': encodeURIComponent(previewClass) }
+          : {}),
+      };
       return {
         status: 200,
-        headers: {
-          'Content-Type': 'image/png',
-          'Content-Length': String(file.length),
-          'Cache-Control': 'no-store',
-        },
+        headers,
         body: new Uint8Array(file),
       };
     } catch (err) {

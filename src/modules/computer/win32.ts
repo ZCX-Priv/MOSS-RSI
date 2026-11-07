@@ -53,6 +53,7 @@ interface User32Bindings {
   GetWindowRect: (hwnd: bigint, rect: unknown) => boolean;
   GetWindowLongW: (hwnd: bigint, index: number) => number;
   GetWindow: (hwnd: bigint, cmd: number) => bigint;
+  GetLastActivePopup: (hwnd: bigint) => bigint;
 }
 
 let ffi: BunFfi | null = null;
@@ -72,6 +73,20 @@ const WS_EX_TOOLWINDOW = 0x00000080;
 const INTERNAL_CLASS_RE =
   /^(?:IME|MSCTFIME UI|OleDdeWndClass|Base_PowerMessageWindow|Chrome_SystemMessageWindow|KAccountWnd_[^ ]*|QEventDispatcherWin32_Internal_Widget.*|__#_ACCOUNTSDK.*)$/i;
 const SHADOW_CLASS_RE = /ShadowBorder/i;
+/**
+ * 瞬态提示类窗口：tooltip / 托盘溢出等。
+ * 这些窗口经常以浮层形式出现在最前面，但不是用户要操作的目标；
+ * 不能把它们当浮层目标，否则截图与元素树会被提示窗劫持。
+ */
+const TRANSIENT_CLASS_RE =
+  /^(?:tooltips?_class32|Qt[\d.]*QWindowToolTip(?:SaveBits)?|NotifyIconOverflowWindow|Chrome_Tooltip)$/i;
+/**
+ * 框架辅助窗口：Qt 弹出层的阴影/保存位图窗口。
+ * 这类窗口可见、与内容浮层重叠、面积也不小，但不是用户目标；
+ * 一旦被当成浮层，截图与 UIA 树会落到空壳窗口上。
+ */
+const FRAMEWORK_HELPER_CLASS_RE =
+  /^Qt[\d.]*QWindow(?:PopupDropShadowSaveBits|ToolTipSaveBits)$/i;
 
 /** 原生枚举是否已就绪（未就绪时调用方应回退 cua list_windows） */
 export function isNativeWindowEnumerationAvailable(): boolean {
@@ -110,6 +125,7 @@ export async function initNativeWindows(): Promise<boolean> {
         GetWindowRect: { args: [mod.FFIType.i64, mod.FFIType.ptr], returns: mod.FFIType.bool },
         GetWindowLongW: { args: [mod.FFIType.i64, mod.FFIType.i32], returns: mod.FFIType.i32 },
         GetWindow: { args: [mod.FFIType.i64, mod.FFIType.u32], returns: mod.FFIType.i64 },
+        GetLastActivePopup: { args: [mod.FFIType.i64], returns: mod.FFIType.i64 },
       });
       ffi = mod;
       user32 = symbols as unknown as User32Bindings;
@@ -124,9 +140,23 @@ export async function initNativeWindows(): Promise<boolean> {
   return initPromise;
 }
 
-/** 是否为内部窗口类名（输入法/阴影/Qt 内部窗口等） */
+/** 是否为框架辅助窗口类（Qt 弹出阴影/保存位图等，不能作为操作目标） */
+export function isFrameworkHelperWindowClass(className: string): boolean {
+  return FRAMEWORK_HELPER_CLASS_RE.test(className);
+}
+
+/** 是否为内部窗口类名（输入法/阴影/Qt 内部/框架辅助窗口等） */
 export function isInternalWindowClass(className: string): boolean {
-  return INTERNAL_CLASS_RE.test(className) || SHADOW_CLASS_RE.test(className);
+  return (
+    INTERNAL_CLASS_RE.test(className) ||
+    SHADOW_CLASS_RE.test(className) ||
+    isFrameworkHelperWindowClass(className)
+  );
+}
+
+/** 是否为瞬态提示类窗口（tooltip/托盘溢出等），不应作为浮层目标 */
+export function isTransientWindowClass(className: string): boolean {
+  return TRANSIENT_CLASS_RE.test(className);
 }
 
 /** 是否为 cua 自己的合成光标覆盖层（按标题前缀识别） */
@@ -267,6 +297,31 @@ export function getForegroundWindowInfo(): NativeWindowInfo | null {
       Buffer.alloc(16),
       0,
       handle,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取某个窗口最后一次激活的 owned popup（GetLastActivePopup）。
+ * 用于自动目标解析：同一锚点窗口弹出的浮层/对话框优先于其他同进程窗口。
+ */
+export function getNativeLastActivePopup(hwnd: number): NativeWindowInfo | null {
+  const api = user32;
+  const ffiApi = ffi;
+  if (!api || !ffiApi) return null;
+  try {
+    const popup = api.GetLastActivePopup(BigInt(hwnd));
+    if (!popup || popup === BigInt(hwnd) || !api.IsWindow(popup)) return null;
+    return readWindow(
+      popup,
+      Buffer.alloc(4),
+      Buffer.alloc(2048),
+      Buffer.alloc(512),
+      Buffer.alloc(16),
+      0,
+      api.GetForegroundWindow(),
     );
   } catch {
     return null;

@@ -95,6 +95,11 @@ export interface ComputerActivity {
   isError?: boolean;
   /** 本次调用耗时（毫秒） */
   durationMs?: number;
+  /** 动作目标窗口（供面板自动跟随；纯观察动作也可能带） */
+  pid?: number;
+  windowId?: number;
+  windowClassName?: string;
+  windowTitle?: string;
 }
 
 /** 一次截图产物（落盘路径 + 可选尺寸） */
@@ -102,6 +107,9 @@ export interface ComputerCapture {
   path: string;
   width?: number;
   height?: number;
+  /** 窗口标题（窗口截图时由驱动返回） */
+  title?: string;
+  className?: string;
   /** 临时画面（HTTP 读取后即可删除，避免面板轮询堆积文件） */
   transient?: boolean;
 }
@@ -124,11 +132,26 @@ export interface ComputerProcessWindow {
   zOrder: number;
 }
 
+/** 原生枚举到的浮层信息（可能 cua 无法寻址） */
+export interface ComputerOverlayWindow {
+  windowId: number;
+  className?: string;
+  title?: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  /** cua 是否登记了该 HWND（决定能否直接当 window_id 用） */
+  addressable: boolean;
+}
+
 /** 自动目标解析结果（浮层优先） */
 export interface ComputerWindowTarget {
+  /** 驱动可寻址的目标窗口（不可寻址浮层时保持锚点窗口） */
   windowId: number;
   /** 是否切换到了同进程的浮层/弹出窗口 */
   isOverlay: boolean;
+  /** 主浮层（决定是否切换 window_id；不可寻址时 windowId 仍是锚点） */
+  overlay?: ComputerOverlayWindow;
+  /** 全部结构性浮层候选（z 序前 → 后，最多 4 个）；Qt 弹层常是「壳 + 内容」多窗口叠加 */
+  overlayCandidates?: ComputerOverlayWindow[];
   /** 该 pid 的主窗口（面积最大） */
   mainWindowId?: number;
   className?: string;
@@ -175,6 +198,25 @@ export interface ComputerCallOptions {
   source?: 'agent' | 'panel';
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 目标窗口（供面板自动跟随；source=agent 时更新活动目标） */
+  pid?: number;
+  windowId?: number;
+  windowClassName?: string;
+  windowTitle?: string;
+  /** 内部校验调用（如滚动前后帧）：不写活动时间线 */
+  silent?: boolean;
+}
+
+/** 面板自动目标解析结果（Agent 最后操作窗口 → 整屏） */
+export interface ComputerPreviewTarget {
+  pid?: number;
+  windowId?: number;
+  title?: string;
+  className?: string;
+  source: 'agent' | 'desktop';
+  isOverlay?: boolean;
+  bounds?: { x: number; y: number; width: number; height: number };
+  updatedAt?: number;
 }
 
 /** Computer 服务接口（ServiceNames.COMPUTER） */
@@ -239,13 +281,50 @@ export interface ComputerService {
   listProcessWindows(pid: number): Promise<ComputerProcessWindow[]>;
 
   /**
+   * 驱动当前登记的窗口 id（cua list_windows；按 pid 缓存 1.5s）。
+   * 用于判断原生枚举到的浮层能否直接作为 window_id 交给驱动。
+   */
+  getCuaWindowIds(pid: number): Promise<Set<number>>;
+
+  /**
    * 自动目标解析：同一进程弹出浮层/对话框时，返回最前面的浮层窗口，
    * 让截图与 UIA 树都针对该窗口；没有浮层时返回请求窗口（或主窗口）。
+   *
+   * 锚点优先级：requestedWindowId → anchorWindowId → 会话最近操作窗口 →
+   * 同 pid 前台窗口 → 面积最大主窗口。
    */
-  resolveWindowTarget(pid: number, requestedWindowId?: number): Promise<ComputerWindowTarget>;
+  resolveWindowTarget(
+    pid: number,
+    requestedWindowId?: number,
+    opts?: { sessionId?: string; anchorWindowId?: number },
+  ): Promise<ComputerWindowTarget>;
 
   /** 当前系统前台窗口（原生枚举不可用时返回 null） */
   getForegroundWindowInfo(): ComputerProcessWindow | null;
+
+  /** 记录会话最近一次 Agent 操作窗口（面板自动跟随用） */
+  setActiveTarget(
+    sessionId: string | undefined,
+    target: { pid: number; windowId: number; title?: string; className?: string },
+  ): void;
+
+  /** 读取会话最近一次 Agent 操作窗口（默认超过 30s 返回 null；allowStale 跳过 TTL） */
+  getActiveTarget(
+    sessionId?: string,
+    opts?: { allowStale?: boolean },
+  ): {
+    pid: number;
+    windowId: number;
+    title?: string;
+    className?: string;
+    at: number;
+  } | null;
+
+  /**
+   * 面板自动目标解析：Agent 最后操作的窗口（粘性，窗口关闭才失效）；
+   * 没有 Agent 目标或浮层无法单独寻址时返回 source='desktop'（整屏）。
+   */
+  resolvePreviewTarget(sessionId?: string): Promise<ComputerPreviewTarget>;
 
   /**
    * 聚焦窗口（bring_to_front）。目标窗口失效/无法聚焦时回退到同 pid 的主窗口；

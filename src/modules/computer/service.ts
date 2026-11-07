@@ -22,6 +22,8 @@ import type {
   ComputerFocusResult,
   ComputerHealth,
   ComputerHealthCheck,
+  ComputerOverlayWindow,
+  ComputerPreviewTarget,
   ComputerProcessWindow,
   ComputerScreenInfo,
   ComputerService,
@@ -31,10 +33,12 @@ import type {
 } from './types';
 import {
   getForegroundWindowInfo as getNativeForegroundWindow,
+  getNativeLastActivePopup,
   initNativeWindows,
   isCuaOverlayWindow,
   isInternalWindowClass,
   isNativeWindowEnumerationAvailable,
+  isTransientWindowClass,
   listNativeWindows,
   type NativeWindowInfo,
 } from './win32';
@@ -59,6 +63,14 @@ const SESSION_REVIVE_TIMEOUT_MS = 8_000;
 const SESSION_PREWARM_TIMEOUT_MS = 5_000;
 /** 截图失败后的健康检查最小间隔（避免每 1.5s 轮询都触发诊断） */
 const HEALTH_MIN_INTERVAL_MS = 30_000;
+/** 会话最近操作窗口的有效期（动作侧窗口粘性；面板预览可 allowStale 跳过） */
+const ACTIVE_TARGET_TTL_MS = 30_000;
+/** 自动目标解析缓存（动作前后两次枚举不抖动） */
+const RESOLVE_CACHE_TTL_MS = 250;
+/** cua 已登记窗口 id 的缓存（原生浮层可寻址判断；避免每次动作都 list_windows） */
+const CUA_WINDOW_IDS_TTL_MS = 1_500;
+/** 原生浮层候选上限（Qt 弹层常见「壳 + 内容」多窗口叠加） */
+const MAX_OVERLAY_CANDIDATES = 4;
 
 /** cua 官方 Windows 安装脚本 */
 const WINDOWS_INSTALLER_URL =
@@ -151,6 +163,40 @@ function rectsIntersect(
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
+/** 可作为自动目标的窗口（可见、非最小化、非内部/瞬态/Agent 光标浮层） */
+function isUsableProcessWindow(item: ComputerProcessWindow): boolean {
+  return (
+    item.visible &&
+    !item.minimized &&
+    item.bounds.width >= 80 &&
+    item.bounds.height >= 60 &&
+    !isInternalWindowClass(item.className) &&
+    !isTransientWindowClass(item.className) &&
+    !isCuaOverlayWindow(item)
+  );
+}
+
+/** MOSS 自身 UI 窗口（避免面板自动跟随截到自己形成递归画面） */
+function isMossSelfWindow(item: { title: string }): boolean {
+  return /\bMOSS(?:-OS)?\b/i.test(item.title);
+}
+
+/** 判断窗口是否通过 owner 链归属于某个锚点窗口（最多向上 4 层） */
+function isOwnedByWindow(
+  item: ComputerProcessWindow,
+  anchorWindowId: number,
+  byId: Map<number, ComputerProcessWindow>,
+): boolean {
+  let owner = item.owner;
+  for (let depth = 0; depth < 4 && owner; depth += 1) {
+    if (owner === anchorWindowId) return true;
+    const parent = byId.get(owner);
+    if (!parent) return false;
+    owner = parent.owner;
+  }
+  return false;
+}
+
 /** 原生窗口信息 → 跨模块契约结构 */
 function toProcessWindow(info: NativeWindowInfo): ComputerProcessWindow {
   return {
@@ -172,6 +218,13 @@ function toProcessWindow(info: NativeWindowInfo): ComputerProcessWindow {
 /** 是否为传输/连接层错误（可安全重连并重试；超时/中止不在此列） */
 function isTransportErrorMessage(message: string): boolean {
   return /\bnot connected\b|connection closed|client is closed|transport closed|EPIPE|ECONNRESET|broken pipe|未连接|连接已关闭|MCP 客户端/i.test(
+    message,
+  );
+}
+
+/** 窗口句柄失效/窗口重建（WPS/Office 重建窗口后旧 HWND 会命中） */
+function isStaleWindowErrorMessage(message: string): boolean {
+  return /(window|hwnd)[^\n]{0,60}(not found|invalid|closed|不存在|已关闭|no such)|no such window|invalid window handle/i.test(
     message,
   );
 }
@@ -224,6 +277,18 @@ export class ComputerServiceImpl implements ComputerService {
   /** 最近一次健康检查结果（连接失败/截图失败/手动诊断时填充） */
   private health: ComputerHealth | null = null;
   private lastHealthAt = 0;
+  /** 会话 → 最近一次 Agent 操作窗口（面板自动跟随） */
+  private readonly activeTargets = new Map<
+    string,
+    { pid: number; windowId: number; title?: string; className?: string; at: number }
+  >();
+  /** 自动目标解析缓存：避免一次动作前后两次 EnumWindows 造成目标抖动 */
+  private readonly resolveCache = new Map<
+    string,
+    { at: number; target: ComputerWindowTarget }
+  >();
+  /** cua 已登记窗口 id：原生浮层能否直接当 window_id 用（按 pid 缓存） */
+  private readonly cuaWindowIdsCache = new Map<number, { at: number; ids: Set<number> }>();
 
   constructor(deps: ComputerServiceDeps) {
     this.logger = deps.logger;
@@ -270,6 +335,9 @@ export class ComputerServiceImpl implements ComputerService {
     this.toolMap.clear();
     this.sessionLabels.clear();
     this.sessionRecovering.clear();
+    this.activeTargets.clear();
+    this.resolveCache.clear();
+    this.cuaWindowIdsCache.clear();
     this.health = null;
     this.screen = null;
     if (client) {
@@ -452,6 +520,9 @@ export class ComputerServiceImpl implements ComputerService {
     this.toolMap.clear();
     this.sessionLabels.clear();
     this.sessionRecovering.clear();
+    this.activeTargets.clear();
+    this.resolveCache.clear();
+    this.cuaWindowIdsCache.clear();
     this.health = null;
     this.lastHealthAt = 0;
     this.screen = null;
@@ -510,16 +581,63 @@ export class ComputerServiceImpl implements ComputerService {
       if (retried) {
         result.text = `${result.text}\n${t('computer.retryAfterReconnect')}`.trim();
       }
-      this.recordActivity(tool, opts, result, Date.now() - startedAt, result.isError === true);
+      this.trackActiveTarget(opts);
+      if (!opts.silent) {
+        this.recordActivity(tool, opts, result, Date.now() - startedAt, result.isError === true);
+      }
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const failed: ComputerToolResult = { text: message, images: [], isError: true };
-      this.recordActivity(tool, opts, failed, Date.now() - startedAt, true);
+      this.trackActiveTarget(opts);
+      if (!opts.silent) {
+        this.recordActivity(tool, opts, failed, Date.now() - startedAt, true);
+      }
       // 工具级错误由 cua 以 isError 返回；这里抛出的多为传输/超时错误 → 标记连接失效，下次调用重连。
       if (!opts.signal?.aborted) this.markConnectionError(message);
       throw err;
     }
+  }
+
+  /** Agent 调用携带目标窗口时更新会话活动目标（面板自动跟随）；窗口失效校验交给预览解析 */
+  private trackActiveTarget(opts: ComputerCallOptions): void {
+    if ((opts.source ?? 'agent') !== 'agent') return;
+    if (typeof opts.pid !== 'number' || typeof opts.windowId !== 'number') return;
+    this.setActiveTarget(opts.sessionId, {
+      pid: opts.pid,
+      windowId: opts.windowId,
+      ...(opts.windowTitle ? { title: opts.windowTitle } : {}),
+      ...(opts.windowClassName ? { className: opts.windowClassName } : {}),
+    });
+  }
+
+  setActiveTarget(
+    sessionId: string | undefined,
+    target: { pid: number; windowId: number; title?: string; className?: string },
+  ): void {
+    const key = sessionId?.trim() || '__shared__';
+    this.activeTargets.set(key, { ...target, at: Date.now() });
+    this.resolveCache.clear();
+  }
+
+  getActiveTarget(
+    sessionId?: string,
+    opts: { allowStale?: boolean } = {},
+  ): {
+    pid: number;
+    windowId: number;
+    title?: string;
+    className?: string;
+    at: number;
+  } | null {
+    const key = sessionId?.trim() || '__shared__';
+    const entry = this.activeTargets.get(key);
+    if (!entry) return null;
+    if (!opts.allowStale && Date.now() - entry.at > ACTIVE_TARGET_TTL_MS) {
+      this.activeTargets.delete(key);
+      return null;
+    }
+    return entry;
   }
 
   /**
@@ -624,7 +742,30 @@ export class ComputerServiceImpl implements ComputerService {
     if (typeof opts.maxImageDimension === 'number' && opts.maxImageDimension > 0) {
       args.max_image_dimension = opts.maxImageDimension;
     }
-    return this.capture('get_window_state', args, path);
+    try {
+      return await this.capture('get_window_state', args, path);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!isStaleWindowErrorMessage(message)) throw err;
+      // 窗口重建（WPS/Office 常见）：选同 pid 可见窗口重试一次，避免面板画面永久卡死
+      const windows = await this.listProcessWindows(pid);
+      const fallback = windows
+        .filter(
+          item =>
+            item.visible &&
+            !item.minimized &&
+            item.windowId !== windowId &&
+            item.bounds.width >= 80 &&
+            item.bounds.height >= 60 &&
+            !isInternalWindowClass(item.className) &&
+            !isTransientWindowClass(item.className) &&
+            !isCuaOverlayWindow(item),
+        )
+        .sort((a, b) => a.zOrder - b.zOrder)[0];
+      if (!fallback) throw err;
+      args.window_id = fallback.windowId;
+      return this.capture('get_window_state', args, newLivePath(this.dirs));
+    }
   }
 
   /**
@@ -659,10 +800,12 @@ export class ComputerServiceImpl implements ComputerService {
       throw new Error(t('computer.screenshotFailed'));
     }
     pruneLiveAfterCapture(this.dirs);
+    const title = pickString(raw.structured, ['window_title', 'title', 'app_name']);
     return {
       path: actualPath,
       width: pickNumber(raw.structured, ['screenshot_width', 'width']),
       height: pickNumber(raw.structured, ['screenshot_height', 'height']),
+      ...(title ? { title } : {}),
       transient: true,
     };
   }
@@ -696,27 +839,52 @@ export class ComputerServiceImpl implements ComputerService {
   }
 
   /**
+   * 驱动当前登记的窗口 id（cua list_windows；按 pid 缓存 1.5s）。
+   * 原生枚举能看到无标题浮层，但 cua 只登记有标题的顶层窗口；
+   * 用该集合判断浮层能否直接作为 window_id 使用。
+   */
+  async getCuaWindowIds(pid: number): Promise<Set<number>> {
+    const cached = this.cuaWindowIdsCache.get(pid);
+    if (cached && Date.now() - cached.at <= CUA_WINDOW_IDS_TTL_MS) return cached.ids;
+    const windows = await this.listCuaWindows(pid, false);
+    const ids = new Set(windows.map(item => item.windowId));
+    if (this.cuaWindowIdsCache.size > 100) this.cuaWindowIdsCache.clear();
+    this.cuaWindowIdsCache.set(pid, { at: Date.now(), ids });
+    return ids;
+  }
+
+  /**
    * 自动目标解析（浮层优先）。
-   * 同一进程弹出浮层/对话框时返回最前面的浮层窗口，让截图与 UIA 树都针对它；
-   * 否则返回请求窗口（未指定时返回主窗口）。
+   *
+   * 锚点优先级：requested → anchorWindowId → 会话最近操作窗口 → 同 pid 前台窗口 → 面积最大主窗口。
+   * 浮层优先级：锚点的 last-active popup → 请求的浮层 → 同 pid 前台浮层 → z 序最前浮层。
+   * 只有 cua 登记过的浮层才会被切换为 window_id；否则保持锚点，
+   * 由工具层改用「整屏截图 + 原生 UIA」呈现浮层（Qt 自绘弹层无标题，驱动无法寻址）。
+   *
+   * 结果缓存 250ms，避免一次动作前后两次 EnumWindows 造成目标抖动；
+   * Agent 每次 callTool 都会通过 setActiveTarget 清空缓存，动作后的浮层检测仍能拿到最新状态。
    */
   async resolveWindowTarget(
     pid: number,
     requestedWindowId?: number,
+    opts: { sessionId?: string; anchorWindowId?: number } = {},
   ): Promise<ComputerWindowTarget> {
     const source: ComputerWindowTarget['source'] = isNativeWindowEnumerationAvailable()
       ? 'native'
       : 'cua';
+    const foregroundNative = this.getForegroundWindowInfo();
+    const foregroundId =
+      foregroundNative && foregroundNative.pid === pid && isUsableProcessWindow(foregroundNative)
+        ? foregroundNative.windowId
+        : 0;
+    const cacheKey = `${pid}|${requestedWindowId ?? ''}|${opts.sessionId ?? ''}|${
+      opts.anchorWindowId ?? ''
+    }|${foregroundId}`;
+    const cached = this.getCachedResolve(cacheKey);
+    if (cached) return cached;
+
     const all = await this.listProcessWindows(pid);
-    const usable = all.filter(
-      item =>
-        item.visible &&
-        !item.minimized &&
-        item.bounds.width >= 80 &&
-        item.bounds.height >= 60 &&
-        !isInternalWindowClass(item.className) &&
-        !isCuaOverlayWindow(item),
-    );
+    const usable = all.filter(isUsableProcessWindow);
     if (usable.length === 0) {
       const fallback =
         requestedWindowId ?? all.find(item => item.visible)?.windowId ?? requestedWindowId ?? 0;
@@ -724,58 +892,198 @@ export class ComputerServiceImpl implements ComputerService {
     }
 
     const sorted = usable.slice().sort((a, b) => a.zOrder - b.zOrder);
+    const byId = new Map(sorted.map(item => [item.windowId, item]));
     const main = sorted.reduce(
       (best, item) => (windowArea(item.bounds) > windowArea(best.bounds) ? item : best),
       sorted[0],
     );
-    const mainArea = windowArea(main.bounds);
     const requested =
-      requestedWindowId !== undefined
-        ? sorted.find(item => item.windowId === requestedWindowId)
+      requestedWindowId !== undefined ? byId.get(requestedWindowId) : undefined;
+
+    const foreground =
+      foregroundNative && foregroundNative.pid === pid && isUsableProcessWindow(foregroundNative)
+        ? byId.get(foregroundNative.windowId) ?? foregroundNative
         : undefined;
 
-    // 浮层候选：同进程、与主窗口相交、面积明显更小 / owned popup / WS_POPUP
-    const overlays = sorted.filter(item => {
-      if (item.windowId === main.windowId) return false;
-      if (!rectsIntersect(item.bounds, main.bounds)) return false;
-      if (windowArea(item.bounds) <= 6000) return false;
+    const active = opts.sessionId ? this.getActiveTarget(opts.sessionId) : null;
+    const activeWindow =
+      active && active.pid === pid ? byId.get(active.windowId) : undefined;
+    const anchored =
+      opts.anchorWindowId !== undefined ? byId.get(opts.anchorWindowId) : undefined;
+
+    // 调用方可能直接把「原生浮层 HWND」当 window_id 传进来（例如沿用 list_windows 的补充行）。
+    // 这类窗口驱动未登记：不能作为锚点/动作目标，改用它 owner 或主窗口作文本锚点，浮层走原生观察。
+    let requestedNativeOverlay: ComputerProcessWindow | undefined;
+    let anchorCandidate = requested ?? anchored ?? activeWindow ?? foreground ?? main;
+    if (requested && source === 'native' && (requested.isPopup || requested.owner !== 0)) {
+      const ids = await this.getCuaWindowIds(pid);
+      if (!ids.has(requested.windowId)) {
+        requestedNativeOverlay = requested;
+        anchorCandidate =
+          (requested.owner ? byId.get(requested.owner) : undefined) ??
+          anchored ??
+          activeWindow ??
+          foreground ??
+          main;
+      }
+    }
+    const anchor = anchorCandidate;
+    const anchorArea = windowArea(anchor.bounds);
+
+    const lastPopup = isNativeWindowEnumerationAvailable()
+      ? getNativeLastActivePopup(anchor.windowId)
+      : null;
+
+    // 浮层候选：结构条件是必要条件（WS_POPUP / owner 链 / 标准对话框 / last-active popup），
+    // 面积只作上限保护。普通同级顶层窗口（如 Qt5QWindowIcon）不再被面积规则误判。
+    const overlayCandidates = sorted.filter(item => {
+      if (item.windowId === anchor.windowId) return false;
+      if (!rectsIntersect(item.bounds, anchor.bounds)) return false;
+      const area = windowArea(item.bounds);
+      if (area <= 6000 || area >= anchorArea) return false;
       return (
-        windowArea(item.bounds) < mainArea * 0.92 ||
-        item.owner === main.windowId ||
-        (item.isPopup && !item.isToolWindow)
+        item.isPopup ||
+        isOwnedByWindow(item, anchor.windowId, byId) ||
+        item.className === '#32770' ||
+        (lastPopup !== null && item.windowId === lastPopup.hwnd)
       );
     });
 
-    const foreground = this.getForegroundWindowInfo();
-    const foregroundOverlay =
-      foreground && foreground.pid === pid
-        ? overlays.find(item => item.windowId === foreground.windowId)
-        : undefined;
+    const lastPopupOverlay = lastPopup
+      ? overlayCandidates.find(item => item.windowId === lastPopup.hwnd)
+      : undefined;
     const requestedOverlay =
-      requested && overlays.some(item => item.windowId === requested.windowId)
+      requested && overlayCandidates.some(item => item.windowId === requested.windowId)
         ? requested
         : undefined;
-    const zFrontOverlay = overlays.slice().sort((a, b) => a.zOrder - b.zOrder)[0];
+    const foregroundOverlay = foreground
+      ? overlayCandidates.find(item => item.windowId === foreground.windowId)
+      : undefined;
+    const zFrontOverlay = overlayCandidates
+      .slice()
+      .sort((a, b) => a.zOrder - b.zOrder)[0];
+    const primaryOverlay =
+      requestedNativeOverlay ??
+      lastPopupOverlay ??
+      requestedOverlay ??
+      foregroundOverlay ??
+      zFrontOverlay;
 
-    const overlay = foregroundOverlay ?? requestedOverlay ?? zFrontOverlay;
-    const target = overlay ?? requested ?? main;
-    return {
+    // Qt 弹层常是「壳 + 内容」多窗口叠加：把与主浮层相交的同进程窗口也作为原生 UIA 候选。
+    // 它们不参与 window_id 切换，只用于工具层读取浮层内容。
+    const secondaryCandidates = primaryOverlay
+      ? sorted
+          .filter(
+            item =>
+              item.windowId !== anchor.windowId &&
+              item.windowId !== primaryOverlay.windowId &&
+              !overlayCandidates.some(candidate => candidate.windowId === item.windowId) &&
+              rectsIntersect(item.bounds, primaryOverlay.bounds) &&
+              windowArea(item.bounds) > 6000 &&
+              windowArea(item.bounds) < anchorArea,
+          )
+          .sort((a, b) => a.zOrder - b.zOrder)
+      : [];
+
+    // 候选顺序：主浮层在前，其余按 z 序（工具层会遍历这些候选读取原生 UIA）
+    const orderedCandidates = primaryOverlay
+      ? [
+          primaryOverlay,
+          ...overlayCandidates
+            .filter(item => item.windowId !== primaryOverlay.windowId)
+            .sort((a, b) => a.zOrder - b.zOrder),
+          ...secondaryCandidates,
+        ].slice(0, MAX_OVERLAY_CANDIDATES)
+      : [];
+
+    let cuaWindowIds: Set<number> | null = null;
+    if (primaryOverlay && source === 'native') {
+      cuaWindowIds = await this.getCuaWindowIds(pid);
+    }
+    const overlays: ComputerOverlayWindow[] = orderedCandidates.map(item => ({
+      windowId: item.windowId,
+      ...(item.className ? { className: item.className } : {}),
+      ...(item.title ? { title: item.title } : {}),
+      bounds: item.bounds,
+      addressable: source === 'cua' ? true : cuaWindowIds?.has(item.windowId) === true,
+    }));
+    const overlay = overlays[0];
+
+    // 只有驱动登记过的浮层才能切 window_id；否则保持锚点，浮层走原生观察
+    const target =
+      overlay && overlay.addressable && byId.has(overlay.windowId)
+        ? byId.get(overlay.windowId) ?? anchor
+        : anchor;
+    const result: ComputerWindowTarget = {
       windowId: target.windowId,
-      isOverlay: target.windowId !== main.windowId,
-      mainWindowId: main.windowId,
+      isOverlay: target.windowId !== anchor.windowId,
+      ...(overlay ? { overlay, overlayCandidates: overlays } : {}),
+      mainWindowId: anchor.windowId,
       className: target.className,
       title: target.title,
       bounds: target.bounds,
       source,
     };
+
+    if (this.resolveCache.size > 200) this.resolveCache.clear();
+    this.resolveCache.set(cacheKey, { at: Date.now(), target: result });
+    return result;
+  }
+
+  /** 从解析缓存取结果（供内部高频调用复用；过期返回 null） */
+  private getCachedResolve(key: string): ComputerWindowTarget | null {
+    const entry = this.resolveCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.at > RESOLVE_CACHE_TTL_MS) return null;
+    return entry.target;
+  }
+
+  /**
+   * 面板自动目标：Agent 最后操作的窗口（粘性，窗口关闭才失效）；
+   * 没有 Agent 目标、目标是 MOSS 自身，或浮层无法单独寻址时返回整屏。
+   * 不再跟随系统前台窗口：未调用 computer 工具时面板应显示当前全屏。
+   */
+  async resolvePreviewTarget(sessionId?: string): Promise<ComputerPreviewTarget> {
+    const active = this.getActiveTarget(sessionId, { allowStale: true });
+    if (active) {
+      const windows = await this.listProcessWindows(active.pid);
+      const current = windows.find(
+        item => item.windowId === active.windowId && item.visible && !item.minimized,
+      );
+      if (current && !isMossSelfWindow(current)) {
+        const target = await this.resolveWindowTarget(active.pid, active.windowId, {
+          sessionId,
+          anchorWindowId: active.windowId,
+        });
+        // 浮层是独立窗口且驱动无法寻址：整屏截图才能完整显示它
+        if (target.overlay && !target.overlay.addressable) {
+          return { source: 'desktop' };
+        }
+        return {
+          pid: active.pid,
+          windowId: target.windowId,
+          ...(target.title ? { title: target.title } : {}),
+          ...(target.className ? { className: target.className } : {}),
+          source: 'agent',
+          isOverlay: target.isOverlay,
+          ...(target.bounds ? { bounds: target.bounds } : {}),
+          updatedAt: active.at,
+        };
+      }
+    }
+
+    return { source: 'desktop' };
   }
 
   /** cua list_windows 回退：只能拿到常规顶层窗口（无原生枚举时使用） */
-  private async listCuaWindows(pid: number): Promise<ComputerProcessWindow[]> {
+  private async listCuaWindows(
+    pid: number,
+    onScreenOnly = true,
+  ): Promise<ComputerProcessWindow[]> {
     try {
       const raw = await this.callTool(
         'list_windows',
-        { pid, on_screen_only: true },
+        { pid, on_screen_only: onScreenOnly },
         { source: 'panel', timeoutMs: 8_000 },
       );
       if (raw.isError) return [];
@@ -831,6 +1139,17 @@ export class ComputerServiceImpl implements ComputerService {
     const target = await this.resolveWindowTarget(pid, windowId);
     const focusId = target.windowId;
 
+    // Qt 自绘浮层不在驱动登记表里：无法 bring_to_front；
+    // 直接失败而不是前置主窗口（前置主窗口会把浮层压掉/关闭）。
+    if (target.overlay && !target.overlay.addressable) {
+      return {
+        ok: false,
+        fallback: true,
+        overlay: true,
+        error: 'native overlay is not addressable',
+      };
+    }
+
     // 前台已经是目标窗口：不再重复前置（避免闪屏/把浮层压掉）
     const foreground = this.getForegroundWindowInfo();
     if (foreground && foreground.pid === pid && foreground.windowId === focusId) {
@@ -874,6 +1193,7 @@ export class ComputerServiceImpl implements ComputerService {
       if (focused) {
         this.lastFocusKey = key;
         this.lastFocusAt = Date.now();
+        this.resolveCache.clear();
         return {
           ok: true,
           ...(typeof hwnd === 'number' ? { focusedWindowId: hwnd } : {}),
@@ -912,6 +1232,7 @@ export class ComputerServiceImpl implements ComputerService {
         if (typeof hwnd === 'number' && hwnd !== 0) {
           this.lastFocusKey = `${pid}:${fallbackId}`;
           this.lastFocusAt = Date.now();
+          this.resolveCache.clear();
           return { ok: true, focusedWindowId: fallbackId, fallback: true };
         }
       } catch {
@@ -925,6 +1246,7 @@ export class ComputerServiceImpl implements ComputerService {
       if (typeof hwnd === 'number' && hwnd !== 0) {
         this.lastFocusKey = `${pid}:`;
         this.lastFocusAt = Date.now();
+        this.resolveCache.clear();
         return { ok: true, focusedWindowId: hwnd, fallback: true };
       }
     } catch (err) {
@@ -1460,6 +1782,10 @@ export class ComputerServiceImpl implements ComputerService {
       ...(isError ? { isError: true } : {}),
       ...(durationMs >= 0 ? { durationMs } : {}),
       ...(screenshotPath ? { screenshotPath } : {}),
+      ...(typeof opts.pid === 'number' ? { pid: opts.pid } : {}),
+      ...(typeof opts.windowId === 'number' ? { windowId: opts.windowId } : {}),
+      ...(opts.windowClassName ? { windowClassName: opts.windowClassName } : {}),
+      ...(opts.windowTitle ? { windowTitle: opts.windowTitle } : {}),
     };
 
     this.activities.push(activity);

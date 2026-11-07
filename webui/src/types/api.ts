@@ -1813,6 +1813,20 @@ export interface ComputerActivity {
   screenshotPath?: string;
   isError?: boolean;
   durationMs?: number;
+  /** 动作目标窗口（面板自动跟随） */
+  pid?: number;
+  windowId?: number;
+  windowClassName?: string;
+  windowTitle?: string;
+}
+
+/** 面板实时截图的目标元信息（来自响应头） */
+export interface ComputerCaptureMeta {
+  source: 'agent' | 'desktop' | 'window';
+  pid?: number;
+  windowId?: number;
+  title?: string;
+  className?: string;
 }
 
 // ============================================================================

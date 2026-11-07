@@ -38,6 +38,8 @@ export type {
   ComputerFocusResult,
   ComputerProcessWindow,
   ComputerWindowTarget,
+  ComputerOverlayWindow,
+  ComputerPreviewTarget,
 } from './computer/types';
 export type {
   BrowserService,

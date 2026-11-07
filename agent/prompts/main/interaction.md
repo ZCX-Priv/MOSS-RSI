@@ -25,6 +25,7 @@
   - `screenshot frame=...` 只截该 iframe，画面更大、更准；
   - `hold`/`key_down`/`key_up` 也传同一个 `frame`，不要把按键发给父页面。
 - `computer` 的 x/y 是 `get_window_state` 截图像素；工具会自动带 `capture_id` 绑定该帧。先看截图再点，不要用旧截图的坐标点新窗口。
+- 若结果出现「浮层观察（驱动无法单独寻址）」，说明那是 Qt 自绘浮层（独立窗口，驱动未登记）；它没有 `element_token`，请用结果里原生 UIA 的 `center`/`rect` 坐标，并传 `scope='desktop'`，不要传 `window_id`。
 
 ## 4. 连续输入
 

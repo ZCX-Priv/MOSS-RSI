@@ -452,7 +452,31 @@ export const zh = {
     computerOverlayWindowLine: '浮层/弹出窗口（cua 未列出，已自动检测）：',
     computerSelfDrawnHint:
       '该浮层是自绘/Chromium 界面，UIA 树可能不完整；像素操作请使用该浮层截图的 x/y。',
+    computerNativeOverlayHeader:
+      '浮层观察（驱动无法单独寻址，已改用整屏截图 + 原生 UIA）：',
+    computerOverlayNotAddressable:
+      '检测到浮层 0x{{windowId}}（class={{className}}，{{width}}x{{height}}），但驱动未登记该窗口；已保持主窗口为动作目标，浮层内容改用整屏截图 + 原生 UIA 呈现。',
+    computerNativeOverlayLine:
+      '- 浮层 0x{{windowId}} class={{className}}，整屏截图坐标 x={{x}} y={{y}} w={{width}} h={{height}}；原生 UIA {{elements}} 个元素',
+    computerNativeShotDims:
+      '（截图 {{shotWidth}}x{{shotHeight}}；屏幕 {{screenWidth}}x{{screenHeight}}）',
+    computerNativeUiaCoordinates:
+      '原生 UIA（坐标已换算为整屏截图像素，可直接用于 scope="desktop" 的 x/y）：',
+    computerNativeUiaCoordinatesPhysical:
+      '原生 UIA（坐标为屏幕物理像素；需要像素操作请带 include_screenshot:true 重新读取整屏截图）：',
+    computerNativeUiaEmpty:
+      '该浮层没有可用的 UIA 元素（纯自绘）；请直接按整屏截图像素操作。',
+    computerNativeOverlayOperate:
+      '操作提示：click/type_text 请传 scope="desktop" 与上面的 center/x,y；不要传 window_id 或 element_token。',
     computerScreenshotFrameRetry: '（已补拍当前窗口截图并重试一次）',
+    computerScrollVerified: '滚动后画面已变化，动作已生效。',
+    computerScrollRetryPage: '滚动后画面未变化，已改用整页滚动重试一次。',
+    computerScrollRetryKey: '滚轮仍无变化，已改用 PageDown/PageUp 重试一次。',
+    computerScrollNoChange: '滚动后画面仍未变化（可能已到边界）。',
+    computerScrollForegroundKnown: '该窗口的后台投递已知不可用，已直接使用 foreground。',
+    computerScrollCoordinateFixed: '滚动坐标超出当前截图范围，已改用窗口中心。',
+    computerProgramScreenshot: '程序窗口截图（优先画面）：{{path}}',
+    computerDesktopFallback: '窗口截图不可用，已回退整屏截图：{{path}}',
     todoSessionIdRequired: 'todo 操作需要 sessionId',
     todoReplaceItemsRequired: 'create mode=replace 需要非空 items 数组（元素为 {text, status?, priority?, id?}）',
     todoItemsMissingText: 'items[{{indexes}}] 缺少非空 text，未做任何修改',

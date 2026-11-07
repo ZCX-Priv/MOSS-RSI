@@ -3,29 +3,57 @@
 // 设计：观察 → 动作 → 验证；默认后台投递（不抢焦点/不移动真实鼠标）。
 // 元数据见同目录 tool.json；cua 进程与截图由 computer 模块的 ComputerService 持有。
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
 import type {
   ComputerFocusResult,
+  ComputerOverlayWindow,
   ComputerService,
   ComputerToolResult,
+  ComputerWindowTarget,
 } from '../../contracts';
+import { isInternalWindowClass, isTransientWindowClass } from '../../computer/win32';
 import type { ToolContext, ToolResult, ToolResultContent } from '../types';
 import { errorResult, textResult } from '../types';
 import {
   buildCuaCall,
   describeTarget,
   needsScreenshot,
+  normalizeScrollParams,
   summarizeAction,
   type ComputerAction,
   type ComputerParams,
 } from './actions';
+import { observeNativeOverlay, type NativeOverlayObservation } from './native-overlay';
 
 /** 等待上限（与 tool.json 描述保持一致） */
 const WAIT_MAX_MS = 10_000;
 /** 单张内联截图上限（超过只保留路径） */
 const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+/** 滚动前后帧复用窗口（窗口未变时不必重复截） */
+const FRAME_CACHE_TTL_MS = 2000;
+/** 后台投递不可用能力缓存（同窗口/同事件类型，10 分钟） */
+const BACKGROUND_UNSUPPORTED_TTL_MS = 10 * 60 * 1000;
+/** 缓存上限（避免长时间运行无界增长） */
+const FRAME_CACHE_MAX = 200;
+const BACKGROUND_CACHE_MAX = 200;
+
+interface FrameSignature {
+  path: string;
+  hash: string;
+  at: number;
+  width?: number;
+  height?: number;
+}
+
+/** 滚动前后帧签名：用于判断画面是否真的变化 */
+const frameCache = new Map<string, FrameSignature>();
+/** `${pid}|${className}` → 已知后台不可用的事件类型（mouse_scroll / keystroke） */
+const backgroundUnsupported = new Map<string, { kinds: Set<string>; at: number }>();
+/** `${pid}:${windowId}` → className（解析目标时顺带记录，供能力缓存使用） */
+const windowClassCache = new Map<string, string>();
 
 /** 需要自动目标解析的动作（浮层优先；不包含 status/list_apps/list_windows 等纯观察入口） */
 const AUTO_TARGET_ACTIONS = new Set<ComputerAction>([
@@ -152,6 +180,11 @@ function pickString(obj: unknown, key: string): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
 }
 
+/** HWND → 十六进制文本（i18n 文案自带 0x 前缀，避免 0x0x） */
+function formatHwnd(id: number): string {
+  return id.toString(16);
+}
+
 function pickBoolean(obj: unknown, key: string): boolean | undefined {
   if (!isObject(obj)) return undefined;
   const value = obj[key];
@@ -198,6 +231,180 @@ function statusText(service: ComputerService): string {
     `allowForeground: ${status.config.allowForeground}`,
     ...(status.error ? [`error: ${status.error}`] : []),
   ].join('\n');
+}
+
+// ============================================================================
+// 滚动可靠性：帧签名 / 后台投递能力缓存
+// ============================================================================
+
+function frameKey(ctx: ToolContext, pid: number, windowId: number): string {
+  return `${ctx.sessionId ?? 'shared'}|${pid}|${windowId}`;
+}
+
+function windowKey(pid: number, windowId: number): string {
+  return `${pid}:${windowId}`;
+}
+
+/** 文件内容 SHA-1（同一帧的 PNG 字节稳定，可用于“画面是否变化”判断） */
+function hashFile(path: string): string | undefined {
+  try {
+    return createHash('sha1').update(readFileSync(path)).digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberWindowClass(pid: number, windowId: number, className: string | undefined): void {
+  if (!className) return;
+  if (windowClassCache.size > FRAME_CACHE_MAX) windowClassCache.clear();
+  windowClassCache.set(windowKey(pid, windowId), className);
+}
+
+function getWindowClass(pid: number, windowId: number): string {
+  return windowClassCache.get(windowKey(pid, windowId)) ?? '';
+}
+
+function rememberFrame(
+  ctx: ToolContext,
+  pid: number,
+  windowId: number,
+  frame: Omit<FrameSignature, 'at'>,
+): void {
+  if (frameCache.size > FRAME_CACHE_MAX) frameCache.clear();
+  frameCache.set(frameKey(ctx, pid, windowId), { ...frame, at: Date.now() });
+}
+
+function getRecentFrame(
+  ctx: ToolContext,
+  pid: number,
+  windowId: number,
+): FrameSignature | undefined {
+  const entry = frameCache.get(frameKey(ctx, pid, windowId));
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > FRAME_CACHE_TTL_MS) {
+    frameCache.delete(frameKey(ctx, pid, windowId));
+    return undefined;
+  }
+  return entry;
+}
+
+/**
+ * 只截窗口画面（不遍历 UIA），用于滚动前后帧校验。
+ * 使用 Agent 会话 + silent，保持 Agent 快照 token 有效且不污染时间线。
+ */
+async function captureWindowFrame(
+  service: ComputerService,
+  ctx: ToolContext,
+  pid: number,
+  windowId: number,
+  kind: string,
+): Promise<FrameSignature | null> {
+  const path = service.createScreenshotPath(kind, pid, windowId);
+  const maxDimension = numberConfig(ctx.toolConfig, 'maxImageDimension', 1280);
+  try {
+    const result = await service.callTool(
+      'get_window_state',
+      {
+        pid,
+        window_id: windowId,
+        include_accessibility_tree: false,
+        include_screenshot: true,
+        screenshot_out_file: path,
+        ...(maxDimension > 0 ? { max_image_dimension: maxDimension } : {}),
+      },
+      {
+        source: 'agent',
+        sessionId: ctx.sessionId,
+        action: 'get_window_state',
+        summary: kind,
+        target: `window pid=${pid} id=${windowId}`,
+        screenshotPath: path,
+        timeoutMs: 15_000,
+        signal: ctx.signal,
+        pid,
+        windowId,
+        silent: true,
+        ...(getWindowClass(pid, windowId) ? { windowClassName: getWindowClass(pid, windowId) } : {}),
+      },
+    );
+    if (result.isError) return null;
+    const reported =
+      pickString(result.structured, 'screenshot_file_path') ??
+      pickString(result.structured, 'screenshot_path');
+    const actualPath = reported && existsSync(reported) ? reported : path;
+    if (!existsSync(actualPath)) return null;
+    const hash = hashFile(actualPath);
+    if (!hash) return null;
+    const info = captureInfoFromResult(result.structured);
+    const frame: FrameSignature = {
+      path: actualPath,
+      hash,
+      at: Date.now(),
+      ...(info.screenshotWidth !== undefined ? { width: info.screenshotWidth } : {}),
+      ...(info.screenshotHeight !== undefined ? { height: info.screenshotHeight } : {}),
+    };
+    rememberFrame(ctx, pid, windowId, frame);
+    return frame;
+  } catch {
+    return null;
+  }
+}
+
+/** scroll / 按键事件类型（用于后台投递能力缓存） */
+function backgroundKindForAction(action: ComputerAction): string | undefined {
+  if (action === 'scroll') return 'mouse_scroll';
+  if (action === 'press_key' || action === 'hotkey') return 'keystroke';
+  return undefined;
+}
+
+/** 从 cua 的 background_unavailable 错误中学习该窗口的后台投递能力 */
+function learnBackgroundUnsupported(
+  pid: number,
+  windowId: number,
+  result: ComputerToolResult,
+): void {
+  const match =
+    /Background delivery is not available for target window class '([^']*)' on this event kind \(([a-z_]+)\)/i.exec(
+      result.text,
+    );
+  if (!match) return;
+  const className = match[1] || getWindowClass(pid, windowId);
+  if (!className) return;
+  const kind = match[2].toLowerCase();
+  rememberWindowClass(pid, windowId, className);
+
+  const key = `${pid}|${className}`;
+  const existing = backgroundUnsupported.get(key);
+  const now = Date.now();
+  if (existing && now - existing.at <= BACKGROUND_UNSUPPORTED_TTL_MS) {
+    existing.kinds.add(kind);
+    existing.at = now;
+    return;
+  }
+  if (backgroundUnsupported.size > BACKGROUND_CACHE_MAX) backgroundUnsupported.clear();
+  backgroundUnsupported.set(key, { kinds: new Set([kind]), at: now });
+}
+
+/** 该窗口/该事件类型是否已知只能前台投递（用户显式指定 delivery_mode 时不覆盖） */
+function shouldUseForeground(
+  p: ComputerParams,
+  pid: number,
+  windowId: number,
+  toolConfig: Record<string, unknown> | undefined,
+): boolean {
+  if (p.delivery_mode !== undefined) return false;
+  if (toolConfig?.allowForeground === false) return false;
+  const kind = backgroundKindForAction(p.action);
+  if (!kind) return false;
+  const className = getWindowClass(pid, windowId);
+  if (!className) return false;
+  const entry = backgroundUnsupported.get(`${pid}|${className}`);
+  if (!entry) return false;
+  if (Date.now() - entry.at > BACKGROUND_UNSUPPORTED_TTL_MS) {
+    backgroundUnsupported.delete(`${pid}|${className}`);
+    return false;
+  }
+  return entry.kinds.has(kind);
 }
 
 /** cua structured → 最近一帧的画面尺寸信息（只用于向模型说明坐标换算） */
@@ -299,6 +506,7 @@ async function observeWindowState(
   pid: number,
   windowId: number,
   kind: string,
+  info?: { className?: string; title?: string },
 ): Promise<ObservedWindowState | null> {
   const screenshotPath = service.createScreenshotPath(kind, pid, windowId);
   const maxDimension = numberConfig(ctx.toolConfig, 'maxImageDimension', 1280);
@@ -322,8 +530,13 @@ async function observeWindowState(
         action: 'get_window_state',
         summary: `window ${windowId}`,
         target: `window pid=${pid} id=${windowId}`,
+        screenshotPath,
         timeoutMs: 15_000,
         signal: ctx.signal,
+        pid,
+        windowId,
+        ...(info?.className ? { windowClassName: info.className } : {}),
+        ...(info?.title ? { windowTitle: info.title } : {}),
       },
     );
     if (result.isError) return null;
@@ -336,9 +549,26 @@ async function observeWindowState(
     const incomplete =
       pickBoolean(structured, 'elements_complete') === false ||
       pickBoolean(structured, 'truncated') === true;
+    const reportedPath =
+      pickString(structured, 'screenshot_file_path') ??
+      pickString(structured, 'screenshot_path');
+    const actualScreenshotPath =
+      reportedPath && existsSync(reportedPath) ? reportedPath : screenshotPath;
+    if (existsSync(actualScreenshotPath)) {
+      const hash = hashFile(actualScreenshotPath);
+      const capture = captureInfoFromResult(structured);
+      if (hash) {
+        rememberFrame(ctx, pid, windowId, {
+          path: actualScreenshotPath,
+          hash,
+          ...(capture.screenshotWidth !== undefined ? { width: capture.screenshotWidth } : {}),
+          ...(capture.screenshotHeight !== undefined ? { height: capture.screenshotHeight } : {}),
+        });
+      }
+    }
     return {
       text: result.text.trim(),
-      ...(existsSync(screenshotPath) ? { screenshotPath } : {}),
+      ...(existsSync(actualScreenshotPath) ? { screenshotPath: actualScreenshotPath } : {}),
       ...(elementCount !== undefined ? { elementCount } : {}),
       ...(incomplete ? { incomplete: true } : {}),
     };
@@ -357,7 +587,7 @@ function rectsIntersect(
 
 /**
  * list_windows 补充：cua 的列表不含无标题浮层（如 WPS 新建面板），
- * 这里用原生枚举把主窗口之上、与主窗口相交的小窗口标成 [overlay]。
+ * 这里用原生枚举把主窗口之上的结构性浮层标成 [overlay]，并标注驱动能否寻址。
  */
 async function describeOverlayWindows(
   service: ComputerService,
@@ -372,7 +602,9 @@ async function describeOverlayWindows(
         item.bounds.width >= 80 &&
         item.bounds.height >= 60 &&
         !!item.className &&
-        !item.title.startsWith('Cua.AgentCursorOverlay'),
+        !item.title.startsWith('Cua.AgentCursorOverlay') &&
+        !isInternalWindowClass(item.className) &&
+        !isTransientWindowClass(item.className),
     );
     if (usable.length < 2) return [];
     const main = usable.reduce(
@@ -383,24 +615,34 @@ async function describeOverlayWindows(
       usable[0],
     );
     const mainArea = main.bounds.width * main.bounds.height;
-    return usable
-      .filter(item => item.windowId !== main.windowId)
-      .filter(item => {
-        const area = item.bounds.width * item.bounds.height;
-        return area > 6000 && area < mainArea * 0.92 && rectsIntersect(item.bounds, main.bounds);
-      })
+    const candidates = usable.filter(item => {
+      if (item.windowId === main.windowId) return false;
+      if (!rectsIntersect(item.bounds, main.bounds)) return false;
+      const area = item.bounds.width * item.bounds.height;
+      if (area <= 6000 || area >= mainArea) return false;
+      // 结构条件：WS_POPUP / 有 owner / 标准对话框；普通同级窗口不算浮层
+      return item.isPopup || item.owner !== 0 || item.className === '#32770';
+    });
+    if (candidates.length === 0) return [];
+    const cuaIds = await service.getCuaWindowIds(pid);
+    return candidates
       .sort((a, b) => a.zOrder - b.zOrder)
-      .map(
-        item =>
-          `- [overlay] HWND 0x${item.windowId.toString(16)} class=${item.className} ${item.bounds.width}x${item.bounds.height}`,
-      );
+      .map(item => {
+        const addressable = cuaIds.has(item.windowId);
+        return (
+          `- [overlay] HWND 0x${item.windowId.toString(16)} class=${item.className} ` +
+          `${item.bounds.width}x${item.bounds.height}（${
+            addressable ? '驱动可寻址' : '驱动不可寻址，请用 scope="desktop"'
+          }）`
+        );
+      });
   } catch {
     return [];
   }
 }
 
-/** 窗口截图可能缺失自绘浮层（Qt 弹层/浮动工具栏）：失败或覆盖不全时补一张整屏 */
-function shouldSupplementDesktop(p: ComputerParams, result: ComputerToolResult): boolean {
+/** 动作失败/覆盖不全时是否需要补一张画面（程序窗口优先，整屏仅作最后兜底） */
+function shouldCaptureFallback(p: ComputerParams, result: ComputerToolResult): boolean {
   if (
     p.action === 'get_desktop_state' ||
     p.action === 'get_window_state' ||
@@ -447,7 +689,13 @@ async function captureDesktopSupplement(
 /** cua 结果 → MOSS ToolResult（文本 + 截图 image content + 元信息） */
 function formatResult(
   result: ComputerToolResult,
-  meta: { action: string; tool: string; screenshotPath?: string; autoEscalated?: boolean },
+  meta: {
+    action: string;
+    tool: string;
+    screenshotPath?: string;
+    autoEscalated?: boolean;
+    verifiedByFrame?: boolean;
+  },
 ): ToolResult {
   const images = [...result.images];
   const screenshotPath = meta.screenshotPath;
@@ -472,7 +720,7 @@ function formatResult(
   if (result.text.trim()) textParts.push(result.text);
   if (meta.autoEscalated) textParts.push('（后台投递不可用，已自动升级 foreground 重试一次）');
   if (effect) textParts.push(`effect=${effect}${verified !== undefined ? ` · verified=${verified}` : ''}`);
-  if (effect === 'unverifiable') {
+  if (effect === 'unverifiable' && !meta.verifiedByFrame) {
     textParts.push(
       '⚠️ 未验证：驱动只完成了投递，动作可能已经生效。请先用 get_window_state / verify 观察；不要重复投递同一动作（尤其是 type_text / click），否则会重复输入或重复点击。',
     );
@@ -589,30 +837,119 @@ export default {
         );
       }
 
-      // ---- 自动目标（浮层优先）----
+      // ---- 自动目标（浮层优先；驱动不可寻址的浮层走原生观察）----
       // 不再无条件 bring_to_front：cua 的后台投递 / UIA invoke 不需要前台；
       // 无条件前置会把 WPS 等应用的浮层压下去或失焦关闭。
       const autoTarget = p.auto_focus ?? (ctx.toolConfig?.autoFocus !== false);
       let effectiveParams: ComputerParams = p;
       let targetNote = '';
-      if (autoTarget && typeof p.pid === 'number' && AUTO_TARGET_ACTIONS.has(p.action)) {
-        const target = await service.resolveWindowTarget(p.pid, p.window_id);
-        if (target.windowId && target.windowId !== p.window_id) {
+      let targetTitle = '';
+      let targetClass = '';
+      let autoTargetInfo: ComputerWindowTarget | null = null;
+      let nativeOverlay: ComputerOverlayWindow | undefined;
+      // scope=desktop 使用整屏坐标，不应触发窗口自动切换
+      const isDesktopScope = p.scope === 'desktop' || !!p.display_id;
+      if (
+        autoTarget &&
+        !isDesktopScope &&
+        typeof p.pid === 'number' &&
+        AUTO_TARGET_ACTIONS.has(p.action)
+      ) {
+        const target = await service.resolveWindowTarget(p.pid, p.window_id, {
+          sessionId: ctx.sessionId,
+        });
+        autoTargetInfo = target;
+        targetTitle = target.title ?? '';
+        targetClass = target.className ?? '';
+        if (typeof p.pid === 'number' && target.windowId) {
+          rememberWindowClass(p.pid, target.windowId, target.className);
+        }
+        nativeOverlay =
+          target.overlay && !target.overlay.addressable ? target.overlay : undefined;
+        if (nativeOverlay) {
+          // 驱动未登记该浮层：保持锚点窗口为动作目标，浮层由原生观察呈现
+          rememberWindowClass(p.pid, nativeOverlay.windowId, nativeOverlay.className);
+          targetNote = t('tools.computerOverlayNotAddressable', {
+            windowId: formatHwnd(nativeOverlay.windowId),
+            className: nativeOverlay.className || '—',
+            width: String(nativeOverlay.bounds.width),
+            height: String(nativeOverlay.bounds.height),
+          });
+          // 调用方可能直接把浮层 HWND 当 window_id 传入：动作目标必须回到可寻址的锚点
+          if (target.windowId && target.windowId !== p.window_id) {
+            effectiveParams = { ...p, pid: p.pid, window_id: target.windowId };
+          }
+        } else if (target.windowId && target.windowId !== p.window_id) {
           effectiveParams = { ...p, pid: p.pid, window_id: target.windowId };
           if (target.isOverlay) {
             targetNote = t('tools.computerTargetAutoSwitched', {
-              windowId: `0x${target.windowId.toString(16)}`,
+              windowId: formatHwnd(target.windowId),
               className: target.className || '—',
               width: String(target.bounds?.width ?? '?'),
               height: String(target.bounds?.height ?? '?'),
             });
           } else if (p.window_id === undefined) {
             targetNote = t('tools.computerWindowAutoResolved', {
-              windowId: `0x${target.windowId.toString(16)}`,
+              windowId: formatHwnd(target.windowId),
               className: target.className || '—',
             });
           }
         }
+      }
+
+      // ---- 不可寻址浮层：整屏截图 + 原生 UIA 兜底 ----
+      // Qt 自绘弹层（Qt5QWindowPopupSaveBits 等）无标题，cua 未登记该 HWND；
+      // 保持主窗口为动作目标，观察改用整屏 + 原生 UIA，避免 No window with window_id 硬失败。
+      if (nativeOverlay && p.action === 'get_window_state') {
+        const obs = await observeNativeOverlay(
+          service,
+          ctx,
+          autoTargetInfo?.overlayCandidates?.length
+            ? autoTargetInfo.overlayCandidates
+            : [nativeOverlay],
+          {
+            includeTree: p.include_accessibility_tree !== false,
+            includeScreenshot: p.include_screenshot !== false,
+            maxImageDimension: numberConfig(ctx.toolConfig, 'maxImageDimension', 1280),
+            maxElements: Math.max(1, numberConfig(ctx.toolConfig, 'maxTreeElements', 250)),
+            ...(p.query ? { query: p.query } : {}),
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+          },
+        );
+        if (obs) {
+          const synthetic: ComputerToolResult = {
+            text: `${targetNote ? `${targetNote}\n` : ''}${obs.text}`,
+            images: [],
+            structured: {
+              native_overlay: true,
+              element_count: obs.elementCount,
+              ...(obs.screenshotWidth !== undefined
+                ? { screenshot_width: obs.screenshotWidth }
+                : {}),
+              ...(obs.screenshotHeight !== undefined
+                ? { screenshot_height: obs.screenshotHeight }
+                : {}),
+            },
+            isError: false,
+          };
+          return formatResult(synthetic, {
+            action: p.action,
+            tool: 'get_desktop_state',
+            ...(obs.screenshotPath ? { screenshotPath: obs.screenshotPath } : {}),
+          });
+        }
+      }
+
+      // 已知该窗口的后台投递不可用（Chromium/Electron 的 scroll/keystroke）→ 直接 foreground，
+      // 避免每次动作都先失败一次、再激活/还原造成窗口闪烁；用户显式 delivery_mode 时不覆盖。
+      let foregroundKnown = false;
+      if (
+        typeof effectiveParams.pid === 'number' &&
+        typeof effectiveParams.window_id === 'number' &&
+        shouldUseForeground(effectiveParams, effectiveParams.pid, effectiveParams.window_id, ctx.toolConfig)
+      ) {
+        effectiveParams = { ...effectiveParams, delivery_mode: 'foreground' };
+        foregroundKnown = true;
       }
 
       let activeScreenshotPath = needsScreenshot(effectiveParams)
@@ -658,14 +995,85 @@ export default {
           screenshotPath: activeScreenshotPath,
         });
         tool = call.tool;
-        return service.callTool(call.tool, call.args, {
+        const windowClass =
+          typeof params.pid === 'number' && typeof params.window_id === 'number'
+            ? getWindowClass(params.pid, params.window_id) ||
+              (params.window_id === effectiveParams.window_id ? targetClass : '')
+            : '';
+        const windowTitle =
+          params.window_id === effectiveParams.window_id ? targetTitle : '';
+        const result = await service.callTool(call.tool, call.args, {
           ...callOptions,
           summary: summarizeAction(params),
           target: describeTarget(params),
           screenshotPath: activeScreenshotPath,
+          ...(typeof params.pid === 'number' ? { pid: params.pid } : {}),
+          ...(typeof params.window_id === 'number' ? { windowId: params.window_id } : {}),
+          ...(windowClass ? { windowClassName: windowClass } : {}),
+          ...(windowTitle ? { windowTitle } : {}),
           ...(timeoutOverride !== undefined ? { timeoutMs: timeoutOverride } : {}),
         });
+        // 普通 get_window_state 的截图也写入帧缓存：紧随其后的 scroll 可复用同一基准帧
+        if (
+          !result.isError &&
+          needsScreenshot(params) &&
+          activeScreenshotPath &&
+          existsSync(activeScreenshotPath) &&
+          typeof params.pid === 'number' &&
+          typeof params.window_id === 'number'
+        ) {
+          const hash = hashFile(activeScreenshotPath);
+          if (hash) {
+            const info = captureInfoFromResult(result.structured);
+            rememberFrame(ctx, params.pid, params.window_id, {
+              path: activeScreenshotPath,
+              hash,
+              ...(info.screenshotWidth !== undefined ? { width: info.screenshotWidth } : {}),
+              ...(info.screenshotHeight !== undefined ? { height: info.screenshotHeight } : {}),
+            });
+          }
+        }
+        return result;
       };
+
+      // ---- 滚动准备：取前后帧基准、修正坐标 ----
+      let scrollBefore: FrameSignature | undefined;
+      let scrollShot: FrameSignature | null = null;
+      let scrollCenter: { x: number; y: number } | undefined;
+      let scrollCoordinateFixed = false;
+      let scrollDirection: 'up' | 'down' | 'left' | 'right' | undefined;
+      if (
+        p.action === 'scroll' &&
+        typeof effectiveParams.pid === 'number' &&
+        typeof effectiveParams.window_id === 'number'
+      ) {
+        const pid = effectiveParams.pid;
+        const windowId = effectiveParams.window_id;
+        scrollBefore =
+          getRecentFrame(ctx, pid, windowId) ??
+          (await captureWindowFrame(service, ctx, pid, windowId, 'scroll-before')) ??
+          undefined;
+        if (scrollBefore?.width && scrollBefore.height) {
+          scrollCenter = {
+            x: Math.round(scrollBefore.width / 2),
+            y: Math.round(scrollBefore.height / 2),
+          };
+          const x = effectiveParams.x;
+          const y = effectiveParams.y;
+          const outside =
+            (x !== undefined && (x < 0 || x > scrollBefore.width)) ||
+            (y !== undefined && (y < 0 || y > scrollBefore.height));
+          if (x === undefined || y === undefined || outside) {
+            effectiveParams = { ...effectiveParams, x: scrollCenter.x, y: scrollCenter.y };
+            scrollCoordinateFixed = x !== undefined || y !== undefined;
+          }
+        }
+        try {
+          scrollDirection = normalizeScrollParams(effectiveParams).direction;
+        } catch {
+          // 参数非法时交给 buildCuaCall 抛出标准错误
+        }
+      }
 
       let result: ComputerToolResult;
       let windowFallbackNote = '';
@@ -677,6 +1085,8 @@ export default {
         const fallbackWindowId = await resolveFallbackWindow(service, effectiveParams, message);
         if (fallbackWindowId === undefined) throw err;
         effectiveParams = { ...effectiveParams, window_id: fallbackWindowId };
+        targetTitle = '';
+        targetClass = '';
         result = await callOnce(effectiveParams);
         windowFallbackNote = t('tools.computerWindowFallback', {
           pid: String(effectiveParams.pid),
@@ -689,12 +1099,19 @@ export default {
         const fallbackWindowId = await resolveFallbackWindow(service, effectiveParams, result.text);
         if (fallbackWindowId !== undefined) {
           effectiveParams = { ...effectiveParams, window_id: fallbackWindowId };
+          targetTitle = '';
+          targetClass = '';
           result = await callOnce(effectiveParams);
           windowFallbackNote = t('tools.computerWindowFallback', {
             pid: String(effectiveParams.pid),
             windowId: String(fallbackWindowId),
           });
         }
+      }
+
+      // 记录后台投递能力（必须在 foreground 升级覆盖 result 之前读取原始错误）
+      if (typeof effectiveParams.pid === 'number' && typeof effectiveParams.window_id === 'number') {
+        learnBackgroundUnsupported(effectiveParams.pid, effectiveParams.window_id, result);
       }
 
       // 无截图 frame：错误表示像素动作未执行，补一次截图后重试一次
@@ -744,6 +1161,95 @@ export default {
         finalTool = tool;
       }
 
+      // ---- 滚动校验：画面哈希不变时用整页滚动 / PageDown 重试 ----
+      // 只有 before/after 帧都存在时才比较；截图失败不会阻断动作结果。
+      let scrollRetryKind: 'page' | 'key' | 'none' | '' = '';
+      let scrollChanged = true;
+      if (
+        p.action === 'scroll' &&
+        typeof effectiveParams.pid === 'number' &&
+        typeof effectiveParams.window_id === 'number'
+      ) {
+        const pid = effectiveParams.pid;
+        const windowId = effectiveParams.window_id;
+        scrollShot = await captureWindowFrame(service, ctx, pid, windowId, 'scroll-after');
+        if (scrollBefore && scrollShot) {
+          scrollChanged = scrollShot.hash !== scrollBefore.hash;
+          if (!scrollChanged) {
+            if (!allowForeground) {
+              scrollRetryKind = 'none';
+            } else {
+              try {
+                const center = scrollCenter;
+                // 1) 整页滚动（SB_PAGEDOWN/UP）
+                let retried = await callOnce(
+                  {
+                    ...effectiveParams,
+                    delivery_mode: 'foreground',
+                    by: 'page',
+                    ...(center ? { x: center.x, y: center.y } : {}),
+                  },
+                  Math.min(configTimeout, 15_000),
+                );
+                result = {
+                  ...retried,
+                  images: [...retried.images, ...result.images],
+                  text: retried.text,
+                };
+                finalTool = tool;
+                const pageShot = await captureWindowFrame(
+                  service,
+                  ctx,
+                  pid,
+                  windowId,
+                  'scroll-after-page',
+                );
+                if (pageShot) {
+                  scrollShot = pageShot;
+                  scrollChanged = pageShot.hash !== scrollBefore.hash;
+                }
+                // 2) 上下滚动仍无变化 → PageDown/PageUp（foreground SendInput）
+                if (!scrollChanged && (scrollDirection === 'up' || scrollDirection === 'down')) {
+                  const key = scrollDirection === 'up' ? 'pageup' : 'pagedown';
+                  const keyParams: ComputerParams = {
+                    ...effectiveParams,
+                    action: 'press_key',
+                    key,
+                    delivery_mode: 'foreground',
+                    ...(center ? { x: center.x, y: center.y } : {}),
+                  };
+                  retried = await callOnce(keyParams, Math.min(configTimeout, 15_000));
+                  result = {
+                    ...retried,
+                    images: [...retried.images, ...result.images],
+                    text: retried.text,
+                  };
+                  finalTool = tool;
+                  const keyShot = await captureWindowFrame(
+                    service,
+                    ctx,
+                    pid,
+                    windowId,
+                    'scroll-after-key',
+                  );
+                  if (keyShot) {
+                    scrollShot = keyShot;
+                    scrollChanged = keyShot.hash !== scrollBefore.hash;
+                  }
+                  scrollRetryKind = scrollChanged ? 'key' : 'none';
+                } else {
+                  scrollRetryKind = scrollChanged ? 'page' : 'none';
+                }
+              } catch {
+                // 重试失败：保留已成功的那一次结果，不让兜底把成功变成硬错误
+                scrollRetryKind = scrollRetryKind || 'none';
+              }
+            }
+          }
+        }
+        if (scrollShot) activeScreenshotPath = scrollShot.path;
+      }
+
       // 动作未确认：前台被同进程的另一个窗口（浮层/对话框）接管 → 视为可能已生效，不重投
       let actionMayHaveTakenEffect = false;
       let observedForegroundWindowId: number | undefined;
@@ -766,9 +1272,11 @@ export default {
         }
       }
 
-      // 动作后检测新浮层：自动把截图与 UIA 树切到浮层，避免「点了没反应」的假象
+      // 动作后检测新浮层：自动把截图与 UIA 树切到浮层，避免「点了没反应」的假象。
+      // 驱动可寻址的浮层用 cua 读取；Qt 自绘浮层用整屏截图 + 原生 UIA 兜底。
       let overlayNote = '';
       let overlayState: ObservedWindowState | null = null;
+      let nativeOverlayState: NativeOverlayObservation | null = null;
       if (
         autoTarget &&
         OVERLAY_OBSERVE_ACTIONS.has(effectiveParams.action) &&
@@ -777,53 +1285,125 @@ export default {
         const after = await service.resolveWindowTarget(
           effectiveParams.pid,
           effectiveParams.window_id,
+          { sessionId: ctx.sessionId },
         );
-        const changedOverlayId =
-          after.isOverlay && after.windowId !== effectiveParams.window_id
-            ? after.windowId
-            : undefined;
-        const targetWindowId = changedOverlayId ?? observedForegroundWindowId;
-        if (targetWindowId !== undefined && targetWindowId !== effectiveParams.window_id) {
-          const foreground = service.getForegroundWindowInfo();
-          const meta =
-            changedOverlayId !== undefined
-              ? after
-              : foreground && foreground.windowId === targetWindowId
-                ? foreground
-                : null;
-          overlayState = await observeWindowState(
+        const nativeOverlayAfter =
+          after.overlay && !after.overlay.addressable ? after.overlay : undefined;
+        if (nativeOverlayAfter) {
+          nativeOverlayState = await observeNativeOverlay(
             service,
             ctx,
-            effectiveParams.pid,
-            targetWindowId,
-            'overlay-state',
+            after.overlayCandidates?.length ? after.overlayCandidates : [nativeOverlayAfter],
+            {
+              includeTree: true,
+              includeScreenshot: true,
+              maxImageDimension: numberConfig(ctx.toolConfig, 'maxImageDimension', 1280),
+              maxElements: Math.max(1, numberConfig(ctx.toolConfig, 'maxTreeElements', 250)),
+              ...(ctx.signal ? { signal: ctx.signal } : {}),
+            },
           );
-          if (overlayState) {
-            overlayNote = t('tools.computerTargetAutoSwitched', {
-              windowId: `0x${targetWindowId.toString(16)}`,
-              className: meta?.className || '—',
-              width: String(meta?.bounds?.width ?? '?'),
-              height: String(meta?.bounds?.height ?? '?'),
+          if (nativeOverlayState) {
+            overlayNote = t('tools.computerOverlayNotAddressable', {
+              windowId: formatHwnd(nativeOverlayAfter.windowId),
+              className: nativeOverlayAfter.className || '—',
+              width: String(nativeOverlayAfter.bounds.width),
+              height: String(nativeOverlayAfter.bounds.height),
             });
+          }
+        } else {
+          const changedOverlayId =
+            after.isOverlay && after.windowId !== effectiveParams.window_id
+              ? after.windowId
+              : undefined;
+          const targetWindowId = changedOverlayId ?? observedForegroundWindowId;
+          if (targetWindowId !== undefined && targetWindowId !== effectiveParams.window_id) {
+            const foreground = service.getForegroundWindowInfo();
+            const meta =
+              changedOverlayId !== undefined
+                ? after
+                : foreground && foreground.windowId === targetWindowId
+                  ? foreground
+                  : null;
+            rememberWindowClass(effectiveParams.pid, targetWindowId, meta?.className);
+            overlayState = await observeWindowState(
+              service,
+              ctx,
+              effectiveParams.pid,
+              targetWindowId,
+              'overlay-state',
+              { className: meta?.className, title: meta?.title },
+            );
+            if (overlayState) {
+              overlayNote = t('tools.computerTargetAutoSwitched', {
+                windowId: formatHwnd(targetWindowId),
+                className: meta?.className || '—',
+                width: String(meta?.bounds?.width ?? '?'),
+                height: String(meta?.bounds?.height ?? '?'),
+              });
+            }
           }
         }
       }
 
-      // 整屏补拍：窗口截图可能缺失自绘浮层（Qt 弹层/浮动工具栏）；失败或覆盖不全时以整屏为准
-      const desktopSupplementPath = shouldSupplementDesktop(effectiveParams, result)
-        ? await captureDesktopSupplement(service, ctx)
-        : undefined;
+      // 失败/覆盖不全：程序窗口截图优先，整屏只在窗口截图也失败时兜底
+      let fallbackShotPath: string | undefined;
+      let fallbackIsDesktop = false;
+      if (
+        shouldCaptureFallback(effectiveParams, result) &&
+        !overlayState &&
+        !nativeOverlayState &&
+        !scrollShot
+      ) {
+        const pid = effectiveParams.pid;
+        const windowId = effectiveParams.window_id;
+        if (typeof pid === 'number' && typeof windowId === 'number') {
+          const frame = await captureWindowFrame(service, ctx, pid, windowId, 'fallback-window');
+          if (frame) fallbackShotPath = frame.path;
+        }
+        if (!fallbackShotPath && typeof pid === 'number') {
+          const foreground = service.getForegroundWindowInfo();
+          if (foreground && foreground.pid === pid) {
+            const frame = await captureWindowFrame(
+              service,
+              ctx,
+              pid,
+              foreground.windowId,
+              'fallback-foreground',
+            );
+            if (frame) fallbackShotPath = frame.path;
+          }
+        }
+        if (!fallbackShotPath) {
+          fallbackShotPath = await captureDesktopSupplement(service, ctx);
+          fallbackIsDesktop = !!fallbackShotPath;
+        }
+      }
 
       const formatted = formatResult(result, {
         action: p.action,
         tool: finalTool,
         screenshotPath: activeScreenshotPath,
         ...(autoEscalated ? { autoEscalated: true } : {}),
+        ...(p.action === 'scroll' &&
+        scrollBefore &&
+        scrollShot &&
+        scrollChanged &&
+        !result.isError
+          ? { verifiedByFrame: true }
+          : {}),
       });
       // 动作可能已生效（前台被同进程浮层接管）：不要让 effect=refused 再把它标成失败
       if (actionMayHaveTakenEffect) formatted.isError = false;
       const notes = [
         targetNote,
+        p.action === 'scroll' && scrollBefore && scrollShot && scrollChanged && !result.isError
+          ? t('tools.computerScrollVerified')
+          : '',
+        foregroundKnown ? t('tools.computerScrollForegroundKnown') : '',
+        scrollCoordinateFixed ? t('tools.computerScrollCoordinateFixed') : '',
+        scrollRetryKind === 'page' ? t('tools.computerScrollRetryPage') : '',
+        scrollRetryKind === 'key' ? t('tools.computerScrollRetryKey') : '',
+        scrollRetryKind === 'none' ? t('tools.computerScrollNoChange') : '',
         windowFallbackNote,
         actionMayHaveTakenEffect ? t('tools.computerActionMayHaveTakenEffect') : '',
         overlayNote,
@@ -831,8 +1411,32 @@ export default {
       if (notes.length > 0) {
         formatted.content.unshift({ type: 'text', text: notes.join('\n') });
       }
-      // 浮层状态：UIA 树 + 截图（让模型直接看到浮层，而不是主窗口）
-      if (overlayState) {
+      // 原生浮层：整屏截图 + 原生 UIA（文本自带标题，不再重复加前缀）
+      if (nativeOverlayState) {
+        formatted.content.push({ type: 'text', text: nativeOverlayState.text });
+        const overlayPath = nativeOverlayState.screenshotPath;
+        if (overlayPath && existsSync(overlayPath)) {
+          const included = formatted.content.some(
+            item => item.type === 'image' && item.path === overlayPath,
+          );
+          if (!included) {
+            try {
+              const buf = readFileSync(overlayPath);
+              if (buf.length > 0 && buf.length <= MAX_INLINE_IMAGE_BYTES) {
+                formatted.content.push({
+                  type: 'image',
+                  source: { data: buf.toString('base64'), mimeType: 'image/png' },
+                  path: overlayPath,
+                });
+              }
+            } catch {
+              // 读取失败时只保留路径提示
+            }
+          }
+          formatted.content.push({ type: 'text', text: `截图：${overlayPath}` });
+        }
+      } else if (overlayState) {
+        // 驱动可寻址浮层：cua 的 UIA 树 + 窗口截图
         const parts = [t('tools.computerOverlayObserved')];
         if (overlayState.text) parts.push(overlayState.text);
         if (
@@ -864,18 +1468,18 @@ export default {
           formatted.content.push({ type: 'text', text: `截图：${overlayPath}` });
         }
       }
-      if (desktopSupplementPath) {
+      if (fallbackShotPath) {
         const included = formatted.content.some(
-          item => item.type === 'image' && item.path === desktopSupplementPath,
+          item => item.type === 'image' && item.path === fallbackShotPath,
         );
         if (!included) {
           try {
-            const buf = readFileSync(desktopSupplementPath);
+            const buf = readFileSync(fallbackShotPath);
             if (buf.length > 0 && buf.length <= MAX_INLINE_IMAGE_BYTES) {
               formatted.content.push({
                 type: 'image',
                 source: { data: buf.toString('base64'), mimeType: 'image/png' },
-                path: desktopSupplementPath,
+                path: fallbackShotPath,
               });
             }
           } catch {
@@ -884,7 +1488,9 @@ export default {
         }
         formatted.content.push({
           type: 'text',
-          text: `整屏截图（优先参考，含自绘浮层/弹出层）：${desktopSupplementPath}`,
+          text: fallbackIsDesktop
+            ? t('tools.computerDesktopFallback', { path: fallbackShotPath })
+            : t('tools.computerProgramScreenshot', { path: fallbackShotPath }),
         });
       }
       // list_windows 自动补充 cua 列表里缺失的浮层窗口（Windows 原生枚举）

@@ -77,6 +77,7 @@ import type {
   ComputerHealth,
   ComputerStatus,
   ComputerWindowInfo,
+  ComputerCaptureMeta,
   BrowserStatus,
   MigrationSource,
   MigrationSourceId,
@@ -391,12 +392,14 @@ export const api = {
     request<BrowserStatus>('POST', '/api/browser/install', { action: 'run' }),
   /** 面板实时画面：带 Authorization 直接拉二进制（不能走 <img src>，否则 token 丢失） */
   fetchComputerScreenshot: async (opts: {
-    target: 'desktop' | 'window';
+    target: 'auto' | 'desktop' | 'window';
+    sessionId?: string;
     pid?: number;
     windowId?: number;
     maxDimension?: number;
-  }): Promise<Blob> => {
+  }): Promise<{ blob: Blob; meta: ComputerCaptureMeta }> => {
     const qs = new URLSearchParams({ target: opts.target });
+    if (opts.sessionId) qs.set('sessionId', opts.sessionId);
     if (opts.pid !== undefined) qs.set('pid', String(opts.pid));
     if (opts.windowId !== undefined) qs.set('windowId', String(opts.windowId));
     if (opts.maxDimension !== undefined) qs.set('maxDimension', String(opts.maxDimension));
@@ -417,7 +420,29 @@ export const api = {
       }
       throw new Error(message);
     }
-    return resp.blob();
+    const decodeHeader = (name: string): string | undefined => {
+      const raw = resp.headers.get(name);
+      if (!raw) return undefined;
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    };
+    const pid = Number(resp.headers.get('X-Computer-Target-Pid'));
+    const windowId = Number(resp.headers.get('X-Computer-Target-Window-Id'));
+    const source = resp.headers.get('X-Computer-Target-Source');
+    const title = decodeHeader('X-Computer-Target-Title');
+    const className = decodeHeader('X-Computer-Target-Class');
+    const meta: ComputerCaptureMeta = {
+      source:
+        source === 'agent' || source === 'window' || source === 'desktop' ? source : 'desktop',
+      ...(Number.isFinite(pid) && pid > 0 ? { pid } : {}),
+      ...(Number.isFinite(windowId) && windowId > 0 ? { windowId } : {}),
+      ...(title ? { title } : {}),
+      ...(className ? { className } : {}),
+    };
+    return { blob: await resp.blob(), meta };
   },
 
   // ==========================================================================
