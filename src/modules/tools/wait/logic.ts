@@ -14,7 +14,9 @@ export type WaitMatch = 'all' | 'any';
 export type NormalizedCondition =
   | { kind: 'session'; sessionId: string }
   | { kind: 'terminal'; sessionId: string; terminalId?: string }
-  | { kind: 'tool'; sessionId: string; toolCallId: string };
+  | { kind: 'tool'; sessionId: string; toolCallId: string }
+  /** 等待智能体（async 子代理）运行结束：agentId（a1/main）与 sessionId 至少提供一个 */
+  | { kind: 'agent'; agentId?: string; sessionId?: string };
 
 export interface WaitTimeInput {
   duration?: string;
@@ -167,7 +169,18 @@ export function normalizeConditions(
       continue;
     }
 
-    return fail(`conditions[${i}] 的 kind 必须是 session / terminal / tool`);
+    if (kind === 'agent') {
+      const agentId = typeof c.agentId === 'string' && c.agentId.trim() ? c.agentId.trim() : undefined;
+      const sessionId =
+        typeof c.sessionId === 'string' && c.sessionId.trim() ? c.sessionId.trim() : undefined;
+      if (!agentId && !sessionId) {
+        return fail(`conditions[${i}]（agent）需要 agentId（如 a1）或 sessionId 至少一项`);
+      }
+      out.push({ kind: 'agent', ...(agentId ? { agentId } : {}), ...(sessionId ? { sessionId } : {}) });
+      continue;
+    }
+
+    return fail(`conditions[${i}] 的 kind 必须是 session / terminal / tool / agent`);
   }
 
   return { ok: true, value: out };

@@ -722,16 +722,54 @@ export const ToolCallDetails = memo(function ToolCallDetails({
     toolCall.status === 'executing' &&
     typeof parsedArgs?.command === 'string';
 
+  // 停止命令 ack（后端中断结果）与兜底定时器
+  const interruptAck = useStore((s) => s.terminalInterruptAcks[toolCall.id]);
+  const stopTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (toolCall.status !== 'executing') setStopping(false);
+    if (toolCall.status !== 'executing') {
+      setStopping(false);
+      if (stopTimerRef.current !== null) {
+        window.clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = null;
+      }
+    }
   }, [toolCall.status]);
+
+  // ack 返回：失败（命令已结束/无中断句柄）立即复位并提示；成功则保持转圈直到 tool-call-end
+  useEffect(() => {
+    if (!interruptAck) return;
+    if (!interruptAck.ok) {
+      setStopping(false);
+      toast.error(t('task.toolCard.stopCommandFailed'));
+      useStore.getState().clearTerminalInterruptAck(toolCall.id);
+    }
+  }, [interruptAck, toolCall.id, t]);
+
+  // 卸载清理：定时器 + ack 记录（toolCallId 不复用，避免 store 长期堆积）
+  useEffect(
+    () => () => {
+      if (stopTimerRef.current !== null) {
+        window.clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = null;
+      }
+      useStore.getState().clearTerminalInterruptAck(toolCall.id);
+    },
+    [toolCall.id],
+  );
 
   const stopCommand = () => {
     if (stopping) return;
+    // 清掉上一次的陈旧 ack，避免立即触发复位
+    useStore.getState().clearTerminalInterruptAck(toolCall.id);
     setStopping(true);
     wsClient.send({ type: 'terminal.interrupt', payload: { toolCallId: toolCall.id } });
-    // 后端无 ack：3s 后恢复按钮，避免命令已结束时按钮永远转圈
-    window.setTimeout(() => setStopping(false), 3000);
+    // 兜底：仅在后端 ack/事件都丢失时复位，正常路径由 tool-call-end 结束转圈
+    if (stopTimerRef.current !== null) window.clearTimeout(stopTimerRef.current);
+    stopTimerRef.current = window.setTimeout(() => {
+      stopTimerRef.current = null;
+      setStopping(false);
+    }, 10_000);
   };
 
   const onCopy = async () => {

@@ -1368,6 +1368,7 @@ export const en = {
       modeSource: 'Source',
       copySource: 'Copy source',
       stopCommand: 'Stop command',
+      stopCommandFailed: 'Stop failed: the command may have finished',
       pending: 'Waiting for result…',
       emptyResult: '(No output)',
       newFile: 'New file',
@@ -1510,6 +1511,9 @@ export const en = {
       flowLoadFailed: 'Failed to load execution trace',
       noSessionYet: 'Not started yet',
       openFullTask: 'Open full task page',
+      stopAgent: 'Stop this agent',
+      stopAgentFailed: 'Failed to stop, please retry',
+      stopAgentNotRunning: 'This agent has already finished',
     },
   },
   agentBus: {
@@ -1526,6 +1530,9 @@ export const en = {
     statusCompleted: 'Completed',
     statusFailed: 'Failed',
     statusAborted: 'Aborted',
+    cancelAgent: 'Stop this agent',
+    cancelFailed: 'Failed to stop, please retry',
+    cancelNotRunning: 'This agent has already finished',
   },
   plugins: {
     title: 'Plugins',

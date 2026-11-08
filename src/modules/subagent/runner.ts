@@ -1,8 +1,9 @@
 // src/modules/subagent/runner.ts
 // SubagentRunner：一次性子代理运行服务（sync/async）。
 // 职责：创建隐藏 subagent 会话（落盘 tasks/subagent/）、嵌套深度保护、
-// 权限模式继承、中断级联（仅 sync）、子代理事件广播（subagent:event）、
-// 多智能体总线注册与 async 结果回执。
+// 权限模式继承、中断级联（sync 随工具调用；async 随父 run abort / 删除会话 / 手动终止）、
+// 子代理事件广播（subagent:event）、多智能体总线注册与 async 结果回执。
+// 生命周期：父 run 正常完成不终止 async（后台跑完并回执）；只有 abort/删除/手动终止才级联取消。
 
 import type { EventBus, Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
@@ -31,7 +32,11 @@ export interface SubagentRunInput {
   parentToolCallId?: string;
   /** 父会话 id（用于继承权限模式、计算嵌套深度、注册总线成员） */
   parentSessionId?: string;
-  /** 父工具调用的中断信号（sync 停止主 run 时级联中止子代理；async 不继承） */
+  /**
+   * 父 run 的中断信号。
+   * sync / async 都继承：主 run 被 abort（用户停止 / 发送新消息打断）时级联中止；
+   * 主 run 正常完成不会 abort，因此 async 子代理继续在后台跑完并回执。
+   */
   signal?: AbortSignal;
 }
 
@@ -68,6 +73,8 @@ export class SubagentRunner {
   private readonly activeRuns = new Map<string, AbortController>();
   /** 会话嵌套深度：sessionId → depth（主会话 0，子代理逐层 +1） */
   private readonly sessionDepth = new Map<string, number>();
+  /** 因父级取消而中止的 async 子代理：不再向父会话投递过期 result 回执 */
+  private readonly stoppedByParent = new Set<string>();
 
   constructor(deps: {
     engine: AgentEngine;
@@ -97,7 +104,9 @@ export class SubagentRunner {
   }
 
   /**
-   * 异步后台 subagent：立即返回 agentId/sessionId，不随父工具 signal 中断。
+   * 异步后台 subagent：立即返回 agentId/sessionId。
+   * 父 run 正常完成不会 abort signal → 后台子代理继续跑完并回执；
+   * 用户停止 / 打断发送会 abort 父 signal → 级联中止（见 execute 的 forwardParentSignal）。
    * 完成后通过 AgentBus 向父代理投递 result 消息（父代理下一轮注入）。
    */
   start(input: SubagentRunInput): SubagentStartOutput {
@@ -110,7 +119,7 @@ export class SubagentRunner {
       template: input.template,
       status: 'running',
     };
-    void this.execute(input, prepared, { forwardParentSignal: false }).catch((err) => {
+    void this.execute(input, prepared, { forwardParentSignal: true }).catch((err) => {
       this.logger.warn('subagent: async run failed', {
         sessionId: prepared.taskId,
         error: err instanceof Error ? err.message : String(err),
@@ -119,13 +128,55 @@ export class SubagentRunner {
     return output;
   }
 
-  /** 取消一个后台/运行中的子代理（主代理 agent_status cancel） */
+  /** 取消一个子代理及其全部后代（agent_status cancel / 前端单 Agent 终止按钮） */
   stop(sessionId: string): boolean {
+    let stopped = false;
     const controller = this.activeRuns.get(sessionId);
-    if (!controller) return false;
-    controller.abort();
-    this.bus()?.update(sessionId, { status: 'aborted', finishedAt: new Date().toISOString() });
-    return true;
+    if (controller) {
+      controller.abort();
+      this.bus()?.update(sessionId, { status: 'aborted', finishedAt: new Date().toISOString() });
+      stopped = true;
+    }
+    // 递归后代：终止父节点后不能让孙代理成为孤儿
+    for (const child of this.runningChildren(sessionId)) {
+      if (this.stop(child.sessionId)) stopped = true;
+    }
+    return stopped;
+  }
+
+  /**
+   * 取消整个任务树下所有运行中的子代理（删除会话等场景）。
+   * 只对「父节点不在待取消集合中」的根节点调用 stop（stop 自带后代递归），
+   * 避免同一成员被重复 abort/广播。返回实际发出取消的成员数量。
+   */
+  cancelTree(rootSessionId: string): number {
+    const bus = this.bus();
+    if (!bus) return 0;
+    const running = bus
+      .list(rootSessionId)
+      .filter((m) => m.kind === 'subagent' && m.status === 'running');
+    const runningIds = new Set(running.map((m) => m.sessionId));
+    let count = 0;
+    for (const member of running) {
+      // 父节点也在取消集合中 → 由父节点的 stop 递归处理
+      if (member.parentSessionId && runningIds.has(member.parentSessionId)) continue;
+      if (this.stop(member.sessionId)) count += 1;
+    }
+    return count;
+  }
+
+  /** 某成员直接派生的、仍在运行的后代 */
+  private runningChildren(sessionId: string): AgentBusMember[] {
+    const bus = this.bus();
+    if (!bus) return [];
+    return bus
+      .list()
+      .filter(
+        (m) =>
+          m.kind === 'subagent' &&
+          m.status === 'running' &&
+          m.parentSessionId === sessionId,
+      );
   }
 
   status(sessionId: string): AgentBusMember | null {
@@ -195,9 +246,13 @@ export class SubagentRunner {
     opts: { forwardParentSignal: boolean },
   ): Promise<SubagentRunOutput> {
     const { taskId, depth, controller, permissionMode } = prepared;
-    const forwardAbort = (): void => controller.abort();
+    // 父 run 被 abort（用户停止 / 打断发送）→ 立即级联中止；标记后不再向父会话投递过期回执
+    const forwardAbort = (): void => {
+      this.stoppedByParent.add(taskId);
+      controller.abort();
+    };
     if (opts.forwardParentSignal && input.signal) {
-      if (input.signal.aborted) controller.abort();
+      if (input.signal.aborted) forwardAbort();
       else input.signal.addEventListener('abort', forwardAbort, { once: true });
     }
 
@@ -234,7 +289,7 @@ export class SubagentRunner {
         finishReason: result.finishReason,
         result: result.finalText,
       };
-      if (input.mode === 'async') {
+      if (input.mode === 'async' && !this.stoppedByParent.has(taskId)) {
         this.sendResultToParent(input, taskId, result.finalText, result.finishReason);
       }
       return output;
@@ -245,7 +300,7 @@ export class SubagentRunner {
         finishedAt: new Date().toISOString(),
         error: message,
       });
-      if (input.mode === 'async') {
+      if (input.mode === 'async' && !this.stoppedByParent.has(taskId)) {
         this.sendResultToParent(input, taskId, `执行失败：${message}`, 'error');
       }
       throw err;
@@ -255,6 +310,7 @@ export class SubagentRunner {
       }
       this.activeRuns.delete(taskId);
       this.sessionDepth.delete(taskId);
+      this.stoppedByParent.delete(taskId);
       this.unregisterExternalRun(taskId, controller);
     }
   }

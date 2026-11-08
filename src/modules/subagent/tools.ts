@@ -126,6 +126,8 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
             mode: 'async',
             parentToolCallId: ctx.toolCallId,
             parentSessionId: ctx.sessionId,
+            // 父 run 正常完成不会 abort；用户停止/打断发送会 abort → 级联中止后台子代理
+            signal: ctx.signal,
           });
           return {
             content: [

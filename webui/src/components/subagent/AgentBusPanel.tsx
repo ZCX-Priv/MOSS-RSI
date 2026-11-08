@@ -1,11 +1,12 @@
 // webui/src/components/subagent/AgentBusPanel.tsx
 // 任务页右侧「智能体」标签：当前任务的智能体树 + 通信记录。
 // 数据：REST 快照（历史/刷新后）+ WS agent-bus.event（实时成员与消息）。
-// 只读面板：用户仍通过主对话驱动智能体；这里只观察与审计。
+// 观察与审计为主；运行中的子代理可在成员行右侧单独终止（含其后代）。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot, Loader2, RefreshCw } from 'lucide-react';
+import { Bot, Loader2, RefreshCw, Square } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/http';
 import {
@@ -48,6 +49,8 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  /** 正在终止的子代理 sessionId（防重复点击） */
+  const [cancellingSession, setCancellingSession] = useState<string | null>(null);
   const [filter, setFilter] = useState<MessageFilter>('all');
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -65,6 +68,20 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
       setLoading(false);
     }
   }, [sessionId]);
+
+  /** 终止单个子代理（含其后代）；状态由 agent-bus.event 实时回写 */
+  const cancelMember = async (member: AgentBusMember): Promise<void> => {
+    if (cancellingSession) return;
+    setCancellingSession(member.sessionId);
+    try {
+      const resp = await api.cancelSubagent(member.sessionId);
+      if (!resp.ok) toast.error(t('agentBus.cancelNotRunning'));
+    } catch {
+      toast.error(t('agentBus.cancelFailed'));
+    } finally {
+      setCancellingSession(null);
+    }
+  };
 
   useEffect(() => {
     setSnapshotMessages([]);
@@ -170,36 +187,60 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
           </div>
         ) : (
           <div className="flex max-h-[180px] flex-col gap-0.5 overflow-auto no-scrollbar">
-            {members.map((member) => (
-              <button
-                key={member.sessionId}
-                type="button"
-                onClick={() =>
-                  setSelectedAgent((prev) =>
-                    prev === member.sessionId ? null : member.sessionId,
-                  )
-                }
-                className={cn(
-                  'flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50',
-                  selectedAgent === member.sessionId && 'bg-muted',
-                )}
-                style={{ paddingLeft: `${6 + Math.max(0, member.depth) * 14}px` }}
-              >
-                <span
-                  className={cn('size-1.5 shrink-0 rounded-full', STATUS_DOT[member.status])}
-                  aria-hidden
-                />
-                <span className="shrink-0 text-[11px] font-medium text-foreground">
-                  {member.agentId}
-                </span>
-                <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-                  {member.name}
-                </span>
-                <span className="ml-auto max-w-[45%] shrink-0 truncate text-[10px] text-muted-foreground/70">
-                  {statusLabel(member.status, t)}
-                </span>
-              </button>
-            ))}
+            {members.map((member) => {
+              const runningSubagent = member.kind === 'subagent' && member.status === 'running';
+              const cancelling = cancellingSession === member.sessionId;
+              return (
+                <div
+                  key={member.sessionId}
+                  className={cn(
+                    'flex min-w-0 items-center gap-1 rounded-md transition-colors hover:bg-muted/50',
+                    selectedAgent === member.sessionId && 'bg-muted',
+                  )}
+                  style={{ paddingLeft: `${6 + Math.max(0, member.depth) * 14}px` }}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedAgent((prev) =>
+                        prev === member.sessionId ? null : member.sessionId,
+                      )
+                    }
+                    className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pr-1 text-left"
+                  >
+                    <span
+                      className={cn('size-1.5 shrink-0 rounded-full', STATUS_DOT[member.status])}
+                      aria-hidden
+                    />
+                    <span className="shrink-0 text-[11px] font-medium text-foreground">
+                      {member.agentId}
+                    </span>
+                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                      {member.name}
+                    </span>
+                    <span className="ml-auto max-w-[45%] shrink-0 truncate text-[10px] text-muted-foreground/70">
+                      {statusLabel(member.status, t)}
+                    </span>
+                  </button>
+                  {runningSubagent && (
+                    <button
+                      type="button"
+                      onClick={() => void cancelMember(member)}
+                      disabled={cancelling}
+                      title={t('agentBus.cancelAgent')}
+                      aria-label={t('agentBus.cancelAgent')}
+                      className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      {cancelling ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <Square className="size-3 fill-current" />
+                      )}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

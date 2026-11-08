@@ -918,6 +918,22 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       }
       break;
     }
+    case 'terminal.interrupt.ack': {
+      // 停止命令结果：ok=false 时前端立即复位按钮并提示（命令已结束/无中断句柄）
+      const payload = (msg.payload ?? {}) as {
+        toolCallId?: string;
+        ok?: boolean;
+        terminalId?: string;
+        reason?: string;
+      };
+      if (!payload.toolCallId) break;
+      useStore.getState().setTerminalInterruptAck(payload.toolCallId, {
+        ok: payload.ok === true,
+        ...(payload.terminalId ? { terminalId: payload.terminalId } : {}),
+        ...(payload.reason ? { reason: payload.reason } : {}),
+      });
+      break;
+    }
     case 'context-updated': {
       if (!sessionId) break;
       const payload = (msg.payload ?? {}) as {
@@ -1202,6 +1218,28 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           { type: ev.type, sessionId: ev.sessionId, payload: ev },
           { silent: true },
         );
+      }
+      break;
+    }
+    case 'subagent.todo': {
+      // 子代理自己的 todo（与主会话完全隔离）：只写入 agentSessionId 对应的子代理会话，
+      // 绝不触碰主会话的 todos。数据源仍是该子代理 sessionId 的独立落盘文件。
+      const payload = (msg.payload ?? {}) as {
+        agentSessionId?: string;
+        todos?: TodoItem[];
+        toolCallId?: string;
+      };
+      const agentSessionId = payload.agentSessionId;
+      if (!agentSessionId || !Array.isArray(payload.todos)) break;
+      useStore.getState().setTodos(agentSessionId, payload.todos);
+      if (payload.toolCallId) {
+        const msgs = useStore.getState().messagesBySession[agentSessionId] ?? [];
+        const target = msgs.find((m) => m.toolCalls?.some((tc) => tc.id === payload.toolCallId));
+        if (target && target.todoSnapshot === undefined) {
+          useStore
+            .getState()
+            .updateMessage(agentSessionId, target.id, { todoSnapshot: payload.todos });
+        }
       }
       break;
     }

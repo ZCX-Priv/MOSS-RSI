@@ -1,7 +1,7 @@
 {
   "name": "wait",
-  "description": "等待工具（同步阻塞）。三种用法：1) 纯时间：time.duration 支持 1500ms / 30s / 5min（最小 100ms），或 time.until 支持 ISO 8601 或本地 HH:mm / HH:mm:ss；2) 纯条件：conditions 等待会话/任务运行结束（session）、终端命令执行结束（terminal）、指定工具调用结束（tool），match=all 全部满足 / any 任一满足；3) 时间+条件：两者都满足才返回，到达时间点仍未满足时正常返回并标记 timedOut（不报错）。单次等待硬上限 30 分钟（超限直接报错，请拆分多次）。条件目标启动时校验：不存在直接报错，目标已结束视为已满足。禁止等待当前会话自身或当前工具调用自身（会死锁，直接报错）。终端忙闲只统计经 run() 执行的命令，用户在终端手工输入的命令无法观测。等待期间可被用户停止（返回 aborted）。",
-  "description_en": "Wait tool (synchronous blocking). Three usages: 1) time only: time.duration accepts 1500ms / 30s / 5min (min 100ms), or time.until accepts ISO 8601 or local HH:mm / HH:mm:ss; 2) conditions only: wait for a session/task to finish (session), a terminal command to finish (terminal), or a specific tool call to finish (tool); match=all requires every condition, any requires one; 3) time + conditions: returns only when both are satisfied; if the time point is reached while conditions are still pending it returns normally with timedOut=true (not an error). Hard cap 30 minutes per wait (larger values are rejected; split into multiple waits). Targets are validated at start: a missing target is an error, an already-finished target counts as satisfied. Waiting for the current session or the current tool call itself is rejected (deadlock). Terminal busy only tracks commands executed via run(); manually typed commands are not observable. The wait can be stopped by the user (returns aborted).",
+  "description": "等待工具（同步阻塞）。三种用法：1) 纯时间：time.duration 支持 1500ms / 30s / 5min（最小 100ms），或 time.until 支持 ISO 8601 或本地 HH:mm / HH:mm:ss；2) 纯条件：conditions 等待会话/任务运行结束（session）、终端命令执行结束（terminal）、指定工具调用结束（tool）、智能体运行结束（agent，用于 async 子代理），match=all 全部满足 / any 任一满足；3) 时间+条件：两者都满足才返回，到达时间点仍未满足时正常返回并标记 timedOut（不报错）。单次等待硬上限 30 分钟（超限直接报错，请拆分多次）。条件目标启动时校验：不存在直接报错，目标已结束视为已满足。禁止等待当前会话自身或当前工具调用自身（会死锁，直接报错）。终端忙闲只统计经 run() 执行的命令，用户在终端手工输入的命令无法观测。等待期间可被用户停止（返回 aborted）。",
+  "description_en": "Wait tool (synchronous blocking). Three usages: 1) time only: time.duration accepts 1500ms / 30s / 5min (min 100ms), or time.until accepts ISO 8601 or local HH:mm / HH:mm:ss; 2) conditions only: wait for a session/task to finish (session), a terminal command to finish (terminal), a specific tool call to finish (tool), or an agent to finish (agent, for async subagents); match=all requires every condition, any requires one; 3) time + conditions: returns only when both are satisfied; if the time point is reached while conditions are still pending it returns normally with timedOut=true (not an error). Hard cap 30 minutes per wait (larger values are rejected; split into multiple waits). Targets are validated at start: a missing target is an error, an already-finished target counts as satisfied. Waiting for the current session or the current tool call itself is rejected (deadlock). Terminal busy only tracks commands executed via run(); manually typed commands are not observable. The wait can be stopped by the user (returns aborted).",
   "icon": "timer",
   "annotations": {
     "readOnlyHint": true,
@@ -31,22 +31,22 @@
       },
       "conditions": {
         "type": "array",
-        "description": "状态条件（最多 16 个）：session=会话/任务结束；terminal=终端命令结束；tool=指定工具调用结束。",
-        "description_en": "State conditions (max 16): session = session/task finished; terminal = terminal command finished; tool = specific tool call finished.",
+        "description": "状态条件（最多 16 个）：session=会话/任务结束；terminal=终端命令结束；tool=指定工具调用结束；agent=智能体运行结束（async 子代理，按 agentId 或 sessionId）。",
+        "description_en": "State conditions (max 16): session = session/task finished; terminal = terminal command finished; tool = specific tool call finished; agent = agent run finished (async subagent, by agentId or sessionId).",
         "maxItems": 16,
         "items": {
           "type": "object",
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["session", "terminal", "tool"],
+              "enum": ["session", "terminal", "tool", "agent"],
               "description": "条件类型。",
               "description_en": "Condition kind."
             },
             "sessionId": {
               "type": "string",
-              "description": "目标会话/任务 id（kind=session 时必填；kind=tool 与 kind=terminal 缺省为当前会话）。",
-              "description_en": "Target session/task id (required for kind=session; defaults to the current session for kind=tool and kind=terminal)."
+              "description": "目标会话/任务 id（kind=session 时必填；kind=tool 与 kind=terminal 缺省为当前会话；kind=agent 可与 agentId 二选一）。",
+              "description_en": "Target session/task id (required for kind=session; defaults to the current session for kind=tool and kind=terminal; optional for kind=agent when agentId is given)."
             },
             "terminalId": {
               "type": "string",
@@ -57,6 +57,11 @@
               "type": "string",
               "description": "目标工具调用 id（kind=tool 时必填）。",
               "description_en": "Target tool call id (required for kind=tool)."
+            },
+            "agentId": {
+              "type": "string",
+              "description": "目标智能体短 id（kind=agent，如 a1 / a2 / main；可用 agent_status list 查看）。与 sessionId 至少提供一个。",
+              "description_en": "Target agent short id (kind=agent, e.g. a1 / a2 / main; see agent_status list). Provide at least one of agentId and sessionId."
             }
           },
           "required": ["kind"],

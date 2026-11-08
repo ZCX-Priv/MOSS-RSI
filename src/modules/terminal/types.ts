@@ -82,6 +82,16 @@ export interface TerminalRunResult {
   restarted?: boolean;
 }
 
+/** 前端「停止命令」的中断结果（WS ack 回传，驱动按钮状态） */
+export interface TerminalInterruptResult {
+  /** 是否找到并触发了中断 */
+  ok: boolean;
+  /** 命中的终端 id（raw 一次性执行没有终端） */
+  terminalId?: string;
+  /** 失败原因：no-active-run=命令已结束；其他值仅用于日志排查 */
+  reason?: string;
+}
+
 /** 终端服务接口（ServiceNames.TERMINAL） */
 export interface TerminalService {
   /** 新建持久终端 */
@@ -114,8 +124,21 @@ export interface TerminalService {
   registerRun(toolCallId: string, terminalId: string): void;
   /** 注销运行登记 */
   unregisterRun(toolCallId: string): void;
-  /** 向该 toolCall 对应的终端发送 Ctrl+C；找不到返回 false */
-  interruptRun(toolCallId: string): boolean;
+  /**
+   * 登记一个「无持久终端」的可中断 run（terminal raw=true 的一次性子进程）。
+   * 停止命令时调用该回调（内部 abort → 杀进程树）。
+   */
+  registerInterruptibleRun(toolCallId: string, interrupt: () => void): void;
+  /** 注销可中断 run 登记 */
+  unregisterInterruptibleRun(toolCallId: string): void;
+  /**
+   * 中断该 toolCall 对应的命令：
+   * - 持久终端：PTY 写 Ctrl+C；管道模式杀进程树；随后立即结算 waiter（工具立即返回 aborted）；
+   * - raw 一次性执行：调用登记的中断回调（abort → 杀进程树）；
+   * - 找不到返回 ok=false（命令可能已结束）。
+   * 兼容 PTC 嵌套调用（内部 id 为 ptc_<callId>）。
+   */
+  interruptRun(toolCallId: string): TerminalInterruptResult;
   /** 把一段文本保存为该终端的完整输出文件（返回路径；失败 null） */
   saveOutput(id: string, text: string): Promise<string | null>;
   /** 清理某会话全部终端（会话删除 / 进程退出时） */

@@ -1368,6 +1368,7 @@ export const zh = {
       modeSource: '源码',
       copySource: '复制源码',
       stopCommand: '停止命令',
+      stopCommandFailed: '停止失败：命令可能已结束',
       pending: '等待结果…',
       emptyResult: '（无输出）',
       newFile: '新建',
@@ -1509,6 +1510,9 @@ export const zh = {
       flowLoadFailed: '执行过程加载失败',
       noSessionYet: '尚未开始执行',
       openFullTask: '打开完整任务页',
+      stopAgent: '终止该智能体',
+      stopAgentFailed: '终止失败，请重试',
+      stopAgentNotRunning: '该智能体已结束',
     },
   },
   agentBus: {
@@ -1525,6 +1529,9 @@ export const zh = {
     statusCompleted: '已完成',
     statusFailed: '失败',
     statusAborted: '已中止',
+    cancelAgent: '终止该智能体',
+    cancelFailed: '终止失败，请重试',
+    cancelNotRunning: '该智能体已结束',
   },
   plugins: {
     title: '插件库',

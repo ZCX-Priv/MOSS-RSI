@@ -7,14 +7,15 @@
 // - 时间+条件：两者都满足才返回；到达时间点仍未满足 → timedOut（正常返回，不报错）；
 // - 用户停止（ctx.signal）→ aborted（正常返回，不报错）。
 //
-// 条件判定依赖三个服务：server.instance（会话运行态）、agent.engine（会话存在性/工具调用状态）、
-// terminal.service（命令忙闲）。目标在启动时校验，已结束的目标视为已满足。
+// 条件判定依赖四个服务：server.instance（会话运行态）、agent.engine（会话存在性/工具调用状态）、
+// terminal.service（命令忙闲）、agent.bus（智能体运行状态）。目标在启动时校验，已结束的目标视为已满足。
 
 import type { ToolContext, ToolResult } from '../types';
 import { errorResult } from '../types';
 import { ServiceNames } from '../../../core/types';
 import type { ServerInstanceLike } from '../../contracts';
 import type { TerminalService } from '../../terminal/types';
+import type { AgentBus, AgentBusMember } from '../../agent-bus/types';
 import {
   WAIT_LIMITS,
   judgeConditions,
@@ -43,6 +44,7 @@ interface Deps {
   server: ServerInstanceLike | null;
   engine: AgentEngineLike | null;
   terminal: TerminalService | null;
+  bus: AgentBus | null;
 }
 
 interface ConditionState {
@@ -74,7 +76,34 @@ function resolveDeps(ctx: ToolContext): Deps {
     server: ctx.services.tryResolve<ServerInstanceLike>(ServiceNames.SERVER_INSTANCE),
     engine: ctx.services.tryResolve<AgentEngineLike>(ServiceNames.AGENT_ENGINE),
     terminal: ctx.services.tryResolve<TerminalService>(ServiceNames.TERMINAL),
+    bus: ctx.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS),
   };
+}
+
+/** wait 的 root 任务树（当前会话未注册总线时以自身为 root） */
+function resolveRoot(ctx: ToolContext, deps: Deps): string {
+  return deps.bus?.get(ctx.sessionId)?.rootSessionId ?? ctx.sessionId;
+}
+
+/**
+ * 解析 agent 条件的目标成员：
+ * - root 限定在当前任务树内（跨树不匹配）；
+ * - agentId 优先，其次 sessionId。
+ */
+function findAgentMember(
+  bus: AgentBus,
+  root: string,
+  condition: Extract<NormalizedCondition, { kind: 'agent' }>,
+): AgentBusMember | null {
+  const members = bus.list(root);
+  if (condition.agentId) {
+    const byAgentId = members.find((m) => m.agentId === condition.agentId);
+    if (byAgentId) return byAgentId;
+  }
+  if (condition.sessionId) {
+    return members.find((m) => m.sessionId === condition.sessionId) ?? null;
+  }
+  return null;
 }
 
 /**
@@ -99,6 +128,20 @@ function validateTargets(conditions: NormalizedCondition[], ctx: ToolContext, de
 
   for (let i = 0; i < conditions.length; i++) {
     const c = conditions[i];
+
+    if (c.kind === 'agent') {
+      if (!deps.bus) return `conditions[${i}] 智能体总线不可用（agent.bus 未就绪）`;
+      const root = resolveRoot(ctx, deps);
+      const member = findAgentMember(deps.bus, root, c);
+      if (!member) {
+        const target = [c.agentId, c.sessionId].filter(Boolean).join('/');
+        return `conditions[${i}] 未找到智能体「${target}」（root=${root}）`;
+      }
+      if (member.sessionId === ctx.sessionId) {
+        return `conditions[${i}] 不能等待当前会话自身（会死锁）；请等待其它智能体`;
+      }
+      continue;
+    }
 
     if (c.kind === 'session') {
       if (c.sessionId === ctx.sessionId) {
@@ -142,6 +185,25 @@ function validateTargets(conditions: NormalizedCondition[], ctx: ToolContext, de
 /** 逐条件评估当前状态 */
 function evaluateConditions(conditions: NormalizedCondition[], ctx: ToolContext, deps: Deps): ConditionState[] {
   return conditions.map((c, index) => {
+    if (c.kind === 'agent') {
+      const target = [c.agentId, c.sessionId].filter(Boolean).join('/');
+      if (!deps.bus) {
+        return { index, kind: c.kind, target, satisfied: true, detail: '总线不可用，视为已结束' };
+      }
+      const member = findAgentMember(deps.bus, resolveRoot(ctx, deps), c);
+      if (!member) {
+        return { index, kind: c.kind, target, satisfied: true, detail: '智能体已结束（总线中不存在）' };
+      }
+      const running = member.status === 'running';
+      return {
+        index,
+        kind: c.kind,
+        target: `${member.agentId}(${member.sessionId})`,
+        satisfied: !running,
+        detail: running ? '当前状态 running' : `已结束（${member.status}）`,
+      };
+    }
+
     if (c.kind === 'session') {
       const running = deps.server?.isSessionRunning?.(c.sessionId) ?? false;
       return {

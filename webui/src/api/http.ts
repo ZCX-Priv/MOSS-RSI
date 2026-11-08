@@ -664,6 +664,9 @@ export const api = {
   // ==========================================================================
   runSubagent: (data: { template: string; task: string; cwd: string; permissionMode?: 'ask' | 'auto' | 'skip' }) =>
     request<SubagentRunOutput>('POST', '/api/subagents/run', data),
+  /** 终止单个子代理（递归终止其后代）；ok=false 表示当前没有可取消的运行 */
+  cancelSubagent: (sessionId: string) =>
+    request<{ ok: boolean }>('POST', '/api/subagents/cancel', { sessionId }),
 
   // ==========================================================================
   // 多智能体总线（任务页「智能体」标签）

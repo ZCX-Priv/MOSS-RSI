@@ -11,7 +11,7 @@
 // 记忆注入等 user 角色内容），避免内部上下文泄露。
 // 工具行复用主对话的 ToolCallDetails（图标 + 可展开参数/结果，样式一致）。
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Atom, ChevronRight, ExternalLink, Loader2 } from 'lucide-react';
@@ -24,8 +24,18 @@ import { stripInjectBlock } from '../../lib/inject-block';
 import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-preview';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
-import { buildToolResultIndex, type ToolResultEntry } from './agent-calls';
+import { TodoProgressCard } from '../shared/TodoProgressCard';
+import { buildToolResultIndex, isAgentCall, parseAgentArgs, type ToolResultEntry } from './agent-calls';
+import type { SubagentCallItem } from './SubagentCard';
 import type { TaskMessage, ToolCall } from '../../types/api';
+
+/**
+ * 嵌套 Subagent 卡片懒加载：SubagentCard 反向懒加载 AgentTaskFlow（避免静态循环依赖），
+ * 运行时递归仅受后端 MAX_SUBAGENT_DEPTH=2 限制。
+ */
+const SubagentCard = lazy(() =>
+  import('./SubagentCard').then((m) => ({ default: m.SubagentCard })),
+);
 
 interface AgentTaskFlowProps {
   /** agent 自己的会话 id（= 其 taskId）；null 表示尚未派发 */
@@ -81,6 +91,10 @@ function mergeToolState(historyMsg: TaskMessage, liveMsg: TaskMessage): TaskMess
   });
   return {
     ...liveMsg,
+    // 实时副本没有快照时保留历史快照：否则节流重拉后卡片会被实时版本覆盖而消失
+    ...(liveMsg.todoSnapshot === undefined && historyMsg.todoSnapshot !== undefined
+      ? { todoSnapshot: historyMsg.todoSnapshot }
+      : {}),
     ...(toolCalls ? { toolCalls } : {}),
     ...(results.size > 0 ? { toolResults: [...results.values()] } : {}),
   };
@@ -165,6 +179,8 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
   /** 子代理自己的会话 id（工具卡懒加载必须按它取结果，而不是主会话） */
   sessionId?: string | null;
 }) {
+  /** 子代理自己的会话 todos（与主会话隔离；实时由 subagent.todo 写入） */
+  const todos = useStore((s) => (sessionId ? s.todosBySession[sessionId] : undefined));
   if (message.isError) {
     return (
       <pre className="mono whitespace-pre-wrap break-words text-[10px] text-destructive">
@@ -174,6 +190,30 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
   }
   // 防御性剥离命令注入块（LLM 可见、UI 不可见），与主对话渲染口径一致
   const visibleContent = stripInjectBlock(message.content);
+  // agent 调用走 SubagentCard（与主会话同口径）；todo 走专属卡片；其余走通用工具卡
+  const toolCalls = message.toolCalls ?? [];
+  const agentCalls = toolCalls.filter((tc) => isAgentCall(tc));
+  const otherCalls = toolCalls.filter((tc) => tc.name !== 'todo' && !isAgentCall(tc));
+  // todo 卡片：优先级 = 消息自身快照（历史）→ 子代理会话实时清单（与主会话同一口径）
+  const todoSnapshot = message.todoSnapshot ?? todos;
+  const hasTodoCall = toolCalls.some((tc) => tc.name === 'todo');
+  const showTodoCard =
+    (todoSnapshot?.length ?? 0) > 0 &&
+    (message.todoSnapshot !== undefined || hasTodoCall);
+  // 嵌套 agent 调用 → SubagentCallItem（结果从全局索引兜底，长耗时结果不紧邻本消息）
+  const agentItems: SubagentCallItem[] = agentCalls.map((tc) => {
+    const indexed = toolResultIndex.get(tc.id);
+    const args = parseAgentArgs(tc) ?? {};
+    return {
+      toolCallId: tc.id,
+      template: args.template ?? '',
+      task: args.task ?? '',
+      ...(args.mode ? { mode: args.mode } : {}),
+      status: indexed ? 'done' : tc.status,
+      ...(indexed ? { resultText: indexed.text, isError: indexed.isError } : {}),
+      ...(indexed?.lazy ? { lazy: true } : {}),
+    };
+  });
   return (
     <div className="flex flex-col gap-1">
       {message.thinking && <ThinkingLine message={message} />}
@@ -189,7 +229,7 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
           />
         </div>
       )}
-      {message.toolCalls?.map((tc) => {
+      {otherCalls.map((tc) => {
         const matched = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         const indexed = toolResultIndex.get(tc.id);
         // 结果即完成：实时副本可能残留 executing，历史索引已拿到结果时按完成渲染
@@ -220,6 +260,12 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
           />
         );
       })}
+      {agentItems.length > 0 && (
+        <Suspense fallback={<div className="text-[11px] text-muted-foreground">…</div>}>
+          <SubagentCard calls={agentItems} sessionId={sessionId ?? undefined} />
+        </Suspense>
+      )}
+      {showTodoCard && <TodoProgressCard todos={todoSnapshot!} variant="inline" />}
     </div>
   );
 });

@@ -251,6 +251,15 @@ async function handleRawRun(p: TerminalParams, ctx: ToolContext, filesys: Filesy
   const timeoutMs = Math.max(1000, Math.min(600_000, rawTimeout));
 
   const snap = await filesys.beginTerminalSnapshot(cwdRes.cwd, ctx.sessionId);
+  // raw 一次性执行没有持久终端：登记可中断回调，前端「停止命令」按钮按下即 abort → 杀进程树
+  const controller = new AbortController();
+  const onParentAbort = (): void => controller.abort();
+  if (ctx.signal) {
+    if (ctx.signal.aborted) controller.abort();
+    else ctx.signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const svc = ctx.services.tryResolve<TerminalService>(ServiceNames.TERMINAL);
+  svc?.registerInterruptibleRun(ctx.toolCallId, () => controller.abort());
   let res: Awaited<ReturnType<typeof runCommandRaw>>;
   try {
     res = await runCommandRaw({
@@ -258,10 +267,13 @@ async function handleRawRun(p: TerminalParams, ctx: ToolContext, filesys: Filesy
       cwd: cwdRes.cwd,
       ...(p.interpreter ? { interpreter: p.interpreter } : {}),
       timeoutMs,
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      signal: controller.signal,
     });
   } catch (err) {
     return textResult(`Error: ${t('tools.terminalActionFailed', { message: errText(err) })}`, true);
+  } finally {
+    svc?.unregisterInterruptibleRun(ctx.toolCallId);
+    ctx.signal?.removeEventListener('abort', onParentAbort);
   }
   const workspaceNote = await finishSnapshot(filesys, snap, ctx);
 

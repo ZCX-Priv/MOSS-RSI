@@ -561,6 +561,16 @@ interface UIActions {
 
   // Todo / Context
   setTodos: (sessionId: string, todos: TodoItem[]) => void;
+  /**
+   * 停止命令 ack（toolCallId → 后端中断结果）：
+   * 前端停止按钮据此判断「已结束/无法中断」，避免固定 3s 复位造成「变回停止图标」。
+   */
+  terminalInterruptAcks: Record<string, { ok: boolean; terminalId?: string; reason?: string; at: number }>;
+  setTerminalInterruptAck: (
+    toolCallId: string,
+    ack: { ok: boolean; terminalId?: string; reason?: string },
+  ) => void;
+  clearTerminalInterruptAck: (toolCallId: string) => void;
   setContext: (
     sessionId: string,
     ctx: { files: ContextFile[]; totalTokens: number; maxTokens: number },
@@ -934,6 +944,7 @@ export const useStore = create<Store>((set, get) => ({
 
   // --- Todo / Context ---
   todosBySession: {},
+  terminalInterruptAcks: {},
   contextBySession: {},
   contextStatsBySession: {},
   contextFileReadSeqBySession: {},
@@ -1692,6 +1703,19 @@ export const useStore = create<Store>((set, get) => ({
     set((state) => ({
       todosBySession: { ...state.todosBySession, [sessionId]: todos },
     })),
+  setTerminalInterruptAck: (toolCallId, ack) =>
+    set((state) => ({
+      terminalInterruptAcks: {
+        ...state.terminalInterruptAcks,
+        [toolCallId]: { ...ack, at: Date.now() },
+      },
+    })),
+  clearTerminalInterruptAck: (toolCallId) =>
+    set((state) => {
+      if (!(toolCallId in state.terminalInterruptAcks)) return {};
+      const { [toolCallId]: _omit, ...rest } = state.terminalInterruptAcks;
+      return { terminalInterruptAcks: rest };
+    }),
   setContext: (sessionId, ctx) =>
     set((state) => ({
       contextBySession: { ...state.contextBySession, [sessionId]: ctx },

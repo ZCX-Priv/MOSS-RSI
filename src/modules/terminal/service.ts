@@ -38,6 +38,7 @@ import {
   type InterpreterKind,
   type TerminalCreateOptions,
   type TerminalInfo,
+  type TerminalInterruptResult,
   type TerminalRunResult,
   type TerminalService,
 } from './types';
@@ -258,6 +259,12 @@ const SHELL_READY_MAX_MS = 3000;
 const LONG_COMMAND_CHARS = 1024;
 /** 超时后延迟复位输入（避开紧接着启动的下一条命令） */
 const TIMEOUT_RESET_DELAY_MS = 220;
+/**
+ * 停止命令的兜底窗口（ms）：PTY 发送 Ctrl+C 后，若 shell 在该窗口内既没有新的完成 D、
+ * 也没有回到提示符，则判定 Ctrl+C 未生效（命令忽略 SIGINT / 子进程树脱离），
+ * 强杀进程树并关闭终端，保证「按下停止立即真正停止」。
+ */
+const INTERRUPT_RECOVER_MS = 800;
 /** OSC 命中完成 D 后的静默观察期：提示符 D 可能先于被缓冲的输出刷出，等安静再切片（防截断） */
 const SETTLE_QUIET_MS = 30;
 /** 静默观察期上限：输出持续不断时的兜底 */
@@ -313,6 +320,8 @@ export class TerminalManager implements TerminalService {
   private readonly defaultByKind = new Map<string, Map<InterpreterKind, string>>();
   /** 运行中的工具调用 → 终端 id（前端停止按钮按 toolCallId 精确中断单条命令） */
   private readonly activeRuns = new Map<string, string>();
+  /** 无持久终端的可中断 run（raw 一次性执行）：toolCallId → 中断回调 */
+  private readonly interruptibles = new Map<string, () => void>();
   /** 终端 id → 经 run() 执行中的命令计数（缺失/0 = 空闲；同一终端并发命令累计） */
   private readonly commandCounts = new Map<string, number>();
   private readonly emit: TerminalEmitter;
@@ -685,17 +694,129 @@ export class TerminalManager implements TerminalService {
     this.activeRuns.delete(toolCallId);
   }
 
-  /** 按 toolCallId 向对应终端发送 Ctrl+C；找不到登记/终端返回 false */
-  interruptRun(toolCallId: string): boolean {
-    const id = this.activeRuns.get(toolCallId);
-    if (!id) return false;
-    const rt = this.runtimes.get(id);
-    if (!rt) {
-      this.activeRuns.delete(toolCallId);
-      return false;
+  /** 登记无持久终端的可中断 run（raw 一次性执行） */
+  registerInterruptibleRun(toolCallId: string, interrupt: () => void): void {
+    this.interruptibles.set(toolCallId, interrupt);
+  }
+
+  /** 注销可中断 run 登记 */
+  unregisterInterruptibleRun(toolCallId: string): void {
+    this.interruptibles.delete(toolCallId);
+  }
+
+  /**
+   * 停止单条命令：按 toolCallId 找到终端/可中断回调并立即中断。
+   *
+   * 关键语义（修「停止按钮按了没停、过一会儿才停」）：
+   * - PTY：先写 Ctrl+C；随后**立即结算 waiter**，工具马上返回 aborted（前端按钮立刻消失）；
+   * - 管道模式：Ctrl+C 字节不是信号 → 直接杀进程树；
+   * - raw：调用登记的中断回调（abort → 杀进程树）；
+   * - PTY 的 Ctrl+C 兜底：800ms 内 shell 未恢复提示符/D 标记 → 强杀进程树并关闭终端。
+   *
+   * 兼容 PTC 嵌套调用（引擎注册的是 `ptc_<callId>`，前端发的是裸 callId）。
+   */
+  interruptRun(toolCallId: string): TerminalInterruptResult {
+    const candidates = [toolCallId];
+    if (toolCallId.startsWith('ptc_')) candidates.push(toolCallId.slice(4));
+    else candidates.push(`ptc_${toolCallId}`);
+
+    let terminalId: string | undefined;
+    for (const key of candidates) {
+      const id = this.activeRuns.get(key);
+      if (id) {
+        terminalId = id;
+        break;
+      }
     }
+
+    if (!terminalId) {
+      for (const key of candidates) {
+        const interrupt = this.interruptibles.get(key);
+        if (interrupt) {
+          try {
+            interrupt();
+          } catch {
+            /* 回调内部已处理 */
+          }
+          return { ok: true, reason: 'interruptible' };
+        }
+      }
+      return { ok: false, reason: 'no-active-run' };
+    }
+
+    const rt = this.runtimes.get(terminalId);
+    if (!rt || rt.closed) {
+      this.activeRuns.delete(toolCallId);
+      return { ok: false, reason: 'terminal-not-found' };
+    }
+
+    const beforeDCount = rt.dCount;
+    const beforeBufferLen = rt.buffer.length;
     this.interrupt(rt);
-    return true;
+    // 立即结算：不再等 shell 的 D 标记/提示符，工具立刻返回 aborted
+    this.abortWaiters(rt);
+    if (rt.pty) {
+      setTimeout(() => {
+        this.ensureInterruptRecovered(rt, beforeDCount, beforeBufferLen);
+      }, INTERRUPT_RECOVER_MS);
+    }
+    return { ok: true, terminalId };
+  }
+
+  /** 停止命令后立即以 aborted 结算该终端全部 waiter（多路结算幂等） */
+  private abortWaiters(rt: Runtime): void {
+    for (const w of Array.from(rt.waiters)) {
+      this.settleWaiter(rt, w, {
+        output: this.sliceRunOutput(rt, w),
+        found: false,
+        aborted: true,
+        ...(w.echoEnd !== undefined ? { exact: true } : {}),
+      });
+    }
+  }
+
+  /**
+   * Ctrl+C 兜底：窗口内 shell 没有产生新的完成 D、也没有回到提示符 → 命令不响应 SIGINT，
+   * 强杀进程树并关闭终端（下次 terminal 工具经 ensureDefault 自动重建）。
+   */
+  private ensureInterruptRecovered(rt: Runtime, beforeDCount: number, beforeBufferLen: number): void {
+    if (rt.closed || this.runtimes.get(rt.info.id) !== rt) return;
+    if (rt.dCount > beforeDCount) return;
+    // 缓冲区尾部出现提示符也算 shell 已恢复（命令已结束，只是没有 D 标记）
+    const tailFrom = Math.max(0, rt.buffer.length - 400);
+    if (findPromptTail(rt.buffer, tailFrom, rt.interpreter.shell) >= 0) return;
+    this.logger.warn('terminal: Ctrl+C did not restore prompt, killing process tree', {
+      terminalId: rt.info.id,
+      sessionId: rt.info.sessionId,
+      bufferGrowth: rt.buffer.length - beforeBufferLen,
+    });
+    this.killTree(rt);
+    this.close(rt.info.id);
+  }
+
+  /** 杀掉终端进程树（Windows 用 taskkill /F /T；POSIX 直接 kill 子进程） */
+  private killTree(rt: Runtime): void {
+    const pid = rt.proc?.pid;
+    try {
+      rt.proc?.kill();
+    } catch {
+      /* 进程可能已退出 */
+    }
+    if (this.isWindows && typeof pid === 'number' && pid > 0) {
+      try {
+        Bun.spawnSync(['taskkill', '/F', '/T', '/PID', String(pid)], {
+          stdout: 'ignore',
+          stderr: 'ignore',
+        });
+      } catch {
+        /* taskkill 不可用/进程已消失 */
+      }
+    }
+    try {
+      rt.pty?.close();
+    } catch {
+      /* 已关闭 */
+    }
   }
 
   /** 输出快照（等待 headless 解析追上写入后再序列化） */
@@ -1343,9 +1464,14 @@ export class TerminalManager implements TerminalService {
     });
   }
 
-  /** 向 shell 发送中断（Ctrl+C）：超时 / 中止 / 续行看门狗共用 */
+  /** 向 shell 发送中断（Ctrl+C）：超时 / 中止 / 续行看门狗 / 停止按钮共用 */
   private interrupt(rt: Runtime): void {
     if (rt.closed) return;
+    if (!rt.pty) {
+      // 管道模式：stdin 写入 0x03 只是普通字符，不会产生中断信号 → 直接杀进程树
+      this.killTree(rt);
+      return;
+    }
     try {
       this.write(rt.info.id, '\u0003');
     } catch {

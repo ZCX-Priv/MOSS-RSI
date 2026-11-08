@@ -1670,6 +1670,10 @@ export class AgentEngineImpl implements AgentEngine {
 
   /** 删除会话 */
   deleteSession(sessionId: string): void {
+    // 会话删除：先终止该任务树下全部运行中的子代理（含 async 后台代理），避免孤儿继续跑
+    this.services
+      .tryResolve<{ cancelTree: (rootSessionId: string) => number }>(ServiceNames.SUBAGENT_RUNNER)
+      ?.cancelTree(sessionId);
     this.sessions.delete(sessionId);
   }
 
@@ -2186,6 +2190,31 @@ export class AgentEngineImpl implements AgentEngine {
           // 持久化快照到 assistant 消息（刷新后可恢复）
           const session = this.sessions.get(sessionId);
           if (session) this.sessions.attachTodoSnapshot(session, toolCallId, todos);
+
+          // 子代理会话：todo 属于子代理自己（数据按 sessionId 隔离落盘）。
+          // 隐藏会话没有前端订阅 → 通过独立事件 subagent.todo 定向通知 root 页面；
+          // 前端只写入 payload.agentSessionId 对应的子代理会话，绝不触碰主会话 todos。
+          const bus = this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
+          const member = bus?.get(sessionId);
+          if (member?.kind === 'subagent') {
+            // 1) 子代理完整任务页（订阅的是子会话）：走原事件，保持自洽
+            server.sendToSession(sessionId, {
+              type: 'todo-updated',
+              sessionId,
+              payload: { todos, toolCallId },
+            });
+            // 2) 主会话页（订阅的是 root）：独立事件，携带子代理归属
+            if (member.rootSessionId && member.rootSessionId !== sessionId) {
+              server.sendToSession(member.rootSessionId, {
+                type: 'subagent.todo',
+                sessionId: member.rootSessionId,
+                payload: { agentSessionId: sessionId, todos, toolCallId },
+              });
+            }
+            break;
+          }
+
+          // 主会话：行为与现状完全一致
           server.sendToSession(sessionId, {
             type: 'todo-updated',
             sessionId,

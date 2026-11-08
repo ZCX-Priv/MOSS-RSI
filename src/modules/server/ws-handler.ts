@@ -1225,10 +1225,17 @@ export class WsHandler {
     this.terminalService()?.close(payload.terminalId);
   }
 
-  /** 停止单条命令：按 toolCallId 找到登记终端并发送 Ctrl+C */
-  private handleTerminalInterrupt(_state: ConnectionState, msg: WSMessage): void {
+  /** 停止单条命令：按 toolCallId 找终端/可中断 run 并中断；ack 回传结果驱动前端按钮 */
+  private handleTerminalInterrupt(state: ConnectionState, msg: WSMessage): void {
     const payload = (msg.payload ?? {}) as { toolCallId?: string };
     if (!payload.toolCallId) return;
-    this.terminalService()?.interruptRun(payload.toolCallId);
+    const result = this.terminalService()?.interruptRun(payload.toolCallId) ?? {
+      ok: false,
+      reason: 'terminal-service-unavailable',
+    };
+    state.conn.send({
+      type: 'terminal.interrupt.ack',
+      payload: { toolCallId: payload.toolCallId, ...result },
+    });
   }
 }

@@ -46,3 +46,23 @@ export function createRunSubagentHandler(services: ServiceRegistry): RouteHandle
     }
   };
 }
+
+/**
+ * 取消一个运行中的子代理（对话流 SubagentCard / 右侧「智能体」标签的单 Agent 终止按钮）。
+ * runner.stop 会递归终止该 agent 的所有后代，避免孙代理成为孤儿。
+ * ok=false 表示该 agent 当前没有可取消的运行（已结束/进程重启后的残留成员）。
+ */
+export function createCancelSubagentHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const runner = resolveRunner(services);
+    if (!runner) {
+      return { status: 503, body: { error: ErrorCode.SUBAGENT_RUNNER_UNAVAILABLE } };
+    }
+    const body = (req.body ?? {}) as { sessionId?: string };
+    const sessionId = body.sessionId?.trim();
+    if (!sessionId) {
+      return { status: 400, body: { error: ErrorCode.SUBAGENT_TEMPLATE_REQUIRED } };
+    }
+    return { status: 200, body: { ok: runner.stop(sessionId) } };
+  };
+}

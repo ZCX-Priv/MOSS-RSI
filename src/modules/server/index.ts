@@ -125,7 +125,7 @@ import {
   createDeleteAgentHandler,
   createSetDefaultAgentHandler,
 } from './routes/agents';
-import { createRunSubagentHandler } from './routes/subagents';
+import { createRunSubagentHandler, createCancelSubagentHandler } from './routes/subagents';
 import { createAgentBusSnapshotHandler } from './routes/agent-bus';
 import { createListAutomationsHandler,
   createCreateAutomationHandler,
@@ -460,6 +460,8 @@ class ServerModule implements Module {
 
     // subagents（一次性子代理运行）
     this.router.addRoute({ method: 'POST', pattern: '/api/subagents/run', handler: createRunSubagentHandler(services), auth: true });
+    // 单 Agent 终止（对话流 SubagentCard / 智能体标签页）
+    this.router.addRoute({ method: 'POST', pattern: '/api/subagents/cancel', handler: createCancelSubagentHandler(services), auth: true });
     // 多智能体总线快照（任务页「智能体」标签：成员树 + 通信审计）
     this.router.addRoute({ method: 'GET', pattern: '/api/agent-bus/snapshot', handler: createAgentBusSnapshotHandler(services), auth: true });
 

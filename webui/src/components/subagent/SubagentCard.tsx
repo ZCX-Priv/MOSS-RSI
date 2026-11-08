@@ -7,8 +7,10 @@
 
 import { lazy, memo, Suspense, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bot, ChevronRight, CircleCheck, CircleX, Loader2 } from 'lucide-react';
+import { Bot, ChevronRight, CircleCheck, CircleX, Loader2, Square } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { api } from '../../api/http';
 import { useStore } from '../../store';
 import { MarkdownRenderer } from '../../render';
 import { getSubagentSession, subscribeSubagentSession } from '../../lib/subagent-sessions';
@@ -109,12 +111,15 @@ const SubagentRow = memo(function SubagentRow({
   displayName,
   expanded,
   onToggle,
+  parentSessionId,
 }: {
   call: SubagentCallItem;
   index: number;
   displayName: string;
   expanded: boolean;
   onToggle: () => void;
+  /** 父会话 id（子代理过程流内嵌时为其自身会话 id；缺省用当前激活会话） */
+  parentSessionId?: string;
 }) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
@@ -122,6 +127,7 @@ const SubagentRow = memo(function SubagentRow({
   const status = rowStatusOf(call, member?.status);
   const running = status === 'running';
   const boundSessionId = useSubagentSessionBinding(call.toolCallId);
+  const [cancelling, setCancelling] = useState(false);
   // 轻量历史投影：行展开时才拉取完整报告（折叠态不请求、不解析长文本）
   const lightResult = useMemo<ToolResult | undefined>(() => {
     if (call.resultText === undefined && !call.lazy) return undefined;
@@ -132,7 +138,7 @@ const SubagentRow = memo(function SubagentRow({
     };
   }, [call.resultText, call.isError, call.lazy]);
   const hydratedResult = useLazyToolResult(
-    activeSessionId,
+    parentSessionId ?? activeSessionId,
     call.toolCallId,
     lightResult,
     expanded,
@@ -150,26 +156,58 @@ const SubagentRow = memo(function SubagentRow({
   const avatarSeed =
     templateAvatarSeed(call.template) ?? fallbackAvatarSeed(call.template, displayName);
 
+  /** 单 Agent 终止：终止该子代理及其后代（后端 runner.stop 递归处理） */
+  const cancelAgent = async (): Promise<void> => {
+    if (!flowSessionId || cancelling) return;
+    setCancelling(true);
+    try {
+      const resp = await api.cancelSubagent(flowSessionId);
+      if (!resp.ok) toast.error(t('subagent.card.stopAgentNotRunning'));
+    } catch {
+      toast.error(t('subagent.card.stopAgentFailed'));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="rounded-lg bg-muted/50 px-2.5 py-2">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        className="flex w-full min-w-0 items-center gap-2 text-left"
-      >
-        <HumationAvatar seed={avatarSeed} size={24} />
-        <span className="min-w-0 truncate text-xs font-medium text-foreground">{displayName}</span>
-        <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground">
-          {String(index + 1).padStart(2, '0')}
-        </span>
-        <ChevronRight
-          className={cn(
-            'size-3 shrink-0 text-muted-foreground transition-transform',
-            expanded && 'rotate-90',
-          )}
-        />
-      </button>
+      <div className="flex w-full min-w-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <HumationAvatar seed={avatarSeed} size={24} />
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">{displayName}</span>
+          <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground">
+            {String(index + 1).padStart(2, '0')}
+          </span>
+          <ChevronRight
+            className={cn(
+              'size-3 shrink-0 text-muted-foreground transition-transform',
+              expanded && 'rotate-90',
+            )}
+          />
+        </button>
+        {running && (
+          <button
+            type="button"
+            onClick={() => void cancelAgent()}
+            disabled={cancelling || !flowSessionId}
+            title={t('subagent.card.stopAgent')}
+            aria-label={t('subagent.card.stopAgent')}
+            className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
+          >
+            {cancelling ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Square className="size-3 fill-current" />
+            )}
+          </button>
+        )}
+      </div>
       {/* 树形任务描述 */}
       <div className="mt-1 flex min-w-0 items-center gap-1.5">
         <span className="shrink-0 select-none text-muted-foreground/50">└</span>
@@ -203,7 +241,14 @@ const SubagentRow = memo(function SubagentRow({
   );
 });
 
-export const SubagentCard = memo(function SubagentCard({ calls }: { calls: SubagentCallItem[] }) {
+export const SubagentCard = memo(function SubagentCard({
+  calls,
+  sessionId,
+}: {
+  calls: SubagentCallItem[];
+  /** 父会话 id（子代理过程流内嵌时传其自身会话 id；缺省用当前激活会话） */
+  sessionId?: string;
+}) {
   const { t } = useTranslation();
   const agents = useStore((s) => s.agents);
   /** 展开的行 key（同一时刻只展开一行，避免卡片过长） */
@@ -281,6 +326,7 @@ export const SubagentCard = memo(function SubagentCard({ calls }: { calls: Subag
               onToggle={() =>
                 setExpandedRow((v) => (v === call.toolCallId ? null : call.toolCallId))
               }
+              parentSessionId={sessionId}
             />
           );
         })}

@@ -114,6 +114,18 @@ describe('normalizeConditions', () => {
     }
   });
 
+  test('智能体条件：agentId / sessionId 至少一项', () => {
+    const byAgentId = normalizeConditions([{ kind: 'agent', agentId: 'a1' }], defaults);
+    expect(byAgentId.ok).toBe(true);
+    if (byAgentId.ok) expect(byAgentId.value).toEqual([{ kind: 'agent', agentId: 'a1' }]);
+
+    const bySession = normalizeConditions([{ kind: 'agent', sessionId: 'sub1' }], defaults);
+    expect(bySession.ok).toBe(true);
+    if (bySession.ok) expect(bySession.value).toEqual([{ kind: 'agent', sessionId: 'sub1' }]);
+
+    expect(normalizeConditions([{ kind: 'agent' }], defaults).ok).toBe(false);
+  });
+
   test('结构非法', () => {
     expect(normalizeConditions('bad', defaults).ok).toBe(false);
     expect(normalizeConditions([{ kind: 'session' }], defaults).ok).toBe(false);
