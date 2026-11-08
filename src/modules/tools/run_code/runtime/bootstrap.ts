@@ -92,6 +92,46 @@ function sandboxNow(): number {
   return Date.now();
 }
 
+/** 编辑距离（工具名拼写纠错用） */
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array<number>(n + 1);
+  let curr = new Array<number>(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    const swap = prev;
+    prev = curr;
+    curr = swap;
+  }
+  return prev[n];
+}
+
+/** 最近邻工具名（最多 3 个；编辑距离 + 前缀加成） */
+function closestToolNames(input: string, allowed: Set<string>): string[] {
+  const needle = input.toLowerCase();
+  const scored: Array<{ name: string; score: number }> = [];
+  for (const name of allowed) {
+    const lower = name.toLowerCase();
+    const distance = editDistance(needle, lower);
+    const prefixBonus = lower.startsWith(needle) || needle.startsWith(lower) ? 0 : 1;
+    scored.push({ name, score: distance + prefixBonus });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  const threshold = Math.max(2, Math.floor(needle.length / 3));
+  return scored
+    .filter((entry) => entry.score <= threshold)
+    .slice(0, 3)
+    .map((entry) => entry.name);
+}
+
 /** 构造 tools Proxy：属性访问时校验 allowlist，调用时发 call 帧并等待宿主结果。 */
 function createToolsProxy(allowlist: string[]): Record<string, (args?: unknown) => Promise<CodeValue>> {
   const allowed = new Set(allowlist);
@@ -99,7 +139,13 @@ function createToolsProxy(allowlist: string[]): Record<string, (args?: unknown) 
     get(_target, prop) {
       if (typeof prop !== 'string') return undefined;
       if (!allowed.has(prop)) {
-        throw new Error(`Unknown tool "${prop}". Only tools listed in the SDK are available inside run_code.`);
+        const suggestions = closestToolNames(prop, allowed);
+        const available = [...allowed].slice(0, 30).join(', ');
+        throw new Error(
+          `Unknown tool "${prop}".` +
+            (suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '') +
+            ` Available: ${available}${allowed.size > 30 ? ' …' : ''}`,
+        );
       }
       return async (args?: unknown): Promise<CodeValue> => {
         const violation = args === undefined ? null : findJsonViolation(args, `tools.${prop}(...)`);

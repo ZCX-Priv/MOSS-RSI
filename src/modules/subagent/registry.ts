@@ -69,11 +69,23 @@ export class AgentRegistryImpl implements AgentRegistry {
       if (!parsed.agents.find(a => a.id === 'agent')) {
         parsed.agents.unshift(defaultData.agents[0]);
       }
-      // 合并内置模板 agent（幂等：已存在则不覆盖用户修改，缺失则补齐）
+      // 合并内置模板 agent：内置模板不可 UI 编辑，启动时无条件刷新为最新模板定义
+      // （提示词 / 工具白名单 / maxTurns 随 agent/prompts 与 templates.ts 更新）
       for (const template of buildTemplateAgents(env)) {
-        if (!parsed.agents.find(a => a.id === template.id)) {
+        const index = parsed.agents.findIndex((a) => a.id === template.id);
+        if (index < 0) {
           parsed.agents.push(template);
+          continue;
         }
+        parsed.agents[index] = {
+          ...parsed.agents[index],
+          name: template.name,
+          description: template.description,
+          systemPrompt: template.systemPrompt,
+          tools: template.tools,
+          maxTurns: template.maxTurns,
+          builtIn: true,
+        };
       }
       if (!parsed.defaultAgentId) parsed.defaultAgentId = 'agent';
       // 标记 default

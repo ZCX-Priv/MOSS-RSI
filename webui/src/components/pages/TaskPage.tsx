@@ -35,6 +35,7 @@ import {
   ArrowUp,
   Stethoscope,
   SquareMousePointer,
+  Bot,
 } from 'lucide-react';
 import {
   Dialog,
@@ -136,6 +137,9 @@ const FileBrowserPanel = lazy(() =>
 const FileChangesPanel = lazy(() =>
   import('../shared/FileChangesPanel').then((m) => ({ default: m.FileChangesPanel })),
 );
+const AgentBusPanel = lazy(() =>
+  import('../subagent/AgentBusPanel').then((m) => ({ default: m.AgentBusPanel })),
+);
 import {
   useStore,
   DEFAULT_SIDEBAR_TABS,
@@ -146,6 +150,7 @@ import {
 } from '../../store';
 import { useTask } from '../../hooks/useTask';
 import { api } from '../../api/http';
+import { hydrateAgentBus } from '../../lib/agent-bus';
 import { copyText } from '../../lib/clipboard';
 import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, AskQuestion } from '../../types/api';
 
@@ -509,12 +514,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const hasFilesTab = sidebarTabs.some((tab) => tab.type === 'files');
   const hasChangesTab = sidebarTabs.some((tab) => tab.type === 'changes');
   const hasComputerTab = sidebarTabs.some((tab) => tab.type === 'computer');
+  const hasAgentsTab = sidebarTabs.some((tab) => tab.type === 'agents');
   const allTabTypesOpen =
-    hasSummaryTab && hasTerminalTab && hasFilesTab && hasChangesTab && hasComputerTab;
+    hasSummaryTab && hasTerminalTab && hasFilesTab && hasChangesTab && hasComputerTab && hasAgentsTab;
 
   // 「开始」面板：打开/切换到某类型标签；「开始」标签存在时原地变身，不再新开标签
   const openTabType = useCallback(
-    (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer', titleKey: string) => {
+    (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer' | 'agents', titleKey: string) => {
       // 已开该类型 → 直接切换
       const existing = sidebarTabs.find((tab) => tab.type === type);
       if (existing) {
@@ -564,6 +570,23 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       alive = false;
     };
   }, [taskId, task]);
+
+  // 多智能体总线水合：刷新后恢复 async 后台子代理的运行/完成状态（一次请求，失败静默）
+  useEffect(() => {
+    if (!taskId) return;
+    let alive = true;
+    void api
+      .getAgentBusSnapshot({ root: taskId, limit: 200 })
+      .then((snapshot) => {
+        if (alive) hydrateAgentBus(snapshot.members);
+      })
+      .catch(() => {
+        // 总线不可用/后端未就绪：实时事件与历史文本仍可兜底
+      });
+    return () => {
+      alive = false;
+    };
+  }, [taskId]);
 
 
   // ===== 会话编排（订阅 + 状态快照 + 分页 + 断线对齐 + 半截流式续接）=====
@@ -1017,6 +1040,14 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 {t('computer.title')}
               </DropdownMenuItem>
             )}
+            {!hasAgentsTab && (
+              <DropdownMenuItem
+                onSelect={() => addSidebarTab(taskId, 'agents', 'task.agents')}
+              >
+                <Bot className="size-4" />
+                {t('task.agents')}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -1215,6 +1246,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {activeTab?.type === 'computer' && (
           <Suspense fallback={<div className="flex-1" />}>
             <ComputerPanel key={taskId} sessionId={taskId} active />
+          </Suspense>
+        )}
+        {activeTab?.type === 'agents' && (
+          <Suspense fallback={<div className="flex-1" />}>
+            <AgentBusPanel key={taskId} sessionId={taskId} />
           </Suspense>
         )}
         {activeTab?.type === 'file' && (activeTab.filePath || activeTab.archiveEntry) && (
@@ -2119,6 +2155,8 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
         <FileDiff className="size-3.5" />
       ) : tab.type === 'computer' ? (
         <SquareMousePointer className="size-3.5" />
+      ) : tab.type === 'agents' ? (
+        <Bot className="size-3.5" />
       ) : tab.type === 'file' ? (
         <FileTypeIcon fileName={tab.title} size={14} className="shrink-0" />
       ) : (
@@ -2170,14 +2208,17 @@ function SortableTab({ tab, isActive, canShowClose, onSelect, onRemove }: Sortab
 /** 「开始」标签页：面板启动器（任务摘要 / 终端 / 文件 / 文件变更 / Computer），点击行打开或切换到对应标签 */
 interface StartPanelProps {
   /** 点击某行：已开该类型标签则激活，未开则新建（title 为 i18n key） */
-  onOpen: (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer', titleKey: string) => void;
+  onOpen: (
+    type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer' | 'agents',
+    titleKey: string,
+  ) => void;
   /** 移动端（Android 后端）：电脑操作不可用 */
   computerUnavailable?: boolean;
 }
 function StartPanel({ onOpen, computerUnavailable = false }: StartPanelProps) {
   const { t } = useTranslation();
   const rows: Array<{
-    type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer';
+    type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer' | 'agents';
     titleKey: string;
     descKey: string;
     Icon: typeof List;
@@ -2211,6 +2252,12 @@ function StartPanel({ onOpen, computerUnavailable = false }: StartPanelProps) {
       titleKey: 'computer.title',
       descKey: 'start.computerDesc',
       Icon: SquareMousePointer,
+    },
+    {
+      type: 'agents',
+      titleKey: 'task.agents',
+      descKey: 'start.agentsDesc',
+      Icon: Bot,
     },
   ];
   return (
@@ -2685,6 +2732,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               toolCallId: tc.id,
               template: args.template ?? '',
               task: args.task ?? '',
+              ...(args.mode ? { mode: args.mode } : {}),
               status: tc.status,
               resultText: matched?.text,
               isError: matched?.isError,

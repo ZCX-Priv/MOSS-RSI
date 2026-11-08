@@ -170,7 +170,9 @@ export type SidebarTabType =
   /** 该任务的文件变更总览（按文件聚合 + 展开 diff） */
   | 'changes'
   /** 计算机使用面板（cua-driver 实时画面 / 窗口 / 动作时间线） */
-  | 'computer';
+  | 'computer'
+  /** 多智能体：当前任务的成员树 + 通信记录 */
+  | 'agents';
 
 /** 右侧边栏标签页 */
 export interface SidebarTab {
@@ -414,6 +416,8 @@ export interface AppConfig {
   version: number;
   server: { host: string; port: number; autoPort: boolean; locale?: string };
   daemon: { enabled: boolean };
+  /** 电源策略（可选，旧 config 无此段时按默认关闭处理） */
+  power?: { preventSleep: boolean };
   /** 日志系统配置（级别 / 保留天数 / 单文件大小上限） */
   logs: LogsConfig;
   update: { autoCheck: boolean; channel: 'stable' | 'beta'; checkIntervalHours: number };
@@ -1340,6 +1344,56 @@ export interface SubagentRunOutput {
   taskId: string;
   finishReason: string;
   result: string;
+}
+
+// ============================================================================
+// 多智能体总线（GET /api/agent-bus/snapshot + WS agent-bus.event）
+// ============================================================================
+
+export type AgentBusMemberKind = 'main' | 'subagent';
+export type AgentBusMemberStatus = 'running' | 'completed' | 'failed' | 'aborted';
+
+export interface AgentBusMember {
+  /** 树内短 id：主代理固定 'main'，子代理 'a1'/'a2'... */
+  agentId: string;
+  sessionId: string;
+  kind: AgentBusMemberKind;
+  template?: string;
+  name: string;
+  task: string;
+  cwd: string;
+  depth: number;
+  parentSessionId?: string;
+  parentAgentId?: string;
+  /** 父会话中触发本次运行的 agent 工具调用 id（卡片/消息精确关联） */
+  parentToolCallId?: string;
+  rootSessionId: string;
+  status: AgentBusMemberStatus;
+  startedAt: string;
+  finishedAt?: string;
+  finishReason?: string;
+  error?: string;
+}
+
+export interface AgentBusMessage {
+  id: string;
+  rootSessionId: string;
+  fromAgentId: string;
+  fromSessionId: string;
+  fromName: string;
+  /** null = 频道广播 */
+  toAgentId: string | null;
+  toSessionId: string | null;
+  channel: string;
+  kind: 'chat' | 'result' | 'system';
+  content: string;
+  createdAt: string;
+  delivered: boolean;
+}
+
+export interface AgentBusSnapshot {
+  members: AgentBusMember[];
+  messages: AgentBusMessage[];
 }
 
 // ============================================================================

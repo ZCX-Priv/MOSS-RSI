@@ -18,6 +18,8 @@ import type {
   AgentMessage,
   AgentEngine,
   AgentEvent,
+  AgentProfileLike,
+  AgentRegistryLike,
   AgentRunInput,
   AgentRunResult,
   ContextEngine,
@@ -28,6 +30,7 @@ import type {
   TruncateResult,
   TruncateRestoreResult,
 } from '../contracts';
+import type { AgentBus } from '../agent-bus/types';
 import type { LLMRouter, ToolRegistry, MCPManager, FileHistoryService, FilesysService } from '../contracts';
 import type { SafetyService } from '../contracts';
 import type { PermissionMode } from '../safety/types';
@@ -35,6 +38,7 @@ import type { FileChangeEvent } from '../filesys/types';
 import type { ConfigService, EventBus, Logger, ServiceRegistry, Environment, ApiConfig } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { AskOutcome, AskPayload, AskQuestion, ToolResult } from '../tools/types';
+import { lightenToolResultForEvent } from '../server/routes/history-light';
 import type { SkillRegistry } from '../tools/shared/skill-registry';
 import { readSessionTodoStore, getSessionTodoPath } from '../tools/todo/shared/store';
 import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } from '../context/compiler';
@@ -320,8 +324,27 @@ export class AgentEngineImpl implements AgentEngine {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     // 全局并发闸门：超限的 run 排队等待（不阻塞事件循环），避免低配机器被并发会话拖垮
     const release = await this.runLimiter.acquire();
+    const bus = this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
     try {
-      return await this.runUnlocked(input);
+      const result = await this.runUnlocked(input);
+      bus?.update(input.sessionId, {
+        status:
+          result.finishReason === 'aborted'
+            ? 'aborted'
+            : result.finishReason === 'error'
+              ? 'failed'
+              : 'completed',
+        finishedAt: new Date().toISOString(),
+        finishReason: result.finishReason,
+      });
+      return result;
+    } catch (err) {
+      bus?.update(input.sessionId, {
+        status: 'failed',
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     } finally {
       release();
     }
@@ -349,9 +372,18 @@ export class AgentEngineImpl implements AgentEngine {
     const cfg = appCfg.agent;
     // 思考回传（OpenAI 兼容 provider 消费；默认 false，按 DeepSeek 规范不回传 reasoning_content）
     const replayThinking = appCfg.context?.thinking?.replayOpenAICompat ?? false;
-    const model = input.model ?? cfg.defaultModel;
+    // Agent 模板配置：子代理/自定义 Agent 的 systemPrompt / tools / model / maxTurns / maxTokens
+    const agentRegistry = this.services.tryResolve<AgentRegistryLike>(ServiceNames.AGENT_REGISTRY);
+    const agentProfile: AgentProfileLike | null = input.agentId
+      ? agentRegistry?.get(input.agentId) ?? null
+      : null;
+    const model = input.model ?? agentProfile?.model ?? cfg.defaultModel;
 
-    this.logger.info(t('agent.runStart'), { sessionId, model });
+    this.logger.info(t('agent.runStart'), {
+      sessionId,
+      model,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+    });
 
     /**
      * 事件出口包装（offset 续传协议 + 流式草稿维护的唯一入口）：
@@ -570,8 +602,27 @@ export class AgentEngineImpl implements AgentEngine {
     // 旧实现无条件用 agent.maxTokens（默认 8192，且无 UI 可改），会覆盖模型声明的输出窗口；
     // 对开启思考的推理模型，思考 token 与回复 token 共用该预算 → 思考/回复被硬性截断
     // （finish_reason=length）。详见 .trae/documents/修复MOSS生成中途截断的严重bug.md
-    const maxOutputTokens = resolveRequestMaxTokens(apiCfg, model, cfg.maxTokens);
+    const maxOutputTokens = resolveRequestMaxTokens(
+      apiCfg,
+      model,
+      agentProfile?.maxTokens ?? cfg.maxTokens,
+    );
     const session = this.sessions.getOrCreate(sessionId);
+    // 多智能体总线：主代理/子代理统一注册（子代理由 runner 预注册并传 bus meta，upsert 保号）
+    const bus = this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
+    if (bus) {
+      bus.register({
+        sessionId,
+        kind: input.bus?.kind ?? 'main',
+        template: input.bus?.template ?? input.agentId,
+        name: input.bus?.name ?? agentProfile?.name ?? '主智能体',
+        task: input.bus?.taskSummary ?? userMessage,
+        cwd,
+        parentSessionId: input.bus?.parentSessionId,
+        parentToolCallId: input.bus?.parentToolCallId,
+        depth: input.bus?.depth ?? 0,
+      });
+    }
     // clientMessageId 随消息持久化：前端本地乐观副本与历史副本据此同身份去重。
     // IM / MCP / 自动化等外部 run 没有前端参与、不会传该字段 → 由引擎生成稳定身份，
     // 保证「实时 user-message 事件」与「刷新后的历史副本」按 id 原位归并（不重复渲染）。
@@ -601,6 +652,8 @@ export class AgentEngineImpl implements AgentEngine {
     this.sessions.setLastCwd(session, cwd);
     // 活跃置顶：task.id 即 sessionId；无对应任务时静默返回 null
     this.tasks.touchTask(sessionId);
+    // 排队期间收到的智能体消息：在用户消息之后、首次 LLM 请求之前注入
+    if (bus) this.drainAgentInbox(session, bus, sessionId);
 
     // 上下文引擎（基础设施：每轮请求流水线 + 工具自愈）；不可用时降级 fallback
     const contextEngine = this.services.tryResolve<ContextEngine>(ServiceNames.CONTEXT_ENGINE);
@@ -623,12 +676,37 @@ export class AgentEngineImpl implements AgentEngine {
       });
     }
     // 代码模式 wire：开启 = 原生工具 + run_code 混合；关闭 = 排除 run_code。
+    // Agent 模板 tools 白名单：非空时只暴露白名单工具（agent_status/agent_message 永远并集，
+    // 保证任何子代理都能被发现与对话）。空/缺省 = 全部工具。
     const codeMode = cfg.codeMode;
-    const wireOptions = codeMode.enabled ? {} : { exclude: new Set(['run_code']) };
+    const profileTools = (agentProfile?.tools ?? []).filter(
+      (name): name is string => typeof name === 'string' && name.trim() !== '',
+    );
+    const includeOnly =
+      profileTools.length > 0
+        ? new Set<string>([...profileTools, 'agent_status', 'agent_message'])
+        : undefined;
+    const wireOptions: {
+      includeOnly?: ReadonlySet<string>;
+      exclude?: ReadonlySet<string>;
+    } = {
+      ...(codeMode.enabled ? {} : { exclude: new Set<string>(['run_code']) }),
+      ...(includeOnly ? { includeOnly } : {}),
+    };
     const tools = buildTools(toolRegistry, mcpTools, wireOptions);
 
     // 系统提示 SDK 附加段：工具/配置不变时字节稳定（前缀缓存友好）。
     const promptExtras: PromptExtraSection[] = [];
+    // Agent 模板角色提示词：叠加在主提示词之后（保留 MOSS 通用纪律）
+    if (agentProfile?.systemPrompt?.trim()) {
+      promptExtras.push({
+        id: 'agent-profile',
+        title: `Agent 模板：${agentProfile.name}`,
+        content:
+          `# 子代理角色（${agentProfile.name}）\n\n${agentProfile.systemPrompt.trim()}\n\n---\n` +
+          '你在本次运行中扮演上述角色；MOSS 主提示词的通用纪律仍然适用。',
+      });
+    }
     if (codeMode.enabled) {
       const sdkTools = [
         ...(toolRegistry?.listSchemas() ?? [])
@@ -654,7 +732,8 @@ export class AgentEngineImpl implements AgentEngine {
 
     // ReAct 循环（maxTurns=0 表示不限制 → Infinity；while 条件与触顶判断天然兼容）
     let turn = 0;
-    const maxTurns = cfg.maxTurns === 0 ? Infinity : cfg.maxTurns;
+    const effectiveMaxTurns = agentProfile?.maxTurns ?? cfg.maxTurns;
+    const maxTurns = effectiveMaxTurns === 0 ? Infinity : effectiveMaxTurns;
     let finalText = '';
     let finishReason: AgentRunResult['finishReason'] = 'stop';
     // 最后一轮自然结束标记：最后一轮恰好无工具调用时是正常完成，不应判为触顶
@@ -1051,7 +1130,7 @@ export class AgentEngineImpl implements AgentEngine {
 
       // 并发语义：
       // - `ask`：同一轮 ≥2 个 → 并发挂起，前端合并为多问题卡片；
-      // - `agent`（一次性子代理）：同一轮 ≥2 个 → 真并发（上限 4）；
+      // - `agent`（一次性子代理）：同一轮 ≥2 个 → 真并发（上限 agent.maxConcurrentSubagents，缺省 4）；
       // - 只读工具（tool.json 声明 parallelSafe：read/grep/glob/web）：
       //   连续段并行（上限 agent.maxParallelTools，缺省 4；1 = 串行），
       //   段结束后按 toolCalls 顺序重排工具结果，保证会话里的 tool_result 顺序稳定。
@@ -1063,8 +1142,13 @@ export class AgentEngineImpl implements AgentEngine {
       const configuredParallel = cfg.maxParallelTools;
       const maxParallelTools =
         typeof configuredParallel === 'number' && Number.isFinite(configuredParallel)
-          ? Math.max(1, Math.min(4, Math.floor(configuredParallel)))
+          ? Math.max(1, Math.min(8, Math.floor(configuredParallel)))
           : 4;
+      const configuredSubagentParallel = cfg.maxConcurrentSubagents;
+      const maxConcurrentSubagents =
+        typeof configuredSubagentParallel === 'number' && Number.isFinite(configuredSubagentParallel)
+          ? Math.max(1, Math.min(8, Math.floor(configuredSubagentParallel)))
+          : MAX_CONCURRENT_SUBAGENT_RUNS;
       const isParallelSafeCall = (tc: (typeof toolCalls)[number]): boolean => {
         if (tc.name === 'ask' || isSubagentToolCall(tc)) return false;
         return toolRegistry?.isParallelSafe?.(tc.name) === true;
@@ -1083,7 +1167,7 @@ export class AgentEngineImpl implements AgentEngine {
         if (parallelSubagents && isSubagentToolCall(tc)) {
           if (!subagentsLaunched) {
             subagentsLaunched = true;
-            await runWithLimit(subagentCalls, MAX_CONCURRENT_SUBAGENT_RUNS, runOne);
+            await runWithLimit(subagentCalls, maxConcurrentSubagents, runOne);
           }
           continue;
         }
@@ -1130,6 +1214,9 @@ export class AgentEngineImpl implements AgentEngine {
           );
         }
       }
+
+      // 多智能体总线：每轮工具完成后注入收件箱消息（下一轮 LLM 可见）
+      this.drainAgentInbox(session, bus, sessionId);
 
       // 引导模式：所有工具调用完成后，检查是否有引导消息（准备进入思考前中止）
       if (input.guideMessages && input.guideMessages.length > 0 && !signal?.aborted) {
@@ -1799,6 +1886,22 @@ export class AgentEngineImpl implements AgentEngine {
     });
   }
 
+  /** 把总线收件箱中的消息注入会话（role=user + name=agent-message，模型视图可见） */
+  private drainAgentInbox(session: Session, bus: AgentBus | null, sessionId: string): void {
+    if (!bus) return;
+    const notices = bus.drainInbox(sessionId);
+    if (notices.length === 0) return;
+    for (const notice of notices) {
+      this.sessions.addAgentMessage(
+        session,
+        `[智能体消息] 来自 ${notice.fromName}(${notice.fromAgentId})${
+          notice.kind === 'result' ? ' 的执行结果' : ''
+        }：\n${notice.content}`,
+        'agent-message',
+      );
+    }
+  }
+
   private async executeToolCall(
     tc: NonNullable<AgentMessage['toolCalls']>[number],
     ctx: {
@@ -1971,7 +2074,8 @@ export class AgentEngineImpl implements AgentEngine {
       sessionId,
       toolName: healedName,
       toolCallId,
-      result: this.stripImagesForWs(result),
+      // UI 帧预算：超限时轻量化（前端展开时懒加载完整结果），避免数 MB 单帧卡住 WebUI
+      result: lightenToolResultForEvent(this.stripImagesForWs(result), 512 * 1024),
     });
 
     // 阶段5.1：工具执行副作用 WS 推送（todo-updated / context-updated / file-*）

@@ -28,6 +28,8 @@ interface RunCodeCardProps {
   fallbackText?: string;
   fallbackIsError?: boolean;
   iconMap: Record<string, string>;
+  /** 懒加载结果所属会话（子代理卡片传入自己的 session；缺省 store.activeSessionId） */
+  sessionId?: string;
 }
 
 interface ParsedArgs {
@@ -41,9 +43,11 @@ export const RunCodeCard = memo(function RunCodeCard({
   fallbackText,
   fallbackIsError,
   iconMap,
+  sessionId,
 }: RunCodeCardProps) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const resultSessionId = sessionId ?? activeSessionId ?? undefined;
   const [open, setOpen] = useState(false);
   const [nestedOpenIds, setNestedOpenIds] = useState<Set<string>>(new Set());
   // 历史轻量投影只保留 hasUi（不含 uiSpec）：折叠态也要按需补拉完整结果，
@@ -53,7 +57,7 @@ export const RunCodeCard = memo(function RunCodeCard({
     result?.metadata?.codeRun?.uiSpec !== undefined;
   // 程序卡片或任一嵌套调用展开时，才按需拉取完整的 codeRun metadata（含 uiSpec/日志）
   const hydratedResult = useLazyToolResult(
-    activeSessionId,
+    resultSessionId,
     toolCall.id,
     result,
     open || nestedOpenIds.size > 0 || hasUiFromResult,
@@ -68,25 +72,20 @@ export const RunCodeCard = memo(function RunCodeCard({
   const isError =
     hydratedResult?.isError === true || (status === 'done' && fallbackIsError === true);
   const bodyText = open ? resultText(hydratedResult, fallbackText) : '';
-  const running = status === 'generating' || status === 'executing';
+  // 结果即完成：已拿到最终结果时，残留的 executing 不得继续显示「正在运行」
+  const hasResult = hydratedResult !== undefined || fallbackText !== undefined;
+  const running = !hasResult && (status === 'generating' || status === 'executing');
   const hasCode = typeof parsed.code === 'string' && parsed.code.trim().length > 0;
   const liveCalls = toolCall.live?.calls ?? [];
   const calls = sortCallsBySeq(meta?.calls?.length ? meta.calls : liveCalls);
-  const kindLabel =
-    meta?.kind === 'ui'
-      ? t('task.runCode.kindUi')
-      : meta?.kind === 'hybrid'
-        ? t('task.runCode.kindHybrid')
-        : meta?.kind === 'text'
-          ? t('task.runCode.kindText')
-          : '';
   const hasUi = hasUiFromResult || meta?.uiSpec !== undefined;
 
-  // 执行中本地 ticker：仅运行中的卡片启动（避免每个历史卡片都挂定时器）
+  // 执行中本地 ticker：仅运行中的卡片启动（避免每个历史卡片都挂定时器）。
+  // 耗时按秒展示，1s 刷新即可；250ms 会让整卡（含嵌套调用）每秒重渲染 4 次。
   const [, forceTick] = useState(0);
   useEffect(() => {
     if (!running) return;
-    const timer = window.setInterval(() => forceTick((v) => v + 1), 250);
+    const timer = window.setInterval(() => forceTick((v) => v + 1), 1000);
     return () => window.clearInterval(timer);
   }, [running]);
   const startedAtMs = toolCall.live?.startedAtMs;
@@ -132,6 +131,7 @@ export const RunCodeCard = memo(function RunCodeCard({
         fallbackText={fallbackText}
         fallbackIsError={fallbackIsError}
         iconMap={iconMap}
+        sessionId={resultSessionId}
         headerClassName="pl-1 pr-2"
         titleOverride={t('task.runCode.code')}
         expanded={open}
@@ -142,7 +142,6 @@ export const RunCodeCard = memo(function RunCodeCard({
             isError={isError}
             durationMs={meta?.durationMs}
             liveElapsedMs={liveElapsedMs}
-            kindLabel={kindLabel}
             truncated={meta?.truncated === true}
             hasUi={hasUi}
           />
@@ -156,13 +155,15 @@ export const RunCodeCard = memo(function RunCodeCard({
       {calls.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {calls.map((call) => {
-            const view = nestedToolView(call);
+            // 父程序结束后不再有「运行中」的嵌套调用（最终 metadata 才是权威）
+            const view = nestedToolView(call, running);
             return (
               <ToolCallDetails
                 key={call.id}
                 toolCall={view.toolCall}
                 result={view.result}
                 iconMap={iconMap}
+                sessionId={resultSessionId}
                 onExpandedChange={(expanded) => setNestedOpen(call.id, expanded)}
               />
             );
@@ -207,13 +208,24 @@ function sortCallsBySeq<T extends { id: string; seq?: number }>(list: readonly T
 }
 
 /** 合成普通 ToolCall/ToolResult：优先使用后端富数据，旧会话/执行中回退 preview 字段 */
-function nestedToolView(call: CodeRunCall & { status?: 'running' | 'done' | 'failed' }): {
+function nestedToolView(
+  call: CodeRunCall & { status?: 'running' | 'done' | 'failed' },
+  parentRunning: boolean,
+): {
   toolCall: ToolCall;
   result?: ToolResult;
 } {
-  const running = call.status === 'running';
-  const failed = call.status === 'failed' || (call.status !== 'running' && !call.ok);
-  const text = call.resultText ?? (call.ok ? call.resultPreview : call.error ?? call.resultPreview);
+  // 只有「父程序仍在运行 + 该调用明确 running + 尚无任何结果」才算执行中；
+  // 父程序已结束（含 metadata 已落库）时迟到的 progress 不得让嵌套行继续转圈。
+  const hasOk = (call as { ok?: boolean }).ok;
+  const running =
+    parentRunning &&
+    call.status === 'running' &&
+    hasOk === undefined &&
+    !call.error &&
+    !call.resultText;
+  const failed = !running && (call.status === 'failed' || hasOk === false);
+  const text = call.resultText ?? (hasOk ? call.resultPreview : call.error ?? call.resultPreview);
   return {
     toolCall: {
       id: call.id,
@@ -310,13 +322,12 @@ function RunCodeResultPreview({
   );
 }
 
-/** 头部右侧状态：生成/执行/失败/完成（含耗时、输出类型、截断标记） */
+/** 头部右侧状态：生成/执行/失败/完成（含耗时、截断标记） */
 function RunStatusText({
   status,
   isError,
   durationMs,
   liveElapsedMs,
-  kindLabel,
   truncated,
   hasUi,
 }: {
@@ -325,7 +336,6 @@ function RunStatusText({
   durationMs?: number;
   /** 执行中实时已用时（ms；仅 running 时存在） */
   liveElapsedMs?: number;
-  kindLabel: string;
   truncated: boolean;
   hasUi: boolean;
 }) {
@@ -368,12 +378,6 @@ function RunStatusText({
         <>
           <span>·</span>
           <span className="tabular-nums">{formatDuration(durationMs)}</span>
-        </>
-      )}
-      {kindLabel && (
-        <>
-          <span>·</span>
-          <span>{kindLabel}</span>
         </>
       )}
       {hasUi && (

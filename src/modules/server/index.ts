@@ -5,6 +5,7 @@ import { t } from '../../core/i18n';
 import { isDevMode } from '../../core/env';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
+import { applyPreventSleep, disposePreventSleep } from '../../utils/prevent-sleep';
 import { HttpRouter } from './http-router';
 import { WsHandler } from './ws-handler';
 import { StaticAssets } from './static-assets';
@@ -125,6 +126,7 @@ import {
   createSetDefaultAgentHandler,
 } from './routes/agents';
 import { createRunSubagentHandler } from './routes/subagents';
+import { createAgentBusSnapshotHandler } from './routes/agent-bus';
 import { createListAutomationsHandler,
   createCreateAutomationHandler,
   createGetAutomationHandler,
@@ -283,6 +285,16 @@ class ServerModule implements Module {
     ctx.eventBus.onAction('config:changed', (data) => {
       this.wsHandler.broadcast({ type: 'config.changed', payload: data });
     });
+    // 电源策略：按配置持有/释放系统级防休眠句柄（config.json 修改后热生效，无需重启）
+    const applyPowerPolicy = (): void => {
+      applyPreventSleep(ctx.config.getAppConfig().power?.preventSleep === true, ctx.logger);
+    };
+    applyPowerPolicy();
+    ctx.eventBus.onAction('config:changed', (data) => {
+      const which = (data as { which?: string } | null)?.which;
+      if (which && which !== 'app') return;
+      applyPowerPolicy();
+    });
     // 资源文件（skill/spec/tool）热重载事件，转发为 WS resources.changed
     ctx.eventBus.onAction('resources:changed', (data) => {
       this.wsHandler.broadcast({ type: 'resources.changed', payload: data });
@@ -302,6 +314,10 @@ class ServerModule implements Module {
     ctx.eventBus.onAction('subagent:event', (data) => {
       this.wsHandler.broadcast({ type: 'subagent.event', payload: data });
     });
+    // 多智能体总线事件（成员状态 / 通信消息；任务页「智能体」标签实时刷新）
+    ctx.eventBus.onAction('agent-bus:event', (data) => {
+      this.wsHandler.broadcast({ type: 'agent-bus.event', payload: data });
+    });
 
     ctx.logger.info(t('server.started', { host: this.actualHost, port: this.actualPort }), {
       staticAssets: this.assets.isAvailable(),
@@ -309,6 +325,8 @@ class ServerModule implements Module {
   }
 
   async destroy(): Promise<void> {
+    // 释放防休眠句柄：进程退出后不得残留常驻的 powershell/caffeinate
+    disposePreventSleep(this.ctx?.logger);
     if (this.server) {
       await this.server.stop(true);
       this.ctx.logger.info(t('server.stopped'));
@@ -442,6 +460,8 @@ class ServerModule implements Module {
 
     // subagents（一次性子代理运行）
     this.router.addRoute({ method: 'POST', pattern: '/api/subagents/run', handler: createRunSubagentHandler(services), auth: true });
+    // 多智能体总线快照（任务页「智能体」标签：成员树 + 通信审计）
+    this.router.addRoute({ method: 'GET', pattern: '/api/agent-bus/snapshot', handler: createAgentBusSnapshotHandler(services), auth: true });
 
     // automations
     this.router.addRoute({ method: 'GET', pattern: '/api/automations', handler: createListAutomationsHandler(services), auth: true });

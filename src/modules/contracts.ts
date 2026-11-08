@@ -334,6 +334,23 @@ export interface HistorySearchResult {
   timestamp?: string;
 }
 
+/** Agent 模板可执行配置（引擎只读取这些字段，避免直接依赖 subagent 实现） */
+export interface AgentProfileLike {
+  id: string;
+  name: string;
+  systemPrompt?: string;
+  model?: string;
+  /** 工具白名单；空/缺省 = 全部工具 */
+  tools?: string[];
+  maxTurns?: number;
+  maxTokens?: number;
+}
+
+/** Agent 注册表最小查询契约 */
+export interface AgentRegistryLike {
+  get(id: string): AgentProfileLike | null;
+}
+
 export interface AgentRunInput {
   sessionId: string;
   /** 用户最新输入文本 */
@@ -342,8 +359,22 @@ export interface AgentRunInput {
   attachments?: string[];
   /** 模型名（可选，默认从配置） */
   model?: string;
-  /** Agent 配置 ID（可选；指定后按该 Agent 的 systemPrompt/model/tools/maxTurns/maxTokens/maxTokens 执行） */
+  /** Agent 配置 ID（可选；指定后按该 Agent 的 systemPrompt/model/tools/maxTurns/maxTokens 执行） */
   agentId?: string;
+  /**
+   * 多智能体总线元信息；缺省按主代理注册。
+   * 子代理由 SubagentRunner 注入 parentSessionId / parentToolCallId / depth。
+   */
+  bus?: {
+    kind: 'main' | 'subagent';
+    template?: string;
+    name?: string;
+    parentSessionId?: string;
+    parentToolCallId?: string;
+    taskSummary?: string;
+    /** 嵌套深度（主=0，子=1，孙=2；runner 计算后传入） */
+    depth?: number;
+  };
   /**
    * 权限模式（前端 PermissionModeSelector 会话级传递）：
    * 'ask'=手动审批 / 'auto'=自动审批（L2 放行 L3 确认） / 'skip'=完全访问（仅查禁用）

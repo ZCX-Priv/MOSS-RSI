@@ -4,6 +4,7 @@
 
 import { buildUiSdkText } from './ui/catalog';
 import { isPtcForbiddenTool, PTC_FORBIDDEN_TOOL_LABEL } from './forbidden';
+import { buildToolSignature } from './runtime/schema';
 
 export interface CodeModeToolSchema {
   name: string;
@@ -41,17 +42,32 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '并行任务优先使用 PTC：多个独立的只读调用（例如同时搜索多个关键词、并行读取多个文件或网页、批量抓取）应放在同一个程序中用 `Promise.all` 并发执行，不要拆成多轮原生工具调用。单步操作或需要即时确认的交互可直接使用原生工具。',
   );
   parts.push(
+    '并行写法按失败语义选择：全部成功才继续用 `Promise.all`；允许部分失败用 `Promise.allSettled` 逐项检查 `status === "rejected"`，拿到 `reason.toolName` 与 `reason.message` 后决定重试或跳过。写工具/terminal 会按提交顺序串行，不要并发写同一文件。',
+    '',
+    '并行与失败隔离示例：',
+    '```ts',
+    'const results = await Promise.allSettled([',
+    "  tools.read({ path: 'a.txt' }),",
+    "  tools.read({ path: 'b.txt' }),",
+    ']);',
+    'const texts = results.map((r) => (r.status === "fulfilled" ? r.value : null));',
+    'for (const r of results) if (r.status === "rejected") console.log(r.reason.toolName, r.reason.message);',
+    'return { texts };',
+    '```',
+  );
+  parts.push(
     '连续/实时操作优先使用 PTC：需要「动作 → 等待 → 截图 → 判断 → 再动作」的浏览器或桌面任务（游戏、拖拽、连续按键、逐步表单），写一段程序在单次调用内完成一小段闭环，再用返回截图/帧差决定下一步；不要每按一个键就单独调用一次工具。',
   );
+  if (tools.length > 0) {
+    const signatures = tools
+      .map((tool) => `- \`${buildToolSignature(tool.name, tool.inputSchema)}\``)
+      .join('\n');
+    parts.push(`程序内的 \`tools\` 镜像当前原生工具；按下面的签名传对象参数：\n${signatures}`);
+  } else {
+    parts.push('程序内的 `tools` 镜像当前原生工具（当前没有可用工具）。');
+  }
   parts.push(
-    tools.length > 0
-      ? `程序内的 \`tools\` 镜像当前原生工具（参数签名见请求中的原生工具 schema）：\n${tools
-          .map((tool) => `\`${tool.name}\``)
-          .join('、')}`
-      : '程序内的 `tools` 镜像当前原生工具（当前没有可用工具）。',
-  );
-  parts.push(
-    `硬限制：程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}（\`tools.ask\` / \`tools.agent\` / \`tools.todo\` 不存在）。需要提问、派发子代理或维护待办时，直接调用原生 \`ask\` / \`agent\` / \`todo\`，不要写进 run_code 程序。`,
+    `硬限制：程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}（\`tools.ask\` / \`tools.agent\` / \`tools.agent_status\` / \`tools.agent_message\` / \`tools.todo\` 不存在）。需要提问、派发/查询/对话子代理或维护待办时，直接调用原生 \`ask\` / \`agent\` / \`agent_status\` / \`agent_message\` / \`todo\`，不要写进 run_code 程序。`,
   );
   parts.push(
     '',
@@ -75,6 +91,15 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '嵌套工具返回的截图会自动附加到 run_code 结果（最多 2 张）；不需要再单独调用 screenshot 取图。',
   );
 
+  parts.push(
+    '',
+    '### 常见失误（调用前自检）',
+    '- 漏必填参数或参数名拼错：按上面的签名逐字核对；宿主会拒绝并回传「期望签名 + 实际入参」。',
+    '- 忘记 `await`：`tools.*` 返回 Promise，不 `await` 会拿到 `{}` 或触发未处理拒绝。',
+    '- 把对象写成 JSON 字符串：宿主会自动解析一次，但不要依赖；直接传对象。',
+    '- 返回超大对象：只返回必要字段，先在程序内聚合/裁剪。',
+    '- 在 PTC 里调用 `agent` / `agent_status` / `agent_message` / `ask` / `todo`：这些必须直接调用原生工具。',
+  );
   parts.push(
     '',
     '### 使用规则',

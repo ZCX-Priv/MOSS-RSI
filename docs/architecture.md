@@ -2,7 +2,7 @@
 
 ## 一、总体架构
 
-MOSS 是一个基于 **微内核 + 模组化架构** 的 AI Agent 应用，运行在 Bun 运行时上。21 个模组全部由内核静态 import 编排，按固定顺序初始化、反向销毁。
+MOSS 是一个基于 **微内核 + 模组化架构** 的 AI Agent 应用，运行在 Bun 运行时上。24 个模组由内核编排（critical 模组静态 import，deferred 模组动态 import），按固定顺序初始化、反向销毁。
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -71,7 +71,7 @@ MOSS/
 │   │   ├── event-bus.ts         # 事件总线（Filter + Action）
 │   │   ├── env.ts               # 环境检测
 │   │   └── logger.ts            # 日志服务
-│   ├── modules/                 # 21 个模组（由内核静态 import 编排）
+│   ├── modules/                 # 24 个模组（critical 静态 import / deferred 动态 import）
 │   │   ├── llm/                 # LLM 路由 + Provider 实现
 │   │   ├── server/              # HTTP + WS 服务
 │   │   ├── remote/              # 远程访问（局域网 / cloudflared 隧道 / 请求门卫）
@@ -89,10 +89,13 @@ MOSS/
 │   │   ├── voice/               # 语音识别（本地 / 在线 / WASM）
 │   │   ├── context/             # 上下文引擎（压缩/自愈）
 │   │   ├── agent/               # Agent 引擎（ReAct 循环）
-│   │   ├── subagent/            # Agent 注册表 + 一次性子代理运行
+│   │   ├── agent-bus/           # 多智能体总线（成员树 / 收件箱 / 频道 / JSONL 审计）
+│   │   ├── subagent/            # Agent 注册表 + 一次性子代理运行（sync/async）
+│   │   ├── im/                  # IM 连接器（QQ 等，deferred）
 │   │   ├── file-history/        # 文件历史（追踪/快照/回滚）
 │   │   ├── daemon/              # PID 文件维护 + 优雅退出
-│   │   └── automation/          # 自动化任务（cron/once 调度）
+│   │   ├── automation/          # 自动化任务（cron/once 调度）
+│   │   └── migration/           # 外部 Agent 会话导入 / MOSS 备份恢复
 │   └── utils/                   # 通用工具
 ├── browser-extension/           # Chrome 扩展（MOSS Browser Bridge，Manifest V3）
 ├── agent/prompts/main/          # Agent 系统提示词（.md）
@@ -110,6 +113,27 @@ MOSS/
 ├── package.json                 # 根 package.json（后端依赖）
 └── tsconfig.json                # TypeScript 配置（exclude: webui）
 ```
+
+### 2.1 架构分级（文件夹 = 层级）
+
+本项目以文件夹表达架构层级，而不是只靠文档描述：
+
+| 层级 | 路径约定 | 允许内容 | 禁止 |
+|---|---|---|---|
+| **L0 内核** | `src/core/` | 配置、事件总线、服务注册、日志、类型、启动编排 | 任何业务能力、工具实现、Agent 循环 |
+| **L1 模组** | `src/modules/<module>/` | 一个可拆装模组；`index.ts` 只做服务注册与装配 | 跨模组直接 import 实现文件（应走 `contracts.ts` / `core/types.ts`） |
+| **L2 子域** | `<module>/<subdomain>/` | 模组内部按职责拆子目录（如 `tools/run_code/runtime`、`context/compiler`、`agent/session`） | 子域之间循环依赖 |
+| **L3 文件** | `index.ts` / `types.ts` / `registry.ts` / `runner.ts` / `tool.json` / `*.test.ts` | 单一实现单元，测试与实现同目录 | 一个文件混合多个子域 |
+| **前端** | `webui/src/{api,components,hooks,store,i18n,render,types,lib}` | `components/{pages,layout,shared,subagent,ui}` 按角色分层 | 页面直接实现网络/状态底层 |
+| **提示词/资源** | `agent/prompts/<domain>/`、`skills/`、`mcps/`、`config/`、`browser-extension/` | 内容与代码分离，可被用户覆盖/播种 | 在代码里硬编码大段提示词 |
+
+**审计结论（2026-11）**：整体符合文件夹分级；仍有 3 项技术债：
+
+1. `src/modules/agent/engine.ts` 约 124KB，混合 ReAct 循环 / 工具执行 / MCP 桥接 / 历史管理（L2 未拆）。
+2. `webui/src/components/pages/TaskPage.tsx`、`SettingsPage.tsx` 偏大，多个子域集中在一个文件。
+3. 少量跨模组实现 import（如 `agent` → `tools/run_code/sdk`、`server` → `subagent/types`），未完全收敛到 contracts。
+
+新增代码必须遵守上表；上述存量债务在后续迭代分批拆分。
 
 ## 三、微内核架构
 
@@ -132,16 +156,16 @@ MOSS/
 |---|---|---|---|
 | **模组 (Module)** | `src/modules/*/` | `ModuleContext`（完整能力）| 可注册服务（scope 隔离，销毁时自动注销）|
 
-**21 个模组加载顺序**：
+**24 个模组加载顺序**：
 
 ```
 llm → server → remote → tools → mcp → computer → browser → update → filesys →
-terminal → safety → rules → hooks → memory → voice → context → agent →
-subagent → file-history → daemon → automation
+terminal → safety → rules → hooks → memory → voice → context → agent-bus →
+agent → subagent → im → file-history → daemon → automation → migration
 ```
 
 **加载流程**（`src/core/kernel.ts`）：
-1. 静态 import 全部 21 个模组工厂，按 `MODULE_FACTORIES` 数组固定顺序实例化
+1. critical 模组静态 import，deferred 模组经 `deferred-bundle` 动态 import；按 `MODULE_FACTORIES` 数组固定顺序实例化
 2. 固定顺序满足依赖关系：
    - `llm` / `server` / `update` 无依赖；`server` 前移到第 2 位，其路由 handler 均为请求时 `tryResolve`，health/静态页可秒级就绪
    - `remote → server`：注入请求门卫、注册 `/api/remote/*` 路由、提供热重绑句柄（门卫未注入时 server 零开销直通，不阻塞端口可用）
@@ -184,8 +208,9 @@ subagent → file-history → daemon → automation
 | `voice.service` | Voice 模组 | `VoiceService`（状态/模型安装/识别会话）|
 | `context.engine` | Context 模组 | `ContextEngine`（拼接/压缩/自愈/预算/治理/遥测）|
 | `agent.engine` | Agent 模组 | `AgentEngine`（run/resolveAsk/resolveConfirm）|
+| `agent.bus` | agent-bus 模组 | `AgentBus`（register/update/send/drainInbox/snapshot）|
 | `agent.registry` | subagent 模组 | `AgentRegistry`（list/get/create/update/delete/setDefault）|
-| `subagent.runner` | subagent 模组 | `SubagentRunner`（一次性子代理运行）|
+| `subagent.runner` | subagent 模组 | `SubagentRunner`（sync/async 一次性子代理运行）|
 | `file.history` | File-history 模组 | `FileHistoryService`（Track Edit + Snapshot + undo/restore）|
 | `automation.service` | Automation 模组 | `AutomationService`（list/create/update/delete/trigger/pause/resume/history）|
 | `kernel.config` | Kernel | `ConfigService`（运行时读取 config.json / api.json）|
@@ -242,7 +267,11 @@ subagent → file-history → daemon → automation
     "maxTokens": 8192,
     "maxTurns": 0,
     "workingDirectory": "",
-    "llmStreamIdleTimeoutMs": 900000
+    "llmStreamIdleTimeoutMs": 900000,
+    "maxParallelTools": 4,
+    "maxConcurrentRuns": 4,
+    "maxConcurrentSubagents": 4,
+    "codeMode": { "enabled": true, "uiEnabled": true, "timeoutMs": 120000, "maxCodeChars": 20000, "maxParallelSubCalls": 10 }
   },
   "security": { "authToken": "", "bindLocalhostOnly": true },
   "remote": { "enabled": false, "lanEnabled": true, "lanPasswordEnabled": true, "lanIpOverride": "" },
@@ -367,6 +396,30 @@ onEvent('done', finishReason)
 - `task.guide`：任务运行中追加引导消息；`task.abort`：中断当前 run。
 - `ask` / `confirm-required` 按 `sessionId + toolCallId` 唯一键管理，避免并发任务串答。
 - 生命周期钩子（SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd）经 hooks 引擎 fail-open 执行。
+
+### 6.1 多智能体（Subagent + AgentBus）
+
+```
+主代理 run ──agent(mode=sync)──▶ SubagentRunner.run ──▶ AgentEngine.run(agentId=模板)
+     │                                  │
+     │                                  └─ systemPrompt 叠加 / tools 白名单 / model / maxTurns
+     │
+     ├──agent(mode=async)──▶ SubagentRunner.start ──▶ 后台 AgentEngine.run
+     │        │                        │
+     │        │                        └─ 完成后 bus.send(to=parent, kind=result)
+     │        └─ 立即返回 agentId/sessionId（主代理继续工作）
+     │
+     ├──agent_status(action=list|get|cancel) ──▶ AgentBus（成员树 / 收件箱 / 取消）
+     └──agent_message(to=all|parent|agentId|sessionId) ──▶ AgentBus.send
+                                                          │
+                    run 开始 / 每轮工具后 ◀── drainInbox ──┘
+                    （注入 role=user + name=agent-message 的 [智能体消息]）
+```
+
+- 成员树：主代理 `main`，子代理 `a1/a2/...`；`rootSessionId` 为主任务 id。
+- 收件箱：消息只投递给运行中的成员；`kind=result` 允许投递给已结束的父代理，等下一次 run 注入。
+- 审计：`~/.moss/agent-bus/<rootSessionId>.jsonl`；事件经 `agent-bus:event` → WS `agent-bus.event`。
+- UI：任务页右侧「智能体」标签展示成员树 + 通信记录（全部/频道/私信）。
 
 ## 七、远程访问与安全
 

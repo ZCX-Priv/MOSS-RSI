@@ -33,6 +33,7 @@ import type {
   ContextStats,
   HistoryMeta,
   TerminalInfo,
+  ToolCall,
 } from '../types/api';
 import { DEFAULT_RENDER_SETTINGS, isValidRenderSettings, type RenderSettings } from '../render/core/types';
 import { fileNameOf } from '../render/file/detector';
@@ -123,6 +124,46 @@ function stampThinkingTiming(
     return { thinkingEndedAt: new Date().toISOString() };
   }
   return {};
+}
+
+/**
+ * 服务端历史副本 ↔ 本地运行态合并。
+ *
+ * 服务端落盘的 toolCalls 不带 status、也不含前端专用的 live 进度：
+ * 直接整条覆盖会把「正在执行」抹成未知（卡片不转圈），或把已拿到的结果丢掉。
+ * 规则：结果即完成（有 toolResult → done）；服务端缺少 status/live 时保留本地值；
+ * toolResults 按 toolCallId 取并集（结果只增不减）。
+ */
+function mergeServerMessage(local: TaskMessage, server: TaskMessage): TaskMessage {
+  const resultMap = new Map<string, NonNullable<TaskMessage['toolResults']>[number]>();
+  for (const entry of local.toolResults ?? []) resultMap.set(entry.toolCallId, entry);
+  // 服务端结果优先（可能是轻量投影；展开时由 useLazyToolResult 补全正文）
+  for (const entry of server.toolResults ?? []) resultMap.set(entry.toolCallId, entry);
+  const mergedResults = resultMap.size > 0 ? [...resultMap.values()] : undefined;
+  const hasResult = (id: string): boolean => resultMap.has(id);
+
+  const toolCalls = server.toolCalls?.length
+    ? server.toolCalls.map((tc): ToolCall => {
+        const localTc = local.toolCalls?.find((item) => item.id === tc.id);
+        const status: ToolCall['status'] = hasResult(tc.id)
+          ? 'done'
+          : (tc.status ?? localTc?.status);
+        const live = tc.live ?? localTc?.live;
+        return {
+          ...tc,
+          ...(status ? { status } : {}),
+          ...(live ? { live } : {}),
+        };
+      })
+    : local.toolCalls;
+
+  return {
+    ...server,
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(mergedResults ? { toolResults: mergedResults } : {}),
+    streaming: false,
+    thinkingStreaming: false,
+  };
 }
 
 /** 分组任务加载态（按需加载 + 组内分页）：groupId → { loaded, loading, hasMore, total } */
@@ -281,6 +322,8 @@ interface UIState {
 
   // --- 跟进行为（任务进行中发送消息时的处理方式） ---
   followUpBehavior: 'queue' | 'guide';
+  /** 阻止标签页休眠（Screen Wake Lock 开关；IndexedDB 持久化） */
+  preventTabSleep: boolean;
   /** 排队消息队列（sessionId → 待发送消息；合并语义：每会话至多一条，多条用分隔符合并） */
   messageQueueBySession: Record<string, QueuedMessage[]>;
   /**
@@ -347,6 +390,8 @@ export interface PersistedState {
   recentDirectories?: string[];
   sendShortcut?: string;
   followUpBehavior?: 'queue' | 'guide';
+  /** 阻止标签页休眠（Screen Wake Lock） */
+  preventTabSleep?: boolean;
   accentColor?: string;
   fontSize?: 'small' | 'medium' | 'large';
   uiDensity?: 'compact' | 'standard' | 'comfortable';
@@ -438,6 +483,15 @@ interface UIActions {
    * runId 给定时只定稿归属该 run 的消息（无 runId 的旧消息仍兜底处理）。
    */
   finalizeStreamingMessages: (sessionId: string, runId?: string) => void;
+  /**
+   * 收敛全会话工具状态：把非 done 的 toolCall 置为 done。
+   * 终态事件（done/task.done/aborted）调用，兜住已定稿消息里的残留 executing。
+   */
+  finalizeToolCalls: (sessionId: string, runId?: string) => void;
+  /**
+   * 收敛除目标消息外所有消息的工具状态：新工具调用开始时，旧消息里的工具不可能还在执行。
+   */
+  finalizeToolCallsExcept: (sessionId: string, messageId: string) => void;
   /** 开始一轮 run：记录身份、点亮生成态、清除错误与停止态 */
   beginRun: (sessionId: string, runId: string) => void;
   /**
@@ -583,6 +637,8 @@ interface UIActions {
 
   // 跟进行为
   setFollowUpBehavior: (v: UIState['followUpBehavior']) => void;
+  /** 阻止标签页休眠（Screen Wake Lock；IndexedDB 持久化，页面可见时自动重申请） */
+  setPreventTabSleep: (v: boolean) => void;
   /** 入队（合并语义）：该会话已有队列项则合并到同一条，否则新建 */
   addToMessageQueue: (sessionId: string, message: QueuedMessage) => void;
   /** 移出并返回某条队列消息（供「编辑回填」使用）；不存在返回 null */
@@ -922,6 +978,8 @@ export const useStore = create<Store>((set, get) => ({
 
   // --- 跟进行为 ---
   followUpBehavior: 'queue',
+  // --- 阻止标签页休眠（Screen Wake Lock） ---
+  preventTabSleep: false,
   messageQueueBySession: {},
   composerInjection: null,
 
@@ -1073,7 +1131,7 @@ export const useStore = create<Store>((set, get) => ({
         const server = incomingById.get(m.id);
         if (!server) return m;
         patchedIds.add(m.id);
-        return { ...server, streaming: false, thinkingStreaming: false };
+        return mergeServerMessage(m, server);
       });
       // 未与本地消息同 id 的部分（更早的历史页 / 服务端新增消息）
       const rest = resolved.filter((m) => !patchedIds.has(m.id));
@@ -1121,7 +1179,16 @@ export const useStore = create<Store>((set, get) => ({
             serverCount: resolved.length,
           });
         }
-        next = [...resolved, ...localOnly];
+        // tail：权威替换（服务端末页为骨架）。同 id 的本地消息仍做一次运行态合并：
+        // 服务端 toolCalls 不带 status/live，整条替换会让「正在执行」的卡片瞬间失去转圈，
+        // 也会丢掉尚未落盘但已实时到达的工具结果。
+        next = [
+          ...resolved.map((server) => {
+            const local = currentById.get(server.id);
+            return local ? mergeServerMessage(local, server) : server;
+          }),
+          ...localOnly,
+        ];
       }
 
       // 归一为时间升序（单一事实来源）：三种模式的拼接都可能是「到达顺序」，
@@ -1311,6 +1378,41 @@ export const useStore = create<Store>((set, get) => ({
       return {
         messagesBySession: { ...state.messagesBySession, [sessionId]: next },
       };
+    }),
+  finalizeToolCalls: (sessionId, runId) =>
+    set((state) => {
+      let changed = false;
+      const next = (state.messagesBySession[sessionId] ?? []).map((m) => {
+        // runId 给定时只处理本轮消息；无 runId 的旧消息仍兜底（它们不该残留执行态）
+        if (runId && m.runId && m.runId !== runId) return m;
+        if (!m.toolCalls?.some((tc) => tc.status !== 'done')) return m;
+        changed = true;
+        return {
+          ...m,
+          toolCalls: m.toolCalls.map((tc) =>
+            tc.status === 'done' ? tc : { ...tc, status: 'done' as const },
+          ),
+        };
+      });
+      if (!changed) return {};
+      return { messagesBySession: { ...state.messagesBySession, [sessionId]: next } };
+    }),
+  finalizeToolCallsExcept: (sessionId, messageId) =>
+    set((state) => {
+      let changed = false;
+      const next = (state.messagesBySession[sessionId] ?? []).map((m) => {
+        if (m.id === messageId) return m;
+        if (!m.toolCalls?.some((tc) => tc.status !== 'done')) return m;
+        changed = true;
+        return {
+          ...m,
+          toolCalls: m.toolCalls.map((tc) =>
+            tc.status === 'done' ? tc : { ...tc, status: 'done' as const },
+          ),
+        };
+      });
+      if (!changed) return {};
+      return { messagesBySession: { ...state.messagesBySession, [sessionId]: next } };
     }),
   beginRun: (sessionId, runId) =>
     set((state) => {
@@ -1756,6 +1858,10 @@ export const useStore = create<Store>((set, get) => ({
   setFollowUpBehavior: (followUpBehavior) => {
     void idbSet('moss-follow-up-behavior', followUpBehavior);
     set({ followUpBehavior });
+  },
+  setPreventTabSleep: (preventTabSleep) => {
+    void idbSet('moss-prevent-tab-sleep', preventTabSleep);
+    set({ preventTabSleep });
   },
   addToMessageQueue: (sessionId, message) =>
     set((state) => {
@@ -2208,6 +2314,9 @@ export const useStore = create<Store>((set, get) => ({
       }
       if (patch.followUpBehavior === 'queue' || patch.followUpBehavior === 'guide') {
         next.followUpBehavior = patch.followUpBehavior;
+      }
+      if (typeof patch.preventTabSleep === 'boolean') {
+        next.preventTabSleep = patch.preventTabSleep;
       }
       if (typeof patch.accentColor === 'string' && patch.accentColor.length > 0) {
         next.accentColor = patch.accentColor;

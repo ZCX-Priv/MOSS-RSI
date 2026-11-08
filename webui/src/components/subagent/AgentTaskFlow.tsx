@@ -25,7 +25,7 @@ import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-previ
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
 import { buildToolResultIndex, type ToolResultEntry } from './agent-calls';
-import type { TaskMessage } from '../../types/api';
+import type { TaskMessage, ToolCall } from '../../types/api';
 
 interface AgentTaskFlowProps {
   /** agent 自己的会话 id（= 其 taskId）；null 表示尚未派发 */
@@ -49,12 +49,41 @@ const STICK_BOTTOM_PX = 24;
 function mergeMessages(history: TaskMessage[], live: TaskMessage[]): TaskMessage[] {
   const byId = new Map<string, TaskMessage>();
   for (const m of history) byId.set(m.id, m);
-  for (const m of live) byId.set(m.id, m);
+  for (const m of live) {
+    const prev = byId.get(m.id);
+    byId.set(m.id, prev ? mergeToolState(prev, m) : m);
+  }
   return [...byId.values()].sort((a, b) => {
     const ta = Date.parse(a.timestamp);
     const tb = Date.parse(b.timestamp);
     return (Number.isFinite(ta) ? ta : 0) - (Number.isFinite(tb) ? tb : 0);
   });
+}
+
+/**
+ * 同 id 消息合并：实时内容优先，但工具状态与结果取并集。
+ * 实时副本可能因事件丢失缺少 toolResult 或残留 executing；历史副本则是无 status 的裸投影。
+ * 规则：有结果 → done；实时缺 status/live 时回退历史值。
+ */
+function mergeToolState(historyMsg: TaskMessage, liveMsg: TaskMessage): TaskMessage {
+  const results = new Map<string, NonNullable<TaskMessage['toolResults']>[number]>();
+  for (const entry of historyMsg.toolResults ?? []) results.set(entry.toolCallId, entry);
+  for (const entry of liveMsg.toolResults ?? []) results.set(entry.toolCallId, entry);
+  const toolCalls = liveMsg.toolCalls?.map((tc) => {
+    const fromHistory = historyMsg.toolCalls?.find((item) => item.id === tc.id);
+    const status = results.has(tc.id) ? ('done' as const) : (tc.status ?? fromHistory?.status);
+    const live = tc.live ?? fromHistory?.live;
+    return {
+      ...tc,
+      ...(status ? { status } : {}),
+      ...(live ? { live } : {}),
+    };
+  });
+  return {
+    ...liveMsg,
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(results.size > 0 ? { toolResults: [...results.values()] } : {}),
+  };
 }
 
 /** 思考状态行：流式中实时计时 + 最新片段预览（与主对话 MessageBubble 同构，紧凑尺寸） */
@@ -87,7 +116,7 @@ const ThinkingLine = memo(function ThinkingLine({ message }: { message: TaskMess
 
   return (
     <details className="group">
-      <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+      <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
         <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" />
         {message.thinkingStreaming ? (
           <Loader2 className="size-3 shrink-0 animate-spin" />
@@ -128,10 +157,13 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
   message,
   iconMap,
   toolResultIndex,
+  sessionId,
 }: {
   message: TaskMessage;
   iconMap: Record<string, string>;
   toolResultIndex: Map<string, ToolResultEntry>;
+  /** 子代理自己的会话 id（工具卡懒加载必须按它取结果，而不是主会话） */
+  sessionId?: string | null;
 }) {
   if (message.isError) {
     return (
@@ -146,11 +178,10 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
     <div className="flex flex-col gap-1">
       {message.thinking && <ThinkingLine message={message} />}
       {visibleContent && (
-        <div className="text-[11px] text-foreground/90">
+        <div className="text-sm text-foreground">
           <MarkdownRenderer
             text={visibleContent}
             streaming={!!message.streaming}
-            variant="compact"
             defer={!message.streaming}
             cursor={
               message.streaming ? <Loader2 className="ml-1 inline size-2.5 animate-spin" /> : undefined
@@ -161,26 +192,31 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
       {message.toolCalls?.map((tc) => {
         const matched = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         const indexed = toolResultIndex.get(tc.id);
+        // 结果即完成：实时副本可能残留 executing，历史索引已拿到结果时按完成渲染
+        const resolved: ToolCall =
+          indexed && tc.status !== 'done' ? { ...tc, status: 'done' } : tc;
         if (tc.name === 'run_code') {
           return (
             <RunCodeCard
               key={tc.id}
-              toolCall={tc}
+              toolCall={resolved}
               result={matched?.result}
               fallbackText={indexed?.text}
               fallbackIsError={indexed?.isError}
               iconMap={iconMap}
+              sessionId={sessionId ?? undefined}
             />
           );
         }
         return (
           <ToolCallDetails
             key={tc.id}
-            toolCall={tc}
+            toolCall={resolved}
             result={matched?.result}
             fallbackText={indexed?.text}
             fallbackIsError={indexed?.isError}
             iconMap={iconMap}
+            sessionId={sessionId ?? undefined}
           />
         );
       })}
@@ -247,6 +283,19 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
     };
   }, [sessionId, load]);
 
+  // WS 重连后补拉一次历史：睡眠/断网期间丢失的 subagent.event 不会自动重放，
+  // 不补拉会让「执行过程」永久停在旧状态。
+  const wsStatus = useStore((s) => s.wsStatus);
+  const prevWsStatusRef = useRef(wsStatus);
+  useEffect(() => {
+    const prev = prevWsStatusRef.current;
+    prevWsStatusRef.current = wsStatus;
+    if (!sessionId) return;
+    if (wsStatus === 'open' && prev !== 'open' && prev !== 'connecting') {
+      void load();
+    }
+  }, [wsStatus, sessionId, load]);
+
   // 双通道合并（id 去重，实时覆盖历史）；过程区只保留 assistant 消息
   const merged = useMemo(
     () => mergeMessages(messages, liveMessages ?? []).filter((m) => m.role === 'assistant'),
@@ -294,7 +343,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex max-h-[280px] flex-col gap-2 overflow-auto no-scrollbar"
+        className="flex max-h-[360px] flex-col gap-2 overflow-auto no-scrollbar"
       >
         {visible.length === 0 && !loading && (
           <div className="px-1 py-2 text-[11px] text-muted-foreground">
@@ -311,6 +360,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
               message={m}
               iconMap={toolIconMap}
               toolResultIndex={toolResultIndex}
+              sessionId={sessionId}
             />
           </div>
         ))}

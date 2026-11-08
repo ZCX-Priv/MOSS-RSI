@@ -69,7 +69,10 @@ export function finalizeMessage(
   m: TaskMessage,
   endedAt: string,
 ): TaskMessage {
-  if (!m.streaming && !m.thinkingStreaming) return m;
+  // 工具状态必须无条件收敛：历史合并会把消息提前定稿（streaming=false），
+  // 之后 done 事件若不处理这类消息，残留的 executing 会永远转圈。
+  const hasPendingTool = m.toolCalls?.some((tc) => tc.status !== 'done') === true;
+  if (!m.streaming && !m.thinkingStreaming && !hasPendingTool) return m;
   const finalizedToolCalls = m.toolCalls?.map((tc) =>
     tc.status === 'done' ? tc : { ...tc, status: 'done' as const },
   );
@@ -78,7 +81,8 @@ export function finalizeMessage(
     streaming: false,
     thinkingStreaming: false,
     toolCalls: finalizedToolCalls,
-    streamEndedAt: endedAt,
+    // 迟到分片屏障只加在原本仍在流式的消息上：已定稿消息加屏障无意义且会干扰后续历史 patch
+    ...(m.streaming || m.thinkingStreaming ? { streamEndedAt: endedAt } : {}),
     ...(m.thinkingStreaming && !m.thinkingEndedAt ? { thinkingEndedAt: endedAt } : {}),
   };
 }

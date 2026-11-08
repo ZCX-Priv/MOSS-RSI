@@ -42,6 +42,7 @@ export function defaultAppConfig(): AppConfig {
     version: 1,
     server: { host: '127.0.0.1', port: 7766, autoPort: true, locale: 'zh' },
     daemon: { enabled: true },
+    power: { preventSleep: false },
     logs: { level: 'info', retentionDays: 14, maxFileMb: 10 },
     update: { autoCheck: true, channel: 'stable', checkIntervalHours: 24 },
     agent: {

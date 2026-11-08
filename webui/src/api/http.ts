@@ -19,6 +19,7 @@ import type {
   AgentItem,
   AgentDetail,
   SubagentRunOutput,
+  AgentBusSnapshot,
   SkillItem,
   SkillDetail,
   MarketSkillItem,
@@ -663,6 +664,17 @@ export const api = {
   // ==========================================================================
   runSubagent: (data: { template: string; task: string; cwd: string; permissionMode?: 'ask' | 'auto' | 'skip' }) =>
     request<SubagentRunOutput>('POST', '/api/subagents/run', data),
+
+  // ==========================================================================
+  // 多智能体总线（任务页「智能体」标签）
+  // ==========================================================================
+  getAgentBusSnapshot: (params?: { root?: string; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.root) query.set('root', params.root);
+    if (typeof params?.limit === 'number') query.set('limit', String(params.limit));
+    const qs = query.toString();
+    return request<AgentBusSnapshot>('GET', `/api/agent-bus/snapshot${qs ? `?${qs}` : ''}`);
+  },
 
   // ==========================================================================
   // Skills（见文档 3.2.5）

@@ -187,7 +187,8 @@
 | PATCH | `/api/agents/:id` | 是 | 更新 Agent |
 | DELETE | `/api/agents/:id` | 是 | 删除 Agent |
 | PUT | `/api/agents/default` | 是 | 设置默认 Agent |
-| POST | `/api/subagents/run` | 是 | 运行一次性 subagent |
+| POST | `/api/subagents/run` | 是 | 运行一次性 subagent（同步） |
+| GET | `/api/agent-bus/snapshot?root=<sessionId>&limit=200` | 是 | 多智能体成员树 + 通信审计快照 |
 
 ### 2.10 自动化
 
@@ -493,6 +494,7 @@
 | `automation.event` | 运行过程事件 |
 | `automation.finished` | `{ automationId, runId, status, finalText? }` |
 | `subagent.event` | `{ taskId, parentToolCallId?, event }` |
+| `agent-bus.event` | `{ type: 'member' \| 'message', member?, message?, rootSessionId }` |
 | `mcp.status` | 服务器连接状态 |
 | `resources.changed` | MCP 资源列表变化 |
 | `insight.diagnose.event` | 诊断链路事件 |

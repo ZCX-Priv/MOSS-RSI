@@ -26,11 +26,11 @@
 
 MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，运行于 [Bun](https://bun.sh) 运行时之上。它以浏览器 Web UI 作为交互界面，以本地常驻服务作为核心载体，将 LLM 推理、工具执行、上下文管理、持久终端、浏览器/桌面操作、语音输入与任务调度整合为一套完整、可扩展的 Agent 运行环境，并支持局域网与公网隧道远程访问。
 
-内核仅提供配置、事件、服务注册与日志四项基础能力，其余一切功能——从 Agent 引擎、LLM 路由到 HTTP 服务与定时任务——均以模组形式挂载，模组之间通过服务契约（`ServiceRegistry`）与事件总线（`EventBus`）解耦协作。模组由内核静态注册表按固定顺序加载（被依赖者在前），正向初始化、反向销毁。这种架构使 MOSS 既保持核心的精简稳定，又允许通过 Skill 在不触碰内核的情况下持续扩展能力边界。
+内核仅提供配置、事件、服务注册与日志四项基础能力，其余一切功能——从 Agent 引擎、LLM 路由到 HTTP 服务与定时任务——均以模组形式挂载，模组之间通过服务契约（`ServiceRegistry`）与事件总线（`EventBus`）解耦协作。模组由内核注册表按固定顺序加载（critical 静态 import / deferred 动态 import，被依赖者在前），正向初始化、反向销毁。这种架构使 MOSS 既保持核心的精简稳定，又允许通过 Skill 在不触碰内核的情况下持续扩展能力边界。
 
 ## 核心特性
 
-- **微内核架构** —— ConfigService / EventBus / ServiceRegistry / Logger 四大核心服务，21 个模组由内核静态注册表按固定顺序加载（被依赖者在前），正向初始化、反向销毁
+- **微内核架构** —— ConfigService / EventBus / ServiceRegistry / Logger 四大核心服务，24 个模组由内核注册表按固定顺序加载（critical 静态 import / deferred 动态 import，被依赖者在前），正向初始化、反向销毁
 - **ReAct Agent 引擎** —— 流式文本与思维链输出、多轮工具调用循环、任务引导/中断、上下文自动压缩与溢出兜底裁剪、工具调用自愈
 - **多 LLM Provider 路由** —— 内置 openai-chat / openai-responses / anthropic / gemini 等接口格式，支持 DeepSeek、Anthropic、OpenAI、Gemini、Qwen、GLM、Kimi 等主流模型，按模型自动解析路由，支持 thinking 推理输出
 - **MCP 双向支持** —— 作为客户端接入任意 Model Context Protocol 外部工具服务器；同时通过 `/mcp` 端点与 `moss mcp`（stdio）向外部 Agent 暴露 MOSS 工具
@@ -89,7 +89,7 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 └──────────────┴──────────────┴──────────────┘
 ```
 
-**模组一览（21 个，按内核加载顺序）：**
+**模组一览（24 个，按内核加载顺序）：**
 
 | 模组 | 职责 | 注册的标准服务 |
 |---|---|---|
@@ -109,11 +109,14 @@ MOSS 是一个基于**微内核 + 模组化架构**的本地 AI Agent 应用，�
 | `memory` | 记忆引擎（存储 / 检索 / 蒸馏） | `memory.engine` |
 | `voice` | 语音识别（本地 sherpa-onnx / 在线服务商 / WASM） | `voice.service` |
 | `context` | 上下文引擎（拼接 / 压缩 / 自愈 / 遥测） | `context.engine` |
+| `agent-bus` | 多智能体总线（成员树 / 收件箱 / 频道 / 审计） | `agent.bus` |
 | `agent` | ReAct 循环、会话与任务管理、事件流 | `agent.engine` |
-| `subagent` | Agent 注册表 + 一次性子代理运行 | `agent.registry`、`subagent.runner` |
+| `subagent` | Agent 注册表 + 一次性子代理运行（sync/async） | `agent.registry`、`subagent.runner` |
+| `im` | IM 连接器（QQ 等） | `im.service` |
 | `file-history` | 文件历史（编辑追踪 / 快照 / 回滚） | `file.history` |
 | `daemon` | 运行时 PID 文件维护 + 优雅退出 | — |
 | `automation` | cron / once 定时任务调度 | `automation.service` |
+| `migration` | 外部 Agent 会话导入 / MOSS 备份与恢复 | `migration.service` |
 
 内核自身另注册 `kernel.config`、`kernel.logger`、`kernel.modules` 三个基础服务。
 
@@ -298,10 +301,10 @@ MOSS/
 │   ├── main.ts                  # 入口：CLI 解析 + 启动 Kernel
 │   ├── cli/                     # CLI 命令实现
 │   ├── core/                    # 微内核（kernel/config/event-bus/...）
-│   ├── modules/                 # 21 个模组（agent/subagent/automation/browser/
+│   ├── modules/                 # 24 个模组（agent-bus/agent/subagent/automation/browser/
 │   │                            #   computer/context/daemon/file-history/filesys/
-│   │                            #   hooks/llm/mcp/memory/remote/rules/safety/
-│   │                            #   server/terminal/tools/update/voice）
+│   │                            #   hooks/im/llm/mcp/memory/migration/remote/
+│   │                            #   rules/safety/server/terminal/tools/update/voice）
 │   └── utils/                   # 通用工具
 ├── browser-extension/           # Chrome 扩展（MOSS Browser Bridge，Manifest V3）
 ├── agent/prompts/main/          # Agent 系统提示词（.md）

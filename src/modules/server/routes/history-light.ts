@@ -76,3 +76,53 @@ export function lightenHistoryMessage(message: unknown): unknown {
 export function lightenHistoryMessages(messages: unknown[]): unknown[] {
   return messages.map((message) => lightenHistoryMessage(message));
 }
+
+/**
+ * 实时 WS 事件的工具结果轻量化。
+ *
+ * run_code 取消长度裁剪后，单次调用的 metadata（完整返回值 + 全量日志 + 每个嵌套调用的
+ * 完整正文/metadata）可达数 MB；整帧推给 WebUI 会让主线程 JSON.parse/React 渲染长时间卡住，
+ * 表现为「PTC 很久不结束 / 状态更新滞后」。
+ *
+ * 超过 maxBytes 时：正文截断为预览、codeRun 走 lightenCodeRun（保留头部与 calls 预览）、
+ * 打 __mossLazy 标记；前端展开卡片时经 /api/session/:id/tool-result 拉取完整内容。
+ * 落库结果不受影响。
+ */
+export function lightenToolResultForEvent<T>(result: T, maxBytes: number): T {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(result) ?? '';
+  } catch {
+    return result;
+  }
+  if (serialized.length <= maxBytes) return result;
+
+  const shaped = result as {
+    content?: unknown;
+    metadata?: unknown;
+  };
+  const content = Array.isArray(shaped.content) ? shaped.content.filter(isRecord) : [];
+  const text = content
+    .filter((part) => part.type === 'text')
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('\n');
+  const preview =
+    text.length > PREVIEW_CHARS
+      ? `${text.slice(0, PREVIEW_CHARS)}\n…[完整内容将在展开时加载]`
+      : text;
+  const metadata = isRecord(shaped.metadata) ? shaped.metadata : {};
+  const codeRun = isRecord(metadata.codeRun) ? metadata.codeRun : null;
+  return {
+    ...(result as object),
+    content: [
+      ...(preview ? [{ type: 'text' as const, text: preview }] : []),
+      // 非文本内容原样保留（图片已由上游剥离为文本占位）
+      ...content.filter((part) => part.type !== 'text'),
+    ],
+    metadata: {
+      ...metadata,
+      [LAZY_RESULT_FLAG]: true,
+      ...(codeRun ? { codeRun: lightenCodeRun(codeRun) } : {}),
+    },
+  } as T;
+}

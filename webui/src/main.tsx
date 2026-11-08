@@ -12,6 +12,7 @@ import { useStore, type PersistedState, LEGACY_DEFAULT_WORKING_DIRECTORY, DEFAUL
 import { isValidRenderSettings } from './render/core/types'
 import { isValidAnimationSettings } from './types/animation'
 import { applyAppearanceToDom } from './lib/appearance'
+import { initTabWakeLock } from './lib/tab-wake-lock'
 import i18n, { type Locale, resolveLocale, LOCALE_STORAGE_KEY } from './i18n'
 import './styles/global.css'
 
@@ -85,6 +86,8 @@ const PERSISTED_KEYS = [
   'moss-recent-dir-aliases',
   'moss-send-shortcut',
   'moss-follow-up-behavior',
+  // 阻止标签页休眠（Screen Wake Lock）
+  'moss-prevent-tab-sleep',
   'moss-permission-mode',
   'moss-sidebar-tabs-by-session',
   'moss-render-settings',
@@ -193,6 +196,8 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
       data['moss-follow-up-behavior'] === 'queue' || data['moss-follow-up-behavior'] === 'guide'
         ? (data['moss-follow-up-behavior'] as 'queue' | 'guide')
         : undefined,
+    preventTabSleep:
+      data['moss-prevent-tab-sleep'] === true ? true : undefined,
     accentColor:
       typeof data['moss-accent-color'] === 'string' && (data['moss-accent-color'] as string).length > 0
         ? (data['moss-accent-color'] as string)
@@ -311,6 +316,8 @@ void Promise.all([initTheme(), initLocale(), initPersisted()])
     useStore.getState().hydratePersisted(buildPersistedState(persisted));
     // 持久化外观注入后同步到 DOM（首帧已用默认值渲染，这里修正为主题色/字号/密度/圆角）
     applyAppearanceToDom(useStore.getState());
+    // 阻止标签页休眠：按持久化开关申请 Screen Wake Lock（不支持时静默跳过）
+    initTabWakeLock();
   })
   .catch((err: unknown) => {
   // 启动链路最后兜底：任何未预期异常也要给用户可见反馈，而非白屏

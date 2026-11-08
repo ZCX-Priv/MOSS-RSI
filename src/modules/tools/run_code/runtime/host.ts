@@ -25,6 +25,7 @@ import {
 } from './protocol';
 import { toolResultErrorMessage, toolResultText, toolResultToCodeValue } from './value';
 import type { SanitizeWarning } from './sanitize';
+import type { ValidationResult } from './schema';
 
 export interface CodeRunCallRecord {
   id: string;
@@ -55,6 +56,8 @@ export interface RunCodeHostOptions {
   invokeTool: (name: string, args: unknown, opts: { callId: string; signal: AbortSignal }) => Promise<ToolResult>;
   /** 保守并发判定：只有 readOnly 且非 destructive 的工具可重叠 */
   isConcurrencySafe: (name: string) => boolean;
+  /** 宿主分发前的参数校验（失败只让该次调用失败，程序内可 catch） */
+  validateCall?: (name: string, args: unknown) => ValidationResult;
   /** 实时进度回调（执行开始 / 日志 / 嵌套调用开始与结束）；异常被吞掉，不影响程序执行 */
   onProgress?: (event: RunCodeProgressEvent) => void;
   logger?: Logger;
@@ -205,11 +208,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     const scheduleLog = (text: string): void => {
       logBuffer.push(text);
-      if (logBuffer.length >= 50) {
+      if (logBuffer.length >= 80) {
         flushLogs();
         return;
       }
-      if (!logTimer) logTimer = setTimeout(flushLogs, 80);
+      if (!logTimer) logTimer = setTimeout(flushLogs, 120);
     };
 
     const writeLine = (line: string): boolean => {
@@ -278,24 +281,28 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     /**
      * 嵌套调用的富数据（前端复用普通工具卡渲染）。
      * 预览完全放开：入参、结果正文、metadata 都不按字节截断。
+     * argsJson 由调用方预计算：同一份入参在 start/record/details 三处复用，避免多次全量 stringify。
      */
     const collectCallDetails = (
-      args: unknown,
+      argsJson: string | undefined,
       result?: ToolResult,
       fallbackText?: string,
     ): Pick<CodeRunCallRecord, 'argumentsJson' | 'resultText' | 'resultMetadata'> => {
-      const argumentsJson = jsonText(args);
       const rawText = result ? toolResultText(result) : (fallbackText ?? '');
       return {
-        ...(argumentsJson ? { argumentsJson } : {}),
+        ...(argsJson ? { argumentsJson: argsJson } : {}),
         ...(rawText ? { resultText: rawText } : {}),
         ...(result?.metadata ? { resultMetadata: result.metadata } : {}),
       };
     };
 
     /** 嵌套调用开始进度（参数超过预算时只给 preview，避免单帧过大） */
-    const emitCallStart = (call: { id: string; name: string; args: unknown }, seq: number): void => {
-      const argsJson = jsonText(call.args);
+    const emitCallStart = (
+      call: { id: string; name: string; args: unknown },
+      seq: number,
+      argsJson = jsonText(call.args),
+      argsPreview = previewJson(call.args),
+    ): void => {
       emitProgress({
         phase: 'call-start',
         ...(programStartedAtMs ? { elapsedMs: Date.now() - programStartedAtMs } : {}),
@@ -303,7 +310,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           id: call.id,
           name: call.name,
           seq,
-          argsPreview: previewJson(call.args),
+          argsPreview,
           ...(argsJson && byteLength(argsJson) <= MAX_PROGRESS_ARGS_BYTES
             ? { argumentsJson: argsJson }
             : {}),
@@ -338,6 +345,34 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           ...(resultText ? { resultText } : {}),
           ...(resultMetadata ? { resultMetadata } : {}),
         },
+      });
+    };
+
+    /** 参数校验失败：记录一次失败调用 + 回写可 catch 的错误帧（不启动工具执行） */
+    const rejectCall = (id: string, name: string, args: unknown, message: string): void => {
+      const seq = (callSeq += 1);
+      const argsJson = jsonText(args);
+      const argsPreview = previewJson(args);
+      emitCallStart({ id, name, args }, seq, argsJson, argsPreview);
+      const record: CodeRunCallRecord = {
+        id,
+        name,
+        seq,
+        argsPreview,
+        resultPreview: truncateToBytes(message, 400),
+        durationMs: 0,
+        ok: false,
+        error: truncateToBytes(message, 800),
+        ...collectCallDetails(argsJson, undefined, message),
+      };
+      recordCall(record);
+      emitCallEnd(record);
+      writeFrame({
+        v: 1,
+        type: 'tool-result',
+        id,
+        ok: false,
+        error: { name: TOOL_CALL_ERROR_NAME, message },
       });
     };
 
@@ -409,7 +444,17 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           });
           return;
         }
-        enqueueCall({ id: frame.id, name: frame.name, args: frame.args });
+        // 参数 Schema 校验：错误在宿主侧拦截，程序内可 catch（错误消息含期望签名）
+        const validated = opts.validateCall?.(frame.name, frame.args);
+        if (validated && !validated.ok) {
+          rejectCall(frame.id, frame.name, frame.args, validated.message);
+          return;
+        }
+        enqueueCall({
+          id: frame.id,
+          name: frame.name,
+          args: validated?.ok ? validated.args : frame.args,
+        });
         return;
       }
       if (frame.type === 'result') {
@@ -477,7 +522,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     const runCall = async (call: QueuedCall): Promise<void> => {
       const started = performance.now();
       const seq = (callSeq += 1);
-      emitCallStart(call, seq);
+      // 入参只序列化一次：start 进度、失败记录、成功记录与富数据详情全部复用
+      //（旧实现对同一份 args 做 3~4 次全量 JSON.stringify，大 write 入参时开销显著）
+      const argsJson = jsonText(call.args);
+      const argsPreview = previewJson(call.args);
+      emitCallStart(call, seq, argsJson, argsPreview);
       try {
         const result = await opts.invokeTool(call.name, call.args, {
           callId: call.id,
@@ -490,12 +539,12 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
             id: call.id,
             name: call.name,
             seq,
-            argsPreview: previewJson(call.args),
+            argsPreview,
             resultPreview: truncateToBytes(message, 400),
             durationMs,
             ok: false,
             error: truncateToBytes(message, 800),
-            ...collectCallDetails(call.args, undefined, message),
+            ...collectCallDetails(argsJson, undefined, message),
           };
           recordCall(record);
           emitCallEnd(record);
@@ -528,12 +577,12 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
             id: call.id,
             name: call.name,
             seq,
-            argsPreview: previewJson(call.args),
+            argsPreview,
             resultPreview: truncateToBytes(message, 400),
             durationMs,
             ok: false,
             error: truncateToBytes(message, 800),
-            ...collectCallDetails(call.args, undefined, message),
+            ...collectCallDetails(argsJson, undefined, message),
           };
           recordCall(record);
           emitCallEnd(record);
@@ -550,11 +599,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           id: call.id,
           name: call.name,
           seq,
-          argsPreview: previewJson(call.args),
+          argsPreview,
           resultPreview: previewJson(value),
           durationMs,
           ok: true,
-          ...collectCallDetails(call.args, result),
+          ...collectCallDetails(argsJson, result),
         };
         recordCall(record);
         emitCallEnd(record);
@@ -566,12 +615,12 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           id: call.id,
           name: call.name,
           seq,
-          argsPreview: previewJson(call.args),
+          argsPreview,
           resultPreview: truncateToBytes(message, 400),
           durationMs,
           ok: false,
           error: truncateToBytes(message, 800),
-          ...collectCallDetails(call.args, undefined, message),
+          ...collectCallDetails(argsJson, undefined, message),
         };
         recordCall(record);
         emitCallEnd(record);
@@ -807,6 +856,11 @@ function jsonText(value: unknown): string | undefined {
 }
 
 function previewJson(value: unknown): string {
+  // 字符串快路径：先截断再展示，避免对大文件内容（write 入参）做整段 JSON.stringify
+  if (typeof value === 'string') {
+    const clipped = truncateToBytes(value, 400);
+    return clipped.length < value.length ? `${clipped}…` : clipped;
+  }
   try {
     const json = JSON.stringify(value);
     return truncateToBytes(json ?? 'null', 400);

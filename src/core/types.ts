@@ -201,6 +201,14 @@ export interface AppConfig {
   daemon: {
     enabled: boolean;
   };
+  /**
+   * 运行期电源策略。
+   * preventSleep=true 时后端持有系统级防休眠句柄（Windows SetThreadExecutionState /
+   * macOS caffeinate / Linux systemd-inhibit）：MOSS 运行期间阻止系统睡眠，允许关屏。
+   */
+  power: {
+    preventSleep: boolean;
+  };
   /** 日志系统配置（级别 / 保留天数 / 单文件大小上限），由 core/logger 消费 */
   logs: {
     level: LogLevel;
@@ -223,6 +231,8 @@ export interface AppConfig {
     maxParallelTools?: number;
     /** 同时运行的 agent run 上限（缺省按内存自适应：<2GB 为 2，否则 4） */
     maxConcurrentRuns?: number;
+    /** 同一轮并发执行 subagent 工具调用的上限（缺省 4） */
+    maxConcurrentSubagents?: number;
     workingDirectory: string;
     /** 代码模式（PTC + Intelligent UI）：run_code 限额（输出不设字节预算） */
     codeMode: {
@@ -524,6 +534,8 @@ export const ServiceNames = {
   COMMAND_REGISTRY: 'command.registry',
   /** Agent 注册表（由 subagent 模块注册：默认 Agent + 内置模板 + 自定义 Agent） */
   AGENT_REGISTRY: 'agent.registry',
+  /** 多智能体总线（由 agent-bus 模块注册：成员树 / 收件箱 / 频道广播 / 消息审计） */
+  AGENT_BUS: 'agent.bus',
   /** 一次性子代理运行服务（由 subagent 模块注册） */
   SUBAGENT_RUNNER: 'subagent.runner',
   /** 自动化任务服务（由 automation 模块注册） */

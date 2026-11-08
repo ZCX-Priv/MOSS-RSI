@@ -720,6 +720,22 @@ export class SessionStore {
     this.markDirty(session);
   }
 
+  /**
+   * 追加一条内部智能体消息（多智能体总线注入）。
+   * 采用 role='user' + name 的既有 harness 约定（与 env-context / 时间提示一致），
+   * 兼容所有 provider；前端按 name 不渲染为用户消息，模型视图照常可见。
+   */
+  addAgentMessage(session: Session, content: string, name: string): void {
+    session.messages.push({
+      role: 'user',
+      name,
+      content,
+      timestamp: new Date().toISOString(),
+    });
+    session.updatedAt = new Date().toISOString();
+    this.markDirty(session);
+  }
+
   /** 写入最近一次 run 统计（不落盘，由调用方按需 persistSession） */
   setLastRunStats(session: Session, stats: RunStats): void {
     session.lastRunStats = stats;

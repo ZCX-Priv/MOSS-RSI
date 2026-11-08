@@ -61,6 +61,8 @@ interface ToolCallDetailsProps {
   fallbackIsError?: boolean;
   /** 工具名 → 图标白名单键（store.toolIconMap） */
   iconMap: Record<string, string>;
+  /** 懒加载工具结果所属会话（子代理卡片传入自己的 session；缺省 store.activeSessionId） */
+  sessionId?: string;
   /** 覆盖默认预览内容（run_code 等有专属结果形态的工具使用） */
   previewOverride?: ReactNode;
   /** 覆盖默认源码内容（run_code 展示程序源码而非参数 JSON） */
@@ -572,6 +574,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   fallbackText,
   fallbackIsError,
   iconMap,
+  sessionId,
   previewOverride,
   sourceOverride,
   copyTextOverride,
@@ -584,6 +587,8 @@ export const ToolCallDetails = memo(function ToolCallDetails({
 }: ToolCallDetailsProps) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
+  /** 结果所属会话：子代理卡片必须传自己的 session，否则懒加载会去主会话找 tool-result */
+  const resultSessionId = sessionId ?? activeSessionId;
   const [internalExpanded, setInternalExpanded] = useState(defaultExpanded === true);
   const isOpen = expanded ?? internalExpanded;
   const [mode, setMode] = useState<CardMode>('preview');
@@ -591,7 +596,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   const [stopping, setStopping] = useState(false);
   const copyTimer = useRef<number | null>(null);
   // 轻量历史结果：仅展开时拉取完整正文/metadata（折叠态零网络、零大对象解析）
-  const hydratedResult = useLazyToolResult(activeSessionId, toolCall.id, result, isOpen);
+  const hydratedResult = useLazyToolResult(resultSessionId, toolCall.id, result, isOpen);
 
   useEffect(
     () => () => {
@@ -688,7 +693,10 @@ export const ToolCallDetails = memo(function ToolCallDetails({
     return added > 0 || removed > 0 ? { added, removed } : null;
   }, [preview]);
 
-  const running = toolCall.status === 'generating' || toolCall.status === 'executing';
+  // 结果即完成：只要已经拿到结果，任何残留的 generating/executing 都不再转圈
+  //（工具状态来自多路事件与历史合并，可能滞后；结果是最强的完成信号）。
+  const running =
+    !hasResult && (toolCall.status === 'generating' || toolCall.status === 'executing');
 
   const ToolIcon = resolveToolIcon(toolCall.name, iconMap);
 

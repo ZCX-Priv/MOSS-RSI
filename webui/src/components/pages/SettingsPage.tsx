@@ -72,6 +72,7 @@ import { useAgents } from '../../hooks/useAgents';
 import { useTools } from '../../hooks/useTools';
 import { useCommands } from '../../hooks/useCommands';
 import { useConfig } from '../../hooks/useConfig';
+import { isWakeLockSupported } from '../../lib/tab-wake-lock';
 import { useReducedMotion } from '../../hooks/useAnimationClass';
 import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset } from '../../store';
 import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
@@ -208,6 +209,8 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.general.language', descriptionKey: 'settings.general.languageDesc', section: 'general' },
   { labelKey: 'settings.general.sendShortcut', descriptionKey: 'settings.general.sendShortcutDesc', section: 'general' },
   { labelKey: 'settings.general.followUpBehavior', descriptionKey: 'settings.general.followUpBehaviorDesc', section: 'general' },
+  { labelKey: 'settings.general.preventSleep', descriptionKey: 'settings.general.preventSleepDesc', section: 'general' },
+  { labelKey: 'settings.general.preventTabSleep', descriptionKey: 'settings.general.preventTabSleepDesc', section: 'general' },
 
   // 外观设置详细项
   { labelKey: 'settings.appearance.accentColor', descriptionKey: 'settings.appearance.accentColorDesc', section: 'appearance' },
@@ -1320,6 +1323,11 @@ export function GeneralSettings() {
   const setSendShortcut = useStore((s) => s.setSendShortcut);
   const followUpBehavior = useStore((s) => s.followUpBehavior);
   const setFollowUpBehavior = useStore((s) => s.setFollowUpBehavior);
+  // 电源/后台策略：电脑休眠写入后端配置，标签页休眠走前端 Wake Lock
+  const { appConfig, updateAppConfig } = useConfig();
+  const preventTabSleep = useStore((s) => s.preventTabSleep);
+  const setPreventTabSleep = useStore((s) => s.setPreventTabSleep);
+  const wakeLockSupported = isWakeLockSupported();
   // 自定义快捷键录制态：true 时捕获全局 keydown 录制组合键
   const [recordingShortcut, setRecordingShortcut] = useState(false);
   const isPresetShortcut = sendShortcut === 'enter' || sendShortcut === 'mod+enter';
@@ -1498,6 +1506,34 @@ export function GeneralSettings() {
               </SelectContent>
             </Select>
           </div>
+        </div>
+      </div>
+
+      {/* 运行与连接：防止合盖/空闲导致 WebUI 掉线重载 */}
+      <div className="flex flex-col gap-3">
+        <div className="text-sm font-medium text-foreground">{t('settings.general.powerSettings')}</div>
+        <div className="flex flex-col divide-y divide-border">
+          <SettingRow
+            title={t('settings.general.preventSleep')}
+            desc={t('settings.general.preventSleepDesc')}
+            checked={appConfig?.power?.preventSleep === true}
+            onCheckedChange={(v) => {
+              void updateAppConfig({ power: { preventSleep: v } }).catch(() => {
+                // 错误已由 useConfig 统一 toast
+              });
+            }}
+          />
+          <SettingRow
+            title={t('settings.general.preventTabSleep')}
+            desc={
+              wakeLockSupported
+                ? t('settings.general.preventTabSleepDesc')
+                : t('settings.general.preventTabSleepUnsupported')
+            }
+            checked={preventTabSleep}
+            disabled={!wakeLockSupported}
+            onCheckedChange={setPreventTabSleep}
+          />
         </div>
       </div>
     </div>

@@ -31,7 +31,12 @@ export function useAgents() {
   }, [load]);
 
   const createAgent = useCallback(
-    async (data: { name: string; systemPrompt?: string; model?: string; tools?: string[] }) => {
+    async (data: {
+      name: string;
+      systemPrompt?: string;
+      model?: string;
+      tools?: string[];
+    }) => {
       try {
         const agent = await api.createAgent(data);
         await load(); // 重新拉取列表

@@ -67,6 +67,8 @@ export class WSClient {
     this.onVisibilityChange = this.onVisibilityChange.bind(this);
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     document.addEventListener(RESUME_EVENT, this.onVisibilityChange);
+    // bfcache/整页恢复（部分浏览器合盖唤醒后走 pageshow 而非 visibilitychange）
+    window.addEventListener('pageshow', this.onVisibilityChange);
     window.addEventListener('focus', this.onVisibilityChange);
   }
 
@@ -199,6 +201,7 @@ export class WSClient {
     this.clearReconnectTimer();
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     document.removeEventListener(RESUME_EVENT, this.onVisibilityChange);
+    window.removeEventListener('pageshow', this.onVisibilityChange);
     window.removeEventListener('focus', this.onVisibilityChange);
     const ws = this.ws;
     this.ws = null;

@@ -33,6 +33,7 @@ import llm from '../modules/llm';
 import tools from '../modules/tools';
 import mcp from '../modules/mcp';
 import server from '../modules/server';
+import agentBus from '../modules/agent-bus';
 import agent from '../modules/agent';
 import filesys from '../modules/filesys';
 import terminal from '../modules/terminal';
@@ -101,8 +102,9 @@ const MODULE_FACTORIES: Array<{
   { name: 'memory', create: memory, deps: [] },
   { name: 'voice', load: () => loadDeferredModule('voice'), deps: [], phase: 'deferred' },
   { name: 'context', create: context, deps: ['llm'] },
-  { name: 'agent', create: agent, deps: ['tools', 'filesys', 'safety', 'rules', 'hooks', 'memory', 'context'] },
-  { name: 'subagent', load: () => loadDeferredModule('subagent'), deps: ['agent', 'tools'], phase: 'deferred' },
+  { name: 'agent-bus', create: agentBus, deps: [] },
+  { name: 'agent', create: agent, deps: ['tools', 'filesys', 'safety', 'rules', 'hooks', 'memory', 'context', 'agent-bus'] },
+  { name: 'subagent', load: () => loadDeferredModule('subagent'), deps: ['agent', 'tools', 'agent-bus'], phase: 'deferred' },
   // im → server（路由注册在初始化时完成；消息到达时 tryResolve agent 执行，不阻塞 agent 初始化）
   { name: 'im', load: () => loadDeferredModule('im'), deps: ['server'], phase: 'deferred' },
   { name: 'file-history', load: () => loadDeferredModule('file-history'), deps: ['tools', 'filesys'], phase: 'deferred' },

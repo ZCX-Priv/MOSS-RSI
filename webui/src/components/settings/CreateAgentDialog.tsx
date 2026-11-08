@@ -35,6 +35,7 @@ export function CreateAgentDialog({ open, onOpenChange, editing, onSaved }: Crea
   const [description, setDescription] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [model, setModel] = useState('');
+  const [toolsInput, setToolsInput] = useState('');
   const [models, setModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(editing);
@@ -46,6 +47,7 @@ export function CreateAgentDialog({ open, onOpenChange, editing, onSaved }: Crea
     setDescription(editing?.description ?? '');
     setSystemPrompt(editing?.systemPrompt ?? '');
     setModel(editing?.model ?? '');
+    setToolsInput(editing?.tools?.join(', ') ?? '');
     setSubmitting(false);
     void (async () => {
       try {
@@ -76,6 +78,11 @@ export function CreateAgentDialog({ open, onOpenChange, editing, onSaved }: Crea
         description: description.trim() || undefined,
         systemPrompt: systemPrompt.trim() || undefined,
         model: model.trim() || undefined,
+        tools:
+          toolsInput
+            .split(',')
+            .map((name) => name.trim())
+            .filter((name) => name !== '') || undefined,
       };
       if (isEdit && editing) {
         await api.updateAgent(editing.id, payload);
@@ -136,6 +143,15 @@ export function CreateAgentDialog({ open, onOpenChange, editing, onSaved }: Crea
                 <option key={m} value={m} />
               ))}
             </datalist>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-tools">{t('settings.agent.tools')}</Label>
+            <Input
+              id="agent-tools"
+              value={toolsInput}
+              onChange={(e) => setToolsInput(e.target.value)}
+              placeholder={t('settings.agent.toolsPlaceholder')}
+            />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="agent-prompt">{t('settings.agent.systemPrompt')}</Label>

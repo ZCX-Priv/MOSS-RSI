@@ -30,6 +30,7 @@ import {
 import { diag, diagAlways } from './diag';
 import { emitInsightEvent } from './insight-bus';
 import { bindSubagentSession } from './subagent-sessions';
+import { applyAgentBusMember, applyAgentBusMessage } from './agent-bus';
 import i18n from '../i18n';
 import type {
   AgentEvent,
@@ -49,6 +50,8 @@ import type {
   SessionSubscribedPayload,
   InsightEvent,
   AskQuestion,
+  AgentBusMember,
+  AgentBusMessage,
 } from '../types/api';
 
 function genId(): string {
@@ -446,6 +449,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (!sessionId) break;
       const pending = ensureStreamingMessage(sessionId, event.messageId);
       if (!pending) break;
+      // 引擎严格按轮次串行：新工具调用开始时，其它消息里的工具不可能仍在执行。
+      // 收敛掉它们，避免 done 事件丢失后旧卡片永久转圈。
+      s.finalizeToolCallsExcept(sessionId, pending.id);
       const newToolCall: ToolCall = {
         id: event.toolCallId,
         name: event.toolName,
@@ -454,14 +460,17 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       };
       const existing = pending.toolCalls ?? [];
       // 幂等：同 id 已存在（重连重放 / 草稿已含该调用）时不重复追加。
-      // 状态单向：已 done 的工具不能被迟到的 start 事件回退为 generating（条目状态回跳的根因）。
+      // 状态单向：done 不回退；executing 也不回退为 generating（状态回跳会让已开始的工具看起来重新生成）。
       const merged = existing.some((tc) => tc.id === event.toolCallId)
         ? existing.map((tc) =>
             tc.id === event.toolCallId
               ? {
                   ...tc,
                   name: event.toolName,
-                  status: tc.status === 'done' ? tc.status : ('generating' as const),
+                  status:
+                    tc.status === 'done' || tc.status === 'executing'
+                      ? tc.status
+                      : ('generating' as const),
                 }
               : tc,
           )
@@ -491,32 +500,21 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       flushPending(); // 保证参数分片先写入
       const event = msg.payload as Extract<AgentEvent, { type: 'tool-call-executing' }> & { messageId?: string };
       if (!sessionId) break;
+      const target = resolveToolCallTarget(
+        sessionId,
+        event.toolCallId,
+        pendingAssistant.get(sessionId)?.id ?? event.messageId,
+      );
+      if (!target?.toolCalls) break;
+      const updatedToolCalls = target.toolCalls.map((tc) =>
+        tc.id === event.toolCallId && tc.status !== 'done'
+          ? { ...tc, status: 'executing' as const }
+          : tc,
+      );
+      s.updateMessage(sessionId, target.id, { toolCalls: updatedToolCalls });
       const pending = pendingAssistant.get(sessionId);
-      const targetId = pending?.id ?? event.messageId;
-      if (targetId) {
-        const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
-        const target = msgs.find((m) => m.id === targetId) ?? findMessageByToolCallId(sessionId, event.toolCallId);
-        if (target?.toolCalls) {
-          const updatedToolCalls = target.toolCalls.map((tc) =>
-            tc.id === event.toolCallId && tc.status !== 'done'
-              ? { ...tc, status: 'executing' as const }
-              : tc,
-          );
-          s.updateMessage(sessionId, target.id, { toolCalls: updatedToolCalls });
-          if (pending && pending.id === target.id) {
-            pendingAssistant.set(sessionId, { ...pending, toolCalls: updatedToolCalls });
-          }
-          break;
-        }
-      }
-      // 回退：无 pending 且历史里也没有该 toolCallId 的消息（刷新丢态）→ 定位含此 id 的消息
-      const fallback = findMessageByToolCallId(sessionId, event.toolCallId);
-      if (fallback?.toolCalls) {
-        s.updateMessage(sessionId, fallback.id, {
-          toolCalls: fallback.toolCalls.map((tc) =>
-            tc.id === event.toolCallId ? { ...tc, status: 'executing' as const } : tc,
-          ),
-        });
+      if (pending && pending.id === target.id) {
+        pendingAssistant.set(sessionId, { ...pending, toolCalls: updatedToolCalls });
       }
       break;
     }
@@ -524,12 +522,13 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       flushPending(); // 保证参数分片先写入，避免 end 后还有残余 delta
       const event = msg.payload as Extract<AgentEvent, { type: 'tool-call-end' }> & { messageId?: string };
       if (!sessionId) break;
-      const pending = pendingAssistant.get(sessionId);
-      const targetId = pending?.id ?? event.messageId;
-      const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
-      const target =
-        (targetId ? msgs.find((m) => m.id === targetId) : undefined) ??
-        findMessageByToolCallId(sessionId, event.toolCallId);
+      // 同一 PTC 调用的缓冲进度必须先落地，再写最终结果（否则会被迟到进度覆盖状态）
+      flushRunCodeProgress(sessionId, event.toolCallId);
+      const target = resolveToolCallTarget(
+        sessionId,
+        event.toolCallId,
+        pendingAssistant.get(sessionId)?.id ?? event.messageId,
+      );
       if (target?.toolCalls) {
         const updatedToolCalls = target.toolCalls.map((tc) =>
           tc.id === event.toolCallId
@@ -545,6 +544,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
           toolCalls: updatedToolCalls,
           toolResults: updatedToolResults,
         });
+        const pending = pendingAssistant.get(sessionId);
         if (pending && pending.id === target.id) {
           pendingAssistant.set(sessionId, {
             ...pending,
@@ -556,6 +556,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       break;
     }
     case 'run-code-progress': {
+      // 高频进度（日志/并行调用）先进 100ms 合并队列：一条消息只写一次 store，
+      // 避免几十次嵌套调用产生上百次整条消息替换与整卡重渲染。
       flushPending();
       const event = msg.payload as {
         toolCallId?: string;
@@ -568,62 +570,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         };
       };
       if (!sessionId || !event.toolCallId || !event.payload) break;
-      const progress = event.payload;
-      const pending = pendingAssistant.get(sessionId);
-      const targetId = pending?.id ?? event.messageId;
-      const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
-      const target =
-        (targetId ? msgs.find((m) => m.id === targetId) : undefined) ??
-        findMessageByToolCallId(sessionId, event.toolCallId);
-      if (!target?.toolCalls) break;
-      const updated = target.toolCalls.map((tc): ToolCall => {
-        if (tc.id !== event.toolCallId) return tc;
-        const live = tc.live ?? { calls: [], logs: [] };
-        if (progress.phase === 'started') {
-          return {
-            ...tc,
-            status: 'executing',
-            live: {
-              ...live,
-              ...(progress.startedAtMs ? { startedAtMs: progress.startedAtMs } : {}),
-            },
-          };
-        }
-        if (progress.phase === 'log') {
-          const log = progress.log ?? '';
-          if (!log) return tc;
-          const logs = [...live.logs, log];
-          if (logs.length > 200) logs.splice(0, logs.length - 200);
-          return { ...tc, status: 'executing', live: { ...live, logs } };
-        }
-        if ((progress.phase === 'call-start' || progress.phase === 'call-end') && progress.call) {
-          const call = progress.call;
-          const idx = live.calls.findIndex((c) => c.id === call.id);
-          const merged =
-            idx >= 0
-              ? live.calls.map((c, i) => (i === idx ? { ...c, ...call } : c))
-              : [...live.calls, call];
-          // 并行调用会按完成顺序回传 call-end：统一按开始序号 seq 排序，
-          // 保证实时卡片与最终 metadata 都是「代码调用顺序」
-          const calls = merged
-            .map((c, i) => ({ c, i }))
-            .sort((a, b) => {
-              const sa = a.c.seq;
-              const sb = b.c.seq;
-              if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
-              if (sa !== undefined && sb === undefined) return -1;
-              if (sa === undefined && sb !== undefined) return 1;
-              return a.i - b.i;
-            })
-            .map((x) => x.c);
-          return { ...tc, status: 'executing', live: { ...live, calls } };
-        }
-        return tc;
-      });
-      s.updateMessage(sessionId, target.id, { toolCalls: updated });
-      if (pending && pending.id === target.id) {
-        pendingAssistant.set(sessionId, { ...pending, toolCalls: updated });
-      }
+      queueRunCodeProgress(sessionId, event.toolCallId, event.payload);
       break;
     }
     case 'ask': {
@@ -722,6 +669,7 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         // 失败终止：未生效的引导不会被执行（后端 run 已结束）
         pendingGuideRunIds.clear(sessionId);
         s.finalizeStreamingMessages(sessionId, eventRunId);
+        s.finalizeToolCalls(sessionId, eventRunId);
         s.addMessage(sessionId, {
           // 稳定身份：与后端持久化 system-error 消息同 id（`<sid>#<turn>#error`）→
           // catchUpTail 合并时原位 patch，实时与刷新后只渲染一条错误卡片。
@@ -751,7 +699,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       };
       if (sessionId) {
         // 只定稿本轮消息：引导交接时新 run 可能已开始流式，不能把它的消息一并定稿
+        flushRunCodeProgress(sessionId);
         s.finalizeStreamingMessages(sessionId, doneEvent.runId ?? eventRunId);
+        s.finalizeToolCalls(sessionId, doneEvent.runId ?? eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -819,7 +769,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       const taskDoneEvent = (msg.payload ?? {}) as { runId?: string; nextRunId?: string };
       if (sessionId) {
         // 只定稿本轮消息（同 done：交接瞬间不得定稿下一轮已在流式的消息）
+        flushRunCodeProgress(sessionId);
         s.finalizeStreamingMessages(sessionId, eventRunId);
+        s.finalizeToolCalls(sessionId, taskDoneEvent.runId ?? eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -853,7 +805,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (sessionId) {
         // 未生效的引导随停止一并作废（后端已中止，不会再续跑）
         pendingGuideRunIds.clear(sessionId);
+        flushRunCodeProgress(sessionId);
         s.finalizeStreamingMessages(sessionId, eventRunId);
+        s.finalizeToolCalls(sessionId, eventRunId);
         const pending = pendingAssistant.get(sessionId);
         if (pending) {
           const finalizedToolCalls = pending.toolCalls?.map((tc) =>
@@ -1251,6 +1205,19 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       }
       break;
     }
+    case 'agent-bus.event': {
+      const payload = (msg.payload ?? {}) as {
+        type?: string;
+        member?: AgentBusMember;
+        message?: AgentBusMessage;
+      };
+      if (payload.type === 'member' && payload.member) {
+        applyAgentBusMember(payload.member);
+      } else if (payload.type === 'message' && payload.message) {
+        applyAgentBusMessage(payload.message);
+      }
+      break;
+    }
     case 'config.changed': {
       // 具体重拉由 useConfig hook 独立订阅 wsClient.onMessage 触发，此处不重复处理
       break;
@@ -1276,6 +1243,150 @@ function findMessageByToolCallId(sid: string, toolCallId: string): TaskMessage |
     if (m.role === 'assistant' && m.toolCalls?.some((tc) => tc.id === toolCallId)) return m;
   }
   return null;
+}
+
+/**
+ * 定位 toolCall 真正所属的消息。
+ * 旧实现只「先按 pending 找，找不到再用全局」，当 pending 存在但该消息不含此 toolCallId 时
+ * 事件会被静默丢弃（大量并行调用后状态错乱的根因）。这里优先命中真正包含该 id 的消息。
+ */
+function resolveToolCallTarget(
+  sessionId: string,
+  toolCallId: string,
+  preferredId?: string,
+): TaskMessage | null {
+  const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
+  if (preferredId) {
+    const preferred = msgs.find((m) => m.id === preferredId);
+    if (preferred?.toolCalls?.some((tc) => tc.id === toolCallId)) return preferred;
+  }
+  return findMessageByToolCallId(sessionId, toolCallId);
+}
+
+// ============================================================================
+// run_code 实时进度：100ms 合并队列
+// ============================================================================
+
+interface PendingRunCodeProgress {
+  sessionId: string;
+  toolCallId: string;
+  startedAtMs?: number;
+  /** 尚未落库的日志（按到达顺序拼接） */
+  logs: string[];
+  /** 尚未落库的嵌套调用状态（按 id 覆盖合并） */
+  calls: Map<string, CodeRunLiveCall>;
+}
+
+const pendingRunCode = new Map<string, PendingRunCodeProgress>();
+let runCodeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueRunCodeProgress(
+  sessionId: string,
+  toolCallId: string,
+  progress: {
+    phase?: 'started' | 'log' | 'call-start' | 'call-end';
+    startedAtMs?: number;
+    log?: string;
+    call?: CodeRunLiveCall;
+  },
+): void {
+  const key = `${sessionId}:${toolCallId}`;
+  let entry = pendingRunCode.get(key);
+  if (!entry) {
+    entry = { sessionId, toolCallId, logs: [], calls: new Map() };
+    pendingRunCode.set(key, entry);
+  }
+  if (progress.phase === 'started') {
+    if (progress.startedAtMs) entry.startedAtMs = progress.startedAtMs;
+  } else if (progress.phase === 'log') {
+    const log = progress.log ?? '';
+    if (log) {
+      entry.logs.push(log);
+      if (entry.logs.length > 200) entry.logs.splice(0, entry.logs.length - 200);
+    }
+  } else if ((progress.phase === 'call-start' || progress.phase === 'call-end') && progress.call) {
+    const call = progress.call;
+    const prev = entry.calls.get(call.id);
+    entry.calls.set(call.id, prev ? { ...prev, ...call } : call);
+  }
+  if (runCodeFlushTimer === null) {
+    runCodeFlushTimer = setTimeout(() => {
+      runCodeFlushTimer = null;
+      flushRunCodeProgress();
+    }, 100);
+  }
+}
+
+/** 按 seq 排序（并行完成顺序 ≠ 调用顺序；旧数据无 seq 时保持原相对顺序） */
+function sortLiveCalls(calls: CodeRunLiveCall[]): CodeRunLiveCall[] {
+  return calls
+    .map((call, index) => ({ call, index }))
+    .sort((a, b) => {
+      const sa = a.call.seq;
+      const sb = b.call.seq;
+      if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+      if (sa !== undefined && sb === undefined) return -1;
+      if (sa === undefined && sb !== undefined) return 1;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.call);
+}
+
+/**
+ * 落地缓冲进度。可按 session/toolCallId 过滤。
+ * 已完成（done）的工具一律忽略：PTC 结束后迟到的 log/call-end 不得把状态打回执行中。
+ */
+function flushRunCodeProgress(sessionId?: string, toolCallId?: string): void {
+  if (pendingRunCode.size === 0) return;
+  const entries: PendingRunCodeProgress[] = [];
+  for (const entry of pendingRunCode.values()) {
+    if (sessionId && entry.sessionId !== sessionId) continue;
+    if (toolCallId && entry.toolCallId !== toolCallId) continue;
+    entries.push(entry);
+    pendingRunCode.delete(`${entry.sessionId}:${entry.toolCallId}`);
+  }
+  if (entries.length === 0) return;
+
+  // 同一目标消息的多个条目合并为一次 updateMessage
+  const perMessage = new Map<string, { sessionId: string; toolCalls: ToolCall[] }>();
+  for (const entry of entries) {
+    const target = resolveToolCallTarget(entry.sessionId, entry.toolCallId);
+    if (!target?.toolCalls) continue;
+    const baseToolCalls = perMessage.get(target.id)?.toolCalls ?? target.toolCalls;
+    const updated = baseToolCalls.map((tc): ToolCall => {
+      if (tc.id !== entry.toolCallId || tc.status === 'done') return tc;
+      const live = tc.live ?? { calls: [], logs: [] };
+      const logs =
+        entry.logs.length > 0
+          ? [...live.logs, ...entry.logs].slice(-200)
+          : live.logs;
+      const callMap = new Map(live.calls.map((call) => [call.id, call]));
+      for (const call of entry.calls.values()) {
+        const prev = callMap.get(call.id);
+        callMap.set(call.id, prev ? { ...prev, ...call } : call);
+      }
+      return {
+        ...tc,
+        status: 'executing',
+        live: {
+          ...live,
+          ...(entry.startedAtMs ? { startedAtMs: entry.startedAtMs } : {}),
+          logs,
+          calls: sortLiveCalls([...callMap.values()]),
+        },
+      };
+    });
+    perMessage.set(target.id, { sessionId: entry.sessionId, toolCalls: updated });
+  }
+
+  for (const [messageId, data] of perMessage) {
+    const st = useStore.getState();
+    st.updateMessage(data.sessionId, messageId, { toolCalls: data.toolCalls });
+    const pending = pendingAssistant.get(data.sessionId);
+    if (pending && pending.id === messageId) {
+      pendingAssistant.set(data.sessionId, { ...pending, toolCalls: data.toolCalls });
+    }
+  }
 }
 
 /**

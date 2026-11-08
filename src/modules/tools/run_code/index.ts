@@ -17,6 +17,7 @@ import type { MCPManager, ToolRegistry } from '../../contracts';
 import type { ToolContext, ToolResult, ToolResultContent } from '../types';
 import { isPtcForbiddenTool } from './forbidden';
 import { runCodeProgram, type CodeRunCallRecord } from './runtime/host';
+import { validateToolArguments } from './runtime/schema';
 import type { CodeFailureKind, CodeValue } from './runtime/protocol';
 import { validateUISpec } from './ui/validate';
 import type { UIDiagnostic, UISpec } from './ui/spec';
@@ -107,6 +108,11 @@ export default {
     }
     const bindings = [...builtinTools.map((t) => t.name), ...mcpTools.map((t) => t.name)];
 
+    // 参数 Schema 表：宿主分发前校验（缺必填/类型错/字符串化 JSON 在程序内可 catch）
+    const schemaByName = new Map<string, unknown>();
+    for (const t of builtinTools) schemaByName.set(t.name, t.inputSchema);
+    for (const t of mcpTools) schemaByName.set(t.name, t.inputSchema);
+
     const safe = new Map<string, boolean>();
     for (const t of builtinTools) {
       safe.set(t.name, t.annotations?.readOnlyHint === true && t.annotations?.destructiveHint !== true);
@@ -138,6 +144,7 @@ export default {
       signal: ctx.signal,
       invokeTool,
       isConcurrencySafe: (name) => safe.get(name) === true,
+      validateCall: (name, args) => validateToolArguments(name, args, schemaByName.get(name)),
       onProgress: ctx.onRunCodeProgress,
       logger: ctx.logger,
     });

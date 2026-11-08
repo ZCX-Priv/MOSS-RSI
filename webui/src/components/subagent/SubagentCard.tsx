@@ -5,13 +5,18 @@
 // 行可展开查看该子代理的「微缩任务流」与最终报告。
 // 同一条 assistant 消息内的多个 agent 调用合并到这一张卡片里。
 
-import { lazy, memo, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, memo, Suspense, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bot, ChevronRight, CircleCheck, CircleX, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
 import { MarkdownRenderer } from '../../render';
 import { getSubagentSession, subscribeSubagentSession } from '../../lib/subagent-sessions';
+import {
+  getAgentByParentToolCall,
+  getAgentBusVersion,
+  subscribeAgentBus,
+} from '../../lib/agent-bus';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { fallbackAvatarSeed, templateAvatarSeed } from '../../lib/agent-avatars';
 import { HumationAvatar } from './HumationAvatar';
@@ -27,6 +32,8 @@ export interface SubagentCallItem {
   toolCallId: string;
   template: string;
   task: string;
+  /** sync / async（历史会话可能缺省） */
+  mode?: string;
   status?: ToolCall['status'];
   resultText?: string;
   isError?: boolean;
@@ -41,10 +48,26 @@ const SUBAGENT_SESSION = /session=([0-9a-zA-Z_-]+)/;
 
 type RowStatus = 'running' | 'completed' | 'failed';
 
-/** 调用状态归一：generating/executing=运行中；有错误=失败；缺省按完成处理 */
-function rowStatusOf(call: SubagentCallItem): RowStatus {
+/** 调用状态归一：优先总线实时状态（async 后台运行不依赖工具结果）；缺省按工具状态 */
+function rowStatusOf(call: SubagentCallItem, memberStatus?: string): RowStatus {
+  if (memberStatus === 'running') return 'running';
+  if (memberStatus === 'failed' || memberStatus === 'aborted') return 'failed';
+  if (memberStatus === 'completed') return 'completed';
+  // 已有结果即完成：工具状态可能因事件丢失/历史合并滞后，结果是最强完成信号
+  if (call.resultText !== undefined) return call.isError ? 'failed' : 'completed';
   if (call.status === 'generating' || call.status === 'executing') return 'running';
+  // async 已返回「已启动」但总线尚未水合：先按运行中显示，避免卡片瞬间显示已完成
+  if (call.mode === 'async' && !call.isError) return 'running';
   return call.isError ? 'failed' : 'completed';
+}
+
+/** 订阅总线版本，按父工具调用 id 取子代理实时成员 */
+function useAgentBusMember(toolCallId: string) {
+  const version = useSyncExternalStore(subscribeAgentBus, getAgentBusVersion);
+  return useMemo(
+    () => getAgentByParentToolCall(toolCallId),
+    [toolCallId, version],
+  );
 }
 
 /** 进度点阵配色（按行状态） */
@@ -95,7 +118,8 @@ const SubagentRow = memo(function SubagentRow({
 }) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
-  const status = rowStatusOf(call);
+  const member = useAgentBusMember(call.toolCallId);
+  const status = rowStatusOf(call, member?.status);
   const running = status === 'running';
   const boundSessionId = useSubagentSessionBinding(call.toolCallId);
   // 轻量历史投影：行展开时才拉取完整报告（折叠态不请求、不解析长文本）
@@ -121,8 +145,8 @@ const SubagentRow = memo(function SubagentRow({
     : call.resultText;
   const report = fullText?.replace(SUBAGENT_PREFIX, '') ?? '';
   const resultSessionId = fullText?.match(SUBAGENT_SESSION)?.[1] ?? null;
-  // 过程会话 id：完成后结果文本里的 session 权威；运行中只认精确绑定
-  const flowSessionId = resultSessionId ?? boundSessionId ?? null;
+  // 过程会话 id：完成后结果文本里的 session 权威；运行中走精确绑定 / 总线成员
+  const flowSessionId = resultSessionId ?? boundSessionId ?? member?.sessionId ?? null;
   const avatarSeed =
     templateAvatarSeed(call.template) ?? fallbackAvatarSeed(call.template, displayName);
 
@@ -184,30 +208,31 @@ export const SubagentCard = memo(function SubagentCard({ calls }: { calls: Subag
   const agents = useStore((s) => s.agents);
   /** 展开的行 key（同一时刻只展开一行，避免卡片过长） */
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  // 总线实时状态参与整体状态计算（async 后台代理完成/失败时即时更新徽章）
+  const busVersion = useSyncExternalStore(subscribeAgentBus, getAgentBusVersion);
 
-  const statuses = useMemo(() => calls.map(rowStatusOf), [calls]);
+  const statuses = useMemo(
+    () =>
+      calls.map((call) =>
+        rowStatusOf(call, getAgentByParentToolCall(call.toolCallId)?.status),
+      ),
+    [calls, busVersion],
+  );
   const anyRunning = statuses.some((s) => s === 'running');
   const anyFailed = !anyRunning && statuses.some((s) => s === 'failed');
   const overall: RowStatus = anyRunning ? 'running' : anyFailed ? 'failed' : 'completed';
 
-  const templates = new Set(calls.map((c) => c.template || ''));
-  const singleTemplate = templates.size === 1 ? calls[0]?.template ?? '' : '';
-  const headerName =
-    (singleTemplate ? agents.find((a) => a.id === singleTemplate)?.name : '') ||
-    singleTemplate ||
-    t('subagent.card.title');
-
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3 shadow-sm">
-      {/* 头部：图标 + 名称 + 任务数 + 进度点阵 + 整体状态徽章 */}
+      {/* 头部：图标 + 固定「智能体」+ 智能体数量 + 进度点阵 + 整体状态徽章 */}
       <div className="flex min-w-0 items-center gap-1.5">
         <Bot className="size-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 truncate text-sm font-medium text-foreground" title={headerName}>
-          {headerName}
+        <span className="min-w-0 truncate text-sm font-medium text-foreground">
+          {t('subagent.card.title')}
         </span>
         <span className="shrink-0 text-border">|</span>
         <span className="shrink-0 text-xs text-muted-foreground">
-          {t('subagent.card.taskCount', { count: calls.length })}
+          {t('subagent.card.agentCount', { count: calls.length })}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {calls.length > 0 && (

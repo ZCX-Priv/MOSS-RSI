@@ -355,6 +355,12 @@ export const appConfigSchema = z.object({
   daemon: z.object({
     enabled: z.boolean(),
   }),
+  /** 电源策略：preventSleep=true 阻止系统睡眠（缺省关闭；旧配置缺此段时按默认值补齐） */
+  power: z
+    .object({
+      preventSleep: z.boolean().default(false),
+    })
+    .prefault({}),
   logs: logsSchema.prefault({}),
   update: z.object({
     autoCheck: z.boolean(),
@@ -367,6 +373,12 @@ export const appConfigSchema = z.object({
     maxTurns: z.number().int().min(0),
     llmStreamIdleTimeoutMs: z.number().int().min(30_000).max(3_600_000).optional(),
     workingDirectory: z.string(),
+    /** 同轮只读工具最大并行数（1 = 串行；缺省 4） */
+    maxParallelTools: z.number().int().min(1).max(8).default(4),
+    /** 同时运行的 agent run 上限（缺省按内存自适应） */
+    maxConcurrentRuns: z.number().int().min(1).max(16).optional(),
+    /** 同轮并发子代理上限（缺省 4） */
+    maxConcurrentSubagents: z.number().int().min(1).max(8).default(4),
     codeMode: codeModeSchema.default({
       enabled: true,
       uiEnabled: true,

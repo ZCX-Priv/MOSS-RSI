@@ -7,6 +7,7 @@ import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { AgentEngine } from '../contracts';
+import { seedBuiltinAgentPrompts } from '../tools/shared/agent-seed';
 import { AgentRegistryImpl } from './registry';
 import { SubagentRunner } from './runner';
 import { registerAgentTools } from './tools';
@@ -15,6 +16,8 @@ class SubagentModule implements Module {
   private runner: SubagentRunner | null = null;
 
   async initialize(ctx: ModuleContext): Promise<void> {
+    // 先播种提示词目录，再加载内置模板（否则首次启动时模板提示词读到空串并落进 agents.json）
+    seedBuiltinAgentPrompts(ctx.env);
     const registry = new AgentRegistryImpl(ctx.env, ctx.logger);
     ctx.services.register(ServiceNames.AGENT_REGISTRY, registry, {
       scope: 'subagent',
