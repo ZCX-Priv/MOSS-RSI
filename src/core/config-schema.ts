@@ -235,6 +235,18 @@ const safetySchema = z.object({
     })
     .prefault({}),
   protectedPaths: z.array(z.string()).default(['~/.ssh', '~/.gnupg', '~/.aws']),
+  // 自动审查（auto 档的第二模型审查）：内层全默认自愈
+  review: z
+    .object({
+      enabled: z.boolean().default(true),
+      model: z.string().default(''),
+      reasoningEffort: z.enum(['off', 'low', 'max']).default('off'),
+      timeoutMs: z.number().int().min(1000).max(300000).default(30000),
+      onReviewFailure: z.enum(['ask', 'deny']).default('ask'),
+      cacheTtlMs: z.number().int().min(0).max(3600000).default(60000),
+      maxIntentChars: z.number().int().min(200).max(20000).default(4000),
+    })
+    .prefault({}),
 });
 
 // logs：日志系统配置（内层全 .default() 自愈；外层 .prefault({}) 使旧 config.json 缺段自动补全）

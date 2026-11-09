@@ -80,7 +80,8 @@ import { api } from '../../api/http';
 import { BrandIcon } from '../../lib/brand-icons';
 import { TOOL_ICON_MAP } from '../../lib/tool-icons';
 import { SKILL_ICON_CHOICES, resolveSkillIcon } from '../../lib/skill-icons';
-import type { SafetyConfig, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
+import type { SafetyConfig, SafetyRules, LogLevel, LogsConfig, LogFileInfo, ContextEngineConfig, ToolItem, AgentDetail, CodeModeConfig } from '../../types/api';
+import { ConfirmDialog } from '../overlays/ConfirmDialog';
 import { ToolEditDialog } from './settings/ToolEditDialog';
 import { CreateAgentDialog } from '../settings/CreateAgentDialog';
 import {
@@ -482,6 +483,15 @@ const SAFETY_FALLBACK: SafetyConfig = {
   cautionPolicy: 'ask',
   rules: { allow: [], deny: [], ask: [] },
   protectedPaths: ['~/.ssh', '~/.gnupg', '~/.aws'],
+  review: {
+    enabled: true,
+    model: '',
+    reasoningEffort: 'off',
+    timeoutMs: 30000,
+    onReviewFailure: 'ask',
+    cacheTtlMs: 60000,
+    maxIntentChars: 4000,
+  },
 };
 
 /** 规则列表编辑器（allow/deny/ask 同构） */
@@ -569,9 +579,19 @@ function SafetyRuleList({
 
 export function SafetySettings() {
   const { t } = useTranslation();
-  const { appConfig, updateAppConfig } = useConfig();
+  const { appConfig, apiConfig, updateAppConfig } = useConfig();
   const [pathDraft, setPathDraft] = useState('');
   const safety = appConfig?.safety ?? SAFETY_FALLBACK;
+  const workingDirectory = useStore((s) => s.workingDirectory);
+  // 完全访问警告弹窗（全局默认模式同样需要勾选风险确认）
+  const [skipDialogOpen, setSkipDialogOpen] = useState(false);
+  const [skipAcknowledged, setSkipAcknowledged] = useState(false);
+  // 项目级规则
+  const [projectCwd, setProjectCwd] = useState(workingDirectory ?? '');
+  const [projectRules, setProjectRules] = useState<SafetyRules>({ allow: [], deny: [], ask: [] });
+  const [projectLoading, setProjectLoading] = useState(false);
+  const [projectError, setProjectError] = useState('');
+  const models = apiConfig?.providers.flatMap((p) => p.models) ?? [];
 
   const patchSafety = async (patch: Partial<typeof SAFETY_FALLBACK>) => {
     try {
@@ -579,6 +599,47 @@ export function SafetySettings() {
     } catch {
       // toast 已在 useConfig 内处理
     }
+  };
+
+  const patchReview = (patch: Partial<typeof SAFETY_FALLBACK.review>) => {
+    void patchSafety({ review: { ...safety.review, ...patch } });
+  };
+
+  /** 切换全局默认权限模式：选择完全访问时先弹警告 */
+  const handleDefaultModeChange = (mode: string) => {
+    if (mode === 'skip' && safety.defaultMode !== 'skip') {
+      setSkipAcknowledged(false);
+      setSkipDialogOpen(true);
+      return;
+    }
+    void patchSafety({ defaultMode: mode as typeof safety.defaultMode });
+  };
+
+  /** 读取项目目录的权限规则 */
+  const loadProjectRules = async (cwd: string) => {
+    const trimmed = cwd.trim();
+    if (!trimmed) return;
+    setProjectLoading(true);
+    setProjectError('');
+    try {
+      const result = await api.getProjectRules(trimmed);
+      setProjectRules(result.rules);
+    } catch {
+      setProjectRules({ allow: [], deny: [], ask: [] });
+      setProjectError(t('settings.safety.projectRulesError'));
+    } finally {
+      setProjectLoading(false);
+    }
+  };
+
+  /** 写入项目规则（增删后立即持久化） */
+  const patchProjectRules = (list: 'allow' | 'deny' | 'ask', mutate: (rules: string[]) => string[]) => {
+    const next: SafetyRules = { ...projectRules, [list]: mutate([...projectRules[list]]) };
+    setProjectRules(next);
+    void api
+      .updateProjectRules(projectCwd.trim(), next)
+      .then((result) => setProjectRules(result.rules))
+      .catch(() => setProjectError(t('settings.safety.projectRulesError')));
   };
 
   const patchRules = (list: 'allow' | 'deny' | 'ask', mutate: (rules: string[]) => string[]) => {
@@ -611,7 +672,7 @@ export function SafetySettings() {
             </div>
             <Select
               value={safety.defaultMode}
-              onValueChange={(v) => void patchSafety({ defaultMode: v as typeof safety.defaultMode })}
+              onValueChange={handleDefaultModeChange}
             >
               <SelectTrigger className="h-8 w-40 shrink-0">
                 <SelectValue />
@@ -637,6 +698,133 @@ export function SafetySettings() {
                 const v = Math.max(0, Math.min(1440, Number(e.target.value) || 0));
                 void patchSafety({ confirmTimeoutMinutes: v });
               }}
+              className="h-8 w-24 shrink-0 text-right"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 自动审查（auto 档：第二模型裁决写操作/命令/外部操作） */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-medium text-foreground">{t('settings.safety.reviewTitle')}</div>
+          <Badge variant="secondary" className="px-1.5 py-0 text-[10px] font-normal text-muted-foreground">
+            AI
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">{t('settings.safety.reviewDesc')}</p>
+        <div className="flex flex-col divide-y divide-border">
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewEnabled')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewEnabledDesc')}</span>
+            </div>
+            <Switch
+              checked={safety.review.enabled}
+              onCheckedChange={(v) => patchReview({ enabled: v })}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewModel')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewModelDesc')}</span>
+            </div>
+            <Select
+              value={safety.review.model || 'inherit'}
+              onValueChange={(v) => patchReview({ model: v === 'inherit' ? '' : v })}
+              disabled={!safety.review.enabled}
+            >
+              <SelectTrigger className="h-8 w-52 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="inherit">{t('settings.safety.reviewModelInherit')}</SelectItem>
+                {models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewEffort')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewEffortDesc')}</span>
+            </div>
+            <Select
+              value={safety.review.reasoningEffort}
+              onValueChange={(v) =>
+                patchReview({ reasoningEffort: v as typeof safety.review.reasoningEffort })
+              }
+              disabled={!safety.review.enabled}
+            >
+              <SelectTrigger className="h-8 w-32 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="off">{t('settings.safety.reviewEffortOff')}</SelectItem>
+                <SelectItem value="low">{t('settings.safety.reviewEffortLow')}</SelectItem>
+                <SelectItem value="max">{t('settings.safety.reviewEffortMax')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewTimeout')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewTimeoutDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={1000}
+              max={300000}
+              step={1000}
+              value={safety.review.timeoutMs}
+              onChange={(e) => {
+                const v = Math.max(1000, Math.min(300000, Number(e.target.value) || 30000));
+                patchReview({ timeoutMs: v });
+              }}
+              disabled={!safety.review.enabled}
+              className="h-8 w-28 shrink-0 text-right"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewFallback')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewFallbackDesc')}</span>
+            </div>
+            <Select
+              value={safety.review.onReviewFailure}
+              onValueChange={(v) =>
+                patchReview({ onReviewFailure: v as typeof safety.review.onReviewFailure })
+              }
+              disabled={!safety.review.enabled}
+            >
+              <SelectTrigger className="h-8 w-32 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="ask">{t('settings.safety.reviewFallbackAsk')}</SelectItem>
+                <SelectItem value="deny">{t('settings.safety.reviewFallbackDeny')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewCache')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewCacheDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={3600}
+              step={10}
+              value={Math.round(safety.review.cacheTtlMs / 1000)}
+              onChange={(e) => {
+                const seconds = Math.max(0, Math.min(3600, Number(e.target.value) || 0));
+                patchReview({ cacheTtlMs: seconds * 1000 });
+              }}
+              disabled={!safety.review.enabled}
               className="h-8 w-24 shrink-0 text-right"
             />
           </div>
@@ -729,7 +917,12 @@ export function SafetySettings() {
 
       {/* 规则表 */}
       <div className="flex flex-col gap-3">
-        <div className="text-sm font-medium text-foreground">{t('settings.safety.rulesTitle')}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-medium text-foreground">{t('settings.safety.rulesTitle')}</div>
+          <Badge variant="secondary" className="px-1.5 py-0 text-[10px] font-normal text-muted-foreground">
+            {t('settings.safety.globalBadge')}
+          </Badge>
+        </div>
         <p className="text-xs text-muted-foreground">{t('settings.safety.rulesDesc')}</p>
         <details className="rounded-md border border-border bg-muted/20 px-2 py-1.5">
           <summary className="cursor-pointer select-none text-xs text-muted-foreground">
@@ -766,6 +959,86 @@ export function SafetySettings() {
           />
         </div>
       </div>
+
+      {/* 项目级规则（{cwd}/.moss/permissions.json；优先级 会话 > 项目 > 全局） */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-medium text-foreground">{t('settings.safety.projectRulesTitle')}</div>
+          <Badge variant="secondary" className="px-1.5 py-0 text-[10px] font-normal text-muted-foreground">
+            {t('settings.safety.projectBadge')}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">{t('settings.safety.projectRulesDesc')}</p>
+        <div className="flex items-center gap-2">
+          <Input
+            value={projectCwd}
+            onChange={(e) => setProjectCwd(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void loadProjectRules(projectCwd);
+              }
+            }}
+            placeholder={t('settings.safety.projectRulesCwdHint')}
+            className="h-8 flex-1 font-mono text-xs"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 shrink-0 gap-1"
+            disabled={projectLoading || !projectCwd.trim()}
+            onClick={() => void loadProjectRules(projectCwd)}
+          >
+            {projectLoading ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {t('settings.safety.projectRulesLoad')}
+          </Button>
+        </div>
+        {projectError && <p className="text-xs text-destructive">{projectError}</p>}
+        <div className="flex flex-col divide-y divide-border">
+          <SafetyRuleList
+            titleKey="settings.safety.denyRules"
+            descKey="settings.safety.denyRulesDesc"
+            rules={projectRules.deny}
+            onAdd={(rule) => patchProjectRules('deny', (r) => [...r, rule])}
+            onRemove={(rule) => patchProjectRules('deny', (r) => r.filter((x) => x !== rule))}
+            accentClass="bg-red-500"
+          />
+          <SafetyRuleList
+            titleKey="settings.safety.askRules"
+            descKey="settings.safety.askRulesDesc"
+            rules={projectRules.ask}
+            onAdd={(rule) => patchProjectRules('ask', (r) => [...r, rule])}
+            onRemove={(rule) => patchProjectRules('ask', (r) => r.filter((x) => x !== rule))}
+            accentClass="bg-amber-500"
+          />
+          <SafetyRuleList
+            titleKey="settings.safety.allowRules"
+            descKey="settings.safety.allowRulesDesc"
+            rules={projectRules.allow}
+            onAdd={(rule) => patchProjectRules('allow', (r) => [...r, rule])}
+            onRemove={(rule) => patchProjectRules('allow', (r) => r.filter((x) => x !== rule))}
+            accentClass="bg-emerald-500"
+          />
+        </div>
+      </div>
+
+      {/* 完全访问警告（全局默认模式） */}
+      <ConfirmDialog
+        open={skipDialogOpen}
+        onOpenChange={(open) => {
+          setSkipDialogOpen(open);
+          if (!open) setSkipAcknowledged(false);
+        }}
+        title={t('permissionMode.skipWarning.title')}
+        description={t('permissionMode.skipWarning.desc')}
+        confirmText={t('permissionMode.skipWarning.confirm')}
+        cancelText={t('permissionMode.skipWarning.cancel')}
+        variant="danger"
+        requireAcknowledge={t('permissionMode.skipWarning.ack')}
+        acknowledgeChecked={skipAcknowledged}
+        onAcknowledgeChange={setSkipAcknowledged}
+        onConfirm={() => patchSafety({ defaultMode: 'skip' })}
+      />
     </div>
   );
 }

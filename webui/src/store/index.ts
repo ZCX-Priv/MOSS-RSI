@@ -223,6 +223,9 @@ interface UIState {
   /** 工具发起的、等待用户确认的请求列表 */
   pendingConfirms: PendingConfirm[];
 
+  /** 自动审查进行中的会话计数（parentSessionId/sessionId → 数量；驱动中控岛「审查中」） */
+  reviewingSessions: Record<string, number>;
+
   /** 消息撤回备份（redo 用）：sessionId → 被删消息快照与截断起点 */
   truncateBackups: Record<string, {
     /** 截断起点时间戳（恢复定位用） */
@@ -631,6 +634,11 @@ interface UIActions {
   removePendingConfirm: (sessionId: string, toolCallId: string) => void;
   clearPendingConfirmsBySession: (sessionId: string) => void;
 
+  // 自动审查状态（中控岛「审查中」）
+  addReviewing: (sessionId: string) => void;
+  removeReviewing: (sessionId: string) => void;
+  clearReviewing: (sessionId: string) => void;
+
   // WS
   setWsStatus: (s: UIState['wsStatus']) => void;
   /** 连接状态详情（含重连次数与下次重试时间），状态条数据源 */
@@ -917,6 +925,7 @@ export const useStore = create<Store>((set, get) => ({
   errorBySession: {},
   pendingAsks: [],
   pendingConfirms: [],
+  reviewingSessions: {},
   truncateBackups: {},
 
   // --- 输入 / 工作目录 ---
@@ -1474,8 +1483,10 @@ export const useStore = create<Store>((set, get) => ({
         return finalized;
       });
 
+      const { [sessionId]: _reviewing, ...restReviewing } = state.reviewingSessions;
       const nextState: Partial<UIState> = {
         stoppingBySession: { ...state.stoppingBySession, [sessionId]: false },
+        reviewingSessions: restReviewing,
         ...(messagesChanged
           ? {
               messagesBySession: {
@@ -1856,6 +1867,31 @@ export const useStore = create<Store>((set, get) => ({
     set((state) => ({
       pendingConfirms: state.pendingConfirms.filter((c) => c.sessionId !== sessionId),
     })),
+
+  // --- Actions: 自动审查状态（中控岛「审查中」） ---
+  addReviewing: (sessionId) =>
+    set((state) => ({
+      reviewingSessions: {
+        ...state.reviewingSessions,
+        [sessionId]: (state.reviewingSessions[sessionId] ?? 0) + 1,
+      },
+    })),
+  removeReviewing: (sessionId) =>
+    set((state) => {
+      const current = state.reviewingSessions[sessionId] ?? 0;
+      if (current <= 0) return {};
+      const next = { ...state.reviewingSessions };
+      if (current <= 1) delete next[sessionId];
+      else next[sessionId] = current - 1;
+      return { reviewingSessions: next };
+    }),
+  clearReviewing: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.reviewingSessions)) return {};
+      const next = { ...state.reviewingSessions };
+      delete next[sessionId];
+      return { reviewingSessions: next };
+    }),
 
   // --- Actions: WS ---
   setWsStatus: (wsStatus) => set({ wsStatus }),

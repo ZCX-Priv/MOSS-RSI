@@ -999,7 +999,7 @@ export class WsHandler {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_AGENT_ENGINE_UNAVAILABLE } });
       return;
     }
-    const payload = (msg.payload ?? {}) as { toolCallId?: string; ok?: boolean; remember?: 'session' | 'global' };
+    const payload = (msg.payload ?? {}) as { toolCallId?: string; ok?: boolean; remember?: 'session' | 'project' | 'global' };
     if (!payload.toolCallId || typeof payload.ok !== 'boolean') {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_TOOLCALLID_ANSWER_REQUIRED } });
       return;

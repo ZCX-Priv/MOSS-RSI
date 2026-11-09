@@ -87,6 +87,15 @@ export function defaultAppConfig(): AppConfig {
       cautionPolicy: 'ask',
       rules: { allow: [], deny: [], ask: [] },
       protectedPaths: ['~/.ssh', '~/.gnupg', '~/.aws'],
+      review: {
+        enabled: true,
+        model: '',
+        reasoningEffort: 'off',
+        timeoutMs: 30000,
+        onReviewFailure: 'ask',
+        cacheTtlMs: 60000,
+        maxIntentChars: 4000,
+      },
     },
     voice: { enabled: false, providerId: '', localModel: '', language: 'auto' },
   };

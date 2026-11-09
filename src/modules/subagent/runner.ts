@@ -225,13 +225,16 @@ export class SubagentRunner {
     });
 
     const controller = new AbortController();
-    // headless 标记：子代理会话无人应答权限确认 → 短超时快速失败（见 engine.requestConfirm）
+    // headless 标记：子代理会话无人直接应答，但权限确认会汇总到主会话中控岛（带来源）。
     this.engine.markSessionHeadless?.(task.id, true);
-    // 权限继承：显式入参 → 父会话模式 → auto（父 skip 时子代理也不再弹无法应答的确认）
+    // 权限继承：显式入参 → 父会话模式 → auto；且子代理权限不得超过父会话（不可提升）。
+    const RANK: Record<PermissionMode, number> = { skip: 0, auto: 1, ask: 2 };
+    const parentMode = input.parentSessionId
+      ? this.engine.getPermissionMode?.(input.parentSessionId)
+      : undefined;
+    const requested = input.permissionMode ?? parentMode ?? 'auto';
     const permissionMode: PermissionMode =
-      input.permissionMode ??
-      (input.parentSessionId ? this.engine.getPermissionMode?.(input.parentSessionId) : undefined) ??
-      'auto';
+      parentMode && RANK[requested] < RANK[parentMode] ? parentMode : requested;
 
     this.activeRuns.set(task.id, controller);
     this.registerExternalRun(task.id, controller);

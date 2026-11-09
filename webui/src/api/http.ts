@@ -51,6 +51,7 @@ import type {
   RulesListResult,
   RuleItem,
   RuleUpsertBody,
+  SafetyRules,
   HooksListResult,
   HookItem,
   HookUpsertBody,
@@ -183,6 +184,19 @@ export const api = {
   // 配置
   // ==========================================================================
   getAppConfig: () => request<AppConfig>('GET', '/api/config'),
+
+  // 项目级权限规则（{cwd}/.moss/permissions.json）
+  getProjectRules: (cwd: string) =>
+    request<{ cwd: string; rules: SafetyRules }>(
+      'GET',
+      `/api/safety/project-rules?cwd=${encodeURIComponent(cwd)}`,
+    ),
+  updateProjectRules: (cwd: string, rules: SafetyRules) =>
+    request<{ ok: boolean; cwd: string; rules: SafetyRules }>(
+      'PUT',
+      '/api/safety/project-rules',
+      { cwd, rules },
+    ),
   updateAppConfig: (patch: Partial<AppConfig>) => request<AppConfig>('PUT', '/api/config', patch),
   getApiConfig: () => request<ApiConfig>('GET', '/api/api-config'),
   updateApiConfig: (patch: Partial<ApiConfig>) => request<ApiConfig>('PUT', '/api/api-config', patch),

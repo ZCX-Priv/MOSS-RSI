@@ -378,6 +378,18 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const todos = useStore((s) => s.todosBySession[taskId] ?? EMPTY_TODOS);
   const pendingAsks = useStore((s) => s.pendingAsks);
   const pendingConfirms = useStore((s) => s.pendingConfirms);
+  /** 自动审查进行中的会话计数（主会话 key；子代理审查已归属到父会话） */
+  const reviewingSessions = useStore((s) => s.reviewingSessions);
+  /**
+   * 本任务可见的待确认权限：主会话自身 + 其派生的子代理（source.parentSessionId === taskId）。
+   * 子代理确认汇总到主会话中控岛，卡片上标注权限来源。
+   */
+  const sessionConfirms = useMemo(
+    () => pendingConfirms.filter(
+      (c) => c.sessionId === taskId || c.source?.parentSessionId === taskId,
+    ),
+    [pendingConfirms, taskId],
+  );
   const messageQueue = useStore((s) => s.messageQueueBySession[taskId] ?? EMPTY_QUEUE);
   const removeFromMessageQueue = useStore((s) => s.removeFromMessageQueue);
   // 当前会话 run 统计（中控岛下方指标栏）与中控岛展开模块
@@ -411,7 +423,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       prevConfirmCountRef.current = 0;
     }
     const askCount = pendingAsks.filter((a) => a.sessionId === taskId).length;
-    const confirmCount = pendingConfirms.filter((c) => c.sessionId === taskId).length;
+    const confirmCount = sessionConfirms.length;
     const prevAsk = prevAskCountRef.current;
     const prevConfirm = prevConfirmCountRef.current;
     prevAskCountRef.current = askCount;
@@ -1762,8 +1774,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           <ControlHub
             leading={<ConnectionStatusTag sessionId={taskId} />}
             status={
-              // 单一派生状态（互斥优先级）：恢复 > 同步 > 停止中 > 运行中 > 空闲。
-              // 恢复/同步期间绝不能再显示「空闲」，否则与连接胶囊的「正在恢复会话状态…」自相矛盾。
+              // 单一派生状态（互斥优先级）：恢复 > 同步 > 停止中 > 审查中 > 运行中 > 空闲。
+              // 审查中 = 有待确认权限（手动审批）或自动审查进行中，二者都让用户感知「正在审查」。
               isRestoring || isSyncing ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin text-primary-strong" />
@@ -1777,6 +1789,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                   <span className="text-xs font-medium text-primary-strong">
                     {t('hub.statusStopping')}
                   </span>
+                </>
+              ) : sessionConfirms.length > 0 || (reviewingSessions[taskId] ?? 0) > 0 ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin text-primary-strong" />
+                  <span className="text-xs font-medium text-primary-strong">{t('hub.statusReviewing')}</span>
                 </>
               ) : isGenerating ? (
                 <>
@@ -1900,9 +1917,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 id: 'permission',
                 icon: ShieldCheck,
                 title: t('hub.permissionModule'),
-                badge: pendingConfirms.filter((c) => c.sessionId === taskId).length,
+                badge: sessionConfirms.length,
                 render: () => {
-                  const confirms = pendingConfirms.filter((c) => c.sessionId === taskId);
+                  const confirms = sessionConfirms;
                   if (confirms.length === 0) {
                     return (
                       <div className="flex items-center gap-1.5 px-1 py-2 text-xs text-muted-foreground">

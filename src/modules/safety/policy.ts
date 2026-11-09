@@ -1,19 +1,20 @@
 // src/modules/safety/policy.ts
-// 统一权限决策管线（按用户决策裁剪）。
+// 统一权限决策管线（对齐 Claude Code：规则在所有模式生效，auto 档交由审查模型裁决）。
 //
-// 九步流水线（短路返回）：
+// 决策流水线（短路返回）：
 //   1. 工具 disabled            → DENY  {disabled}
 //   1.5 终端命令 .moss 越界   → DENY  {mossAccess}（全局硬规则，skip 也拦）
-//   2. mode === 'skip'          → ALLOW {mode}      （用户决策：真全放行，仅查禁用）
-//   3. deny 规则命中(会话>全局)  → DENY  {rule}
-//   4. ask 规则命中(会话>全局)   → ASK   {rule}
-//   5. 沙箱检测：
-//      a. 终端 BLOCK 级危险命令 → DENY {dangerousCommand}
-//      b. 终端 CAUTION 级       → ASK/配 deny {cautionCommand}
-//      c. 写类工具保护路径        → DENY {protectedPath}（含 ~/.moss/config 硬保护）
-//   6. allow 规则命中(会话>全局) → ALLOW {rule}
-//   7. mode === 'auto'          → L0/L1/L2 ? ALLOW : ASK {mode}
-//   8. mode === 'ask'(默认)     → L0/L1 ? ALLOW : ASK {default}（fail-closed：未知工具归 L3）
+//   2. deny 规则命中(会话>项目>全局) → DENY {rule}（所有模式，含 skip）
+//   3. ask 规则命中(会话>项目>全局)  → ASK  {rule}（所有模式，含 skip）
+//   4. 沙箱检测（终端）：
+//      a. BLOCK 级危险命令 → DENY {dangerousCommand}（所有模式，含 skip）
+//      b. CAUTION 级       → skip 放行 / 配 deny 直接拒绝 / 其余 ASK
+//   5. 写类工具保护路径：~/.moss/config 硬保护 → DENY（所有模式）；
+//      用户配置 protectedPaths → 非 skip 模式 DENY，skip 放行
+//   6. mode === 'skip'          → ALLOW {mode}
+//   7. allow 规则命中(会话>项目>全局) → ALLOW {rule}
+//   8. mode === 'auto'          → L0/L1 ? ALLOW : REVIEW {review}（交审查模型裁决）
+//   9. mode === 'ask'(默认)     → L0/L1 ? ALLOW : ASK {default}（fail-closed：未知工具归 L3）
 
 import type {
   SafetyDecision,
@@ -121,6 +122,8 @@ const EMPTY_RULES: SafetyRules = { allow: [], deny: [], ask: [] };
 export interface PolicyEnv {
   /** 会话级规则（可 undefined） */
   sessionRules?: SafetyRules;
+  /** 项目级规则（{cwd}/.moss/permissions.json，可 undefined） */
+  projectRules?: SafetyRules;
   /** 全局规则（config.safety.rules） */
   globalRules?: SafetyRules;
   /** 危险命令拦截开关 */
@@ -141,7 +144,7 @@ export interface PolicyEnv {
 
 /**
  * 统一决策入口（纯函数）。
- * 规则求值顺序：会话层 > 全局层（会话规则先查）。
+ * 规则求值顺序：会话层 > 项目层 > 全局层。
  */
 export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
   // 1. 工具禁用
@@ -161,75 +164,82 @@ export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
     }
   }
 
-  // 2. skip：全放行（用户决策：仅查禁用）
-  if (req.mode === 'skip') {
-    return { action: 'allow', reason: { type: 'mode', mode: 'skip' } };
-  }
-
   const sessionRules = env.sessionRules ?? EMPTY_RULES;
+  const projectRules = env.projectRules ?? EMPTY_RULES;
   const globalRules = env.globalRules ?? EMPTY_RULES;
   const isTerminal = req.toolName === 'terminal';
   // System 作用域哨兵下规则路径匹配以系统盘根为基准（与 filesys 相对路径解析一致）
   const ruleCwd = req.cwd === SYSTEM_SCOPE ? env.systemRoot : req.cwd;
 
-  // 3. deny 规则（会话 > 全局）
-  for (const rule of [...sessionRules.deny, ...globalRules.deny]) {
+  // 2. deny 规则（会话 > 项目 > 全局；所有模式生效，含 skip）
+  for (const rule of [...sessionRules.deny, ...projectRules.deny, ...globalRules.deny]) {
     if (matchRule(rule, req.toolName, req.params, ruleCwd, 'restrictive')) {
       return { action: 'deny', reason: { type: 'rule', rule } };
     }
   }
 
-  // 4. ask 规则（会话 > 全局）
-  for (const rule of [...sessionRules.ask, ...globalRules.ask]) {
+  // 3. ask 规则（会话 > 项目 > 全局；所有模式生效，含 skip）
+  for (const rule of [...sessionRules.ask, ...projectRules.ask, ...globalRules.ask]) {
     if (matchRule(rule, req.toolName, req.params, ruleCwd, 'restrictive')) {
       return { action: 'ask', reason: { type: 'rule', rule } };
     }
   }
 
-  // 5a/5b. 危险命令智能拦截（仅 terminal）
+  // 4a/4b. 危险命令智能拦截（仅 terminal）
   if (isTerminal && env.blockDangerousCommands) {
     const cmd = (req.params as { command?: unknown } | null)?.command;
     if (typeof cmd === 'string' && cmd.trim()) {
       const hit = matchDangerousCommand(cmd);
       if (hit) {
         if (hit.level === 'block') {
+          // BLOCK 级：所有模式拒绝（含 skip；对齐 Claude Code 对 critical rm 的处理）
           return { action: 'deny', reason: { type: 'dangerousCommand', pattern: hit.label } };
         }
-        // caution 级：按策略
+        // CAUTION 级：skip 放行；配 deny 直接拒绝；其余确认
         if (env.cautionPolicy === 'deny') {
           return { action: 'deny', reason: { type: 'cautionCommand', pattern: hit.label } };
         }
-        return { action: 'ask', reason: { type: 'cautionCommand', pattern: hit.label } };
+        if (req.mode !== 'skip') {
+          return { action: 'ask', reason: { type: 'cautionCommand', pattern: hit.label } };
+        }
       }
     }
   }
 
-  // 5c. 保护路径（写类工具；含 ~/.moss/config 硬保护）
+  // 5. 保护路径（写类工具；含 ~/.moss/config 硬保护）
   const risk = classifyRisk(req);
   if (risk === 'L2') {
     if (isHardProtectedPath(req.params, env.home, env.configDir)) {
       return { action: 'deny', reason: { type: 'protectedPath', pattern: env.configDir } };
     }
-    const hitPath = matchProtectedPath(req.params, env.protectedPaths, env.home);
-    if (hitPath) {
-      return { action: 'deny', reason: { type: 'protectedPath', pattern: hitPath } };
+    // 用户配置的保护路径：非 skip 模式拒绝；skip 视为完全访问放行
+    if (req.mode !== 'skip') {
+      const hitPath = matchProtectedPath(req.params, env.protectedPaths, env.home);
+      if (hitPath) {
+        return { action: 'deny', reason: { type: 'protectedPath', pattern: hitPath } };
+      }
     }
   }
 
-  // 6. allow 规则（会话 > 全局）
-  for (const rule of [...sessionRules.allow, ...globalRules.allow]) {
+  // 6. skip：其余全放行（deny/ask 规则、BLOCK 命令、硬保护已在前置步骤拦截）
+  if (req.mode === 'skip') {
+    return { action: 'allow', reason: { type: 'mode', mode: 'skip' } };
+  }
+
+  // 7. allow 规则（会话 > 项目 > 全局）
+  for (const rule of [...sessionRules.allow, ...projectRules.allow, ...globalRules.allow]) {
     if (matchRule(rule, req.toolName, req.params, ruleCwd, 'permissive')) {
       return { action: 'allow', reason: { type: 'rule', rule } };
     }
   }
 
-  // 7/8. 模式语义（按风险分级决策矩阵）
+  // 8/9. 模式语义（按风险分级决策矩阵）
   if (req.mode === 'auto') {
-    // 自动审批：L0/L1/L2 放行（L2 有回收站/备份兜底），L3 仍确认
-    if (risk === 'L0' || risk === 'L1' || risk === 'L2') {
+    // 自动审查：只读/会话内直接放行；写操作/命令/外部操作交给审查模型裁决
+    if (risk === 'L0' || risk === 'L1') {
       return { action: 'allow', reason: { type: 'mode', mode: 'auto' } };
     }
-    return { action: 'ask', reason: { type: 'mode', mode: 'auto' } };
+    return { action: 'review', reason: { type: 'review', mode: 'auto' } };
   }
 
   // ask（默认）：L0/L1 放行，其余确认（fail-closed）

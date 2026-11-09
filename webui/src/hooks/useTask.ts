@@ -365,7 +365,7 @@ export function useTask() {
   );
 
   const replyConfirm = useCallback(
-    (sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global') => {
+    (sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'project' | 'global') => {
       const cf = useStore
         .getState()
         .pendingConfirms.find((c) => c.sessionId === sessionId && c.toolCallId === toolCallId);

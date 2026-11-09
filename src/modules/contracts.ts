@@ -71,8 +71,8 @@ export type {
   BrowserInstallerState,
   BrowserFocusResult,
 } from './browser/types';
-import type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
-export type { PermissionMode, SafetyDecision, SafetyRequest } from './safety/types';
+import type { PermissionMode, SafetyDecision, SafetyRequest, SafetyReviewConfig, SafetyRules } from './safety/types';
+export type { PermissionMode, SafetyDecision, SafetyRequest, SafetyReviewConfig, SafetyRules } from './safety/types';
 
 // ============================================================================
 // LLM Router（由 LLM 插件注册，ServiceNames.LLM_ROUTER）
@@ -243,7 +243,7 @@ export interface AgentEngine {
    * @param remember 「始终允许」级别：session=写会话规则（内存）；global=写 config.safety.rules（持久）
    * @returns true 表示匹配到本会话的 pending confirm 并已 resolve；false 表示无匹配（可能已超时或不存在）。
    */
-  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean;
+  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'project' | 'global'): boolean;
 
   /**
    * 消息撤回预览（dryRun）：定位目标用户消息，列出将被删除的消息与将被回滚的文件变更。
@@ -438,6 +438,18 @@ export interface StreamChunkMeta {
   total?: number;
 }
 
+/** 权限确认来源（区分主会话与不同子代理同时发起的申请） */
+export interface ConfirmSource {
+  kind: 'main' | 'subagent';
+  sessionId: string;
+  /** 子代理显示名（模板名） */
+  name?: string;
+  /** 子代理模板 id */
+  template?: string;
+  /** 发起子代理的父会话 id（主会话据此汇总展示） */
+  parentSessionId?: string;
+}
+
 export type AgentEvent =
   /**
    * 用户消息已持久化（引擎统一发出，覆盖 WebUI / IM / MCP / 自动化等全部入口）。
@@ -473,8 +485,10 @@ export type AgentEvent =
     }
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
-  | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string }
+  | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string; source?: ConfirmSource }
   | { type: 'confirm-cancel'; sessionId: string; toolCallId: string; runId?: string }
+  | { type: 'review-start'; sessionId: string; toolCallId: string; toolName: string; parentSessionId?: string; runId?: string }
+  | { type: 'review-end'; sessionId: string; toolCallId: string; toolName: string; decision: 'allow' | 'deny' | 'uncertain'; reason?: string; riskLevel?: string; parentSessionId?: string; runId?: string }
   | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; icon?: string; message?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string; providerError?: string; messageId?: string }
@@ -791,7 +805,9 @@ export interface SafetyService {
   getDefaultMode(): PermissionMode;
   /** 确认超时（分钟；0=永不超时） */
   getConfirmTimeoutMinutes(): number;
-  /** 统一权限决策（allow=放行 / ask=需用户确认 / deny=拒绝） */
+  /** 自动审查配置（config.safety.review；实时读取） */
+  getReviewConfig(): SafetyReviewConfig;
+  /** 统一权限决策（allow=放行 / ask=需用户确认 / deny=拒绝 / review=自动审查） */
   evaluate(req: SafetyRequest): SafetyDecision;
   /** 添加会话级规则（「始终允许(会话)」；内存存储，刷新失效） */
   addSessionRule(sessionId: string, list: 'allow' | 'deny' | 'ask', rule: string): void;
@@ -799,6 +815,12 @@ export interface SafetyService {
   clearSessionRules(sessionId: string): void;
   /** 添加全局持久规则（「始终允许(全局)」→ config.safety.rules + 广播 config:changed） */
   addGlobalRule(list: 'allow' | 'deny' | 'ask', rule: string): Promise<boolean>;
+  /** 读取项目级规则（{cwd}/.moss/permissions.json） */
+  listProjectRules(cwd: string): SafetyRules;
+  /** 整体写入项目级规则 */
+  saveProjectRules(cwd: string, rules: SafetyRules): Promise<boolean>;
+  /** 追加单条项目级规则（「始终允许(本项目)」） */
+  addProjectRule(cwd: string, list: 'allow' | 'deny' | 'ask', rule: string): Promise<boolean>;
   /** 生成「始终允许」规则建议（terminal 智能前缀 / MCP 全名 / 工具名） */
   generateRuleSuggestion(toolName: string, params: unknown): string;
 }

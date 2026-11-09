@@ -15,9 +15,11 @@ import {
   ChevronRight,
   Infinity as InfinityIcon,
   Clock3,
+  FolderGit2,
 } from 'lucide-react';
 import type { PendingConfirm } from '../../types/api';
 import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -75,7 +77,7 @@ export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProp
   const current = sorted[Math.min(step, Math.max(0, sorted.length - 1))];
   if (!current) return null;
 
-  const handle = (ok: boolean, remember?: 'session' | 'global') => {
+  const handle = (ok: boolean, remember?: 'session' | 'project' | 'global') => {
     if (sending) return;
     setSending(true);
     replyConfirm(current.sessionId, current.toolCallId, ok, remember);
@@ -93,15 +95,34 @@ export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProp
         className,
       )}
     >
-      {/* 头部：标题 + 步骤进度 + 顺序切换 */}
-      <div className="flex items-center gap-1.5">
-        <ShieldAlert className="size-3.5 text-amber-600" />
-        <span className="text-xs font-medium text-foreground">
+      {/* 头部：标题 + 权限来源 + 步骤进度 + 顺序切换 */}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <ShieldAlert className="size-3.5 shrink-0 text-amber-600" />
+        <span className="shrink-0 text-xs font-medium text-foreground">
           {t('task.confirmTitle')}
           {current.toolName ? ` · ${current.toolName}` : ''}
         </span>
+        {/* 权限来源：区分主会话与同时发起的多个子代理 */}
+        {current.source?.kind === 'subagent' ? (
+          <Badge
+            variant="secondary"
+            className="max-w-[10rem] shrink-0 truncate border border-primary/30 bg-primary/10 px-1.5 text-[10px] font-normal text-primary-strong"
+            title={current.source.name ?? current.source.template}
+          >
+            {t('task.confirmSourceSubagent', {
+              name: current.source.name ?? current.source.template ?? 'Subagent',
+            })}
+          </Badge>
+        ) : (
+          <Badge
+            variant="secondary"
+            className="shrink-0 border border-border px-1.5 text-[10px] font-normal text-muted-foreground"
+          >
+            {t('task.confirmSourceMain')}
+          </Badge>
+        )}
         {total > 1 && (
-          <span className="text-[11px] text-muted-foreground">
+          <span className="shrink-0 text-[11px] text-muted-foreground">
             {t('task.askStepOf', { current: step + 1, total })}
           </span>
         )}
@@ -191,6 +212,15 @@ export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProp
                   <span className="text-sm leading-tight">{t('task.confirmRememberSession')}</span>
                   <span className="text-[11px] leading-tight text-muted-foreground">
                     {t('task.confirmRememberSessionDesc')}
+                  </span>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => handle(true, 'project')} className="gap-2 px-2 py-1.5">
+                <FolderGit2 className="size-3.5 shrink-0" />
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="text-sm leading-tight">{t('task.confirmRememberProject')}</span>
+                  <span className="text-[11px] leading-tight text-muted-foreground">
+                    {t('task.confirmRememberProjectDesc')}
                   </span>
                 </div>
               </DropdownMenuItem>

@@ -168,6 +168,10 @@ import {
   createDeleteRuleHandler,
 } from './routes/rules';
 import {
+  createGetProjectRulesHandler,
+  createUpdateProjectRulesHandler,
+} from './routes/safety';
+import {
   createListHooksHandler,
   createCreateHookHandler,
   createGetHookHandler,
@@ -407,6 +411,10 @@ class ServerModule implements Module {
     // tools（工具元信息 + 可编辑参数定义；PATCH 更新 config.tools[name] 热生效）
     this.router.addRoute({ method: 'GET', pattern: '/api/tools', handler: createListToolsHandler(services, config), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/tools/:name', handler: createUpdateToolHandler(services, config), auth: true });
+
+    // 项目级权限规则（{cwd}/.moss/permissions.json）
+    this.router.addRoute({ method: 'GET', pattern: '/api/safety/project-rules', handler: createGetProjectRulesHandler(services), auth: true });
+    this.router.addRoute({ method: 'PUT', pattern: '/api/safety/project-rules', handler: createUpdateProjectRulesHandler(services), auth: true });
 
     // providers（服务商 + 旗下模型；静态路由先于 :id 参数路由注册）
     this.router.addRoute({ method: 'GET', pattern: '/api/providers', handler: createListProvidersHandler(config), auth: true });

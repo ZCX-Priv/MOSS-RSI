@@ -91,7 +91,8 @@ const SUBAGENT_DISPLAY_EVENT_TYPES = new Set([
   'assistant-text', 'assistant-thinking',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
   'run-code-progress',
-  'ask', 'ask-timeout', 'confirm-required', 'stats-updated', 'error', 'done',
+  'ask', 'ask-timeout', 'confirm-required', 'review-start', 'review-end',
+  'stats-updated', 'error', 'done',
 ]);
 
 /** 读取事件的 runId（agent 事件 payload 顶层） */
@@ -623,9 +624,22 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         toolName: event.toolName,
         question: event.question,
         details: event.details,
-        ruleSuggestion: (msg.payload as { ruleSuggestion?: string }).ruleSuggestion,
+        ruleSuggestion: event.ruleSuggestion,
+        source: event.source,
         createdAt: Date.now(),
       });
+      break;
+    }
+    case 'review-start': {
+      const event = msg.payload as Extract<AgentEvent, { type: 'review-start' }>;
+      const owner = event.parentSessionId ?? event.sessionId ?? sessionId;
+      if (owner) s.addReviewing(owner);
+      break;
+    }
+    case 'review-end': {
+      const event = msg.payload as Extract<AgentEvent, { type: 'review-end' }>;
+      const owner = event.parentSessionId ?? event.sessionId ?? sessionId;
+      if (owner) s.removeReviewing(owner);
       break;
     }
     case 'confirm-cancel': {

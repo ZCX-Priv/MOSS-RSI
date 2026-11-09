@@ -22,6 +22,7 @@ import type {
   AgentRegistryLike,
   AgentRunInput,
   AgentRunResult,
+  ConfirmSource,
   ContextEngine,
   HistorySearchInput,
   HistorySearchResult,
@@ -33,7 +34,9 @@ import type {
 import type { AgentBus } from '../agent-bus/types';
 import type { LLMRouter, ToolRegistry, MCPManager, FileHistoryService, FilesysService } from '../contracts';
 import type { SafetyService } from '../contracts';
-import type { PermissionMode } from '../safety/types';
+import type { PermissionMode, RiskClass, SafetyDecision } from '../safety/types';
+import { classifyRisk } from '../safety/policy';
+import { SafetyReviewer, type SafetyReviewResult } from '../safety/reviewer';
 import type { FileChangeEvent } from '../filesys/types';
 import type { ConfigService, EventBus, Logger, ServiceRegistry, Environment, ApiConfig } from '../../core/types';
 import { ServiceNames } from '../../core/types';
@@ -80,8 +83,19 @@ function extractToolPaths(toolName: string, args: unknown): string[] {
 /** ask 超时兜底上限（即使配置异常也不会让 Promise 永久悬挂） */
 const ASK_TIMEOUT_CEILING_MS = 24 * 60 * 60 * 1000; // 24h
 
-/** headless 会话（子代理/团队成员）的权限确认超时：无人应答时快速失败而非白等 5 分钟 */
-const HEADLESS_CONFIRM_TIMEOUT_MS = 30 * 1000;
+/** 子代理默认只读工具白名单（模板未显式声明 tools 时生效，防止子代理默认获得写权限） */
+const SUBAGENT_READONLY_TOOLS = [
+  'read',
+  'glob',
+  'grep',
+  'todo',
+  'ask',
+  'skill',
+  'memory',
+  'agent_status',
+  'agent_message',
+  'context',
+];
 
 /** 同一轮并发执行 subagent 工具调用的上限（防止一次性开过多 LLM 流造成资源压力） */
 const MAX_CONCURRENT_SUBAGENT_RUNS = 4;
@@ -89,6 +103,41 @@ const MAX_CONCURRENT_SUBAGENT_RUNS = 4;
 /** 是否为 agent 工具调用（一次性子代理委派） */
 function isSubagentToolCall(tc: { name: string; arguments: string }): boolean {
   return tc.name === 'agent';
+}
+
+/** 工具调用上下文（预检与执行共用） */
+interface ToolCallContext {
+  sessionId: string;
+  cwd: string;
+  toolCallId: string;
+  onEvent: (event: AgentEvent) => void;
+  signal?: AbortSignal;
+  permissionMode: PermissionMode;
+  /** 当前会话模型 id（自动审查继承主模型时使用） */
+  model: string;
+  /** 子代理的父会话 id（审查/确认事件的来源归属） */
+  parentSessionId?: string;
+}
+
+/** 确认元信息（预检阶段收集，本轮统一注册，前端合并分页） */
+interface ConfirmMetaInfo {
+  toolName: string;
+  details: unknown;
+  ruleSuggestion?: string;
+  question?: string;
+}
+
+/** 单工具预检结果 */
+interface PreparedToolCall {
+  tc: NonNullable<AgentMessage['toolCalls']>[number];
+  healedName: string;
+  args: unknown;
+  healLogText: string;
+  mcpMatch: RegExpMatchArray | null;
+  outcome:
+    | { kind: 'ready' }
+    | { kind: 'denied'; text: string }
+    | { kind: 'confirm'; meta: ConfirmMetaInfo; promise?: Promise<boolean> };
 }
 
 /** 并发执行（上限 limit），保持每个任务的错误隔离由调用方 runOne 负责 */
@@ -170,11 +219,18 @@ export class AgentEngineImpl implements AgentEngine {
     question: string;
     /** 「始终允许」规则建议（confirm-required 事件携带，前端卡片展示） */
     ruleSuggestion?: string;
+    /** 发起确认的工作目录（「始终允许(本项目)」写入 {cwd}/.moss/permissions.json） */
+    cwd: string;
+    /** 权限来源（主会话 / 子代理），前端中控岛据此区分同时发起的申请 */
+    source: ConfirmSource;
   }>();
 
+  /** 自动审查执行器（懒加载：首次需要 review 时解析 LLM 路由并构造） */
+  private safetyReviewer: SafetyReviewer | null = null;
+
   /**
-   * headless 会话集合（子代理 / 团队成员等无人交互的会话）：
-   * 权限确认没有前端可应答，改为短超时快速失败并返回明确原因，避免每个 L3 工具白等 5 分钟。
+   * headless 会话集合（子代理 / 团队成员等无独立界面的会话）：
+   * 权限确认会汇总到主会话中控岛（带来源）由用户应答；该标记主要用于拒绝文案与运行态判断。
    */
   private readonly headlessSessions = new Set<string>();
 
@@ -677,7 +733,9 @@ export class AgentEngineImpl implements AgentEngine {
     }
     // 代码模式 wire：开启 = 原生工具 + run_code 混合；关闭 = 排除 run_code。
     // Agent 模板 tools 白名单：非空时只暴露白名单工具（agent_status/agent_message 永远并集，
-    // 保证任何子代理都能被发现与对话）。空/缺省 = 全部工具。
+    // 保证任何子代理都能被发现与对话）。
+    // 子代理且模板未显式声明 tools 时收窄为只读默认集（需要写权限必须在模板里显式声明）；
+    // 主会话空/缺省 = 全部工具。
     const codeMode = cfg.codeMode;
     const profileTools = (agentProfile?.tools ?? []).filter(
       (name): name is string => typeof name === 'string' && name.trim() !== '',
@@ -685,7 +743,9 @@ export class AgentEngineImpl implements AgentEngine {
     const includeOnly =
       profileTools.length > 0
         ? new Set<string>([...profileTools, 'agent_status', 'agent_message'])
-        : undefined;
+        : input.bus?.kind === 'subagent'
+          ? new Set<string>(SUBAGENT_READONLY_TOOLS)
+          : undefined;
     const wireOptions: {
       includeOnly?: ReadonlySet<string>;
       exclude?: ReadonlySet<string>;
@@ -1069,11 +1129,59 @@ export class AgentEngineImpl implements AgentEngine {
         break;
       }
 
+      // ===== 权限预检（同一轮全部工具并行）=====
+      // 一次列出本轮所有待审批项（前端合并分页）；执行阶段「允许一项执行一项」。
+      // 预检完成自愈 / PreToolUse hook / safety.evaluate / 自动审查；执行阶段不再重复。
+      const prepared = await Promise.all(
+        toolCalls.map(async (tc): Promise<PreparedToolCall> => {
+          try {
+            return await this.prepareToolCall(tc, {
+              sessionId,
+              cwd,
+              toolCallId: tc.id,
+              onEvent: emit,
+              signal,
+              permissionMode,
+              model,
+              ...(input.bus?.parentSessionId ? { parentSessionId: input.bus.parentSessionId } : {}),
+            });
+          } catch (err) {
+            // 预检异常隔离：单个工具失败不拖垮整轮
+            return {
+              tc,
+              healedName: tc.name,
+              args: {},
+              healLogText: '',
+              mcpMatch: null,
+              outcome: {
+                kind: 'denied',
+                text: `Error preparing tool call "${tc.name}": ${err instanceof Error ? err.message : String(err)}`,
+              },
+            };
+          }
+        }),
+      );
+      // 需要确认的项统一注册：所有 confirm-required 在同一同步批次发出，前端合并为一张分页卡
+      for (const p of prepared) {
+        if (p.outcome.kind === 'confirm') {
+          // catch → false：批量注册后若上层 abort 导致部分 Promise 提前 reject，
+          // 不能让尚未 await 的 Promise 触发 unhandledRejection；执行阶段按「拒绝」处理。
+          p.outcome.promise = this.requestConfirm(
+            { sessionId, cwd, toolCallId: p.tc.id, onEvent: emit, signal },
+            p.outcome.meta.toolName,
+            p.outcome.meta.details,
+            p.outcome.meta.ruleSuggestion,
+            p.outcome.meta.question,
+          ).catch(() => false);
+        }
+      }
+
       // 执行单个工具调用（含 abort 兜底、失败隔离、配对、统计）。
       // abortedInTools：本轮工具执行期间是否发生中断（闭包内赋值，供循环底部判定；
       // 直接用 finishReason=== 判定会被 TS 流分析窄化，故用显式标志）
       let abortedInTools = false;
-      const runOne = async (tc: (typeof toolCalls)[number]): Promise<void> => {
+      const runOne = async (p: PreparedToolCall): Promise<void> => {
+        const tc = p.tc;
         if (signal?.aborted) {
           // abort 时补一个错误 tool 结果，保持 tool_calls 配对完整
           // 否则 assistant 消息已带 tool_calls 但缺少对应 tool 结果，session 复用时会触发 HTTP 400
@@ -1088,11 +1196,11 @@ export class AgentEngineImpl implements AgentEngine {
           abortedInTools = true;
           return;
         }
-        // 单工具失败隔离：executeToolCall 抛错时兜底补错误 tool_result，
+        // 单工具失败隔离：executePreparedToolCall 抛错时兜底补错误 tool_result，
         // 避免中断后续 tc 导致多个 tool_use 失去 tool_result（触发 HTTP 400）。
         const toolStart = performance.now();
         try {
-          await this.executeToolCall(tc, {
+          await this.executePreparedToolCall(p, {
             sessionId,
             cwd,
             toolCallId: tc.id,
@@ -1100,6 +1208,8 @@ export class AgentEngineImpl implements AgentEngine {
             onEvent: emit,
             signal,
             permissionMode,
+            model,
+            ...(input.bus?.parentSessionId ? { parentSessionId: input.bus.parentSessionId } : {}),
           });
           // 工具执行完毕后检查 abort：这里**不能** break，
           // 否则尚未执行的 tc 会缺失 tool 结果，assistant.tool_calls 悬挂 → HTTP 400。
@@ -1135,8 +1245,8 @@ export class AgentEngineImpl implements AgentEngine {
       //   连续段并行（上限 agent.maxParallelTools，缺省 4；1 = 串行），
       //   段结束后按 toolCalls 顺序重排工具结果，保证会话里的 tool_result 顺序稳定。
       // - 其余（写工具/terminal/run_code 等）严格串行且保持调用顺序。
-      const askCalls = toolCalls.filter((tc) => tc.name === 'ask');
-      const subagentCalls = toolCalls.filter(isSubagentToolCall);
+      const askCalls = prepared.filter((p) => p.tc.name === 'ask');
+      const subagentCalls = prepared.filter((p) => isSubagentToolCall(p.tc));
       const parallelAsks = askCalls.length >= 2;
       const parallelSubagents = subagentCalls.length >= 2;
       const configuredParallel = cfg.maxParallelTools;
@@ -1149,45 +1259,45 @@ export class AgentEngineImpl implements AgentEngine {
         typeof configuredSubagentParallel === 'number' && Number.isFinite(configuredSubagentParallel)
           ? Math.max(1, Math.min(8, Math.floor(configuredSubagentParallel)))
           : MAX_CONCURRENT_SUBAGENT_RUNS;
-      const isParallelSafeCall = (tc: (typeof toolCalls)[number]): boolean => {
-        if (tc.name === 'ask' || isSubagentToolCall(tc)) return false;
-        return toolRegistry?.isParallelSafe?.(tc.name) === true;
+      const isParallelSafeCall = (p: PreparedToolCall): boolean => {
+        if (p.tc.name === 'ask' || isSubagentToolCall(p.tc)) return false;
+        return toolRegistry?.isParallelSafe?.(p.tc.name) === true;
       };
       let asksLaunched = false;
       let subagentsLaunched = false;
-      for (let i = 0; i < toolCalls.length; i++) {
-        const tc = toolCalls[i];
-        if (parallelAsks && tc.name === 'ask') {
+      for (let i = 0; i < prepared.length; i++) {
+        const p = prepared[i];
+        if (parallelAsks && p.tc.name === 'ask') {
           if (!asksLaunched) {
             asksLaunched = true;
             await Promise.all(askCalls.map((a) => runOne(a)));
           }
           continue;
         }
-        if (parallelSubagents && isSubagentToolCall(tc)) {
+        if (parallelSubagents && isSubagentToolCall(p.tc)) {
           if (!subagentsLaunched) {
             subagentsLaunched = true;
             await runWithLimit(subagentCalls, maxConcurrentSubagents, runOne);
           }
           continue;
         }
-        if (maxParallelTools > 1 && isParallelSafeCall(tc)) {
-          const segment: Array<NonNullable<AgentMessage['toolCalls']>[number]> = [];
-          while (i < toolCalls.length && isParallelSafeCall(toolCalls[i])) {
-            segment.push(toolCalls[i]);
+        if (maxParallelTools > 1 && isParallelSafeCall(p)) {
+          const segment: PreparedToolCall[] = [];
+          while (i < prepared.length && isParallelSafeCall(prepared[i])) {
+            segment.push(prepared[i]);
             i++;
           }
           i--;
           if (segment.length > 1) {
             await runWithLimit(segment, maxParallelTools, runOne);
             // 并行完成顺序 ≠ 调用顺序；按 toolCalls 顺序重排结果，模型看到稳定的配对序列
-            this.reorderToolMessages(sessionId, segment);
+            this.reorderToolMessages(sessionId, segment.map((s) => s.tc));
           } else if (segment.length === 1) {
             await runOne(segment[0]);
           }
           continue;
         }
-        await runOne(tc);
+        await runOne(p);
       }
 
       // 兜底自愈：确保本轮每个 tool_call_id 都有对应 tool 消息。
@@ -1906,71 +2016,35 @@ export class AgentEngineImpl implements AgentEngine {
     }
   }
 
-  private async executeToolCall(
+  /**
+   * 预检：参数自愈 → PreToolUse hook → 权限决策（含自动审查）。
+   * 同一轮所有工具先并行预检，需要确认的项由调用方统一注册（前端合并分页、允许一项执行一项）。
+   */
+  private async prepareToolCall(
     tc: NonNullable<AgentMessage['toolCalls']>[number],
-    ctx: {
-      sessionId: string;
-      cwd: string;
-      toolCallId: string;
-      onEvent: (event: AgentEvent) => void;
-      signal?: AbortSignal;
-      permissionMode: PermissionMode;
-    },
-  ): Promise<void> {
-    const { sessionId, cwd, toolCallId, onEvent, signal } = ctx;
-
-    // 工具执行前再次检查 abort（防止在工具队列等待期间被 abort）
-    if (signal?.aborted) {
-      this.sessions.addToolMessage(
-        this.sessions.get(sessionId)!,
-        toolCallId,
-        'Error: aborted by user',
-        tc.name,
-        { isError: true },
-      );
-      return;
-    }
-
-    onEvent({
-      type: 'tool-call-executing',
-      sessionId,
-      toolName: tc.name,
-      toolCallId,
-    });
-
-    // 参数解析 + 自愈（context 引擎：JSON 修复/工具名纠正/schema 修正）
-    // 服务不可用时回退旧行为（静默 {}）；修复失败回传结构化错误让模型自纠
+    ctx: ToolCallContext,
+  ): Promise<PreparedToolCall> {
+    const { sessionId, cwd, signal } = ctx;
     let args: unknown = {};
     let healedName = tc.name;
     let healLogText = '';
+
+    // 参数解析 + 自愈（context 引擎：JSON 修复/工具名纠正/schema 修正）
     const contextEngine = this.services.tryResolve<ContextEngine>(ServiceNames.CONTEXT_ENGINE);
     if (contextEngine) {
       const heal = contextEngine.healToolCall(tc.name, tc.arguments || '');
       healedName = heal.toolName;
       args = heal.args;
+      this.notifyHealed(sessionId, ctx.toolCallId, heal.healLog);
       if (!heal.executable) {
-        // 修复失败：结构化错误回传（含修复尝试与正确用法），模型下轮自纠
         const errorText = heal.errorText ?? `Error: tool call "${tc.name}" could not be repaired`;
-        this.sessions.addToolMessage(
-          this.sessions.get(sessionId)!,
-          toolCallId,
-          errorText,
-          healedName,
-          { isError: true },
-        );
-        onEvent({
-          type: 'tool-call-end',
-          sessionId,
-          toolName: healedName,
-          toolCallId,
-          result: { content: [{ type: 'text', text: errorText }], isError: true },
-        });
-        this.notifyHealed(sessionId, toolCallId, heal.healLog);
-        return;
+        return {
+          tc, healedName, args, healLogText, mcpMatch: null,
+          outcome: { kind: 'denied', text: errorText },
+        };
       }
       if (heal.healLog.length > 0) {
         healLogText = `\n\n[自愈] ${heal.healLog.map(h => h.detail).join('; ')}`;
-        this.notifyHealed(sessionId, toolCallId, heal.healLog);
       }
     } else {
       try {
@@ -1980,7 +2054,10 @@ export class AgentEngineImpl implements AgentEngine {
       }
     }
 
-    // ===== 钩子事件：PreToolUse（自愈后、执行前；deny → 补错误 tool 消息并中止此工具） =====
+    // 判断是否是 MCP 工具（mcp__server__tool 前缀；用自愈纠正后的名字）
+    const mcpMatch = healedName.match(/^mcp__([^_]+)__(.+)$/);
+
+    // ===== 钩子事件：PreToolUse（自愈后、执行前；deny → 直接给出错误结果） =====
     const hooksEngine = this.services.tryResolve<HooksEngineServiceImpl>(ServiceNames.HOOKS_ENGINE);
     if (hooksEngine) {
       try {
@@ -1994,27 +2071,15 @@ export class AgentEngineImpl implements AgentEngine {
               : {},
         });
         if (pre.decision === 'deny') {
-          const blockText = `Blocked by hook: ${pre.reason ?? 'tool call denied'}`;
           this.logger.info('agent: tool call blocked by hook', {
             sessionId,
             toolName: healedName,
             reason: pre.reason,
           });
-          this.sessions.addToolMessage(
-            this.sessions.get(sessionId)!,
-            toolCallId,
-            blockText,
-            healedName,
-            { isError: true },
-          );
-          onEvent({
-            type: 'tool-call-end',
-            sessionId,
-            toolName: healedName,
-            toolCallId,
-            result: { content: [{ type: 'text', text: blockText }], isError: true },
-          });
-          return;
+          return {
+            tc, healedName, args, healLogText, mcpMatch,
+            outcome: { kind: 'denied', text: `Blocked by hook: ${pre.reason ?? 'tool call denied'}` },
+          };
         }
       } catch (err) {
         this.logger.warn('agent: PreToolUse hook failed (fail-open)', {
@@ -2025,14 +2090,267 @@ export class AgentEngineImpl implements AgentEngine {
       }
     }
 
-    // 判断是否是 MCP 工具（mcp__server__tool 前缀；用自愈纠正后的名字）
-    const mcpMatch = healedName.match(/^mcp__([^_]+)__(.+)$/);
+    if (signal?.aborted) {
+      return {
+        tc, healedName, args, healLogText, mcpMatch,
+        outcome: { kind: 'denied', text: 'Error: aborted by user' },
+      };
+    }
+
+    // ===== 统一权限决策（safety 模块）：本预检取代工具内部权限检查 =====
+    const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
+    if (!safety) {
+      return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+    }
+
+    let decision: SafetyDecision;
+    let confirmMeta: ConfirmMetaInfo;
+    if (mcpMatch) {
+      const serverName = mcpMatch[1];
+      const toolName = mcpMatch[2];
+      const fullToolName = `mcp__${serverName}__${toolName}`;
+      const mcpManager = this.services.tryResolve<MCPManager>(ServiceNames.MCP_MANAGER);
+      if (!mcpManager) {
+        return {
+          tc, healedName, args, healLogText, mcpMatch,
+          outcome: { kind: 'denied', text: 'Error: MCP manager not available' },
+        };
+      }
+      if (mcpManager.isServerEnabled(serverName) !== true) {
+        return {
+          tc, healedName, args, healLogText, mcpMatch,
+          outcome: { kind: 'denied', text: `Error: MCP server "${serverName}" is disabled or not found` },
+        };
+      }
+      const annotations = mcpManager.getToolAnnotations(serverName, toolName);
+      decision = safety.evaluate({
+        toolName: fullToolName,
+        params: args,
+        mcpAnnotations: annotations ?? undefined,
+        mode: ctx.permissionMode,
+        sessionId,
+        cwd,
+        enabled: true,
+      });
+      confirmMeta = {
+        toolName: fullToolName,
+        details: args,
+        ruleSuggestion: fullToolName,
+        question: t('agent.mcpDestructiveConfirm', { server: serverName, tool: toolName }),
+      };
+    } else {
+      const toolRegistry = this.services.tryResolve<ToolRegistry>(ServiceNames.TOOL_REGISTRY);
+      if (!toolRegistry) {
+        return {
+          tc, healedName, args, healLogText, mcpMatch,
+          outcome: { kind: 'denied', text: 'Error: tool registry not available' },
+        };
+      }
+      const tool = toolRegistry.get(healedName);
+      decision = safety.evaluate({
+        toolName: healedName,
+        params: args,
+        annotations: tool?.annotations,
+        mode: ctx.permissionMode,
+        sessionId,
+        cwd,
+        enabled: toolRegistry.isEnabled(healedName),
+      });
+      confirmMeta = {
+        toolName: healedName,
+        details: args,
+        ruleSuggestion: safety.generateRuleSuggestion(healedName, args),
+      };
+    }
+
+    if (decision.action === 'deny') {
+      return {
+        tc, healedName, args, healLogText, mcpMatch,
+        outcome: { kind: 'denied', text: this.formatDenyReason(confirmMeta.toolName, decision.reason) },
+      };
+    }
+    if (decision.action === 'allow') {
+      return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+    }
+
+    // ask / review
+    if (decision.action === 'review') {
+      const verdict = await this.reviewToolCall(healedName, args, ctx);
+      if (verdict.decision === 'allow') {
+        return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+      }
+      if (safety.getReviewConfig().onReviewFailure === 'deny') {
+        return {
+          tc, healedName, args, healLogText, mcpMatch,
+          outcome: { kind: 'denied', text: `Error: [safety][auto-review] ${verdict.reason}` },
+        };
+      }
+      // 转人工：确认卡片附带审查意见，由用户最终决策
+      confirmMeta.question = `${confirmMeta.question ? `${confirmMeta.question}\n\n` : ''}AI 审查：${verdict.reason}\n是否允许执行该操作？`;
+    }
+
+    return {
+      tc, healedName, args, healLogText, mcpMatch,
+      outcome: { kind: 'confirm', meta: confirmMeta },
+    };
+  }
+
+  /** 懒加载审查器（LLM 路由未就绪时返回 null，调用方按失败关闭处理） */
+  private getSafetyReviewer(): SafetyReviewer | null {
+    if (this.safetyReviewer) return this.safetyReviewer;
+    const llm = this.services.tryResolve<LLMRouter>(ServiceNames.LLM_ROUTER);
+    if (!llm) return null;
+    this.safetyReviewer = new SafetyReviewer({ config: this.config, logger: this.logger, llm });
+    return this.safetyReviewer;
+  }
+
+  /**
+   * 自动审查一次工具调用：推送 review-start / review-end，返回结构化裁决。
+   * 证据仅包含待审动作与当前会话最后一条真实用户消息。
+   */
+  private async reviewToolCall(
+    toolName: string,
+    args: unknown,
+    ctx: ToolCallContext,
+  ): Promise<SafetyReviewResult> {
+    const { sessionId, toolCallId, onEvent, signal, parentSessionId } = ctx;
+    const base = { sessionId, toolCallId, toolName, ...(parentSessionId ? { parentSessionId } : {}) };
+    onEvent({ type: 'review-start', ...base });
+
+    const reviewer = this.getSafetyReviewer();
+    if (!reviewer) {
+      const result: SafetyReviewResult = {
+        decision: 'uncertain',
+        riskLevel: 'unknown',
+        reason: '审查器不可用（LLM 路由未就绪）',
+        source: 'fallback',
+      };
+      onEvent({
+        type: 'review-end',
+        ...base,
+        decision: result.decision,
+        reason: result.reason,
+        riskLevel: result.riskLevel,
+      });
+      return result;
+    }
+
+    // 用户意图：最后一条真实用户消息（排除 env-context / 记忆等内部锚定消息）
+    let userIntent = '';
+    try {
+      const messages = this.sessions.get(sessionId)?.messages ?? [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role === 'user' && !m.name) {
+          userIntent = m.content;
+          break;
+        }
+      }
+    } catch {
+      // 会话不可用：空证据（审查器仍可基于动作本身判断）
+    }
+
+    const risk: RiskClass = classifyRisk({ toolName, params: args });
+    const result = await reviewer.review({
+      toolName,
+      params: args,
+      cwd: ctx.cwd,
+      risk,
+      userIntent,
+      model: ctx.model,
+      signal,
+    });
+    onEvent({
+      type: 'review-end',
+      ...base,
+      decision: result.decision,
+      reason: result.reason,
+      riskLevel: result.riskLevel,
+    });
+    return result;
+  }
+
+  /**
+   * 执行已预检的工具调用：等待自身确认（允许一项执行一项）→ 执行 → 落库 → 事后钩子/通知。
+   */
+  private async executePreparedToolCall(
+    prepared: PreparedToolCall,
+    ctx: ToolCallContext,
+  ): Promise<void> {
+    const { sessionId, cwd, toolCallId, onEvent, signal } = ctx;
+    const { tc, healedName, args, healLogText, mcpMatch } = prepared;
+    const hooksEngine = this.services.tryResolve<HooksEngineServiceImpl>(ServiceNames.HOOKS_ENGINE);
+
+    // 工具执行前再次检查 abort（防止在确认等待期间被 abort）
+    if (signal?.aborted) {
+      this.sessions.addToolMessage(
+        this.sessions.get(sessionId)!,
+        toolCallId,
+        'Error: aborted by user',
+        healedName,
+        { isError: true },
+      );
+      return;
+    }
+
+    // 预检拒绝（hook / safety deny / 自愈失败）：补错误结果，不执行
+    if (prepared.outcome.kind === 'denied') {
+      const text = prepared.outcome.text;
+      this.sessions.addToolMessage(
+        this.sessions.get(sessionId)!,
+        toolCallId,
+        text + healLogText,
+        healedName,
+        { isError: true },
+      );
+      onEvent({
+        type: 'tool-call-end',
+        sessionId,
+        toolName: healedName,
+        toolCallId,
+        result: { content: [{ type: 'text', text }], isError: true },
+      });
+      return;
+    }
+
+    // 需要确认：只等待自己的 Promise（同轮其他项并行等待用户决策）
+    if (prepared.outcome.kind === 'confirm') {
+      const ok = prepared.outcome.promise ? await prepared.outcome.promise : false;
+      if (!ok) {
+        const reason = this.headlessSessions.has(sessionId)
+          ? `Tool "${healedName}" canceled: permission prompt unavailable in a headless subagent session (timed out)`
+          : `Tool "${healedName}" canceled (user declined the permission prompt)`;
+        this.sessions.addToolMessage(
+          this.sessions.get(sessionId)!,
+          toolCallId,
+          reason + healLogText,
+          healedName,
+          { isError: true },
+        );
+        onEvent({
+          type: 'tool-call-end',
+          sessionId,
+          toolName: healedName,
+          toolCallId,
+          result: { content: [{ type: 'text', text: reason }], isError: true },
+        });
+        return;
+      }
+    }
+
+    onEvent({
+      type: 'tool-call-executing',
+      sessionId,
+      toolName: healedName,
+      toolCallId,
+    });
+
     let result: ToolResult;
     try {
       if (mcpMatch) {
-        result = await this.executeMcpTool(mcpMatch[1], mcpMatch[2], args, ctx);
+        result = await this.executeMcpTool(mcpMatch[1], mcpMatch[2], args, { ...ctx, prechecked: true });
       } else {
-        result = await this.executeBuiltinTool(healedName, args, ctx);
+        result = await this.executeBuiltinTool(healedName, args, { ...ctx, prechecked: true });
       }
     } catch (err) {
       // 工具执行抛异常时，补一个错误 ToolResult，确保 addToolMessage 一定执行
@@ -2262,6 +2580,12 @@ export class AgentEngineImpl implements AgentEngine {
       onEvent: (event: AgentEvent) => void;
       signal?: AbortSignal;
       permissionMode: PermissionMode;
+      /** 已由本轮预检完成权限决策（跳过内部重复评估） */
+      prechecked?: boolean;
+      /** 当前会话模型 id（嵌套调用审查时继承） */
+      model?: string;
+      /** 子代理父会话 id（审查/确认来源归属） */
+      parentSessionId?: string;
     },
   ): Promise<ToolResult> {
     const toolRegistry = this.services.tryResolve<ToolRegistry>(ServiceNames.TOOL_REGISTRY);
@@ -2273,11 +2597,12 @@ export class AgentEngineImpl implements AgentEngine {
     }
 
     // 统一权限决策（safety 模块）：所有 builtin 工具的唯一权限入口。
-    // ALLOW/ASK(用户同意后)→ctx 带 permissionDecision（registry 跳过内部 requireConfirmation，避免二次弹窗）；
-    // ASK→confirm 卡片（带规则建议）用户同意后执行；DENY→结构化错误（模型可感知原因）。
+    // 预检已完成（prechecked）时直接放行；嵌套调用（run_code 内部）仍走完整权限链。
     const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
     let permissionDecision: 'allowed' | undefined;
-    if (safety) {
+    if (ctx.prechecked) {
+      permissionDecision = 'allowed';
+    } else if (safety) {
       const tool = toolRegistry.get(name);
       const decision = safety.evaluate({
         toolName: name,
@@ -2295,7 +2620,41 @@ export class AgentEngineImpl implements AgentEngine {
         });
         return { content: [{ type: 'text', text: this.formatDenyReason(name, decision.reason) }], isError: true };
       }
-      if (decision.action === 'ask') {
+      if (decision.action === 'review') {
+        const verdict = await this.reviewToolCall(name, args, {
+          sessionId: ctx.sessionId,
+          cwd: ctx.cwd,
+          toolCallId: ctx.toolCallId,
+          onEvent: ctx.onEvent,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+          permissionMode: ctx.permissionMode,
+          model: ctx.model ?? '',
+          ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
+        });
+        if (verdict.decision === 'allow') {
+          permissionDecision = 'allowed';
+        } else if (safety.getReviewConfig().onReviewFailure === 'deny') {
+          return {
+            content: [{ type: 'text', text: `Error: [safety][auto-review] ${verdict.reason}` }],
+            isError: true,
+          };
+        } else {
+          const ok = await this.requestConfirm(
+            ctx,
+            name,
+            args,
+            safety.generateRuleSuggestion(name, args),
+            `AI 审查：${verdict.reason}\n是否允许执行该操作？`,
+          );
+          if (!ok) {
+            return {
+              content: [{ type: 'text', text: `Tool "${name}" canceled (user declined the permission prompt)` }],
+              isError: true,
+            };
+          }
+          permissionDecision = 'allowed';
+        }
+      } else if (decision.action === 'ask') {
         const ruleSuggestion = safety.generateRuleSuggestion(name, args);
         const ok = await this.requestConfirm(ctx, name, args, ruleSuggestion);
         if (!ok) {
@@ -2410,6 +2769,8 @@ export class AgentEngineImpl implements AgentEngine {
             onEvent: ctx.onEvent,
             signal: opts?.signal ?? ctx.signal,
             permissionMode: ctx.permissionMode,
+            model: ctx.model ?? '',
+            ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
           },
           opts?.callId,
         ),
@@ -2455,6 +2816,10 @@ export class AgentEngineImpl implements AgentEngine {
       onEvent: (event: AgentEvent) => void;
       signal?: AbortSignal;
       permissionMode: PermissionMode;
+      /** 当前会话模型 id（嵌套审查继承） */
+      model?: string;
+      /** 子代理父会话 id（审查/确认来源归属） */
+      parentSessionId?: string;
     },
     requestedCallId?: string,
   ): Promise<ToolResult> {
@@ -2521,6 +2886,8 @@ export class AgentEngineImpl implements AgentEngine {
       },
       signal: ctx.signal,
       permissionMode: ctx.permissionMode,
+      model: ctx.model ?? '',
+      ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
     };
 
     const mcpMatch = name.match(/^mcp__([^_]+)__(.+)$/);
@@ -2621,9 +2988,9 @@ export class AgentEngineImpl implements AgentEngine {
 
   /**
    * 前端回复 confirm 确认。匹配到本会话的 pending 则 resolve 并返回 true。
-   * @param remember 「始终允许」级别：session=写入会话规则（内存）；global=写入 config.safety.rules（持久+广播）
+   * @param remember 「始终允许」级别：session=会话规则（内存）；project=项目规则（{cwd}/.moss/permissions.json）；global=全局规则（持久+广播）
    */
-  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'global'): boolean {
+  resolveConfirm(sessionId: string, toolCallId: string, ok: boolean, remember?: 'session' | 'project' | 'global'): boolean {
     const key = this.pendingKey(sessionId, toolCallId);
     const pending = this.pendingConfirms.get(key);
     if (!pending) return false;
@@ -2635,6 +3002,8 @@ export class AgentEngineImpl implements AgentEngine {
       if (safety) {
         if (remember === 'session') {
           safety.addSessionRule(pending.sessionId, 'allow', pending.ruleSuggestion);
+        } else if (remember === 'project') {
+          void safety.addProjectRule(pending.cwd, 'allow', pending.ruleSuggestion);
         } else {
           void safety.addGlobalRule('allow', pending.ruleSuggestion);
         }
@@ -2672,23 +3041,60 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   /** 列出某 session 的待确认 confirm（供 WS 重连恢复 pending confirms）。 */
-  getPendingConfirms(sessionId: string): Array<{ toolCallId: string; sessionId: string; question: string; ruleSuggestion?: string }> {
-    const out: Array<{ toolCallId: string; sessionId: string; question: string; ruleSuggestion?: string }> = [];
+  getPendingConfirms(sessionId: string): Array<{
+    toolCallId: string;
+    sessionId: string;
+    question: string;
+    ruleSuggestion?: string;
+    details?: unknown;
+    source?: ConfirmSource;
+  }> {
+    const out: Array<{
+      toolCallId: string;
+      sessionId: string;
+      question: string;
+      ruleSuggestion?: string;
+      details?: unknown;
+      source?: ConfirmSource;
+    }> = [];
     for (const [, pending] of this.pendingConfirms) {
       if (pending.sessionId === sessionId) {
-        out.push({ toolCallId: pending.toolCallId, sessionId: pending.sessionId, question: pending.question, ruleSuggestion: pending.ruleSuggestion });
+        out.push({
+          toolCallId: pending.toolCallId,
+          sessionId: pending.sessionId,
+          question: pending.question,
+          ruleSuggestion: pending.ruleSuggestion,
+          source: pending.source,
+        });
       }
     }
     return out;
   }
 
+  /** 计算确认来源：AgentBus 成员 → 子代理；否则主会话 */
+  private resolveConfirmSource(sessionId: string): ConfirmSource {
+    const bus = this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
+    const member = bus?.get(sessionId);
+    if (member && member.kind === 'subagent') {
+      return {
+        kind: 'subagent',
+        sessionId,
+        ...(member.name ? { name: member.name } : {}),
+        ...(member.template ? { template: member.template } : {}),
+        ...(member.parentSessionId ? { parentSessionId: member.parentSessionId } : {}),
+      };
+    }
+    return { kind: 'main', sessionId };
+  }
+
   /**
-   * 统一确认请求：注册 pendingConfirms + 推送 confirm-required 事件（带规则建议）+
+   * 统一确认请求：注册 pendingConfirms + 推送 confirm-required 事件（带规则建议/来源）+
    * 超时从 config.safety.confirmTimeoutMinutes 读取（0=永不，默认 5 分钟）。
    */
   private requestConfirm(
     ctx: {
       sessionId: string;
+      cwd: string;
       toolCallId: string;
       onEvent: (event: AgentEvent) => void;
       signal?: AbortSignal;
@@ -2699,28 +3105,29 @@ export class AgentEngineImpl implements AgentEngine {
     customQuestion?: string,
   ): Promise<boolean> {
     return new Promise<boolean>((resolve, reject) => {
-      // headless 会话（子代理/团队成员）无前端可应答：短超时快速失败，
-      // 避免同一轮多个 L3 工具各白等 5 分钟把并行子代理拖死。
-      const headless = this.headlessSessions.has(ctx.sessionId);
-      let timeoutMs = headless ? HEADLESS_CONFIRM_TIMEOUT_MS : 5 * 60 * 1000;
+      // 子代理确认会汇总到主会话中控岛（带权限来源），因此统一使用正常超时；
+      // 父会话结束/中断时由 abort 级联取消，run 结束时 cleanupPendingAsks 兜底。
+      let timeoutMs = 5 * 60 * 1000;
       try {
-        if (!headless) {
-          const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
-          if (safety) {
-            const minutes = safety.getConfirmTimeoutMinutes();
-            timeoutMs = minutes === 0 ? 0 : Math.min(minutes * 60 * 1000, ASK_TIMEOUT_CEILING_MS);
-          }
+        const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
+        if (safety) {
+          const minutes = safety.getConfirmTimeoutMinutes();
+          timeoutMs = minutes === 0 ? 0 : Math.min(minutes * 60 * 1000, ASK_TIMEOUT_CEILING_MS);
         }
       } catch {
         // config 不可用：保留默认超时
       }
       const pendingKey = this.pendingKey(ctx.sessionId, ctx.toolCallId);
-      const timer = setTimeout(() => {
-        this.pendingConfirms.delete(pendingKey);
-        // 超时同样要通知前端/IM 移除确认卡片；否则卡片会残留到用户下次回复才暴露
-        ctx.onEvent({ type: 'confirm-cancel', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
-        resolve(false);
-      }, timeoutMs);
+      const source = this.resolveConfirmSource(ctx.sessionId);
+      // timeoutMs=0 表示永不超时：不能把 0 传给 setTimeout（会立即触发）
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pendingConfirms.delete(pendingKey);
+            // 超时同样要通知前端/IM 移除确认卡片；否则卡片会残留到用户下次回复才暴露
+            ctx.onEvent({ type: 'confirm-cancel', sessionId: ctx.sessionId, toolCallId: ctx.toolCallId });
+            resolve(false);
+          }, timeoutMs)
+        : (null as unknown as ReturnType<typeof setTimeout>);
       const question = customQuestion ?? `Tool "${toolName}" requires confirmation (permission mode)`;
       this.pendingConfirms.set(pendingKey, {
         resolve,
@@ -2729,7 +3136,9 @@ export class AgentEngineImpl implements AgentEngine {
         sessionId: ctx.sessionId,
         toolCallId: ctx.toolCallId,
         question,
-        ruleSuggestion,
+        ...(ruleSuggestion ? { ruleSuggestion } : {}),
+        cwd: ctx.cwd,
+        source,
       });
       if (ctx.signal) {
         ctx.signal.addEventListener(
@@ -2753,6 +3162,7 @@ export class AgentEngineImpl implements AgentEngine {
         question,
         details,
         ruleSuggestion,
+        source,
       });
     });
   }
@@ -2853,6 +3263,12 @@ export class AgentEngineImpl implements AgentEngine {
       onEvent: (event: AgentEvent) => void;
       signal?: AbortSignal;
       permissionMode: PermissionMode;
+      /** 已由本轮预检完成权限决策（跳过内部重复评估） */
+      prechecked?: boolean;
+      /** 当前会话模型 id（嵌套调用审查时继承） */
+      model?: string;
+      /** 子代理父会话 id（审查/确认来源归属） */
+      parentSessionId?: string;
     },
   ): Promise<ToolResult> {
     const mcpManager = this.services.tryResolve<MCPManager>(ServiceNames.MCP_MANAGER);
@@ -2873,10 +3289,13 @@ export class AgentEngineImpl implements AgentEngine {
 
     const fullToolName = `mcp__${serverName}__${toolName}`;
 
-    // 2. 统一权限决策（safety 模块）：MCP 工具与 builtin 同一决策管线（模式/规则/风险分级）
+    // 2. 统一权限决策（safety 模块）：MCP 工具与 builtin 同一决策管线（模式/规则/风险分级）。
+    // 预检已完成（prechecked）时跳过；嵌套调用仍走完整权限链。
     const annotations = mcpManager.getToolAnnotations(serverName, toolName);
     const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
-    if (safety) {
+    if (ctx.prechecked) {
+      // 预检已裁决：直接执行
+    } else if (safety) {
       const decision = safety.evaluate({
         toolName: fullToolName,
         params: args,
@@ -2893,7 +3312,41 @@ export class AgentEngineImpl implements AgentEngine {
           metadata: { server: serverName, tool: toolName, denied: true },
         };
       }
-      if (decision.action === 'ask') {
+      if (decision.action === 'review') {
+        const verdict = await this.reviewToolCall(fullToolName, args, {
+          sessionId: ctx.sessionId,
+          cwd: ctx.cwd,
+          toolCallId: ctx.toolCallId,
+          onEvent: ctx.onEvent,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+          permissionMode: ctx.permissionMode,
+          model: ctx.model ?? '',
+          ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
+        });
+        if (verdict.decision !== 'allow') {
+          if (safety.getReviewConfig().onReviewFailure === 'deny') {
+            return {
+              content: [{ type: 'text', text: `Error: [safety][auto-review] ${verdict.reason}` }],
+              isError: true,
+              metadata: { server: serverName, tool: toolName, denied: true },
+            };
+          }
+          const ok = await this.requestConfirm(
+            ctx,
+            fullToolName,
+            args,
+            fullToolName,
+            `AI 审查：${verdict.reason}\n是否允许执行该操作？`,
+          );
+          if (!ok) {
+            return {
+              content: [{ type: 'text', text: 'Canceled: user declined the MCP tool call' }],
+              isError: true,
+              metadata: { server: serverName, tool: toolName, canceled: true },
+            };
+          }
+        }
+      } else if (decision.action === 'ask') {
         const ok = await this.requestConfirm(
           ctx,
           fullToolName,

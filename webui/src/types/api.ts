@@ -479,6 +479,24 @@ export interface SafetyRules {
   ask: string[];
 }
 
+/** 自动审查配置（与后端 config.safety.review 对齐） */
+export interface SafetyReviewConfig {
+  /** 审查总开关（默认开启） */
+  enabled: boolean;
+  /** 审查模型 id；空串 = 继承当前会话主模型 */
+  model: string;
+  /** 推理挡位：off=不思考 / low=低思考 / max=高强度思考 */
+  reasoningEffort: 'off' | 'low' | 'max';
+  /** 单次审查超时（毫秒） */
+  timeoutMs: number;
+  /** 审查 deny / 不确定 / 失败时：ask=转人工确认 / deny=直接拒绝 */
+  onReviewFailure: 'ask' | 'deny';
+  /** 相同工具+参数裁决缓存时长（毫秒；0=关闭） */
+  cacheTtlMs: number;
+  /** 用户意图证据截断字符数 */
+  maxIntentChars: number;
+}
+
 /** config.safety 段（与后端 Zod schema 对齐） */
 export interface SafetyConfig {
   defaultMode: PermissionMode;
@@ -487,6 +505,7 @@ export interface SafetyConfig {
   cautionPolicy: 'ask' | 'deny';
   rules: SafetyRules;
   protectedPaths: string[];
+  review: SafetyReviewConfig;
 }
 
 export type ThinkingEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -1624,7 +1643,9 @@ export type AgentEvent =
     }
   | { type: 'ask'; sessionId: string; toolCallId: string; questions: AskQuestion[]; runId?: string }
   | { type: 'ask-timeout'; sessionId: string; toolCallId: string; runId?: string }
-  | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string }
+  | { type: 'confirm-required'; sessionId: string; toolCallId: string; toolName: string; question: string; details?: unknown; runId?: string; ruleSuggestion?: string; source?: ConfirmSource }
+  | { type: 'review-start'; sessionId: string; toolCallId: string; toolName: string; parentSessionId?: string; runId?: string }
+  | { type: 'review-end'; sessionId: string; toolCallId: string; toolName: string; decision: 'allow' | 'deny' | 'uncertain'; reason?: string; riskLevel?: string; parentSessionId?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string }
   | { type: 'done'; sessionId: string; finishReason: string; runId?: string };
@@ -1682,6 +1703,18 @@ export interface PendingAsk {
   createdAt: number;
 }
 
+/** 权限确认来源（区分主会话与不同子代理同时发起的申请） */
+export interface ConfirmSource {
+  kind: 'main' | 'subagent';
+  sessionId: string;
+  /** 子代理显示名（模板名） */
+  name?: string;
+  /** 子代理模板 id */
+  template?: string;
+  /** 发起子代理的父会话 id（主会话据此汇总展示） */
+  parentSessionId?: string;
+}
+
 /** 工具发起的、待用户确认的请求（requireConfirmation 工具执行前触发） */
 export interface PendingConfirm {
   toolCallId: string;
@@ -1694,6 +1727,8 @@ export interface PendingConfirm {
   details?: unknown;
   /** 「始终允许」规则建议（safety 模块生成，如 "terminal(git commit *)"；卡片展示+remember 回复） */
   ruleSuggestion?: string;
+  /** 权限来源（主会话 / 子代理名称），中控岛据此区分同时发起的申请 */
+  source?: ConfirmSource;
   /** 收到时间，用于排序 */
   createdAt: number;
 }

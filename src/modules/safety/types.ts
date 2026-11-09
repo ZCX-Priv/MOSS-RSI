@@ -15,8 +15,8 @@ export type PermissionMode = 'ask' | 'auto' | 'skip';
  */
 export type RiskClass = 'L0' | 'L1' | 'L2' | 'L3';
 
-/** 权限决策动作 */
-export type SafetyAction = 'allow' | 'ask' | 'deny';
+/** 权限决策动作（review = auto 档交由审查模型裁决） */
+export type SafetyAction = 'allow' | 'ask' | 'deny' | 'review';
 
 /** 决策原因（结构化，供审计日志与前端展示） */
 export interface DecisionReason {
@@ -28,6 +28,7 @@ export interface DecisionReason {
     | 'cautionCommand'
     | 'protectedPath'
     | 'mossAccess'
+    | 'review'
     | 'default';
   /** 命中的规则原文（type='rule' 时） */
   rule?: string;
@@ -52,6 +53,24 @@ export interface SafetyRules {
   ask: string[];
 }
 
+/** 自动审查配置（auto 档的第二模型审查） */
+export interface SafetyReviewConfig {
+  /** 审查总开关（默认开启；关闭后 auto 退化为人工确认） */
+  enabled: boolean;
+  /** 审查模型（ModelConfig.id；空串 = 继承当前会话主模型） */
+  model: string;
+  /** 审查推理挡位：off=不思考 / low=低思考 / max=高强度思考（只影响思考成本，不影响是否审查） */
+  reasoningEffort: 'off' | 'low' | 'max';
+  /** 单次审查超时（毫秒） */
+  timeoutMs: number;
+  /** 审查 deny / 不确定 / 失败时：ask=转人工确认（默认）/ deny=直接拒绝 */
+  onReviewFailure: 'ask' | 'deny';
+  /** 相同「工具 + 参数」裁决缓存时长（毫秒；0=关闭） */
+  cacheTtlMs: number;
+  /** 用户意图证据截断字符数 */
+  maxIntentChars: number;
+}
+
 /** config.safety 段（Zod schema 内层全 .default() 自愈，旧 config 缺字段自动补全） */
 export interface SafetyConfig {
   defaultMode: PermissionMode;
@@ -64,6 +83,8 @@ export interface SafetyConfig {
   rules: SafetyRules;
   /** 保护路径（~ 前缀展开；写类工具目标路径命中即 DENY） */
   protectedPaths: string[];
+  /** 自动审查（auto 档） */
+  review: SafetyReviewConfig;
 }
 
 /** 决策请求（SafetyPolicy.evaluate 入参） */

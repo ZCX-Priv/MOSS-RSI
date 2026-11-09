@@ -15,6 +15,8 @@ import {
   AlertDialogAction,
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 
 export type ConfirmDialogVariant = 'danger' | 'warning' | 'info';
@@ -27,6 +29,10 @@ interface ConfirmDialogProps {
   confirmText?: string;
   cancelText?: string;
   variant?: ConfirmDialogVariant;
+  /** 勾选确认文案；提供时确认按钮在未勾选前禁用（高风险操作二次确认） */
+  requireAcknowledge?: string;
+  acknowledgeChecked?: boolean;
+  onAcknowledgeChange?: (checked: boolean) => void;
   onConfirm: () => void | Promise<void>;
 }
 
@@ -60,12 +66,16 @@ export function ConfirmDialog({
   confirmText,
   cancelText,
   variant = 'info',
+  requireAcknowledge,
+  acknowledgeChecked = false,
+  onAcknowledgeChange,
   onConfirm,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
   const cfg = variantConfig[variant];
   const Icon = cfg.icon;
+  const confirmDisabled = loading || (!!requireAcknowledge && !acknowledgeChecked);
 
   const handleConfirm = async () => {
     try {
@@ -91,6 +101,22 @@ export function ConfirmDialog({
             </div>
           </div>
         </AlertDialogHeader>
+        {requireAcknowledge && (
+          <div className="px-4 pb-3">
+            <Label
+              htmlFor="confirm-dialog-acknowledge"
+              className="flex cursor-pointer items-start gap-2.5 rounded-md border border-border bg-muted/40 px-3 py-2.5 text-sm font-normal leading-snug"
+            >
+              <Checkbox
+                id="confirm-dialog-acknowledge"
+                checked={acknowledgeChecked}
+                onCheckedChange={(checked) => onAcknowledgeChange?.(checked === true)}
+                className="mt-0.5"
+              />
+              <span>{requireAcknowledge}</span>
+            </Label>
+          </div>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={loading}>{cancelText ?? t('common.cancel')}</AlertDialogCancel>
           <AlertDialogAction
@@ -98,7 +124,7 @@ export function ConfirmDialog({
               e.preventDefault();
               void handleConfirm();
             }}
-            disabled={loading}
+            disabled={confirmDisabled}
             className={cn(variant === 'danger' && cfg.actionClass)}
           >
             {confirmText ?? t('common.confirm')}
