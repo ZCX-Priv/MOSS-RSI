@@ -115,7 +115,7 @@ function snapshotDigest(s: ResourceSnapshot): string {
   ].join('\n');
 }
 
-/** 诊断提示词文件路径（agent/prompts/insight/<kind>.md） */
+/** 诊断提示词文件路径（agent/insight/<kind>.md） */
 const INSIGHT_PROMPT_PATHS: Record<InsightKind, string> = {
   cause: 'insight/cause.md',
   harness: 'insight/harness.md',
@@ -234,7 +234,7 @@ export async function runInsightDiagnose(
     if (signal.aborted) return;
 
     // ===== 模型分析（流式） =====
-    // 诊断提示词从 agent/prompts/insight/<kind>.md 加载；缺失则直接报错结束（降级）
+    // 诊断提示词从 agent/insight/<kind>.md 加载；缺失则直接报错结束（降级）
     const system = loadPromptFileOrNull(deps.env, INSIGHT_PROMPT_PATHS[kind]);
     if (!system) {
       emit({ requestId, kind, phase: 'error', message: 'insight prompt missing' });

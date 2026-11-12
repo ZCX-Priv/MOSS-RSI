@@ -5,7 +5,7 @@
 // 用户修改过的文件保留不动（内容哈希不匹配任何已知播种指纹）。
 // 指纹记录：~/.moss/agent/.seed-manifest.json（path → 上次播种内容 sha256）。
 // 失败不阻断启动（静默降级，调用方各自处理目录缺失场景）。
-// 附带清理历史遗留：早期版本误放入 main/ 子目录的提示词与已移除的 spec 目录（见 DEPRECATED_SEED_PATHS）。
+// 附带清理历史遗留：旧版 prompts/ 一层嵌套、早期误放入 main/ 子目录的提示词与已移除的 spec 目录（见 DEPRECATED_SEED_PATHS）。
 
 import { createHash } from 'node:crypto';
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -21,7 +21,7 @@ let seeded = false;
  * 后续版本演进由 manifest 机制接管，新迁移时在此追加旧指纹即可。
  */
 const LEGACY_SEED_HASHES: Readonly<Record<string, ReadonlyArray<string>>> = {
-  'prompts/main/system.md': [
+  'main/system.md': [
     '61a92fc6c815da130d26a3f17ebe0d87d954bb897f9eda175b6fd901659d64f0',
     'd56794dff898e11fe8fdaafbc8c6e196a8b62e5a99a939cb7cb4b31745b06bf8',
     // 二期版本（环境变量注入版）：rules 并入 system、环境信息迁往 env-context 前的形态
@@ -29,7 +29,7 @@ const LEGACY_SEED_HASHES: Readonly<Record<string, ReadonlyArray<string>>> = {
     // 二期落地版（rules 并入 + 环境信息迁 env-context）：三期新增语言思考/输出渲染段前的形态
     '83a6f4069fe6ca3c1849a29f3c171e13366204b842d4b0f022ab9af614c47169',
   ],
-  'prompts/main/rules.md': [
+  'main/rules.md': [
     '9a80c5af645cf3feffacf6cfe936349424c19085fa0cfff09c1659c799b91928',
     'afecb8d831bd60b5c9254def1e9baac7974989fa3481079c1d2e8c2114d8e48a',
     '166d069be3dd54329e74fd53a04e302b3de075cd0a7088f8970ab4bee3e3c5f7',
@@ -47,21 +47,20 @@ const MANIFEST_FILE = '.seed-manifest.json';
  * 启动播种时从用户目录清理残留（幂等）。
  */
 const DEPRECATED_SEED_PATHS: ReadonlyArray<string> = [
-  'prompts/main/system',
-  'prompts/main/base',
-  'prompts/main/base.md',
-  'prompts/main/rule',
-  'prompts/main/spec',
-  'prompts/main/rules.md',
+  'main/system',
+  'main/base',
+  'main/base.md',
+  'main/rule',
+  'main/spec',
+  'main/rules.md',
   // 提示词精简（去英文/去 fallback/合并 distill）：清理用户目录残留
-  'prompts/agenteam/usage-en.md',
+  'agenteam/usage-en.md',
   // usage-zh.md 更名为 usage.md：清理用户目录旧文件（新文件由本次播种写入）
-  'prompts/subagent/usage-zh.md',
-  // agenteam 模块整体废弃：旧工具说明与模板目录迁往 prompts/subagent
-  'prompts/agenteam',
-  'prompts/fallback',
-  'prompts/memory/distill-system.md',
-  'prompts/context',
+  'subagent/usage-zh.md',
+  // agenteam 模块整体废弃：旧工具说明与模板目录迁往 subagent
+  'agenteam',
+  'fallback',
+  'memory/distill-system.md',
 ];
 
 interface SeedManifest {
@@ -99,6 +98,33 @@ function listFilesRecursive(root: string): string[] {
   };
   walk(root);
   return out;
+}
+
+/**
+ * 旧目录布局迁移：~/.moss/agent/prompts/** → ~/.moss/agent/**（保留用户改动）。
+ * - 目标文件已存在 → 跳过（新布局优先，不覆盖用户现有文件）；
+ * - 迁移完成后删除旧的 prompts 目录；
+ * - 幂等：prompts 不存在时直接返回；单项失败静默（下次启动重试）。
+ */
+function migrateLegacyPromptLayout(dest: string): void {
+  const legacy = join(dest, 'prompts');
+  if (!existsSync(legacy)) return;
+  for (const file of listFilesRecursive(legacy)) {
+    const rel = relative(legacy, file).split(sep).join('/');
+    const target = join(dest, ...rel.split('/'));
+    try {
+      if (existsSync(target)) continue;
+      mkdirSync(join(target, '..'), { recursive: true });
+      copyFileSync(file, target);
+    } catch {
+      // 单项失败忽略：保留旧目录，下次启动重试
+    }
+  }
+  try {
+    rmSync(legacy, { recursive: true, force: true });
+  } catch {
+    // 删除失败忽略（已迁移文件不受影响）
+  }
 }
 
 /** 读取 manifest（缺失/损坏返回空 manifest） */
@@ -148,10 +174,13 @@ export function seedBuiltinAgentPrompts(env: Environment): boolean {
       seeded = true;
       return false;
     }
+    // 旧布局迁移：~/.moss/agent/prompts/** → ~/.moss/agent/**（幂等；全新安装为 no-op）
+    migrateLegacyPromptLayout(dest);
     if (!existsSync(dest)) {
       // 首次初始化：全量复制 + 记录 manifest
       cpSync(src, dest, { recursive: true });
-      // 复制源可能是历史构建产物，仍需清理废弃路径
+      // 复制源可能是历史构建产物：旧 prompts/ 层先归位再清理废弃路径
+      migrateLegacyPromptLayout(dest);
       cleanupDeprecatedSeedPaths(dest);
       const files: Record<string, string> = {};
       for (const file of listFilesRecursive(src)) {

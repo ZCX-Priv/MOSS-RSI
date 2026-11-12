@@ -1,7 +1,7 @@
 // src/modules/subagent/templates.ts
 // 内置 Agent 模板（精简四件套：explorer / planner / coder / reviewer）。
 // 以注册表 builtIn agent 形式存在（不可删除），临时 subagent 直接以模板 id 运行。
-// 提示词外置：systemPrompt 从 agent/prompts/subagent/templates/<name>.md 加载。
+// 提示词外置：systemPrompt 从 agent/subagent/templates/<name>.md 加载。
 // tools 为默认工具白名单（引擎会并集 agent_status/agent_message）；空 = 全部工具。
 
 import type { Environment } from '../../core/types';
@@ -13,7 +13,7 @@ interface TemplateMeta {
   id: string;
   name: string;
   description: string;
-  /** 提示词文件相对 agent/prompts/ 的路径 */
+  /** 提示词文件相对 agent/ 的路径 */
   promptPath: string;
   /** 默认工具白名单 */
   tools: string[];

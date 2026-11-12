@@ -3,7 +3,7 @@
 //
 // 落盘分工：
 //   - 会话/任务 → agent.engine.importSessions（内存 + 磁盘同步写入，无需重启）
-//   - 目录资源（skills/mcps/commands/memory/todo/prompts/agenteam）→ 文件级合并
+//   - 目录资源（skills/mcps/commands/memory/todo/agent 提示词/agenteam）→ 文件级合并
 //   - 配置 → config 服务（app 顶层键合并 / api providers 按 id 合并）
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';

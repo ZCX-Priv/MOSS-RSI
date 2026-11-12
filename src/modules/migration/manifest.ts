@@ -27,7 +27,16 @@ export const BACKUP_DIRS = [
 export const BACKUP_FILES = ['task.json', 'automations.json'] as const;
 
 /** 额外窄目录（相对 dataDir）：只收这些子目录，避免把 agent/attachments 带进包 */
-export const BACKUP_SUBDIRS = ['agent/prompts'] as const;
+export const BACKUP_SUBDIRS = [
+  'agent/main',
+  'agent/subagent',
+  'agent/compact',
+  'agent/context',
+  'agent/heal',
+  'agent/insight',
+  'agent/mcp',
+  'agent/memory',
+] as const;
 
 /** 配置文件（经清洗后写入，不直接拷贝原文件） */
 export const BACKUP_CONFIG_FILE = 'config/config.json';

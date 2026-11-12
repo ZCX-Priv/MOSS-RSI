@@ -1,7 +1,7 @@
 // src/modules/context/compiler/system-prompt.ts
 // 静态系统提示组装（缓存对齐布局核心）：
-// - 从 ~/.moss/agent/prompts/main/ 加载基本设定并按序拼接（soul → identity → 其他）
-//   （rules 解析段已移除：rules.md 内容已并入 system.md，见 agent/prompts/main/）
+// - 从 ~/.moss/agent/main/ 加载基本设定并按序拼接（soul → identity → 其他）
+//   （rules 解析段已移除：rules.md 内容已并入 system.md，见 agent/main/）
 // - 零动态变量替换：全部环境信息（平台/CWD/设备/编码/模型/解释器/工具链/时间）
 //   统一由 env-context 消息承载 → system prompt 纯文本拼接，字节级稳定（前缀缓存锚点）
 // - always 用户规则段（rules 引擎注入）插在末尾；规则集内容指纹纳入缓存键
@@ -100,7 +100,7 @@ function promptDirMtime(userDir: string): number {
  */
 export function loadSystemPromptSegments(env: Environment, rulesSection?: RulesSectionInput | null): SystemSection[] {
   seedBuiltinAgentPrompts(env);
-  const userDir = join(env.dataDir, 'agent', 'prompts', 'main');
+  const userDir = join(env.dataDir, 'agent', 'main');
   const cacheKey = userDir;
   const mtime = promptDirMtime(userDir);
   const rulesFingerprint = rulesSection?.fingerprint ?? '';
@@ -188,7 +188,7 @@ export function buildStaticSystemPrompt(
   extras?: PromptExtraSection[] | null,
 ): string {
   seedBuiltinAgentPrompts(env);
-  const userDir = join(env.dataDir, 'agent', 'prompts', 'main');
+  const userDir = join(env.dataDir, 'agent', 'main');
   const mtime = promptDirMtime(userDir);
   const rulesFingerprint = rulesSection?.fingerprint ?? '';
   if (

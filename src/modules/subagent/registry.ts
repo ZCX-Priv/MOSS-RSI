@@ -70,7 +70,7 @@ export class AgentRegistryImpl implements AgentRegistry {
         parsed.agents.unshift(defaultData.agents[0]);
       }
       // 合并内置模板 agent：内置模板不可 UI 编辑，启动时无条件刷新为最新模板定义
-      // （提示词 / 工具白名单 / maxTurns 随 agent/prompts 与 templates.ts 更新）
+      // （提示词 / 工具白名单 / maxTurns 随 agent/ 与 templates.ts 更新）
       for (const template of buildTemplateAgents(env)) {
         const index = parsed.agents.findIndex((a) => a.id === template.id);
         if (index < 0) {

@@ -842,7 +842,7 @@ export class McpTaskRegistry {
     }
     if (!model) return { text: null, error: 'summary model unresolved (empty model name)' };
 
-    // 摘要系统提示词从 agent/prompts/mcp/task-summary.md 加载；缺失则放弃摘要（降级）
+    // 摘要系统提示词从 agent/mcp/task-summary.md 加载；缺失则放弃摘要（降级）
     const systemPrompt = loadPromptFileOrNull(this.env, 'mcp/task-summary.md');
     if (!systemPrompt) return { text: null, error: 'task summary prompt missing' };
 

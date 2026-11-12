@@ -219,6 +219,8 @@ function copyAgentPrompts() {
     error(`Agent prompts source not found: ${src}`);
     process.exit(1);
   }
+  // 先清空旧产物：cpSync 只增量覆盖，已删除的源目录（如旧 prompts/）会残留在 dist
+  rmSync(dest, { recursive: true, force: true });
   cpSync(src, dest, { recursive: true });
   log(`Agent prompts copied: ${dest}`);
 }

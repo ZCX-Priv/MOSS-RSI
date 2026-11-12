@@ -1,6 +1,6 @@
 // src/modules/context/prompt-loader.ts
-// 上下文引擎提示词文件加载：所有 LLM 提示词外部化为 agent/prompts/ 下的 md 文件。
-// 加载顺序：~/.moss/agent/prompts/<relative>（用户可改）→ 包内种子源 → 内置兜底文本。
+// 上下文引擎提示词文件加载：所有 LLM 提示词外部化为 agent/ 下的 md 文件。
+// 加载顺序：~/.moss/agent/<relative>（用户可改）→ 包内种子源 → 内置兜底文本。
 // ensureContextPrompts：为已初始化用户补充播种 compact/ 与 heal/ 目录（幂等，不覆盖用户修改）。
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -16,11 +16,11 @@ function stripBom(text: string): string {
  * 加载提示词文件（缺失或为空时返回 null）。
  * 查找顺序：用户目录 → 包内种子源；均缺失/为空时返回 null，由调用方决定降级行为。
  * @param env 环境信息
- * @param relativePath 相对 ~/.moss/agent/prompts/ 的路径（如 'compact/compaction.md'）
+ * @param relativePath 相对 ~/.moss/agent/ 的路径（如 'compact/compaction.md'）
  */
 export function loadPromptFileOrNull(env: Environment, relativePath: string): string | null {
-  // 1. 用户目录（~/.moss/agent/prompts/...）
-  const userFile = join(env.dataDir, 'agent', 'prompts', relativePath);
+  // 1. 用户目录（~/.moss/agent/...）
+  const userFile = join(env.dataDir, 'agent', relativePath);
   try {
     if (existsSync(userFile)) {
       const text = readFileSync(userFile, 'utf8');
@@ -30,8 +30,8 @@ export function loadPromptFileOrNull(env: Environment, relativePath: string): st
     // 读取失败落回种子源
   }
 
-  // 2. 包内种子源（<packageRoot>/agent/prompts/...）
-  const pkgFile = join(env.packageRoot, 'agent', 'prompts', relativePath);
+  // 2. 包内种子源（<packageRoot>/agent/...）
+  const pkgFile = join(env.packageRoot, 'agent', relativePath);
   try {
     if (existsSync(pkgFile)) {
       const text = readFileSync(pkgFile, 'utf8');
@@ -47,7 +47,7 @@ export function loadPromptFileOrNull(env: Environment, relativePath: string): st
 /**
  * 加载提示词文件（缺失时返回兜底文本，默认空串）。
  * @param env 环境信息
- * @param relativePath 相对 ~/.moss/agent/prompts/ 的路径（如 'compact/compaction.md'）
+ * @param relativePath 相对 ~/.moss/agent/ 的路径（如 'compact/compaction.md'）
  * @param fallback 兜底文本（用户文件与包内种子均缺失时使用；默认空串）
  */
 export function loadPromptFile(env: Environment, relativePath: string, fallback = ''): string {
@@ -67,9 +67,9 @@ export function ensureContextPrompts(env: Environment): void {
     'context/pressure.md',
   ];
   for (const rel of relatives) {
-    const dest = join(env.dataDir, 'agent', 'prompts', rel);
+    const dest = join(env.dataDir, 'agent', rel);
     if (existsSync(dest)) continue;
-    const src = join(env.packageRoot, 'agent', 'prompts', rel);
+    const src = join(env.packageRoot, 'agent', rel);
     try {
       if (!existsSync(src)) continue;
       mkdirSync(join(dest, '..'), { recursive: true });

@@ -1,7 +1,7 @@
 // src/modules/context/healer/index.ts
 // 自愈器统一入口：参数修复（args-repair）→ 工具名纠正（tool-match）→
 // schema 校验修正（schema-fix）→ 可执行判定。
-// 修复失败时按 agent/prompts/heal/tool-error.md 模板生成结构化错误文本，
+// 修复失败时按 agent/heal/tool-error.md 模板生成结构化错误文本，
 // 回传给模型下一轮自我纠正。
 
 import type { Environment } from '../../../core/types';
@@ -34,7 +34,7 @@ export interface HealToolCallInput {
 
 /**
  * 生成工具错误回传文本。
- * 优先使用 agent/prompts/heal/tool-error.md 模板；文件缺失时程序化拼接最小结构（降级），
+ * 优先使用 agent/heal/tool-error.md 模板；文件缺失时程序化拼接最小结构（降级），
  * 保证自愈回路仍能向模型回传结构化错误。
  * @returns text 回传文本；degraded 是否走了降级路径
  */

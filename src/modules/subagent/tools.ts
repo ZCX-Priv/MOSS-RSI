@@ -101,7 +101,7 @@ function findMember(bus: AgentBus, rootSessionId: string, id: string): AgentBusM
 }
 
 function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
-  // 用法文案从 agent/prompts/subagent/usage.md 加载；缺失时为空串降级
+  // 用法文案从 agent/subagent/usage.md 加载；缺失时为空串降级
   const usage = loadPromptFileOrNull(env, 'subagent/usage.md') ?? '';
   return {
     name: 'agent',

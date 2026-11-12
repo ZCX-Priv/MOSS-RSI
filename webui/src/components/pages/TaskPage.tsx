@@ -1359,8 +1359,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       // 空 assistant 占位整条不渲染（含外层 padding）：否则会在页脚「响应中」上方
       // 留下几 px 幽灵高度，表现为「响应中先出现、随后下移几 px 才出现正文」。
       if (isEmptyAssistantPlaceholder(msg)) return null;
-      // 复制按钮：每条「总 AI 消息」（每段回复结尾）都带
-      const showActions = replyEndIds.has(msg.id);
+      // 复制按钮：每条「总 AI 消息」（每段回复结尾）都带。
+      // 生成中一律隐藏：运行中的尾部回复随时可能继续输出（切页/重连后单条消息的
+      // streaming 标记可能已定稿），此时展示复制/重新生成/诊断会让未完成回复看起来已结束。
+      const showActions = !isGenerating && replyEndIds.has(msg.id);
       // 重新生成 / 诊断(Harness)：仅最新的一段回复结尾
       const isLastReply = msg.id === lastReplyEndId;
       // 续接气泡（同一段回复内的中间轮次：assistant 且非回复结尾、非系统卡）→ 收紧底部留白，

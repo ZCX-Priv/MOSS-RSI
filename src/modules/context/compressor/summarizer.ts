@@ -2,7 +2,7 @@
 // 摘要生成：
 // - 摘要请求 messages = [静态 system 前缀, ...被压缩区消息, 压缩指令]
 //   ——复用主对话的 system 前缀，摘要请求本身命中前缀缓存
-// - 指令从 agent/prompts/compact/compaction.md 加载（{{FOCUS}} 变量），缺失则抛错放弃本轮压缩
+// - 指令从 agent/compact/compaction.md 加载（{{FOCUS}} 变量），缺失则抛错放弃本轮压缩
 // - 单次失败不重试（summarizeOnce 语义）：空结果/截断 → 抛错，由调用方放弃本轮压缩
 
 import type { Environment } from '../../../core/types';
@@ -16,7 +16,7 @@ import { sanitizeMessages } from '../healer/pair-sanitize';
 const FOCUS_PREFIX = '\n\n本次压缩的附加焦点（优先保留以下内容）：';
 
 /**
- * 加载压缩指令（agent/prompts/compact/compaction.md；缺失则抛错，调用方放弃本轮压缩）。
+ * 加载压缩指令（agent/compact/compaction.md；缺失则抛错，调用方放弃本轮压缩）。
  * @param focus 手动压缩时的附加焦点文本（可空）
  */
 export function loadCompactionInstruction(env: Environment, focus?: string): string {

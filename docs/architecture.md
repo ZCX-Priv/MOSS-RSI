@@ -98,7 +98,7 @@ MOSS/
 │   │   └── migration/           # 外部 Agent 会话导入 / MOSS 备份恢复
 │   └── utils/                   # 通用工具
 ├── browser-extension/           # Chrome 扩展（MOSS Browser Bridge，Manifest V3）
-├── agent/prompts/main/          # Agent 系统提示词（.md）
+├── agent/main/                  # Agent 系统提示词（.md）
 ├── skills/                      # Skill 定义（.md，YAML front-matter，播种到 ~/.moss/skills/）
 ├── config/                      # 配置模板
 │   ├── config.json              # AppConfig 模板
@@ -125,7 +125,7 @@ MOSS/
 | **L2 子域** | `<module>/<subdomain>/` | 模组内部按职责拆子目录（如 `tools/run_code/runtime`、`context/compiler`、`agent/session`） | 子域之间循环依赖 |
 | **L3 文件** | `index.ts` / `types.ts` / `registry.ts` / `runner.ts` / `tool.json` / `*.test.ts` | 单一实现单元，测试与实现同目录 | 一个文件混合多个子域 |
 | **前端** | `webui/src/{api,components,hooks,store,i18n,render,types,lib}` | `components/{pages,layout,shared,subagent,ui}` 按角色分层 | 页面直接实现网络/状态底层 |
-| **提示词/资源** | `agent/prompts/<domain>/`、`skills/`、`mcps/`、`config/`、`browser-extension/` | 内容与代码分离，可被用户覆盖/播种 | 在代码里硬编码大段提示词 |
+| **提示词/资源** | `agent/<domain>/`、`skills/`、`mcps/`、`config/`、`browser-extension/` | 内容与代码分离，可被用户覆盖/播种 | 在代码里硬编码大段提示词 |
 
 **审计结论（2026-11）**：整体符合文件夹分级；仍有 3 项技术债：
 
@@ -463,7 +463,7 @@ onEvent('done', finishReason)
 | `~/.moss/automations-history.json` | 自动化运行历史 | JSON |
 | `~/.moss/skills/` | 用户自定义 Skill（唯一运行时加载源；包内 `skills/` 首次启动播种） | .md（YAML front-matter + body） |
 | `~/.moss/commands/` | 自定义斜杠命令 | .md |
-| `~/.moss/agent/prompts/` | 用户自定义系统提示词（`main/` 等） | .md |
+| `~/.moss/agent/<domain>/` | 用户自定义系统提示词（`main/` 等） | .md |
 | `~/.moss/agent/attachments/` | 粘贴附件落盘 | 二进制 |
 | `~/.moss/memory/` | 记忆宫殿存储（全局作用域） | JSON |
 | `~/.moss/rules/` | 用户规则（全局作用域） | JSON |
