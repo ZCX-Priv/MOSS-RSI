@@ -9,6 +9,8 @@
 // 说明：界面密度（uiDensity）不在此处写值，而是映射到 <html data-density>，
 // 由 global.css 的 html[data-density=...] 覆写 Tailwind v4 的 --spacing 实现整体间距缩放。
 
+import { ACCENT_PRESETS, applyThemePaletteToDom, resolveThemePalette } from './theme-palette';
+
 export interface AppearanceState {
   /** 主题色（预设 ID 或自定义 hex 字符串） */
   accentColor: string;
@@ -19,16 +21,6 @@ export interface AppearanceState {
   /** 圆角大小 */
   cornerRadius: 'small' | 'standard' | 'large';
 }
-
-/** 主题色预设（与设置页色板保持一致） */
-const ACCENT_PRESETS: Record<string, string> = {
-  blue: 'oklch(0.546 0.245 263.4)',
-  green: 'oklch(0.627 0.194 149.2)',
-  purple: 'oklch(0.541 0.281 293.0)',
-  orange: 'oklch(0.646 0.222 41.0)',
-  rose: 'oklch(0.586 0.225 16.5)',
-  teal: 'oklch(0.6 0.118 184.5)',
-};
 
 /** 字号档位 → 根字号（rem 系 utility 与 --spacing 均随之缩放） */
 const FONT_SIZE_MAP: Record<AppearanceState['fontSize'], string> = {
@@ -44,13 +36,13 @@ const RADIUS_MAP: Record<AppearanceState['cornerRadius'], string> = {
   large: '0.875rem',
 };
 
-export function applyAppearanceToDom(state: AppearanceState): void {
+export function applyAppearanceToDom(state: AppearanceState, mode?: 'light' | 'dark'): void {
   const root = document.documentElement;
 
   // 主题色：覆盖主题变量（按钮 / 链接 / 指示器 / 图表）
   const color = state.accentColor.startsWith('#')
     ? state.accentColor
-    : (ACCENT_PRESETS[state.accentColor] ?? ACCENT_PRESETS.blue);
+    : (ACCENT_PRESETS.find((preset) => preset.id === state.accentColor)?.color ?? ACCENT_PRESETS[0].color);
   root.style.setProperty('--primary', color);
   root.style.setProperty('--primary-strong', color);
   root.style.setProperty('--ring', color);
@@ -58,6 +50,11 @@ export function applyAppearanceToDom(state: AppearanceState): void {
   root.style.setProperty('--sidebar-ring', color);
   root.style.setProperty('--chart-1', color);
   root.style.setProperty('--chart-2', color);
+
+  // 项目级色卡：按「主题色 × 亮暗模式」写入全部 --palette-* 变量
+  // mode 显式传入（App 的 resolvedTheme）时优先使用，避免与 .dark class 切换时序错位
+  const resolvedMode = mode ?? (root.classList.contains('dark') ? 'dark' : 'light');
+  applyThemePaletteToDom(resolveThemePalette(state.accentColor, resolvedMode));
 
   // 字号：根字号（body 以 1rem 继承，见 global.css）
   root.style.fontSize = FONT_SIZE_MAP[state.fontSize] ?? FONT_SIZE_MAP.medium;

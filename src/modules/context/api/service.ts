@@ -46,6 +46,15 @@ import {
 import { resolveSummaryModel } from '../compressor';
 import { ensureContextPrompts } from '../prompt-loader';
 
+/** 本地自然日 key（YYYY-MM-DD；概览按日遥测的桶键） */
+function localDayKey(date: Date): string {
+  const pad = (n: number): string => (n < 10 ? `0${n}` : String(n));
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 按日遥测保留上限（天） */
+const DAILY_USAGE_RETENTION_DAYS = 400;
+
 /** ToolRegistry 鸭子类型（get/listSchemas） */
 interface ToolRegistryLike {
   get(name: string): { name: string; description?: string; inputSchema?: unknown } | null;
@@ -497,7 +506,41 @@ export class ContextEngineServiceImpl {
       if (cacheHits.length > BUFFER_SIZE) {
         cacheHits.splice(0, cacheHits.length - BUFFER_SIZE);
       }
-      session.contextTelemetry = { lastUsage, cacheHits };
+      // 会话级全量累计（设置-概览「用量」精确数据源；历史会话无此字段时按 lastRunStats 回退）
+      const prevTotals = session.contextTelemetry?.usageTotals;
+      // 按自然日累计：概览两张趋势图（请求次数 / 三段 tokens）的数据源
+      const dayKey = localDayKey(new Date());
+      const daily = { ...(session.contextTelemetry?.usageDaily ?? {}) };
+      const dayUsage = daily[dayKey] ?? {
+        promptTokens: 0,
+        cachedTokens: 0,
+        completionTokens: 0,
+        requests: 0,
+      };
+      daily[dayKey] = {
+        promptTokens: dayUsage.promptTokens + promptTokens,
+        cachedTokens: dayUsage.cachedTokens + cachedTokens,
+        completionTokens: dayUsage.completionTokens + completionTokens,
+        requests: dayUsage.requests + 1,
+      };
+      const dayKeys = Object.keys(daily).sort();
+      if (dayKeys.length > DAILY_USAGE_RETENTION_DAYS) {
+        for (const stale of dayKeys.slice(0, dayKeys.length - DAILY_USAGE_RETENTION_DAYS)) {
+          delete daily[stale];
+        }
+      }
+      session.contextTelemetry = {
+        lastUsage,
+        cacheHits,
+        usageTotals: {
+          promptTokens: (prevTotals?.promptTokens ?? 0) + promptTokens,
+          completionTokens: (prevTotals?.completionTokens ?? 0) + completionTokens,
+          cachedTokens: (prevTotals?.cachedTokens ?? 0) + cachedTokens,
+          requests: (prevTotals?.requests ?? 0) + 1,
+          since: prevTotals?.since ?? new Date().toISOString(),
+        },
+        usageDaily: daily,
+      };
       try {
         this.sessionStore?.persist(session);
       } catch (err) {

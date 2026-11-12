@@ -156,8 +156,8 @@ export function BrowserBuiltinSection() {
                   <span
                     className={
                       builtin.extensionLoaded
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-amber-600 dark:text-amber-400'
+                        ? 'text-success'
+                        : 'text-warning'
                     }
                   >
                     {builtin.extensionLoaded

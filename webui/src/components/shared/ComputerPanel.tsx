@@ -414,7 +414,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
             className={cn(
               'size-1.5 rounded-full',
               status?.connection === 'connected'
-                ? 'bg-emerald-500'
+                ? 'bg-success'
                 : status?.connection === 'error'
                   ? 'bg-destructive'
                   : 'bg-muted-foreground/60',
@@ -473,7 +473,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
 
       {/* 暂停横幅 */}
       {status?.paused && (
-        <div className="flex items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+        <div className="flex items-center gap-2 border-b border-warning/30 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
           <Pause className="size-3.5 shrink-0" />
           {t('computer.pausedBanner')}
         </div>
@@ -622,12 +622,12 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
             </span>
           </div>
           {isWindowTarget && (
-            <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+            <div className="border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">
               {t('computer.windowOverlayWarning')}
             </div>
           )}
           {targetKey === AUTO_TARGET && frame?.meta.source === 'desktop' && (
-            <div className="border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+            <div className="border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">
               {t('computer.fallbackDesktop')}
             </div>
           )}
@@ -711,7 +711,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
                           className={cn(
                             'shrink-0 rounded px-1 py-px text-[10px]',
                             item.effect === 'confirmed'
-                              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                              ? 'bg-success/10 text-success'
                               : item.effect === 'refused'
                                 ? 'bg-destructive/10 text-destructive'
                                 : 'bg-muted text-muted-foreground',
@@ -721,7 +721,7 @@ export function ComputerPanel({ sessionId, active }: ComputerPanelProps) {
                         </span>
                       )}
                       {item.verified === true && (
-                        <span className="shrink-0 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        <span className="shrink-0 text-[10px] text-success">
                           {t('computer.verified')}
                         </span>
                       )}

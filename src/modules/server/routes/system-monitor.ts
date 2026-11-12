@@ -1,12 +1,14 @@
 // src/modules/server/routes/system-monitor.ts
 // 系统资源监控：GET /api/system-monitor/snapshot
-// 采集范围：系统总量 + MOSS 自身占用（进程树）。所有采集点独立 try/catch 降级，
-// 任一失败只影响对应字段（置 0/空），接口永不 5xx。不引入任何新依赖。
+// 采集范围：系统总量 + MOSS 自身占用（进程树）。
+// 性能模型：HTTP 请求只读内存快照（毫秒返回）；慢采集（PowerShell / 磁盘遍历）在后台异步刷新。
+// 所有采集点独立 try/catch 降级，任一失败只影响对应字段（置 0/空），接口永不 5xx。
 
 import type { HttpRequest, HttpResponse, RouteHandler } from '../types';
 import type { Environment } from '../../../core/types';
 import { cpus, totalmem, freemem, networkInterfaces } from 'node:os';
-import { readdirSync, statSync, statfsSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
+import { statfsSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type MossProcessGroup = 'server' | 'terminal' | 'child' | 'other';
@@ -100,18 +102,32 @@ async function runCommand(cmd: string[], timeoutMs = CMD_TIMEOUT_MS): Promise<st
   return result;
 }
 
-/** ConvertTo-Json 输出可能是对象或数组（单项时退化为对象）→ 统一为数组 */
-function parseJsonArray(text: string | null): Array<Record<string, unknown>> {
-  if (!text) return [];
+// ============================================================================
+// JSON 解析工具（ConvertTo-Json 单项会退化为对象）
+// ============================================================================
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is Record<string, unknown> => asRecord(item) !== null);
+  }
+  const single = asRecord(value);
+  return single ? [single] : [];
+}
+
+function parseJsonObject(text: string | null): Record<string, unknown> | null {
+  if (!text) return null;
   const trimmed = text.trim();
-  if (!trimmed) return [];
+  if (!trimmed) return null;
   try {
-    const raw: unknown = JSON.parse(trimmed);
-    if (Array.isArray(raw)) return raw.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object');
-    if (raw && typeof raw === 'object') return [raw as Record<string, unknown>];
-    return [];
+    return asRecord(JSON.parse(trimmed));
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -149,7 +165,7 @@ function sampleCpu(): { usagePercent: number; cores: number; model: string } {
 }
 
 // ============================================================================
-// 进程（Windows: PowerShell；Unix: ps）
+// 进程 / 网卡（Windows 一次 PowerShell 同时取回；Unix 走 ps + /proc/net/dev）
 // ============================================================================
 
 interface RawProcess {
@@ -160,38 +176,47 @@ interface RawProcess {
   cpuSec: number | null;
 }
 
+interface RawNet {
+  name: string;
+  rx: number;
+  tx: number;
+}
+
 let prevProcCpu = new Map<number, number>();
 let prevProcAt = 0;
 
 const PS_UTF8 = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ';
 
-const PS_PROCESS =
+/** 一次 PowerShell 同时输出进程树与网卡累计字节（避免两次进程启动） */
+const PS_RESOURCE =
   PS_UTF8 +
   '$c=@{}; ' +
   'Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $c[[int]$_.Id]=[double]$_.CPU }; ' +
-  'Get-CimInstance Win32_Process | ForEach-Object { [PSCustomObject]@{ pid=[int]$_.ProcessId; ppid=[int]$_.ParentProcessId; name=[string]$_.Name; rss=[long]$_.WorkingSetSize; cpu=[double]($c[[int]$_.ProcessId]) } } | ConvertTo-Json -Compress';
+  '$p = Get-CimInstance Win32_Process | ForEach-Object { [PSCustomObject]@{ pid=[int]$_.ProcessId; ppid=[int]$_.ParentProcessId; name=[string]$_.Name; rss=[long]$_.WorkingSetSize; cpu=[double]($c[[int]$_.ProcessId]) } }; ' +
+  '$n = Get-NetAdapterStatistics | Select-Object Name,ReceivedBytes,SentBytes; ' +
+  '[PSCustomObject]@{ processes=$p; net=$n } | ConvertTo-Json -Depth 5 -Compress';
 
-async function readProcesses(env: Environment): Promise<RawProcess[]> {
-  if (env.isWindows) {
-    const out = await runCommand([
-      'powershell',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      PS_PROCESS,
-    ]);
-    const arr = parseJsonArray(out);
-    return arr.map((p) => ({
-      pid: toNum(p.pid),
-      ppid: toNum(p.ppid),
-      name: typeof p.name === 'string' ? p.name : '',
-      rssBytes: toNum(p.rss),
-      cpuSec: typeof p.cpu === 'number' && Number.isFinite(p.cpu) ? p.cpu : null,
-    }));
-  }
-  const out = await runCommand(['ps', '-axo', 'pid=,ppid=,pcpu=,rss=,comm=']);
+function parseWindowsProcesses(value: unknown): RawProcess[] {
+  return toRecordArray(value).map((p) => ({
+    pid: toNum(p.pid),
+    ppid: toNum(p.ppid),
+    name: typeof p.name === 'string' ? p.name : '',
+    rssBytes: toNum(p.rss),
+    cpuSec: typeof p.cpu === 'number' && Number.isFinite(p.cpu) ? p.cpu : null,
+  }));
+}
+
+function parseWindowsNet(value: unknown): RawNet[] {
+  return toRecordArray(value).map((r) => ({
+    name: typeof r.Name === 'string' ? r.Name : (typeof r.name === 'string' ? r.name : ''),
+    rx: toNum(r.ReceivedBytes),
+    tx: toNum(r.SentBytes),
+  }));
+}
+
+function parseUnixProcesses(out: string | null): RawProcess[] {
   if (!out) return [];
-  const rows: RawProcess[] = [];
+  const rows: Array<RawProcess & { pcpu?: number }> = [];
   for (const line of out.split('\n')) {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 5) continue;
@@ -207,12 +232,45 @@ async function readProcesses(env: Environment): Promise<RawProcess[]> {
       rssBytes: Number.isFinite(rssKb) ? rssKb * 1024 : 0,
       // ps 的 pcpu 为「单核百分比」，能效口径与前端展示一致，直接使用
       cpuSec: null,
-      // 占位：由下方计算时替换
+      pcpu: Number.isFinite(pcpu) ? pcpu : 0,
     });
-    // 记录 pcpu 到临时字段
-    (rows[rows.length - 1] as RawProcess & { pcpu?: number }).pcpu = Number.isFinite(pcpu) ? pcpu : 0;
   }
   return rows;
+}
+
+function parseUnixNet(out: string | null): RawNet[] {
+  if (!out) return [];
+  const rows: RawNet[] = [];
+  for (const line of out.split('\n')) {
+    const m = /^\s*(\S+):\s*(\d+\s+){8}(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!m) continue;
+    // 字段：iface: rx_bytes(1) ... rx_packets ... tx_bytes(9) tx_packets(10)
+    const nums = line.split(':')[1]?.trim().split(/\s+/).map(Number) ?? [];
+    if (nums.length < 16) continue;
+    rows.push({ name: m[1], rx: nums[0], tx: nums[8] });
+  }
+  return rows;
+}
+
+interface RawStats {
+  processes: RawProcess[];
+  net: RawNet[];
+}
+
+async function readStats(env: Environment): Promise<RawStats> {
+  if (env.isWindows) {
+    const out = await runCommand(['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_RESOURCE]);
+    const root = parseJsonObject(out);
+    return {
+      processes: parseWindowsProcesses(root?.processes),
+      net: parseWindowsNet(root?.net),
+    };
+  }
+  const [procOut, netOut] = await Promise.all([
+    runCommand(['ps', '-axo', 'pid=,ppid=,pcpu=,rss=,comm=']),
+    runCommand(['cat', '/proc/net/dev']),
+  ]);
+  return { processes: parseUnixProcesses(procOut), net: parseUnixNet(netOut) };
 }
 
 const SHELL_NAMES = new Set([
@@ -282,7 +340,7 @@ function collectProcesses(env: Environment, raw: RawProcess[], cores: number, no
 }
 
 // ============================================================================
-// 磁盘（系统盘容量 + ~/.moss 分类占用）
+// 磁盘（系统盘容量 + ~/.moss 分类占用；目录遍历异步化，绝不阻塞事件循环）
 // ============================================================================
 
 function driveCapacity(p: string): { totalBytes: number; freeBytes: number } {
@@ -301,25 +359,25 @@ const DIR_MAX_VISIT = 6000;
 const DIR_TIMEOUT_MS = 1500;
 
 /** 递归求目录字节数（深度/节点/时间三重上限，超限即停并返回已累计值） */
-function dirSize(dir: string): number {
+async function dirSize(dir: string): Promise<number> {
   const deadline = Date.now() + DIR_TIMEOUT_MS;
   let visited = 0;
-  const walk = (d: string, depth: number): number => {
+  const walk = async (d: string, depth: number): Promise<number> => {
     if (depth > DIR_MAX_DEPTH || visited > DIR_MAX_VISIT || Date.now() > deadline) return 0;
-    let total = 0;
     let entries: import('node:fs').Dirent[];
     try {
-      entries = readdirSync(d, { withFileTypes: true });
+      entries = await readdir(d, { withFileTypes: true });
     } catch {
       return 0;
     }
+    let total = 0;
     for (const e of entries) {
       if (visited++ > DIR_MAX_VISIT || Date.now() > deadline) break;
       if (DIR_SKIP.has(e.name.toLowerCase())) continue;
       const full = join(d, e.name);
       try {
-        if (e.isDirectory()) total += walk(full, depth + 1);
-        else if (e.isFile()) total += statSync(full).size;
+        if (e.isDirectory()) total += await walk(full, depth + 1);
+        else if (e.isFile()) total += (await stat(full)).size;
       } catch {
         /* 单个条目失败忽略 */
       }
@@ -338,22 +396,19 @@ const DISK_CATEGORIES: Array<{ key: string; rel: string }> = [
   { key: 'terminals', rel: 'terminals' },
 ];
 
-function sampleDisk(env: Environment): ResourceSnapshot['disk'] {
+async function sampleDisk(env: Environment): Promise<ResourceSnapshot['disk']> {
   const driveRoot = env.isWindows ? `${process.env.SystemDrive ?? 'C:'}\\` : '/';
   const cap = driveCapacity(driveRoot);
   const usedPercent = cap.totalBytes > 0
     ? Math.round(((cap.totalBytes - cap.freeBytes) / cap.totalBytes) * 1000) / 10
     : 0;
 
-  const categories: Array<{ key: string; bytes: number }> = [];
-  let knownTotal = 0;
-  for (const c of DISK_CATEGORIES) {
-    const bytes = dirSize(join(env.dataDir, c.rel));
-    knownTotal += bytes;
-    categories.push({ key: c.key, bytes });
-  }
-  const totalData = dirSize(env.dataDir);
-  categories.push({ key: 'other', bytes: Math.max(0, totalData - knownTotal) });
+  const known = await Promise.all(
+    DISK_CATEGORIES.map(async (c) => ({ key: c.key, bytes: await dirSize(join(env.dataDir, c.rel)) })),
+  );
+  const knownTotal = known.reduce((sum, c) => sum + c.bytes, 0);
+  const totalData = await dirSize(env.dataDir);
+  const categories = [...known, { key: 'other', bytes: Math.max(0, totalData - knownTotal) }];
 
   return {
     drive: driveRoot,
@@ -364,42 +419,25 @@ function sampleDisk(env: Environment): ResourceSnapshot['disk'] {
   };
 }
 
+/** 磁盘分类变化慢：30s 内复用，避免每次采样重复遍历 */
+const DISK_TTL_MS = 30000;
+let diskCache: { at: number; value: ResourceSnapshot['disk'] } | null = null;
+
+async function sampleDiskCached(env: Environment): Promise<ResourceSnapshot['disk']> {
+  if (diskCache && Date.now() - diskCache.at < DISK_TTL_MS) return diskCache.value;
+  const value = await sampleDisk(env);
+  diskCache = { at: Date.now(), value };
+  return value;
+}
+
 // ============================================================================
-// 网络（Windows: Get-NetAdapterStatistics；Linux: /proc/net/dev；其余降级）
+// 网络（速率由两次采样差值得出）
 // ============================================================================
 
 let prevNet = new Map<string, { rx: number; tx: number }>();
 let prevNetAt = 0;
 
-const PS_NET = `${PS_UTF8}Get-NetAdapterStatistics | Select-Object Name,ReceivedBytes,SentBytes | ConvertTo-Json -Compress`;
-
-interface RawNet { name: string; rx: number; tx: number }
-
-async function readNetCounters(env: Environment): Promise<RawNet[]> {
-  if (env.isWindows) {
-    const out = await runCommand(['powershell', '-NoProfile', '-NonInteractive', '-Command', PS_NET]);
-    return parseJsonArray(out).map((r) => ({
-      name: typeof r.Name === 'string' ? r.Name : (typeof r.name === 'string' ? r.name : ''),
-      rx: toNum(r.ReceivedBytes),
-      tx: toNum(r.SentBytes),
-    }));
-  }
-  // Linux: 解析 /proc/net/dev
-  const out = await runCommand(['cat', '/proc/net/dev']);
-  if (!out) return [];
-  const rows: RawNet[] = [];
-  for (const line of out.split('\n')) {
-    const m = /^\s*(\S+):\s*(\d+\s+){8}(\d+)\s+(\d+)\s*$/.exec(line);
-    if (!m) continue;
-    // 字段：iface: rx_bytes(1) ... rx_packets ... tx_bytes(9) tx_packets(10)
-    const nums = line.split(':')[1]?.trim().split(/\s+/).map(Number) ?? [];
-    if (nums.length < 16) continue;
-    rows.push({ name: m[1], rx: nums[0], tx: nums[8] });
-  }
-  return rows;
-}
-
-function sampleNetwork(env: Environment, counters: RawNet[], now: number): ResourceSnapshot['network'] {
+function sampleNetwork(counters: RawNet[], now: number): ResourceSnapshot['network'] {
   const elapsedSec = prevNetAt > 0 ? Math.max(0.001, (now - prevNetAt) / 1000) : 0;
   const next = new Map<string, { rx: number; tx: number }>();
   const interfaces: ResourceSnapshot['network']['interfaces'] = [];
@@ -431,44 +469,50 @@ function sampleNetwork(env: Environment, counters: RawNet[], now: number): Resou
 }
 
 // ============================================================================
-// 快照聚合（< 800ms 直接返回缓存，减轻 PowerShell 轮询压力）
+// 快照：内存直返 + 后台全量采样
 // ============================================================================
 
-let cachedSnapshot: ResourceSnapshot | null = null;
-let cachedAt = 0;
-const SNAPSHOT_CACHE_MS = 800;
+const SNAPSHOT_STALE_MS = 2000;
+let latestSnapshot: ResourceSnapshot | null = null;
+let latestAt = 0;
+let inflight: Promise<unknown> | null = null;
 
-export async function sampleResourceSnapshot(env: Environment): Promise<ResourceSnapshot> {
+async function fullSample(env: Environment): Promise<ResourceSnapshot> {
   const now = Date.now();
-  if (cachedSnapshot && now - cachedAt < SNAPSHOT_CACHE_MS) return cachedSnapshot;
-
   const cpuSample = sampleCpu();
   const total = totalmem();
   const free = freemem();
   const usedBytes = Math.max(0, total - free);
 
+  const [stats, disk] = await Promise.all([
+    readStats(env).catch((): RawStats => ({ processes: [], net: [] })),
+    sampleDiskCached(env).catch((): ResourceSnapshot['disk'] => ({
+      drive: env.isWindows ? `${process.env.SystemDrive ?? 'C:'}\\` : '/',
+      totalBytes: 0,
+      freeBytes: 0,
+      usedPercent: 0,
+      categories: [],
+    })),
+  ]);
+
   let processes: MossProcessInfo[] = [];
   let mossPercent = 0;
   let mossBytes = 0;
   try {
-    const raw = await readProcesses(env);
-    const agg = collectProcesses(env, raw, cpuSample.cores, now);
+    const agg = collectProcesses(env, stats.processes, cpuSample.cores, now);
     processes = agg.processes;
     mossPercent = agg.mossPercent;
     mossBytes = agg.mossBytes;
   } catch {
-    /* 进程采集失败：降级为空 */
+    /* 进程聚合失败：降级为空 */
   }
 
   let network: ResourceSnapshot['network'] = { interfaces: [] };
   try {
-    const counters = await readNetCounters(env);
-    network = sampleNetwork(env, counters, now);
+    network = sampleNetwork(stats.net, now);
   } catch {
     /* 网络采集失败：降级为空 */
   }
-
-  const disk = sampleDisk(env);
 
   const snapshot: ResourceSnapshot = {
     cpu: { ...cpuSample, mossPercent },
@@ -483,17 +527,78 @@ export async function sampleResourceSnapshot(env: Environment): Promise<Resource
     moss: { pid: process.pid, processes },
     sampledAt: new Date().toISOString(),
   };
-  cachedSnapshot = snapshot;
-  cachedAt = now;
+  latestSnapshot = snapshot;
+  latestAt = now;
   return snapshot;
 }
 
-/** GET /api/system-monitor/snapshot */
+/** 毫秒级快速快照：CPU/内存/磁盘容量同步获取，其余复用上一份完整快照 */
+function buildFastSnapshot(env: Environment): ResourceSnapshot {
+  const cpuSample = sampleCpu();
+  const total = totalmem();
+  const free = freemem();
+  const usedBytes = Math.max(0, total - free);
+  const driveRoot = env.isWindows ? `${process.env.SystemDrive ?? 'C:'}\\` : '/';
+  const cap = driveCapacity(driveRoot);
+  const disk = latestSnapshot?.disk ?? {
+    drive: driveRoot,
+    totalBytes: cap.totalBytes,
+    freeBytes: cap.freeBytes,
+    usedPercent: cap.totalBytes > 0
+      ? Math.round(((cap.totalBytes - cap.freeBytes) / cap.totalBytes) * 1000) / 10
+      : 0,
+    categories: [] as Array<{ key: string; bytes: number }>,
+  };
+  return {
+    cpu: { ...cpuSample, mossPercent: latestSnapshot?.cpu.mossPercent ?? 0 },
+    memory: {
+      totalBytes: total,
+      usedBytes,
+      usedPercent: total > 0 ? Math.round((usedBytes / total) * 1000) / 10 : 0,
+      mossBytes: latestSnapshot?.memory.mossBytes ?? 0,
+    },
+    disk,
+    network: latestSnapshot?.network ?? { interfaces: [] },
+    moss: latestSnapshot?.moss ?? { pid: process.pid, processes: [] },
+    sampledAt: new Date().toISOString(),
+  };
+}
+
+/** 后台全量采样（inflight 去重，不阻塞调用方） */
+function refreshResourceSnapshot(env: Environment): void {
+  if (inflight !== null) return;
+  inflight = fullSample(env)
+    .catch(() => {
+      /* 采样失败保留旧快照，下次请求重试 */
+    })
+    .finally(() => {
+      inflight = null;
+    });
+}
+
+/** 服务启动预热（server/index.ts 调用） */
+export function warmResourceSnapshot(env: Environment): void {
+  refreshResourceSnapshot(env);
+}
+
+/** AI 解读等场景：等待一次全量采样并返回最新快照 */
+export async function sampleResourceSnapshot(env: Environment): Promise<ResourceSnapshot> {
+  if (inflight !== null) {
+    await inflight;
+    if (latestSnapshot) return latestSnapshot;
+  }
+  if (latestSnapshot && Date.now() - latestAt < 1000) return latestSnapshot;
+  return fullSample(env);
+}
+
+/** GET /api/system-monitor/snapshot：只读内存，毫秒返回 */
 export function createSystemMonitorSnapshotHandler(env: Environment): RouteHandler {
   return async (_req: HttpRequest): Promise<HttpResponse> => {
     try {
-      const snapshot = await sampleResourceSnapshot(env);
-      return { status: 200, body: snapshot };
+      if (!latestSnapshot || Date.now() - latestAt > SNAPSHOT_STALE_MS) {
+        refreshResourceSnapshot(env);
+      }
+      return { status: 200, body: latestSnapshot ?? buildFastSnapshot(env) };
     } catch {
       // 极端兜底：任何意外都不让接口 5xx
       return {

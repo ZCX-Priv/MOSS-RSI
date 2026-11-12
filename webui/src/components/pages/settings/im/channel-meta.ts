@@ -12,15 +12,15 @@ export const CHANNEL_BRAND: Record<ImChannelId, BrandIconName> = {
 
 /** 渠道状态点的颜色（沿用设置页语义色） */
 export const STATE_DOT_CLASS: Record<string, string> = {
-  connected: 'bg-emerald-500',
-  connecting: 'bg-blue-500 animate-pulse',
-  error: 'bg-red-500',
+  connected: 'bg-success',
+  connecting: 'bg-primary animate-pulse',
+  error: 'bg-danger',
   offline: 'bg-muted-foreground/40',
 };
 
 export const STATE_BADGE_CLASS: Record<string, string> = {
-  connected: 'bg-emerald-600/15 text-emerald-600',
-  connecting: 'bg-blue-600/15 text-blue-600',
-  error: 'bg-red-500/15 text-red-600',
+  connected: 'bg-success/15 text-success',
+  connecting: 'bg-primary/15 text-primary-text',
+  error: 'bg-danger/15 text-danger',
   offline: 'bg-muted text-muted-foreground',
 };

@@ -118,7 +118,7 @@ export function ImBotDialog({ channel, editing, onOpenChange, onSaved }: Props) 
                   <div key={field.key} className="flex flex-col gap-1.5">
                     <Label htmlFor={`im-${field.key}`}>
                       {field.label}
-                      {field.required ? <span className="ml-1 text-red-500">*</span> : null}
+                      {field.required ? <span className="ml-1 text-danger">*</span> : null}
                     </Label>
                     {field.type === 'select' ? (
                       <Select

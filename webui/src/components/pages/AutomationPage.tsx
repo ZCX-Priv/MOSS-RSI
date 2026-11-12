@@ -48,9 +48,9 @@ function formatTime(iso?: string): string {
 }
 
 function RunStatusIcon({ status }: { status: string }) {
-  if (status === 'running') return <Loader2 className="size-3.5 animate-spin text-blue-600" />;
-  if (status === 'success') return <CheckCircle2 className="size-3.5 text-green-500" />;
-  if (status === 'failed' || status === 'timeout') return <XCircle className="size-3.5 text-red-500" />;
+  if (status === 'running') return <Loader2 className="size-3.5 animate-spin text-primary" />;
+  if (status === 'success') return <CheckCircle2 className="size-3.5 text-success" />;
+  if (status === 'failed' || status === 'timeout') return <XCircle className="size-3.5 text-danger" />;
   return <Clock className="size-3.5 text-muted-foreground" />;
 }
 

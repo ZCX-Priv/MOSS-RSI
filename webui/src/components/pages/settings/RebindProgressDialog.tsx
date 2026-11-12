@@ -124,9 +124,9 @@ export function RebindProgressDialog({ open, onCompleteReload = true }: RebindPr
         <DialogHeader showCloseButton={false}>
           <DialogTitle className="flex items-center gap-2">
             {stage === 'done' ? (
-              <CheckCircle2 className="h-5 w-5 text-green-500" />
+              <CheckCircle2 className="h-5 w-5 text-success" />
             ) : stage === 'timeout' ? (
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              <AlertTriangle className="h-5 w-5 text-warning" />
             ) : (
               <Loader2 className="h-5 w-5 animate-spin text-primary" />
             )}
@@ -140,7 +140,7 @@ export function RebindProgressDialog({ open, onCompleteReload = true }: RebindPr
         <DialogBody className="gap-4">
           <Progress value={STAGE_PROGRESS[stage]} className="h-2" />
           <div className="flex items-center justify-between text-sm">
-            <span className={stage === 'timeout' ? 'text-amber-500' : 'text-muted-foreground'}>
+            <span className={stage === 'timeout' ? 'text-warning' : 'text-muted-foreground'}>
               {t(stageTextKey[stage])}
             </span>
             <span className="text-xs text-muted-foreground tabular-nums">

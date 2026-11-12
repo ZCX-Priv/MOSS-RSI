@@ -466,6 +466,8 @@ export class SessionStore {
           ...(parsed.envContext ? { envContext: parsed.envContext } : {}),
           ...(Array.isArray(parsed.compactions) ? { compactions: parsed.compactions } : {}),
           ...(parsed.lastRunStats ? { lastRunStats: parsed.lastRunStats } : {}),
+          // 上下文遥测（usageTotals / usageDaily / cacheHits）：重启后恢复，否则再次落盘会丢累计数据
+          ...(parsed.contextTelemetry ? { contextTelemetry: parsed.contextTelemetry } : {}),
           ...(Array.isArray(parsed.lastTruncations)
             ? { lastTruncations: parsed.lastTruncations }
             : parsed.lastTruncation

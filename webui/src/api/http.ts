@@ -76,6 +76,8 @@ import type {
   VoiceStatus,
   VoiceModelStatus,
   ResourceSnapshot,
+  UsageOverview,
+  UsageRange,
   ComputerHealth,
   ComputerStatus,
   ComputerWindowInfo,
@@ -1006,10 +1008,17 @@ export const api = {
     request<{ ok: boolean }>('DELETE', `/api/voice/models/${encodeURIComponent(id)}`),
 
   // ==========================================================================
-  // 资源管理器（system-monitor）
+  // 资源监控（system-monitor）
   // ==========================================================================
-  /** 系统资源快照（资源管理器轮询数据源） */
+  /** 系统资源快照（资源页轮询数据源） */
   getResourceSnapshot: () => request<ResourceSnapshot>('GET', '/api/system-monitor/snapshot'),
+
+  // ==========================================================================
+  // 设置-概览「用量」（跨会话聚合，扫描 ~/.moss/tasks）
+  // ==========================================================================
+  /** 用量总览（日期范围 + KPI + 每日序列 + 技能/工具/命令 + 会话列表） */
+  getUsageOverview: (range: UsageRange) =>
+    request<UsageOverview>('GET', `/api/usage/overview?range=${range}`),
 };
 // 说明：AI 诊断（错误原因 / Harness / 资源解读）已改为 WebSocket 流式通道
 // （insight.diagnose / insight.diagnose.event），不再提供 HTTP API。

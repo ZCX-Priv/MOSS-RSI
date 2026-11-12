@@ -126,7 +126,7 @@ export function ImBotRow({
       </div>
 
       {bot.lastError ? (
-        <div className="line-clamp-2 text-xs text-red-600 dark:text-red-400">{bot.lastError}</div>
+        <div className="line-clamp-2 text-xs text-danger">{bot.lastError}</div>
       ) : null}
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">

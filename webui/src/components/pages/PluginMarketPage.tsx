@@ -991,7 +991,7 @@ function MossServerCard() {
         <div className="relative flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary-strong/10 text-primary-strong">
           <Server className="size-5" />
           <span
-            className={enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40'}
+            className={enabled ? 'bg-success' : 'bg-muted-foreground/40'}
             title={enabled ? t('plugins.mcpStatusConnected') : t('plugins.mcpStatusDisconnected')}
             aria-label={enabled ? t('plugins.mcpStatusConnected') : t('plugins.mcpStatusDisconnected')}
           />
@@ -1007,7 +1007,7 @@ function MossServerCard() {
           <p className="truncate text-xs text-muted-foreground" title={endpoint}>{endpoint}</p>
           <p className="truncate text-xs text-muted-foreground">{t('plugins.mossServerDesc')}</p>
           {!appConfig?.security?.authToken ? (
-            <p className="truncate text-xs text-amber-600 dark:text-amber-500">
+            <p className="truncate text-xs text-warning">
               {t('plugins.mossServerNoTokenHint')}
             </p>
           ) : null}
@@ -1052,7 +1052,7 @@ function MossServerCard() {
             aria-label={t('plugins.mossServerExposeInternal')}
           />
           <span>{t('plugins.mossServerExposeInternal')}</span>
-          <span className="text-amber-600 dark:text-amber-500">{t('plugins.mossServerExposeInternalHint')}</span>
+          <span className="text-warning">{t('plugins.mossServerExposeInternalHint')}</span>
         </div>
       </div>
     </Card>
@@ -1208,7 +1208,7 @@ export function McpTab({
   }, [addMode, submitForm, submitJson]);
 
   const statusColor = (s: McpServer['status']): string =>
-    s === 'connected' ? 'bg-emerald-500' : s === 'error' ? 'bg-red-500' : 'bg-muted-foreground/40';
+    s === 'connected' ? 'bg-success' : s === 'error' ? 'bg-danger' : 'bg-muted-foreground/40';
 
   return (
     <div className="p-6 pt-2">
@@ -1313,7 +1313,7 @@ export function McpTab({
                                 <Badge variant="outline" className="px-1 py-0 text-[10px] font-normal">RO</Badge>
                               )}
                               {tl.annotations?.destructiveHint && (
-                                <Badge variant="secondary" className="px-1 py-0 text-[10px] font-normal text-amber-600">
+                                <Badge variant="secondary" className="px-1 py-0 text-[10px] font-normal text-warning">
                                   {t('plugins.destructive')}
                                 </Badge>
                               )}

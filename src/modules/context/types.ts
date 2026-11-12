@@ -362,7 +362,33 @@ export interface SessionMemoryState {
   lastDistilledIndex: number;
 }
 
-/** 会话级持久化遥测（agent Session 内嵌字段；lastUsage/cacheHits 的单一真源） */
+/** 会话级真实用量累计（onTurnUsage 每次请求累加；历史会话无此字段时回退 lastRunStats/cacheHits） */
+export interface SessionUsageTotals {
+  /** 累计输入 token（含缓存命中部分） */
+  promptTokens: number;
+  /** 累计输出 token */
+  completionTokens: number;
+  /** 累计缓存命中输入 token */
+  cachedTokens: number;
+  /** 累计模型请求次数 */
+  requests: number;
+  /** 开始累计的时间（ISO 8601） */
+  since: string;
+}
+
+/** 会话级按自然日累计（概览图表精确数据源；key = YYYY-MM-DD 本地日期） */
+export interface SessionDailyUsage {
+  /** 当日输入 token（含缓存命中） */
+  promptTokens: number;
+  /** 当日输入中的缓存命中 token */
+  cachedTokens: number;
+  /** 当日输出 token */
+  completionTokens: number;
+  /** 当日模型请求次数 */
+  requests: number;
+}
+
+/** 会话级持久化遥测（agent Session 内嵌字段；lastUsage/cacheHits/usageTotals 的单一真源） */
 export interface SessionContextTelemetry {
   /** 最近一次请求的真实 usage（LLM 上报；无样本为 null） */
   lastUsage: {
@@ -372,6 +398,10 @@ export interface SessionContextTelemetry {
   } | null;
   /** 缓存命中样本环形缓冲（上限 TELEMETRY_BUFFER_SIZE） */
   cacheHits: CacheHitSample[];
+  /** 会话级全量用量累计（设置-概览「用量」页的精确数据源） */
+  usageTotals?: SessionUsageTotals;
+  /** 按自然日累计（设置-概览图表；保留最近 400 天） */
+  usageDaily?: Record<string, SessionDailyUsage>;
 }
 
 /** agent 模块注入的会话存取回调（bind 注入，保持依赖方向 agent → context） */

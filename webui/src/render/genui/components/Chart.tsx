@@ -6,6 +6,8 @@ import { useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as echarts from 'echarts';
 import type { EChartsOption } from 'echarts';
+import { useTheme } from '@/contexts/ThemeContext';
+import { readThemePaletteFromDom } from '@/lib/theme-palette';
 
 export interface GenUIChartDatum {
   label: string;
@@ -20,25 +22,32 @@ export interface GenUIChartProps {
   title?: string;
 }
 
-const PALETTES: Record<string, string[]> = {
-  default: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'],
-  primary: ['#3b82f6', '#6366f1', '#8b5cf6', '#0ea5e9', '#06b6d4', '#2563eb'],
-  success: ['#10b981', '#22c55e', '#14b8a6', '#84cc16', '#059669'],
-  warning: ['#f59e0b', '#f97316', '#eab308', '#fbbf24', '#d97706'],
-  danger: ['#ef4444', '#f43f5e', '#dc2626', '#e11d48', '#fb7185'],
-  info: ['#06b6d4', '#0ea5e9', '#3b82f6', '#14b8a6', '#38bdf8'],
-  muted: ['#94a3b8', '#6b7280', '#a1a1aa', '#9ca3af', '#71717a'],
-};
-
-const AXIS_COLOR = '#94a3b8';
-const SPLIT_COLOR = 'rgba(148, 163, 184, 0.22)';
+/** 按当前项目级色卡生成 ECharts 调色板（随主题色/亮暗模式变化） */
+function buildPalettes(): Record<string, string[]> {
+  const palette = readThemePaletteFromDom();
+  const ramp = palette.chart.ramp;
+  return {
+    default: [ramp[5], ramp[3], ramp[1], palette.success, palette.warning, palette.info, ramp[6]],
+    primary: [ramp[5], ramp[4], ramp[3], ramp[2], ramp[1], ramp[0]],
+    success: [palette.success, ramp[3], ramp[1], palette.info],
+    warning: [palette.warning, ramp[3], ramp[1]],
+    danger: [palette.danger, palette.warning, ramp[3]],
+    info: [palette.info, ramp[3], ramp[1]],
+    muted: [ramp[4], ramp[2], palette.connection.offline],
+  };
+}
 
 export default function GenUIChart({ kind, data, height = 260, tone = 'default', title }: GenUIChartProps) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement | null>(null);
+  const { resolvedTheme } = useTheme();
+  const themePalette = useMemo(() => readThemePaletteFromDom(), [resolvedTheme]);
 
   const option = useMemo<EChartsOption>(() => {
-    const palette = PALETTES[tone] ?? PALETTES.default;
+    const palettes = buildPalettes();
+    const palette = palettes[tone] ?? palettes.default;
+    const axisColor = themePalette.chart.axis;
+    const splitColor = themePalette.chart.grid;
     const labels = data.map((d) => d.label);
     const values = data.map((d) => d.value);
 
@@ -59,9 +68,9 @@ export default function GenUIChart({ kind, data, height = 260, tone = 'default',
       tooltip: {
         trigger: kind === 'pie' ? 'item' : 'axis',
         confine: true,
-        backgroundColor: 'rgba(24, 24, 27, 0.92)',
+        backgroundColor: themePalette.chart.ramp[7],
         borderWidth: 0,
-        textStyle: { color: '#fafafa', fontSize: 12 },
+        textStyle: { color: themePalette.chart.ramp[0], fontSize: 12 },
       },
     };
 
@@ -74,8 +83,8 @@ export default function GenUIChart({ kind, data, height = 260, tone = 'default',
             radius: ['38%', '68%'],
             center: ['50%', '55%'],
             data: data.map((d) => ({ name: d.label, value: d.value })),
-            label: { color: AXIS_COLOR, fontSize: 11 },
-            labelLine: { lineStyle: { color: SPLIT_COLOR } },
+            label: { color: axisColor, fontSize: 11 },
+            labelLine: { lineStyle: { color: splitColor } },
             itemStyle: { borderColor: 'transparent', borderWidth: 1, borderRadius: 4 },
           },
         ],
@@ -88,16 +97,16 @@ export default function GenUIChart({ kind, data, height = 260, tone = 'default',
       xAxis: {
         type: 'category',
         data: labels,
-        axisLine: { lineStyle: { color: SPLIT_COLOR } },
+        axisLine: { lineStyle: { color: splitColor } },
         axisTick: { show: false },
-        axisLabel: { color: AXIS_COLOR, fontSize: 11, width: 90, overflow: 'truncate' },
+        axisLabel: { color: axisColor, fontSize: 11, width: 90, overflow: 'truncate' },
       },
       yAxis: {
         type: 'value',
         axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: AXIS_COLOR, fontSize: 11 },
-        splitLine: { lineStyle: { color: SPLIT_COLOR, type: 'dashed' } },
+        axisLabel: { color: axisColor, fontSize: 11 },
+        splitLine: { lineStyle: { color: splitColor, type: 'dashed' } },
       },
       series: [
         kind === 'bar'
@@ -117,7 +126,7 @@ export default function GenUIChart({ kind, data, height = 260, tone = 'default',
             },
       ],
     };
-  }, [kind, data, title, tone]);
+  }, [kind, data, title, tone, themePalette]);
 
   useEffect(() => {
     const el = ref.current;

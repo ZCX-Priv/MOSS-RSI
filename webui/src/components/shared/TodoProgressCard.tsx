@@ -100,7 +100,7 @@ export function TodoRow({ item }: { item: TodoItem }) {
   return (
     <div className="flex min-w-0 items-start gap-2">
       {item.status === 'completed' && (
-        <CircleCheck className="size-4 shrink-0 text-emerald-500" />
+        <CircleCheck className="size-4 shrink-0 text-success" />
       )}
       {item.status === 'in_progress' && (
         <Loader2 className="size-4 shrink-0 animate-spin text-primary-strong" />

@@ -1110,8 +1110,8 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                     className="flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[10px] tabular-nums"
                     title={t('context.cacheHitHint')}
                     style={{
-                      color: contextStats.avgHitRate >= 0.6 ? '#10b981' : contextStats.avgHitRate >= 0.3 ? '#f59e0b' : '#ef4444',
-                      borderColor: contextStats.avgHitRate >= 0.6 ? '#10b98155' : contextStats.avgHitRate >= 0.3 ? '#f59e0b55' : '#ef444455',
+                      color: contextStats.avgHitRate >= 0.6 ? 'var(--palette-success)' : contextStats.avgHitRate >= 0.3 ? 'var(--palette-warning)' : 'var(--palette-danger)',
+                      borderColor: contextStats.avgHitRate >= 0.6 ? 'var(--palette-success)' : contextStats.avgHitRate >= 0.3 ? 'var(--palette-warning)' : 'var(--palette-danger)',
                     }}
                   >
                     <Zap className="size-2.5" />
@@ -1620,12 +1620,12 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                   {/* 将回滚的文件变更 */}
                   <div>
                     <div className="mb-1 flex items-center gap-1 text-xs font-medium text-foreground">
-                      <FileWarning className="size-3.5 text-amber-500" />
+                      <FileWarning className="size-3.5 text-warning" />
                       {t('task.truncateFiles', { count: truncatePreview?.fileChanges.length ?? 0 })}
                     </div>
                     {/* 回滚被跳过的原因（诚实降级：不再静默，用户明确知道文件不会回滚） */}
                     {truncatePreview?.rollbackSkippedReason && (
-                      <div className="mb-1 rounded-md border border-amber-300/60 bg-amber-50/60 px-2 py-1.5 text-xs text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-400">
+                      <div className="mb-1 rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-xs text-warning">
                         {truncatePreview.rollbackSkippedReason === 'no-file-history'
                           ? t('task.truncateSkipNoHistory')
                           : t('task.truncateSkipNoTimestamp')}
@@ -1732,7 +1732,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                     </div>
                     <div className="rounded-md border border-border p-2">
                       <div className="text-muted-foreground">{t('context.estimatedAfter')}</div>
-                      <div className="mt-0.5 text-base font-medium tabular-nums text-emerald-500">
+                      <div className="mt-0.5 text-base font-medium tabular-nums text-success">
                         ~{compactPreview.estimatedAfterTokens.toLocaleString()}
                       </div>
                     </div>
@@ -2348,13 +2348,13 @@ function ContextStackedBar({ stats }: { stats: ContextStats }) {
   // 分段按 breakdown 占比缩放到 total（真实占用与估算存在系统性偏差时保持构成比例）
   const scale = breakdown.total > 0 ? total / breakdown.total : 0;
   const segments = [
-    { key: 'system', value: breakdown.system, color: 'bg-blue-700', label: t('context.segSystem') },
-    { key: 'env', value: breakdown.env, color: 'bg-teal-500', label: t('context.segEnv') },
-    { key: 'summary', value: breakdown.summary, color: 'bg-amber-500', label: t('context.segSummary') },
-    { key: 'history', value: breakdown.history, color: 'bg-blue-500', label: t('context.segHistory') },
+    { key: 'system', value: breakdown.system, color: 'bg-context-system', label: t('context.segSystem') },
+    { key: 'env', value: breakdown.env, color: 'bg-context-env', label: t('context.segEnv') },
+    { key: 'summary', value: breakdown.summary, color: 'bg-context-summary', label: t('context.segSummary') },
+    { key: 'history', value: breakdown.history, color: 'bg-context-history', label: t('context.segHistory') },
     // 规则/记忆注入段（新后端字段；值为 0 时不渲染——旧数据无噪声）
-    ...(breakdown.rules ? [{ key: 'rules', value: breakdown.rules, color: 'bg-violet-500', label: t('context.segRules') }] : []),
-    ...(breakdown.memory ? [{ key: 'memory', value: breakdown.memory, color: 'bg-rose-500', label: t('context.segMemory') }] : []),
+    ...(breakdown.rules ? [{ key: 'rules', value: breakdown.rules, color: 'bg-context-rules', label: t('context.segRules') }] : []),
+    ...(breakdown.memory ? [{ key: 'memory', value: breakdown.memory, color: 'bg-context-memory', label: t('context.segMemory') }] : []),
   ];
   const percentText = formatPercent(total / window);
   const usedText = formatTokens(total);
@@ -2585,7 +2585,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
         )}
         {/* 只发附件不打字时正文为空：不渲染空气泡，只显示上方附件卡片行 */}
         {hasUserBody && (
-        <div className="max-w-[80%] rounded-2xl border border-border bg-indigo-100 px-3 py-2 text-sm text-foreground shadow-sm break-words whitespace-pre-wrap dark:bg-blue-600 dark:text-white dark:shadow-[0_2px_14px_rgba(37,99,235,0.35)]">
+        <div className="max-w-[80%] rounded-2xl border border-border bg-primary/10 px-3 py-2 text-sm text-foreground shadow-sm break-words whitespace-pre-wrap dark:bg-primary dark:text-primary-foreground dark:shadow-[0_2px_14px_rgba(0,0,0,0.35)]">
         <MentionTokenText text={userBodyDisplay} onOpenFile={onOpenAttachment ?? (() => {})} />
       </div>
         )}
@@ -2928,7 +2928,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       )}
       {/* 上次进程中断遗留的未完成回复：标注在真正的断点（所有正文与工具卡片之后） */}
       {message.interrupted && (
-        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+        <div className="flex items-center gap-1 text-xs text-warning">
           <CircleAlert className="size-3.5 shrink-0" />
           <span>{t('task.interruptedReply')}</span>
         </div>

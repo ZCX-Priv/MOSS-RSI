@@ -11,7 +11,7 @@ import type { InsightStreamState } from '@/hooks/useInsightStream';
 function StepMark({ status }: { status: 'running' | 'done' | 'error' }) {
   if (status === 'running') return <Loader2 className="size-3.5 shrink-0 animate-spin text-primary-strong" />;
   if (status === 'error') return <AlertCircle className="size-3.5 shrink-0 text-destructive" />;
-  return <Check className="size-3.5 shrink-0 text-emerald-500" />;
+  return <Check className="size-3.5 shrink-0 text-success" />;
 }
 
 export function InsightChain({ state, onRerun }: { state: InsightStreamState; onRerun: () => void }) {

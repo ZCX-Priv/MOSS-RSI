@@ -65,7 +65,7 @@ function ImportResultPanel({ result }: { result: MigrationImportResult }) {
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/20 px-4 py-3">
       <div className="flex flex-wrap items-center gap-3">
         <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-          <CheckCircle2 className="size-4 text-emerald-600" />
+          <CheckCircle2 className="size-4 text-success" />
           {t('settings.migration.importedCount', { count: result.imported })}
         </span>
         {result.skipped.length > 0 && (
@@ -74,7 +74,7 @@ function ImportResultPanel({ result }: { result: MigrationImportResult }) {
           </Badge>
         )}
         {result.warnings.length > 0 && (
-          <Badge variant="secondary" className="gap-1 font-normal text-amber-600">
+          <Badge variant="secondary" className="gap-1 font-normal text-warning">
             <AlertTriangle className="size-3" />
             {t('settings.migration.warningsCount', { count: result.warnings.length })}
           </Badge>
@@ -112,7 +112,7 @@ function ImportResultPanel({ result }: { result: MigrationImportResult }) {
       )}
 
       {result.warnings.length > 0 && (
-        <details className="text-xs text-amber-600">
+        <details className="text-xs text-warning">
           <summary className="cursor-pointer select-none">{t('settings.migration.warningsTitle')}</summary>
           <div className="mt-1.5 flex max-h-32 flex-col gap-1 overflow-auto">
             {result.warnings.map((w, i) => (
@@ -228,7 +228,7 @@ function ExternalImportPanel() {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-foreground">{source.label}</span>
                     {source.available ? (
-                      <Badge className="bg-emerald-600/15 text-emerald-600" variant="secondary">
+                      <Badge className="bg-success/15 text-success" variant="secondary">
                         {t('settings.migration.sourceAvailable')}
                       </Badge>
                     ) : (
@@ -518,7 +518,7 @@ function BackupPanel() {
         {exportResult && (
           <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/20 px-4 py-3">
             <div className="flex flex-wrap items-center gap-2 text-sm text-foreground">
-              <CheckCircle2 className="size-4 text-emerald-600" />
+              <CheckCircle2 className="size-4 text-success" />
               <span>{t('settings.migration.exportDone')}</span>
               <Badge variant="secondary" className="font-normal">
                 {formatBytes(exportResult.bytes)}

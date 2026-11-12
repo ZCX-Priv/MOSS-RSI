@@ -115,7 +115,7 @@ export function ConnectionStatusTag({ sessionId }: ConnectionStatusTagProps) {
         'inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors',
         tone === 'ok' && 'border-border bg-transparent text-muted-foreground',
         tone === 'busy' && 'border-primary-strong/40 bg-primary-strong/5 text-primary-strong',
-        tone === 'warn' && 'border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+        tone === 'warn' && 'border-warning/50 bg-warning/10 text-warning',
       )}
       role="status"
       aria-live="polite"

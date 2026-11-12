@@ -296,7 +296,7 @@ function RunCodeResultPreview({
       )}
       {diagnostics.length > 0 && (
         <div className="flex min-w-0 flex-col gap-0.5">
-          <div className="text-[11px] text-amber-600 dark:text-amber-400">
+          <div className="text-[11px] text-warning">
             {t('task.runCode.diagnostics', { count: diagnostics.length })}
           </div>
           <ul className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">
@@ -372,7 +372,7 @@ function RunStatusText({
   }
   return (
     <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
-      <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
+      <Check className="size-3 text-success" />
       {t('task.runCode.completed')}
       {durationMs != null && (
         <>
@@ -383,11 +383,11 @@ function RunStatusText({
       {hasUi && (
         <>
           <span>·</span>
-          <span className="text-sky-600 dark:text-sky-400">{t('task.runCode.uiBadge')}</span>
+          <span className="text-info">{t('task.runCode.uiBadge')}</span>
         </>
       )}
       {truncated && (
-        <span className="text-amber-600 dark:text-amber-400">{t('task.runCode.truncated')}</span>
+        <span className="text-warning">{t('task.runCode.truncated')}</span>
       )}
     </span>
   );

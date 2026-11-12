@@ -59,8 +59,8 @@ const MODE_CONFIG: ModeConfig[] = [
     descKey: 'permissionMode.skip.desc',
     badgeKey: 'permissionMode.skip.badge',
     badgeClass:
-      'bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30',
-    iconClass: 'text-red-600 dark:text-red-500',
+      'bg-danger/15 text-danger border-danger/30',
+    iconClass: 'text-danger',
   },
 ];
 

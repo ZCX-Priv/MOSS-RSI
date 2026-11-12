@@ -22,9 +22,9 @@ export const OutputLimitNoticeCard = memo(function OutputLimitNoticeCard({
 
   return (
     <div className="flex justify-center py-1">
-      <div className="w-full max-w-2xl rounded-lg border border-dashed border-amber-300/70 bg-amber-50/60 px-3 py-2.5 text-xs text-muted-foreground dark:border-amber-500/40 dark:bg-amber-500/10">
+      <div className="w-full max-w-2xl rounded-lg border border-dashed border-warning/40 bg-warning/10 px-3 py-2.5 text-xs text-muted-foreground">
         <div className="flex items-center gap-1.5">
-          <Scissors className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <Scissors className="size-3.5 shrink-0 text-warning" />
           <span className="font-medium text-foreground">
             {t('task.outputLimitTitle')}
             {typeof notice.maxTokens === 'number' && notice.maxTokens > 0 && (

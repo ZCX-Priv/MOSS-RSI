@@ -130,7 +130,7 @@ function commandToItem(c: CommandItem, group: 'recent' | 'commands'): MentionIte
     name: c.name,
     desc: c.argumentHint ? `${c.description} ${c.argumentHint}` : c.description,
     icon: resolveSkillIcon(c.icon),
-    iconClass: 'text-violet-400',
+    iconClass: 'text-context-rules',
     data: { source: 'command', name: c.name, prompt: c.prompt },
   };
 }
@@ -144,7 +144,7 @@ function skillToItem(s: SkillItem, group: 'recent' | 'skills'): MentionItem {
     name: s.name,
     desc: s.description,
     icon: resolveSkillIcon(s.icon),
-    iconClass: 'text-blue-600',
+    iconClass: 'text-primary',
     data: { source: 'skill', name: s.name, prompt: s.prompt ?? '' },
   };
 }
@@ -374,7 +374,7 @@ export function TaskInput({
         name: a.name,
         desc: a.description ?? '',
         icon: Bot,
-        iconClass: 'text-emerald-400',
+        iconClass: 'text-success',
       })),
     [agents],
   );

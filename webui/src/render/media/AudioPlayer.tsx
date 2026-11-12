@@ -53,7 +53,7 @@ export function AudioPlayer({ path, objectUrl }: AudioPlayerProps) {
           container,
           height: 88,
           waveColor: 'rgba(148,163,184,0.55)',
-          progressColor: 'var(--primary, #4f46e5)',
+          progressColor: 'var(--primary)',
           cursorColor: 'var(--foreground, #111)',
           barWidth: 2,
           barGap: 1,

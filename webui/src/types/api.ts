@@ -315,7 +315,7 @@ export interface InsightEvent {
 }
 
 // ============================================================================
-// 资源管理器（GET /api/system-monitor/snapshot）
+// 资源监控（GET /api/system-monitor/snapshot）
 // ============================================================================
 
 export type MossProcessGroup = 'server' | 'terminal' | 'child' | 'other';
@@ -352,6 +352,80 @@ export interface ResourceSnapshot {
   };
   moss: { pid: number; processes: MossProcessInfo[] };
   sampledAt: string;
+}
+
+// ============================================================================
+// 设置-概览「用量」（GET /api/usage/overview）
+// ============================================================================
+
+export type UsageRange = 'today' | '7d' | '30d' | 'all';
+
+export interface UsageTallyStat {
+  name: string;
+  count: number;
+  /** 出现过该名称的会话数 */
+  sessions: number;
+  /** 最近一次出现时间（ISO）；无时间戳为 '' */
+  lastAt: string;
+}
+
+export interface UsageSessionRow {
+  id: string;
+  title: string;
+  groupId: string;
+  groupName: string;
+  hidden: boolean;
+  cwd: string;
+  createdAt: string;
+  updatedAt: string;
+  turns: number;
+  tokens: { prompt: number; cached: number; completion: number; total: number };
+  cacheHitRate: number | null;
+  toolCalls: number;
+  skillLoads: number;
+  commandRuns: number;
+  lastUser: string;
+  /** 会话 Token 构成（环形图数据源） */
+  parts: Array<{ key: 'cached' | 'prompt' | 'completion'; value: number }>;
+  /** 该会话出现过的名称（前端本地筛选） */
+  tools: string[];
+  skills: string[];
+  commands: string[];
+  /** 有活动的自然日（YYYY-MM-DD；热力图按天筛选会话） */
+  activeDays: string[];
+}
+
+export interface UsageOverview {
+  range: UsageRange;
+  generatedAt: string;
+  totals: {
+    sessions: number;
+    sessionsTotal: number;
+    turns: number;
+    tokens: { prompt: number; cached: number; completion: number; total: number };
+    cacheHitRate: number | null;
+    toolCalls: number;
+    skillLoads: number;
+    commandRuns: number;
+    /** 各会话最近一轮 run 的耗时/速度汇总（口径：仅最近一轮） */
+    llmMs: number;
+    toolMs: number;
+    outputTps: number | null;
+  };
+  /** 近 56 天连续序列（热力图 8 周） */
+  days: Array<{ day: string; tokens: number; sessions: number; toolCalls: number }>;
+  /** 当前统计范围的逐日序列（两张趋势图数据源） */
+  series: Array<{
+    day: string;
+    requests: number;
+    cachedTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+  }>;
+  skills: UsageTallyStat[];
+  tools: UsageTallyStat[];
+  commands: UsageTallyStat[];
+  sessions: UsageSessionRow[];
 }
 
 /** GET /api/session/:id/state（刷新/重连恢复「不丢状态」的契约） */

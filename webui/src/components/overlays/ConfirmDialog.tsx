@@ -48,7 +48,7 @@ const variantConfig: Record<
   },
   warning: {
     icon: TriangleAlertIcon,
-    iconClass: 'text-amber-500',
+    iconClass: 'text-warning',
     actionClass: '',
   },
   info: {

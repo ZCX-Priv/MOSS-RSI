@@ -624,7 +624,7 @@ export function MemorySettingsSection() {
                         ★{m.importance.toFixed(2)}
                       </Badge>
                       {typeof m.score === 'number' && (
-                        <Badge className="bg-emerald-600/15 text-[10px] tabular-nums text-emerald-600">
+                        <Badge className="bg-success/15 text-[10px] tabular-nums text-success">
                           {t('settings.memory.relevance')} {m.score.toFixed(2)}
                         </Badge>
                       )}

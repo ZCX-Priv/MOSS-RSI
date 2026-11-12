@@ -53,10 +53,10 @@ function opKey(op: FileHistoryEntry['operation']): string {
 
 /** 操作徽章配色 */
 function opBadgeClass(op: FileHistoryEntry['operation'] | NetFileChange['operation']): string {
-  if (op === 'create') return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
-  if (op === 'delete') return 'bg-red-500/15 text-red-600 dark:text-red-400';
-  if (op === 'move') return 'bg-sky-500/15 text-sky-600 dark:text-sky-400';
-  return 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
+  if (op === 'create') return 'bg-file-create/15 text-file-create';
+  if (op === 'delete') return 'bg-file-delete/15 text-file-delete';
+  if (op === 'move') return 'bg-file-move/15 text-file-move';
+  return 'bg-file-update/15 text-file-update';
 }
 
 /** 无 diff 原因 → i18n key */
@@ -136,7 +136,7 @@ function FileChangeCard({
           )}
         </div>
         <span className="shrink-0 text-[11px] tabular-nums">
-          {file.added > 0 && <span className="text-emerald-500">+{file.added}</span>}
+          {file.added > 0 && <span className="text-success">+{file.added}</span>}
           {file.added > 0 && file.removed > 0 && ' '}
           {file.removed > 0 && <span className="text-destructive">-{file.removed}</span>}
         </span>
@@ -179,7 +179,7 @@ function FileChangeCard({
                         {t(opKey(e.operation))}
                       </span>
                       {e.toolName === 'watch' && (
-                        <span className="shrink-0 text-sky-500">{t('fileChanges.op.watch')}</span>
+                        <span className="shrink-0 text-info">{t('fileChanges.op.watch')}</span>
                       )}
                       <span
                         className="min-w-0 flex-1 truncate"
@@ -335,7 +335,7 @@ export function FileChangesPanel({ sessionId, workingDirectory }: FileChangesPan
           </span>
           <span className="text-[11px] tabular-nums text-muted-foreground">
             {t('fileChanges.changedCount', { count: files?.length ?? 0 })}
-            <span className="ml-2 text-emerald-500">+{totalAdded}</span>
+            <span className="ml-2 text-success">+{totalAdded}</span>
             <span className="ml-1.5 text-destructive">-{totalRemoved}</span>
           </span>
         </div>

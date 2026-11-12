@@ -133,7 +133,7 @@ function PinManager({ scope, pin, passwordEnabled, supportsDisable = false, cust
           )}
           {customized && <Badge variant="secondary" className="text-[10px]">{t('settings.remote.pin.custom')}</Badge>}
           {supportsDisable && !passwordEnabled && (
-            <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/40">
+            <Badge variant="outline" className="text-[10px] text-warning border-warning/40">
               {t('settings.remote.pin.disabled')}
             </Badge>
           )}
@@ -320,7 +320,7 @@ export function RemoteSettingsSection() {
         <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
           <div className="flex items-center justify-between gap-4 py-3">
             {enabled ? (
-              <Badge className="border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400">
+              <Badge className="border-success/30 bg-success/15 text-success">
                 {t('settings.remote.state.on')}
               </Badge>
             ) : (
@@ -496,7 +496,7 @@ export function RemoteSettingsSection() {
 
               {tunnelPhase === 'error' && (
                 <div className="space-y-3 py-3">
-                  <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400 break-all">
+                  <div className="rounded-lg border border-danger/30 bg-danger/5 p-3 text-sm text-danger break-all">
                     {status.tunnel.detail || t('settings.remote.tunnel.errorGeneric')}
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -518,8 +518,8 @@ export function RemoteSettingsSection() {
           </div>
 
           {/* ============ 安全提示 ============ */}
-          <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-            <ShieldAlert className="h-5 w-5 shrink-0 text-amber-500" />
+          <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning/5 p-4">
+            <ShieldAlert className="h-5 w-5 shrink-0 text-warning" />
             <div className="space-y-1.5 text-xs text-muted-foreground leading-relaxed">
               <div className="text-sm font-medium text-foreground">{t('settings.remote.security.title')}</div>
               <p>{t('settings.remote.security.1')}</p>

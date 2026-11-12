@@ -97,7 +97,8 @@ import {
   createCleanupLogsHandler,
 } from './routes/logs';
 import { createTruncatePreviewHandler, createTruncateHandler, createTruncateRestoreHandler, createRegenerateTargetHandler } from './routes/truncate';
-import { createSystemMonitorSnapshotHandler } from './routes/system-monitor';
+import { createSystemMonitorSnapshotHandler, warmResourceSnapshot } from './routes/system-monitor';
+import { createUsageOverviewHandler, warmUsageOverview } from './routes/usage';
 import {
   createListFileHistoryHandler,
   createUndoFileHistoryHandler,
@@ -257,6 +258,14 @@ class ServerModule implements Module {
     this.registerRoutes();
 
     await this.startServer();
+
+    // 概览页数据预热：启动 1.5s 后后台跑一次资源采样与用量聚合，
+    // 用户首次打开「设置-概览」即可毫秒出数（不阻塞启动，不阻止进程退出）
+    const warmTimer = setTimeout(() => {
+      warmResourceSnapshot(ctx.env);
+      warmUsageOverview(ctx.env);
+    }, 1500);
+    warmTimer.unref?.();
 
     // 注册 ServerInstance 服务（host/baseUrl 用 getter：热重绑后动态反映最新绑定）
     const self = this;
@@ -534,6 +543,9 @@ class ServerModule implements Module {
 
     // system-monitor（资源管理器：系统总量 + MOSS 自身占用进程树）
     this.router.addRoute({ method: 'GET', pattern: '/api/system-monitor/snapshot', handler: createSystemMonitorSnapshotHandler(env), auth: true });
+
+    // usage（设置-概览「用量」：跨会话 tokens / 工具 / 技能 / 命令 / 活跃度聚合）
+    this.router.addRoute({ method: 'GET', pattern: '/api/usage/overview', handler: createUsageOverviewHandler(env), auth: true });
 
     // AI 诊断（链路式流式）改走 WebSocket（ws-handler: insight.diagnose），不再提供 HTTP 接口。
 

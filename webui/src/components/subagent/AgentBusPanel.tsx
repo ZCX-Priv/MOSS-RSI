@@ -21,10 +21,10 @@ import type { AgentBusMember, AgentBusMessage } from '../../types/api';
 type MessageFilter = 'all' | 'channel' | 'direct';
 
 const STATUS_DOT: Record<AgentBusMember['status'], string> = {
-  running: 'bg-blue-500 animate-pulse',
-  completed: 'bg-emerald-500',
-  failed: 'bg-red-500',
-  aborted: 'bg-amber-500',
+  running: 'bg-primary animate-pulse',
+  completed: 'bg-success',
+  failed: 'bg-danger',
+  aborted: 'bg-warning',
 };
 
 function formatTime(iso: string): string {
@@ -147,7 +147,7 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
           <span className="shrink-0">→</span>
           <span className="shrink-0">{to}</span>
           {message.kind === 'result' && (
-            <span className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] text-emerald-600 dark:text-emerald-500">
+            <span className="shrink-0 rounded-full border border-success/30 bg-success/10 px-1.5 py-0.5 text-[9px] text-success">
               {t('subagent.card.completed')}
             </span>
           )}

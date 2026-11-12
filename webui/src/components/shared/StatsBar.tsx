@@ -21,7 +21,7 @@ function StatItem({ label, value, warning }: { label: string; value: string; war
   return (
     <span className="anim-stat whitespace-nowrap tabular-nums">
       {label}{' '}
-      <span className={cn('text-foreground/80', warning && 'text-amber-500 dark:text-amber-400')}>
+      <span className={cn('text-foreground/80', warning && 'text-warning')}>
         {value}
       </span>
     </span>

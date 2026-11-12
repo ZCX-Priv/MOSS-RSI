@@ -128,7 +128,7 @@ export function BrowserExtensionSection() {
                 bridge.port !== null &&
                 bridge.port !== bridge.configuredPort)) && (
               <Row last>
-                <span className="break-all text-xs text-amber-600 dark:text-amber-400">
+                <span className="break-all text-xs text-warning">
                   {bridge.error ??
                     t('settings.browser.bridgePortMismatch', {
                       configured: bridge.configuredPort,
@@ -240,7 +240,7 @@ export function BrowserExtensionSection() {
                   </ol>
                   <p className="mt-2 text-xs text-muted-foreground">{t('settings.browser.chromiumOnly')}</p>
                   <p className="mt-1 text-xs text-muted-foreground">{t('settings.browser.popupHint')}</p>
-                  <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  <p className="mt-1 text-xs text-warning">
                     {t('settings.browser.permissionNote')}
                   </p>
                 </details>

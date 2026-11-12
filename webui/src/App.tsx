@@ -14,8 +14,8 @@ const TaskPage = lazy(() =>
 
 // 非任务页全部路由级懒加载：设置/插件/自动化/系统监控及其重依赖（全量 lucide 图标、
 // 各类表单与表格）只在进入对应页面时下载，首屏 main chunk 不再被它们撑大。
-const SystemMonitorPage = lazy(() =>
-  import('./components/pages/SystemMonitorPage').then((m) => ({ default: m.SystemMonitorPage })),
+const OverviewSettings = lazy(() =>
+  import('./components/pages/overview/OverviewSettings').then((m) => ({ default: m.OverviewSettings })),
 );
 const PluginMarketPage = lazy(() =>
   import('./components/pages/PluginMarketPage').then((m) => ({ default: m.PluginMarketPage })),
@@ -131,6 +131,7 @@ import { useAnimationClass } from './hooks/useAnimationClass';
 import { useSkills } from './hooks/useSkills';
 import { useAgents } from './hooks/useAgents';
 import { useCommands } from './hooks/useCommands';
+import { useTheme } from './contexts/ThemeContext';
 import { useStore } from './store';
 import { applyAppearanceToDom } from './lib/appearance';
 
@@ -159,6 +160,8 @@ export default function App() {
   const fontSize = useStore((s) => s.fontSize);
   const uiDensity = useStore((s) => s.uiDensity);
   const cornerRadius = useStore((s) => s.cornerRadius);
+  // 亮暗模式：切换后需重算项目级色卡（theme-palette 按模式取色）
+  const { resolvedTheme } = useTheme();
   // TaskPage 自带含左 trigger 的合并 header，全局移动端 header 仅在其他路由显示
   const isTaskRoute = pathname === '/' || pathname.startsWith('/task');
   // 移动端 header 标题与右侧 button（仅非 TaskPage 路由）
@@ -197,8 +200,8 @@ export default function App() {
   // 外观设置 → DOM 同步：实现集中在 lib/appearance.ts（main.tsx 亦在首帧前调用一次，
   // 保证持久化值不闪默认态）；此处仅在设置变化时即时应用
   useEffect(() => {
-    applyAppearanceToDom({ accentColor, fontSize, uiDensity, cornerRadius });
-  }, [accentColor, fontSize, uiDensity, cornerRadius]);
+    applyAppearanceToDom({ accentColor, fontSize, uiDensity, cornerRadius }, resolvedTheme);
+  }, [accentColor, fontSize, uiDensity, cornerRadius, resolvedTheme]);
 
   return (
     <TooltipProvider>
@@ -342,8 +345,6 @@ export default function App() {
                 根治「发送后任务页整页重挂 + 浮出动画起点黑帧」；刷新/前进后退保持任务页 */}
             <Route path="/" element={<Navigate to="/task" replace />} />
             <Route path="/task/:taskId?" element={<TaskPage />} />
-            {/* 资源管理器（系统总量 + MOSS 自身占用；桌面/移动自适应） */}
-            <Route path="/system-monitor" element={<SystemMonitorPage />} />
             {/* 插件库：主页为 SkillHub 技能市场，管理页为技能/MCP 管理 */}
             <Route path="/plugins" element={<SkillMarketPage />} />
             <Route path="/plugins/skills" element={<PluginMarketPage />} />
@@ -357,7 +358,12 @@ export default function App() {
               <Route path="*" element={<Navigate to="/automation/configured" replace />} />
             </Route>
             <Route path="/settings" element={<SettingsPage />}>
-              <Route index element={<Navigate to="general" replace />} />
+              <Route index element={<Navigate to="overview" replace />} />
+              {/* 概览：设置默认页；用量/资源两分区在同一 OverviewSettings chunk 内静态引入 */}
+              <Route path="overview" element={<Navigate to="usage" replace />} />
+              <Route path="overview/usage" element={<OverviewSettings />} />
+              <Route path="overview/resources" element={<OverviewSettings />} />
+              <Route path="overview/*" element={<Navigate to="/settings/overview/usage" replace />} />
               <Route path="general" element={<GeneralSettings />} />
               {/* 外观：Tab 容器（外观占位 / 渲染设置 / 动画设置） */}
               <Route path="appearance" element={<AppearanceSettings />}>
@@ -406,7 +412,7 @@ export default function App() {
               <Route path="index" element={<Navigate to="/settings/context" replace />} />
               <Route path="rules" element={<Navigate to="/settings/context/rules" replace />} />
               <Route path="memory" element={<Navigate to="/settings/context/memory" replace />} />
-              <Route path="*" element={<Navigate to="/settings/general" replace />} />
+              <Route path="*" element={<Navigate to="/settings/overview" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/task" replace />} />
             </Routes>

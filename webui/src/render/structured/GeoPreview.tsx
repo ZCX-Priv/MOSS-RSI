@@ -196,7 +196,7 @@ export function GeoPreview({ text, ext }: GeoPreviewProps) {
       const margin = 12;
       const spanLon = bounds.maxLon - bounds.minLon;
       const spanLat = bounds.maxLat - bounds.minLat;
-      const color = getComputedStyle(canvas).color || '#3b82f6';
+      const color = getComputedStyle(canvas).color || getComputedStyle(document.documentElement).getPropertyValue('--palette-primary').trim();
       ctx.fillStyle = color;
       for (const p of points) {
         const x =

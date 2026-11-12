@@ -948,7 +948,7 @@ function SortableProviderCard({
                   <span
                     className={cn(
                       'size-2.5 shrink-0 rounded-full',
-                      isSelected ? 'bg-emerald-500' : 'bg-muted-foreground/30',
+                      isSelected ? 'bg-success' : 'bg-muted-foreground/30',
                     )}
                   />
                   {/* 名称 + 徽章 */}
@@ -1948,7 +1948,7 @@ function BalanceDialog({ open, onOpenChange, provider }: BalanceDialogProps) {
                 <span className="text-muted-foreground">
                   {t('settings.provider.balanceRemaining')}
                 </span>
-                <span className="tabular-nums text-emerald-600 dark:text-emerald-400">
+                <span className="tabular-nums text-success">
                   {fmt(result.balanceUsd)}
                 </span>
               </div>

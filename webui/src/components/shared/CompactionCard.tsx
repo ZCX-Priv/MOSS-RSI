@@ -54,7 +54,7 @@ export const CompactionCard = memo(function CompactionCard({
               {beforeTokens.toLocaleString()} →{' '}
               {afterTokens.toLocaleString()}
             </span>
-            <span className="text-emerald-500">
+            <span className="text-success">
               -{savedPercent}%（{(saved / 1000).toFixed(1)}k）
             </span>
           </span>

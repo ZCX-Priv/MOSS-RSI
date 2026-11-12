@@ -267,7 +267,7 @@ export function ImQrLoginDialog({ channel, open, onOpenChange, onConnected }: Pr
             {message && message !== error ? (
               <div className="text-xs text-muted-foreground">{message}</div>
             ) : null}
-            {error ? <div className="text-xs text-red-600 dark:text-red-400">{error}</div> : null}
+            {error ? <div className="text-xs text-danger">{error}</div> : null}
             {showCountdown ? (
               <div className="text-xs text-muted-foreground">
                 {t('settings.im.qrValidFor', { time: formatRemaining(remainingMs ?? 0) })}

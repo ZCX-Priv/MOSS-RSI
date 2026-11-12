@@ -74,20 +74,20 @@ function useAgentBusMember(toolCallId: string) {
 
 /** 进度点阵配色（按行状态） */
 const DOT_CLASS: Record<RowStatus, string> = {
-  completed: 'bg-emerald-500',
-  running: 'bg-blue-500 animate-pulse',
-  failed: 'bg-red-500',
+  completed: 'bg-success',
+  running: 'bg-primary animate-pulse',
+  failed: 'bg-danger',
 };
 
 /** 任务行右侧状态图标 */
 function TaskStatusIcon({ status }: { status: RowStatus }) {
   switch (status) {
     case 'completed':
-      return <CircleCheck className="size-3.5 shrink-0 text-emerald-500" />;
+      return <CircleCheck className="size-3.5 shrink-0 text-success" />;
     case 'failed':
-      return <CircleX className="size-3.5 shrink-0 text-red-500" />;
+      return <CircleX className="size-3.5 shrink-0 text-danger" />;
     default:
-      return <Loader2 className="size-3.5 shrink-0 animate-spin text-blue-500" />;
+      return <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />;
   }
 }
 
@@ -294,11 +294,11 @@ export const SubagentCard = memo(function SubagentCard({
             className={cn(
               'flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium',
               overall === 'running' &&
-                'border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400',
+                'border-primary/30 bg-primary/10 text-primary-text',
               overall === 'failed' &&
-                'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-500',
+                'border-danger/30 bg-danger/10 text-danger',
               overall === 'completed' &&
-                'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-500',
+                'border-success/30 bg-success/10 text-success',
             )}
           >
             {overall === 'running' && <Loader2 className="size-2.5 animate-spin" />}

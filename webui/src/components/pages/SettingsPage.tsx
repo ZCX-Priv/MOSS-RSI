@@ -40,6 +40,7 @@ import {
   SquareMousePointer,
   DatabaseBackup,
   MessageSquare,
+  LayoutDashboard,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -48,6 +49,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { useI18n } from '../../contexts/I18nContext';
 import type { Locale } from '../../i18n';
 import { cn } from '@/lib/utils';
+import { ACCENT_PRESETS, DEFAULT_ACCENT_HEX } from '@/lib/theme-palette';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -123,6 +125,7 @@ export interface NavItem {
 }
 
 export const settingsNavItems: NavItem[] = [
+  { id: 'overview', labelKey: 'settings.nav.overview', Icon: LayoutDashboard },
   { id: 'general', labelKey: 'settings.nav.general', Icon: Settings },
   { id: 'appearance', labelKey: 'settings.nav.appearance', Icon: Palette },
   { id: 'agent', labelKey: 'settings.nav.agent', Icon: Bot },
@@ -149,6 +152,9 @@ export interface SearchableSetting {
 
 export const settingsSearchIndex: SearchableSetting[] = [
   // 页面级（导航项 + placeholder 页面描述）
+  { labelKey: 'settings.nav.overview', section: 'overview' },
+  { labelKey: 'settings.overview.usageTitle', descriptionKey: 'settings.overview.usageDesc', section: 'overview' },
+  { labelKey: 'settings.overview.resourcesTitle', descriptionKey: 'settings.overview.resourcesDesc', section: 'overview' },
   { labelKey: 'settings.nav.general', section: 'general' },
   { labelKey: 'settings.nav.appearance', section: 'appearance' },
   { labelKey: 'settings.nav.render', section: 'render' },
@@ -939,7 +945,7 @@ export function SafetySettings() {
             rules={safety.rules.deny}
             onAdd={(rule) => patchRules('deny', (r) => [...r, rule])}
             onRemove={(rule) => patchRules('deny', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-red-500"
+            accentClass="bg-danger"
           />
           <SafetyRuleList
             titleKey="settings.safety.askRules"
@@ -947,7 +953,7 @@ export function SafetySettings() {
             rules={safety.rules.ask}
             onAdd={(rule) => patchRules('ask', (r) => [...r, rule])}
             onRemove={(rule) => patchRules('ask', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-amber-500"
+            accentClass="bg-warning"
           />
           <SafetyRuleList
             titleKey="settings.safety.allowRules"
@@ -955,7 +961,7 @@ export function SafetySettings() {
             rules={safety.rules.allow}
             onAdd={(rule) => patchRules('allow', (r) => [...r, rule])}
             onRemove={(rule) => patchRules('allow', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-emerald-500"
+            accentClass="bg-success"
           />
         </div>
       </div>
@@ -1001,7 +1007,7 @@ export function SafetySettings() {
             rules={projectRules.deny}
             onAdd={(rule) => patchProjectRules('deny', (r) => [...r, rule])}
             onRemove={(rule) => patchProjectRules('deny', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-red-500"
+            accentClass="bg-danger"
           />
           <SafetyRuleList
             titleKey="settings.safety.askRules"
@@ -1009,7 +1015,7 @@ export function SafetySettings() {
             rules={projectRules.ask}
             onAdd={(rule) => patchProjectRules('ask', (r) => [...r, rule])}
             onRemove={(rule) => patchProjectRules('ask', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-amber-500"
+            accentClass="bg-warning"
           />
           <SafetyRuleList
             titleKey="settings.safety.allowRules"
@@ -1017,7 +1023,7 @@ export function SafetySettings() {
             rules={projectRules.allow}
             onAdd={(rule) => patchProjectRules('allow', (r) => [...r, rule])}
             onRemove={(rule) => patchProjectRules('allow', (r) => r.filter((x) => x !== rule))}
-            accentClass="bg-emerald-500"
+            accentClass="bg-success"
           />
         </div>
       </div>
@@ -1330,10 +1336,10 @@ const LOGS_FALLBACK: LogsConfig = { level: 'info', retentionDays: 14, maxFileMb:
 const LOG_LINE_RE = /^(\S+)\s+(DEBUG|INFO|WARN|ERROR|FATAL)\s*\[([^\]]*)\]\s?(.*)$/;
 const LEVEL_BADGE_CLASS: Record<string, string> = {
   DEBUG: 'bg-muted text-muted-foreground',
-  INFO: 'bg-blue-600/15 text-blue-600',
-  WARN: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-  ERROR: 'bg-red-500/15 text-red-600 dark:text-red-400',
-  FATAL: 'bg-purple-500/15 text-purple-600 dark:text-purple-400',
+  INFO: 'bg-info/15 text-info',
+  WARN: 'bg-warning/15 text-warning',
+  ERROR: 'bg-danger/15 text-danger',
+  FATAL: 'bg-danger/15 text-danger-strong',
 };
 
 export function LogsSettings() {
@@ -1912,7 +1918,7 @@ export function AgentSettings() {
             <Button
               variant="ghost"
               size="icon-sm"
-              className="text-red-500 hover:text-red-600"
+              className="text-danger hover:text-danger/80"
               title={t('common.delete')}
               disabled={isBusy}
               onClick={() => setDeleteTarget(agent.id)}
@@ -1988,7 +1994,7 @@ export function AgentSettings() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction className="bg-red-500 text-white hover:bg-red-600" onClick={() => void handleDelete()}>
+            <AlertDialogAction className="bg-danger text-white hover:bg-danger/90" onClick={() => void handleDelete()}>
               {t('common.delete')}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -2472,7 +2478,7 @@ export function ToolsSettings() {
                       {tool.source === 'builtin' ? t('settings.tools.builtin') : t('settings.tools.custom')}
                     </Badge>
                     {tool.annotations?.destructiveHint && (
-                      <Badge variant="secondary" className="font-normal text-amber-600">
+                      <Badge variant="secondary" className="font-normal text-warning">
                         {t('settings.tools.destructive')}
                       </Badge>
                     )}
@@ -2838,15 +2844,6 @@ export function AppearanceSettingsSection() {
   // 手动拖拽过 → 一律显示「自定义」；否则按当前比例命中三档预设
   const rightPanelPreset = rightPanelCustom ? 'custom' : rightPanelPresetOf(rightPanelRatio);
 
-  const ACCENT_PRESETS = [
-    { id: 'blue', color: 'oklch(0.546 0.245 263.4)' },
-    { id: 'green', color: 'oklch(0.627 0.194 149.2)' },
-    { id: 'purple', color: 'oklch(0.541 0.281 293.0)' },
-    { id: 'orange', color: 'oklch(0.646 0.222 41.0)' },
-    { id: 'rose', color: 'oklch(0.586 0.225 16.5)' },
-    { id: 'teal', color: 'oklch(0.6 0.118 184.5)' },
-  ];
-
   const isCustom = accentColor.startsWith('#');
 
   return (
@@ -2889,7 +2886,7 @@ export function AppearanceSettingsSection() {
             {isCustom && <Check className="size-4 text-white" />}
             <input
               type="color"
-              value={isCustom ? accentColor : '#2563eb'}
+              value={isCustom ? accentColor : DEFAULT_ACCENT_HEX}
               onChange={(e) => setAccentColor(e.target.value)}
               className="sr-only"
             />

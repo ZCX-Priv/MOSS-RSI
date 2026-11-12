@@ -126,7 +126,7 @@ function ToolModeToggle({ mode, onChange }: { mode: CardMode; onChange: (mode: C
 function DiffLineRow({ row }: { row: DiffRow }) {
   if (row.kind === 'hunk') {
     return (
-      <div className="bg-sky-500/10 px-2 py-0.5 text-sky-600 dark:text-sky-400">
+      <div className="bg-info/10 px-2 py-0.5 text-info">
         {row.text}
       </div>
     );
@@ -135,8 +135,8 @@ function DiffLineRow({ row }: { row: DiffRow }) {
     <div
       className={cn(
         'diff-row grid grid-cols-[2.5rem_2.5rem_1rem_1fr] items-start px-1',
-        row.kind === 'add' && 'bg-emerald-500/10 dark:bg-emerald-500/20',
-        row.kind === 'del' && 'bg-red-500/10 dark:bg-red-500/20',
+        row.kind === 'add' && 'bg-success/10 dark:bg-success/20',
+        row.kind === 'del' && 'bg-danger/10 dark:bg-danger/20',
       )}
     >
       <span className="select-none pr-1.5 text-right text-muted-foreground/50">
@@ -148,7 +148,7 @@ function DiffLineRow({ row }: { row: DiffRow }) {
       <span
         className={cn(
           'select-none whitespace-pre',
-          row.kind === 'add' && 'text-emerald-600 dark:text-emerald-400',
+          row.kind === 'add' && 'text-success',
           row.kind === 'del' && 'text-destructive',
           row.kind === 'context' && 'text-muted-foreground/60',
         )}
@@ -200,7 +200,7 @@ function DiffBlockView({ block }: { block: DiffBlock }) {
         <span className="shrink-0 text-[10px] text-muted-foreground">({label})</span>
         <span className="ml-auto shrink-0 text-[10px] tabular-nums">
           {block.added > 0 && (
-            <span className="text-emerald-600 dark:text-emerald-400">+{block.added}</span>
+            <span className="text-success">+{block.added}</span>
           )}
           {block.added > 0 && block.removed > 0 && ' '}
           {block.removed > 0 && <span className="text-destructive">-{block.removed}</span>}
@@ -389,7 +389,7 @@ function PreviewBody({
     return (
       <div className="overflow-hidden">
         <div className="flex items-center gap-1.5 border-b border-border bg-muted/40 px-2 py-1 font-mono text-[11px]">
-          <span className="select-none text-emerald-600 dark:text-emerald-400">$</span>
+          <span className="select-none text-success">$</span>
           {/* 命令行单行横向滚动：超长命令不再省略号截断（可左右拖动查看完整命令） */}
           <span
             className="min-w-0 flex-1 overflow-x-auto no-scrollbar whitespace-pre text-foreground"
@@ -831,7 +831,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         {diffStats && (
           <span className="shrink-0 text-[10px] tabular-nums">
             {diffStats.added > 0 && (
-              <span className="text-emerald-600 dark:text-emerald-400">+{diffStats.added}</span>
+              <span className="text-success">+{diffStats.added}</span>
             )}
             {diffStats.added > 0 && diffStats.removed > 0 && ' '}
             {diffStats.removed > 0 && (
@@ -872,7 +872,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
                 className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
               >
                 {copied ? (
-                  <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <Check className="size-3.5 text-success" />
                 ) : (
                   <Copy className="size-3.5" />
                 )}

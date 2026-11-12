@@ -4,6 +4,7 @@
 export type OverlayType = 'search' | null;
 
 export type SettingsSection =
+  | 'overview'
   | 'general'
   | 'appearance'
   | 'render'

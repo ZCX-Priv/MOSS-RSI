@@ -91,13 +91,13 @@ export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProp
   return (
     <div
       className={cn(
-        'flex flex-col gap-2.5 rounded-lg border border-amber-500/40 bg-amber-50/50 p-3 shadow-sm dark:bg-amber-950/20',
+        'flex flex-col gap-2.5 rounded-lg border border-warning/40 bg-warning/10 p-3 shadow-sm',
         className,
       )}
     >
       {/* 头部：标题 + 权限来源 + 步骤进度 + 顺序切换 */}
       <div className="flex min-w-0 items-center gap-1.5">
-        <ShieldAlert className="size-3.5 shrink-0 text-amber-600" />
+        <ShieldAlert className="size-3.5 shrink-0 text-warning" />
         <span className="shrink-0 text-xs font-medium text-foreground">
           {t('task.confirmTitle')}
           {current.toolName ? ` · ${current.toolName}` : ''}

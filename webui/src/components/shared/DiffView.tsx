@@ -42,15 +42,15 @@ export function DiffView({ diff, maxHeight = 420 }: DiffViewProps) {
                 key={`${hi}-${li}`}
                 className={cn(
                   'grid grid-cols-[3.4rem_3.4rem_1fr]',
-                  line.type === 'add' && 'bg-emerald-500/15',
-                  line.type === 'del' && 'bg-red-500/15',
+                  line.type === 'add' && 'bg-success/15',
+                  line.type === 'del' && 'bg-danger/15',
                 )}
               >
                 <span
                   className={cn(
                     'select-none pr-2 text-right tabular-nums',
-                    line.type === 'add' && 'text-emerald-600/70 dark:text-emerald-400/70',
-                    line.type === 'del' && 'text-red-500/70 dark:text-red-400/70',
+                    line.type === 'add' && 'text-success/70',
+                    line.type === 'del' && 'text-danger/70',
                     line.type === 'context' && 'text-muted-foreground/60',
                   )}
                 >
@@ -59,8 +59,8 @@ export function DiffView({ diff, maxHeight = 420 }: DiffViewProps) {
                 <span
                   className={cn(
                     'select-none pr-2 text-right tabular-nums',
-                    line.type === 'add' && 'text-emerald-600/70 dark:text-emerald-400/70',
-                    line.type === 'del' && 'text-red-500/70 dark:text-red-400/70',
+                    line.type === 'add' && 'text-success/70',
+                    line.type === 'del' && 'text-danger/70',
                     line.type === 'context' && 'text-muted-foreground/60',
                   )}
                 >
@@ -69,8 +69,8 @@ export function DiffView({ diff, maxHeight = 420 }: DiffViewProps) {
                 <span
                   className={cn(
                     'whitespace-pre pr-3',
-                    line.type === 'add' && 'text-emerald-700 dark:text-emerald-200',
-                    line.type === 'del' && 'text-red-700 dark:text-red-200',
+                    line.type === 'add' && 'text-success',
+                    line.type === 'del' && 'text-danger',
                     line.type === 'context' && 'text-foreground/90',
                   )}
                 >
