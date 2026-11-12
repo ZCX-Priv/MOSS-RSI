@@ -1568,7 +1568,7 @@ export const en = {
     channel: 'Channel',
     direct: 'Direct',
     all: 'All',
-    empty: 'No agents yet',
+    empty: 'No running agents',
     emptyMessages: 'No messages yet',
     auditHint: 'Messages are audited under ~/.moss/agent-bus/',
     task: 'Task',

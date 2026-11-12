@@ -5,7 +5,7 @@
 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CircleCheck, Circle, Loader2, ListTodo, ChevronDown } from 'lucide-react';
+import { CircleCheck, Circle, CircleX, Loader2, ListTodo, ChevronDown } from 'lucide-react';
 import type { TodoItem } from '../../types/api';
 import { cn } from '@/lib/utils';
 
@@ -108,10 +108,15 @@ export function TodoRow({ item }: { item: TodoItem }) {
       {item.status === 'pending' && (
         <Circle className="size-4 shrink-0 text-muted-foreground" />
       )}
+      {/* 未解决：与 completed 的绿色勾 + 删除线正好相反（红叉 + 删除线） */}
+      {item.status === 'blocked' && (
+        <CircleX className="size-4 shrink-0 text-danger" />
+      )}
       <span
         className={cn(
           'min-w-0 break-words text-xs',
           item.status === 'completed' && 'text-muted-foreground line-through',
+          item.status === 'blocked' && 'text-muted-foreground line-through',
           item.status === 'in_progress' && 'font-medium text-foreground',
           item.status === 'pending' && 'text-muted-foreground',
         )}

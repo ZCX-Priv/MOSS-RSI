@@ -1154,7 +1154,8 @@ export interface TaskGroup {
 export interface TodoItem {
   id: string;
   text: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  /** blocked = 未解决（遇阻/失败），前端用红叉 + 删除线呈现 */
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked';
   priority?: 'low' | 'medium' | 'high';
   sessionId?: string;
 }

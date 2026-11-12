@@ -28,6 +28,10 @@ export interface SubagentRunInput {
   /** 同步等待结果 / 后台运行（async 立即返回 agentId，结果通过总线回执） */
   mode?: 'sync' | 'async';
   permissionMode?: PermissionMode;
+  /** 本次运行的工具白名单覆盖（不传=模板配置；空数组等同不传） */
+  toolAllowlist?: string[];
+  /** 本次运行的最大轮数覆盖（0=不限制；不传=模板/全局配置） */
+  maxTurns?: number;
   /** 父会话中触发本次子代理的工具调用 id（前端卡片据此精确关联运行过程） */
   parentToolCallId?: string;
   /** 父会话 id（用于继承权限模式、计算嵌套深度、注册总线成员） */
@@ -268,6 +272,8 @@ export class SubagentRunner {
         userMessage: input.task,
         permissionMode,
         cwd: input.cwd,
+        ...(input.toolAllowlist ? { toolAllowlist: input.toolAllowlist } : {}),
+        ...(typeof input.maxTurns === 'number' ? { maxTurns: input.maxTurns } : {}),
         bus: {
           kind: 'subagent',
           template: input.template,

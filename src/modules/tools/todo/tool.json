@@ -1,7 +1,7 @@
 {
   "name": "todo",
-  "description": "管理当前会话的待办清单（每会话独立持久化）。action=\"create\" mode=\"append\"（默认）加 text（可选 priority）新建一条；action=\"create\" mode=\"replace\" 加 items（全量待办数组，至少 1 条，每项可选 id/status/priority）整体覆盖清单；action=\"update\" 加 id 与 text/status/priority 至少一项修改；action=\"list\" 查看当前全部待办（含 id，操作前建议先 list）；action=\"reorder\" 加 orderedIds（全量 id 的新顺序排列）重排；action=\"batch_update\" 加 updates 数组一次批量更新多项（任一 id 无效则整体失败不写入）。开始多步任务时建议创建待办并在每步完成后更新状态。任务全部完成后保留 completed 状态即可，无需重建清单。",
-  "description_en": "Manage the current session's todo list (persisted per session). action=\"create\" mode=\"append\" (default) with text (optional priority) creates one item; action=\"create\" mode=\"replace\" with items (full todo array, at least 1 item, each with optional id/status/priority) replaces the whole list; action=\"update\" with id plus at least one of text/status/priority; action=\"list\" shows all current todos (with ids; listing first is recommended before operating); action=\"reorder\" with orderedIds (a full permutation of ids in the new order); action=\"batch_update\" with an updates array to update multiple items at once (any invalid id fails the whole batch, nothing is written). When starting a multi-step task, create todos and update statuses as steps complete. After everything is done, keep the completed statuses; no need to rebuild the list.",
+  "description": "管理当前会话的待办清单（每会话独立持久化）。action=\"create\" mode=\"append\"（默认）加 text（可选 priority）新建一条；action=\"create\" mode=\"replace\" 加 items（全量待办数组，至少 1 条，每项可选 id/status/priority）整体覆盖清单；action=\"update\" 加 id 与 text/status/priority 至少一项修改；action=\"list\" 查看当前全部待办（含 id，操作前建议先 list）；action=\"reorder\" 加 orderedIds（全量 id 的新顺序排列）重排；action=\"batch_update\" 加 updates 数组一次批量更新多项（任一 id 无效则整体失败不写入）。执行纪律：多步任务先用一次 create mode=replace 建好清单；同一时刻只允许一个 in_progress，其余保持 pending；完成一项立即 update status=completed（打勾）再开始下一项；没做成不要静默跳过，update status=blocked 并把 text 改为「未解决：<原因/证据>」，解决后恢复文本并改为 completed；禁止并行推进多个待办或跨项跳跃。每次变更后工具会回传完整清单与当前/下一个待办。任务全部完成后保留最终状态，无需重建清单。",
+  "description_en": "Manage the current session's todo list (persisted per session). action=\"create\" mode=\"append\" (default) with text (optional priority) creates one item; action=\"create\" mode=\"replace\" with items (full todo array, at least 1 item, each with optional id/status/priority) replaces the whole list; action=\"update\" with id plus at least one of text/status/priority; action=\"list\" shows all current todos (with ids; listing first is recommended before operating); action=\"reorder\" with orderedIds (a full permutation of ids in the new order); action=\"batch_update\" with an updates array to update multiple items at once (any invalid id fails the whole batch, nothing is written). Discipline: build the list once with create mode=replace for multi-step tasks; keep at most one in_progress item (others pending); mark an item completed immediately when it is done, then start the next; never silently skip a failed item—set status=blocked and prefix its text with \"Unresolved: <reason/evidence>\", then restore the text and mark completed after fixing it; never work on multiple todos in parallel or jump between them. Every mutation returns the full list plus the current/next item. Keep final statuses when everything is done; no need to rebuild the list.",
   "icon": "list-checks",
   "annotations": {
     "idempotentHint": false
@@ -55,9 +55,10 @@
         "enum": [
           "pending",
           "in_progress",
-          "completed"
+          "completed",
+          "blocked"
         ],
-        "description": "状态。仅 update/batch_update/create(mode=replace 的 items 内) 使用",
+        "description": "状态（blocked=未解决）。仅 update/batch_update/create(mode=replace 的 items 内) 使用",
         "description_en": "Status. Only used by update/batch_update/create (inside items when mode=replace)"
       },
       "items": {
@@ -81,7 +82,8 @@
               "enum": [
                 "pending",
                 "in_progress",
-                "completed"
+                "completed",
+                "blocked"
               ]
             },
             "priority": {
@@ -127,7 +129,8 @@
               "enum": [
                 "pending",
                 "in_progress",
-                "completed"
+                "completed",
+                "blocked"
               ]
             },
             "priority": {

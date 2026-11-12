@@ -9,7 +9,8 @@ import { join, dirname } from 'node:path';
 import type { Environment } from '../../../../core/types';
 import { atomicWriteFile } from '../../../../utils/fs-atomic';
 
-export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+// blocked = 未解决（遇阻/失败/待外部条件）：保留在清单中，解决后再改为 completed
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
 export type TodoPriority = 'low' | 'medium' | 'high';
 
 export interface TodoItem {

@@ -17,7 +17,7 @@ interface TemplateMeta {
   promptPath: string;
   /** 默认工具白名单 */
   tools: string[];
-  /** 默认最大轮数 */
+  /** 默认最大轮数（统一 200；agent 工具支持运行级覆盖，最低 200） */
   maxTurns: number;
 }
 
@@ -39,7 +39,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
     description: '代码库探索专家：只读优先，快速定位结构与关键文件',
     promptPath: 'subagent/templates/explorer.md',
     tools: ['read', 'glob', 'grep', 'web', 'skill', 'memory', 'todo'],
-    maxTurns: 20,
+    maxTurns: 200,
   },
   {
     id: 'agent_planner',
@@ -47,7 +47,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
     description: '任务规划专家：拆解目标为带依赖与验收标准的任务 DAG',
     promptPath: 'subagent/templates/planner.md',
     tools: ['read', 'glob', 'grep', 'todo', 'skill', 'memory'],
-    maxTurns: 12,
+    maxTurns: 200,
   },
   {
     id: 'agent_coder',
@@ -66,7 +66,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
       'skill',
       'memory',
     ],
-    maxTurns: 40,
+    maxTurns: 200,
   },
   {
     id: 'agent_reviewer',
@@ -74,7 +74,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
     description: '对抗性审查专家：从第一性原理揪出所有 bug',
     promptPath: 'subagent/templates/reviewer.md',
     tools: ['read', 'glob', 'grep', 'terminal', 'run_code', 'todo', 'skill', 'memory'],
-    maxTurns: 24,
+    maxTurns: 200,
   },
 ];
 

@@ -361,6 +361,10 @@ export interface AgentRunInput {
   model?: string;
   /** Agent 配置 ID（可选；指定后按该 Agent 的 systemPrompt/model/tools/maxTurns/maxTokens 执行） */
   agentId?: string;
+  /** 覆盖 Agent 模板的工具白名单（子代理派发用；不传=模板配置） */
+  toolAllowlist?: string[];
+  /** 覆盖最大轮数（0=不限制；不传=模板/全局配置） */
+  maxTurns?: number;
   /**
    * 多智能体总线元信息；缺省按主代理注册。
    * 子代理由 SubagentRunner 注入 parentSessionId / parentToolCallId / depth。

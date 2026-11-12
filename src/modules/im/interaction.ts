@@ -155,6 +155,7 @@ const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
   pending: 'im.interaction.todoPending',
   in_progress: 'im.interaction.todoInProgress',
   completed: 'im.interaction.todoCompleted',
+  blocked: 'im.interaction.todoBlocked',
 };
 
 /** Todo 清单（空清单返回空串） */

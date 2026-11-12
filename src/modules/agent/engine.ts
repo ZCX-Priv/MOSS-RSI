@@ -737,7 +737,8 @@ export class AgentEngineImpl implements AgentEngine {
     // 子代理且模板未显式声明 tools 时收窄为只读默认集（需要写权限必须在模板里显式声明）；
     // 主会话空/缺省 = 全部工具。
     const codeMode = cfg.codeMode;
-    const profileTools = (agentProfile?.tools ?? []).filter(
+    // 运行级白名单覆盖（agent 工具派发时传入）优先于模板配置
+    const profileTools = (input.toolAllowlist ?? agentProfile?.tools ?? []).filter(
       (name): name is string => typeof name === 'string' && name.trim() !== '',
     );
     const includeOnly =
@@ -791,8 +792,9 @@ export class AgentEngineImpl implements AgentEngine {
     }
 
     // ReAct 循环（maxTurns=0 表示不限制 → Infinity；while 条件与触顶判断天然兼容）
+    // 运行级覆盖（agent 工具派发时传入）优先于模板配置
     let turn = 0;
-    const effectiveMaxTurns = agentProfile?.maxTurns ?? cfg.maxTurns;
+    const effectiveMaxTurns = input.maxTurns ?? agentProfile?.maxTurns ?? cfg.maxTurns;
     const maxTurns = effectiveMaxTurns === 0 ? Infinity : effectiveMaxTurns;
     let finalText = '';
     let finishReason: AgentRunResult['finishReason'] = 'stop';
@@ -1494,19 +1496,14 @@ export class AgentEngineImpl implements AgentEngine {
    */
   getUserNodes(sessionId: string): Array<{ id: string; index: number; label: string }> {
     const all = this.getHistory(sessionId);
-    const skipNames = new Set([
-      'compaction-summary',
-      'env-context',
-      'day-rollover',
-      'active-rules',
-      'memory-l1',
-      'project-context',
-    ]);
     const nodes: Array<{ id: string; index: number; label: string }> = [];
     for (let i = 0; i < all.length; i++) {
       const m = all[i];
       if (m.role !== 'user') continue;
-      if (m.name && skipNames.has(m.name)) continue;
+      // 只保留真实用户消息：内部锚定/注入消息（env-context / active-rules / memory-l1 /
+      // agent-message / max-turns-notice / compaction-summary 等）一律带 name，
+      // 它们在模型视图可见，但不应出现在「对话节点」导航中。
+      if (m.name) continue;
       const id =
         typeof m.clientMessageId === 'string' && m.clientMessageId
           ? m.clientMessageId

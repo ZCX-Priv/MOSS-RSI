@@ -708,6 +708,7 @@ export const zh = {
       todoPending: '待办',
       todoInProgress: '进行中',
       todoCompleted: '已完成',
+      todoBlocked: '未解决',
     },
   },
   daemon: {

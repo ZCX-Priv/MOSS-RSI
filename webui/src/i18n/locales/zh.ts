@@ -1567,7 +1567,7 @@ export const zh = {
     channel: '频道',
     direct: '私信',
     all: '全部',
-    empty: '暂无智能体',
+    empty: '当前没有运行中的智能体',
     emptyMessages: '暂无通信记录',
     auditHint: '通信记录已落盘到 ~/.moss/agent-bus/',
     task: '任务',

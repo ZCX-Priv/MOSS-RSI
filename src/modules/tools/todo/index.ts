@@ -36,6 +36,29 @@ interface TodoReplaceInput {
   updatedAt?: string;
 }
 
+/**
+ * 清单摘要：每次变更后回传完整清单与当前/下一个待办。
+ * 目的：让模型始终看见自己的进度，强化「一次只推进一项」。
+ */
+function formatTodoSummary(items: TodoItem[]): string {
+  const mark: Record<TodoStatus, string> = {
+    completed: '[x]',
+    in_progress: '[>]',
+    pending: '[ ]',
+    blocked: '[!]',
+  };
+  const lines = items.map((it) => `${mark[it.status]} #${it.id} ${it.text}`);
+  const current = items.find((it) => it.status === 'in_progress');
+  const next = items.find((it) => it.status === 'pending');
+  return [
+    ...lines,
+    current ? `当前进行中：#${current.id} ${current.text}` : '当前没有 in_progress 项',
+    next ? `下一个待办：#${next.id} ${next.text}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export default function createExecute(env: Environment) {
   return {
     async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -102,7 +125,10 @@ export default function createExecute(env: Environment) {
             store.items = newItems;
             persist();
             return {
-              content: [{ type: 'text', text: `${t('tools.todoReplaced', { count: newItems.length })}:\n${JSON.stringify(newItems, null, 2)}` }],
+              content: [{
+                type: 'text',
+                text: `${t('tools.todoReplaced', { count: newItems.length })}:\n${JSON.stringify(newItems, null, 2)}\n\n${formatTodoSummary(newItems)}`,
+              }],
               metadata: { action: 'create', mode: 'replace', count: newItems.length },
             };
           }
@@ -124,7 +150,10 @@ export default function createExecute(env: Environment) {
           store.nextId += 1;
           persist();
           return {
-            content: [{ type: 'text', text: `${t('tools.todoCreated', { id: item.id })}:\n${JSON.stringify(item, null, 2)}` }],
+            content: [{
+              type: 'text',
+              text: `${t('tools.todoCreated', { id: item.id })}:\n${JSON.stringify(item, null, 2)}\n\n${formatTodoSummary(store.items)}`,
+            }],
             metadata: { action: 'create', mode: 'append', id: item.id },
           };
         }
@@ -143,7 +172,10 @@ export default function createExecute(env: Environment) {
           item.updatedAt = new Date().toISOString();
           persist();
           return {
-            content: [{ type: 'text', text: `${t('tools.todoUpdated', { id: item.id })}:\n${JSON.stringify(item, null, 2)}` }],
+            content: [{
+              type: 'text',
+              text: `${t('tools.todoUpdated', { id: item.id })}:\n${JSON.stringify(item, null, 2)}\n\n${formatTodoSummary(store.items)}`,
+            }],
             metadata: { action: 'update', id: item.id },
           };
         }
@@ -195,7 +227,10 @@ export default function createExecute(env: Environment) {
           }
           persist();
           return {
-            content: [{ type: 'text', text: `${t('tools.todoBatchUpdated', { count: updates.length })}:\n${JSON.stringify(store.items.filter(it => updateIds.has(it.id)), null, 2)}` }],
+            content: [{
+              type: 'text',
+              text: `${t('tools.todoBatchUpdated', { count: updates.length })}:\n${JSON.stringify(store.items.filter(it => updateIds.has(it.id)), null, 2)}\n\n${formatTodoSummary(store.items)}`,
+            }],
             metadata: { action: 'batch_update', count: updates.length },
           };
         }

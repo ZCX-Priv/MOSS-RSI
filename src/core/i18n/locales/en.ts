@@ -710,6 +710,7 @@ export const en = {
       todoPending: 'Pending',
       todoInProgress: 'In progress',
       todoCompleted: 'Completed',
+      todoBlocked: 'Unresolved',
     },
   },
   daemon: {

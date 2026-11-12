@@ -15,6 +15,10 @@ import type { AgentBus, AgentBusMember } from '../agent-bus/types';
 import type { AgentRegistry } from './types';
 import type { SubagentRunner } from './runner';
 
+/** 子代理默认/最低工具调用轮数（不填按 200；低于 200 提升为 200） */
+const DEFAULT_SUBAGENT_MAX_TURNS = 200;
+const MIN_SUBAGENT_MAX_TURNS = 200;
+
 interface AgentToolParams {
   /** 注册表 agent id（如 agent_explorer） */
   template?: string;
@@ -23,6 +27,35 @@ interface AgentToolParams {
   cwd?: string;
   /** sync=阻塞等待报告（默认）；async=后台运行，立即返回 agentId */
   mode?: 'sync' | 'async';
+  /** 本次子代理可用的工具白名单（不填=模板默认配置） */
+  tools?: string[];
+  /** 工具调用轮数：不填=200；最低 200；'infinite'=不限制 */
+  maxTurns?: number | string;
+}
+
+/** 归一化工具白名单：去空/去重；空数组视为未填写（返回 undefined，走模板默认） */
+function normalizeToolAllowlist(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const names = [
+    ...new Set(
+      raw
+        .filter((v): v is string => typeof v === 'string')
+        .map((v) => v.trim())
+        .filter(Boolean),
+    ),
+  ];
+  return names.length > 0 ? names : undefined;
+}
+
+/** 归一化轮数：不填=200；infinite=0（引擎按 Infinity 处理）；低于 200 提升为 200 */
+function normalizeMaxTurns(raw: unknown): { value?: number; error?: string } {
+  if (raw === undefined || raw === null || raw === '') return { value: DEFAULT_SUBAGENT_MAX_TURNS };
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'infinite') return { value: 0 };
+  const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(n) || n <= 0) {
+    return { error: 'maxTurns 必须是 ≥200 的整数，或 "infinite"' };
+  }
+  return { value: Math.max(MIN_SUBAGENT_MAX_TURNS, n) };
 }
 
 interface AgentStatusParams {
@@ -73,7 +106,7 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
   return {
     name: 'agent',
     icon: 'bot',
-    description: `把自包含任务委派给一次性子代理（template + task + mode）。子代理在自己的隐藏会话中运行并返回最终报告；mode=async 时后台运行，用 agent_status 查询。${usageZh}`,
+    description: `把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns）。多个相互独立的任务应在同一轮发起多个 async 调用并行执行；子代理在自己的隐藏会话中运行并返回最终报告，mode=async 时后台运行、用 agent_status 查询。${usageZh}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,6 +133,27 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
           description: '工作目录（默认当前会话 cwd）',
           description_en: 'Working directory (defaults to current session cwd)',
         },
+        tools: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '本次子代理可用的工具白名单（如 ["read","grep","edit"]）。不填=使用模板默认配置；agent_status/agent_message 始终可用',
+          description_en:
+            'Tool allowlist for this subagent (e.g. ["read","grep","edit"]). Omitted = template defaults; agent_status/agent_message are always available',
+        },
+        maxTurns: {
+          oneOf: [
+            {
+              type: 'integer',
+              minimum: MIN_SUBAGENT_MAX_TURNS,
+              description: '工具调用轮数上限（≥200，无上限）',
+            },
+            { type: 'string', enum: ['infinite'], description: '不限制轮数' },
+          ],
+          description: '子代理工具调用轮数：不填=200；低于 200 按 200；infinite=不限制',
+          description_en:
+            'Subagent tool-call turns: omitted=200; values below 200 are raised to 200; infinite=unlimited',
+        },
       },
       required: ['template', 'task'],
     },
@@ -114,6 +168,14 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
         if (mode !== 'sync' && mode !== 'async') {
           return errorResult('mode 只允许 "sync" 或 "async"');
         }
+        // 可选覆盖：工具白名单与工具调用轮数（不填走模板默认 / 200）
+        const toolAllowlist = normalizeToolAllowlist(p.tools);
+        const maxTurnsResult = normalizeMaxTurns(p.maxTurns);
+        if (maxTurnsResult.error) return errorResult(maxTurnsResult.error);
+        const maxTurns = maxTurnsResult.value as number;
+        const configSummary =
+          `tools=${toolAllowlist?.join(',') ?? '模板默认'} ` +
+          `maxTurns=${maxTurns === 0 ? 'infinite' : maxTurns}`;
         const registry = resolveRegistry(ctx.services);
         if (registry && !registry.get(template)) {
           return errorResult(`注册表中未找到模板 "${template}"`);
@@ -124,6 +186,8 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
             task,
             cwd: p.cwd || ctx.cwd,
             mode: 'async',
+            toolAllowlist,
+            maxTurns,
             parentToolCallId: ctx.toolCallId,
             parentSessionId: ctx.sessionId,
             // 父 run 正常完成不会 abort；用户停止/打断发送会 abort → 级联中止后台子代理
@@ -135,7 +199,7 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
                 type: 'text',
                 text:
                   `已启动后台智能体 (agent=${started.agentId}, session=${started.sessionId}, ` +
-                  `template=${started.template}, mode=async)。\n` +
+                  `template=${started.template}, mode=async, ${configSummary})。\n` +
                   '用 agent_status 查询进度；完成后结果会以 [智能体消息] 形式送达。',
               },
             ],
@@ -154,12 +218,14 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
           task,
           cwd: p.cwd || ctx.cwd,
           mode: 'sync',
+          toolAllowlist,
+          maxTurns,
           parentToolCallId: ctx.toolCallId,
           parentSessionId: ctx.sessionId,
           signal: ctx.signal,
         });
         return textResult(
-          `子代理已完成 (finishReason=${output.finishReason}, session=${output.sessionId}):\n\n${output.result}`,
+          `子代理已完成 (finishReason=${output.finishReason}, session=${output.sessionId}, ${configSummary}):\n\n${output.result}`,
           output.finishReason === 'error',
         );
       } catch (err) {

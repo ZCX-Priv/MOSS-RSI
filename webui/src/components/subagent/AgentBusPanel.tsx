@@ -1,7 +1,10 @@
 // webui/src/components/subagent/AgentBusPanel.tsx
-// 任务页右侧「智能体」标签：当前任务的智能体树 + 通信记录。
+// 任务页右侧「智能体」标签：当前任务的运行中智能体树 + 通信记录。
 // 数据：REST 快照（历史/刷新后）+ WS agent-bus.event（实时成员与消息）。
-// 观察与审计为主；运行中的子代理可在成员行右侧单独终止（含其后代）。
+// 树只渲染 status=running 的成员（主代理 + 子代理），按 parentSessionId 还原拓扑；
+// 已完成/失败/中止的成员不进入树，避免把历史成员当成当前状态。
+// 节点为卡片形态（与对话流 SubagentCard 行一致），不可展开智能体内容；
+// 运行中的子代理可在节点右侧单独终止（含其后代）。
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -16,16 +19,54 @@ import {
   listAgentBusMessages,
   subscribeAgentBus,
 } from '../../lib/agent-bus';
+import { fallbackAvatarSeed, templateAvatarSeed } from '../../lib/agent-avatars';
+import { HumationAvatar } from './HumationAvatar';
 import type { AgentBusMember, AgentBusMessage } from '../../types/api';
 
 type MessageFilter = 'all' | 'channel' | 'direct';
 
-const STATUS_DOT: Record<AgentBusMember['status'], string> = {
-  running: 'bg-primary animate-pulse',
-  completed: 'bg-success',
-  failed: 'bg-danger',
-  aborted: 'bg-warning',
-};
+/** 运行中智能体树节点（父子关系由 parentSessionId 还原） */
+interface RunningNode {
+  member: AgentBusMember;
+  children: RunningNode[];
+}
+
+/**
+ * 只保留运行中成员，并按拓扑建树：
+ * 父节点不在运行集合中（已完成/已消失）时，子节点提升为根——
+ * async 子代理会在父 run 结束后继续运行，不能成为孤儿。
+ */
+function buildRunningTree(members: AgentBusMember[]): RunningNode[] {
+  const running = members.filter((m) => m.status === 'running');
+  const visible = new Set(running.map((m) => m.sessionId));
+  const children = new Map<string, AgentBusMember[]>();
+  const roots: AgentBusMember[] = [];
+  for (const member of running) {
+    const parentId =
+      member.parentSessionId && visible.has(member.parentSessionId)
+        ? member.parentSessionId
+        : null;
+    if (!parentId) {
+      roots.push(member);
+      continue;
+    }
+    const list = children.get(parentId);
+    if (list) list.push(member);
+    else children.set(parentId, [member]);
+  }
+  const byStart = (a: AgentBusMember, b: AgentBusMember): number =>
+    Date.parse(a.startedAt) - Date.parse(b.startedAt);
+  const toNode = (member: AgentBusMember): RunningNode => ({
+    member,
+    children: (children.get(member.sessionId) ?? []).sort(byStart).map(toNode),
+  });
+  return roots.sort(byStart).map(toNode);
+}
+
+/** 树节点总数（含后代） */
+function countNodes(nodes: RunningNode[]): number {
+  return nodes.reduce((sum, node) => sum + 1 + countNodes(node.children), 0);
+}
 
 function formatTime(iso: string): string {
   const time = Date.parse(iso);
@@ -33,10 +74,94 @@ function formatTime(iso: string): string {
   return new Date(time).toLocaleTimeString();
 }
 
-/** 成员状态本地化（agentBus.statusRunning / Completed / Failed / Aborted） */
-function statusLabel(status: AgentBusMember['status'], t: (key: string) => string): string {
-  const suffix = status.charAt(0).toUpperCase() + status.slice(1);
-  return t(`agentBus.status${suffix}`);
+/** 单个运行中节点卡片（不可展开内容；点击过滤通信记录，右侧按钮终止子代理） */
+function RunningTreeNode({
+  node,
+  selectedAgent,
+  onSelect,
+  onCancel,
+  cancellingSession,
+}: {
+  node: RunningNode;
+  selectedAgent: string | null;
+  onSelect: (sessionId: string) => void;
+  onCancel: (member: AgentBusMember) => void;
+  cancellingSession: string | null;
+}) {
+  const { t } = useTranslation();
+  const member = node.member;
+  const avatarSeed =
+    templateAvatarSeed(member.template) ?? fallbackAvatarSeed(member.template, member.name);
+  const cancelling = cancellingSession === member.sessionId;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect(member.sessionId)}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          onSelect(member.sessionId);
+        }}
+        className={cn(
+          'cursor-pointer rounded-lg border border-border/70 bg-muted/40 px-2.5 py-2 transition-colors hover:bg-muted/70',
+          selectedAgent === member.sessionId && 'border-primary/40 bg-primary/5',
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <HumationAvatar seed={avatarSeed} size={22} />
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">
+            {member.name}
+          </span>
+          <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+            {member.agentId}
+          </span>
+          <Loader2 className="ml-auto size-3 shrink-0 animate-spin text-primary" />
+          {member.kind === 'subagent' && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onCancel(member);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+              disabled={cancelling}
+              title={t('agentBus.cancelAgent')}
+              aria-label={t('agentBus.cancelAgent')}
+              className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
+            >
+              {cancelling ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Square className="size-3 fill-current" />
+              )}
+            </button>
+          )}
+        </div>
+        <div className="mt-1 flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 select-none text-muted-foreground/50">└</span>
+          <span className="min-w-0 flex-1 truncate text-[11px] text-foreground" title={member.task}>
+            {member.task}
+          </span>
+        </div>
+      </div>
+      {node.children.length > 0 && (
+        <div className="ml-3 flex flex-col gap-1.5 border-l border-border/60 pl-2">
+          {node.children.map((child) => (
+            <RunningTreeNode
+              key={child.member.sessionId}
+              node={child}
+              selectedAgent={selectedAgent}
+              onSelect={onSelect}
+              onCancel={onCancel}
+              cancellingSession={cancellingSession}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function AgentBusPanel({ sessionId }: { sessionId: string }) {
@@ -70,24 +195,40 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   /** 终止单个子代理（含其后代）；状态由 agent-bus.event 实时回写 */
-  const cancelMember = async (member: AgentBusMember): Promise<void> => {
-    if (cancellingSession) return;
-    setCancellingSession(member.sessionId);
-    try {
-      const resp = await api.cancelSubagent(member.sessionId);
-      if (!resp.ok) toast.error(t('agentBus.cancelNotRunning'));
-    } catch {
-      toast.error(t('agentBus.cancelFailed'));
-    } finally {
-      setCancellingSession(null);
-    }
-  };
+  const cancelMember = useCallback(
+    async (member: AgentBusMember): Promise<void> => {
+      if (cancellingSession) return;
+      setCancellingSession(member.sessionId);
+      try {
+        const resp = await api.cancelSubagent(member.sessionId);
+        if (!resp.ok) toast.error(t('agentBus.cancelNotRunning'));
+      } catch {
+        toast.error(t('agentBus.cancelFailed'));
+      } finally {
+        setCancellingSession(null);
+      }
+    },
+    [cancellingSession, t],
+  );
 
   useEffect(() => {
     setSnapshotMessages([]);
     setSelectedAgent(null);
     void load();
   }, [load]);
+
+  // 树只保留运行中成员，并按父会话还原拓扑
+  const runningTree = useMemo(() => buildRunningTree(members), [members]);
+  const runningCount = useMemo(() => countNodes(runningTree), [runningTree]);
+
+  // 选中的成员结束后清理过滤条件，避免通信记录被不可见的 agent 锁死
+  useEffect(() => {
+    if (!selectedAgent) return;
+    const stillRunning = members.some(
+      (member) => member.sessionId === selectedAgent && member.status === 'running',
+    );
+    if (!stillRunning) setSelectedAgent(null);
+  }, [members, selectedAgent]);
 
   // 快照消息 + 实时消息按 id 合并（实时为准）
   const messages = useMemo(() => {
@@ -100,7 +241,10 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
   }, [snapshotMessages, liveMessages]);
 
   const selectedMember = useMemo(
-    () => members.find((m) => m.sessionId === selectedAgent) ?? null,
+    () =>
+      members.find(
+        (member) => member.sessionId === selectedAgent && member.status === 'running',
+      ) ?? null,
     [members, selectedAgent],
   );
 
@@ -162,11 +306,11 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {/* 头部：标题 + 刷新 */}
+      {/* 头部：标题 + 运行中数量 + 刷新 */}
       <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2">
         <Bot className="size-3.5 text-muted-foreground" />
         <span className="text-xs font-medium text-foreground">{t('agentBus.tree')}</span>
-        <span className="text-[10px] text-muted-foreground">{members.length}</span>
+        <span className="text-[10px] text-muted-foreground">{runningCount}</span>
         {loading && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
         <button
           type="button"
@@ -179,68 +323,26 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
         </button>
       </div>
 
-      {/* 智能体树 */}
+      {/* 运行中智能体树（卡片 + 拓扑；不包含已结束成员） */}
       <div className="shrink-0 border-b border-border px-2 py-1.5">
-        {members.length === 0 ? (
+        {runningCount === 0 ? (
           <div className="px-1 py-2 text-[11px] text-muted-foreground">
             {failed ? t('subagent.card.flowLoadFailed') : t('agentBus.empty')}
           </div>
         ) : (
-          <div className="flex max-h-[180px] flex-col gap-0.5 overflow-auto no-scrollbar">
-            {members.map((member) => {
-              const runningSubagent = member.kind === 'subagent' && member.status === 'running';
-              const cancelling = cancellingSession === member.sessionId;
-              return (
-                <div
-                  key={member.sessionId}
-                  className={cn(
-                    'flex min-w-0 items-center gap-1 rounded-md transition-colors hover:bg-muted/50',
-                    selectedAgent === member.sessionId && 'bg-muted',
-                  )}
-                  style={{ paddingLeft: `${6 + Math.max(0, member.depth) * 14}px` }}
-                >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSelectedAgent((prev) =>
-                        prev === member.sessionId ? null : member.sessionId,
-                      )
-                    }
-                    className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pr-1 text-left"
-                  >
-                    <span
-                      className={cn('size-1.5 shrink-0 rounded-full', STATUS_DOT[member.status])}
-                      aria-hidden
-                    />
-                    <span className="shrink-0 text-[11px] font-medium text-foreground">
-                      {member.agentId}
-                    </span>
-                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-                      {member.name}
-                    </span>
-                    <span className="ml-auto max-w-[45%] shrink-0 truncate text-[10px] text-muted-foreground/70">
-                      {statusLabel(member.status, t)}
-                    </span>
-                  </button>
-                  {runningSubagent && (
-                    <button
-                      type="button"
-                      onClick={() => void cancelMember(member)}
-                      disabled={cancelling}
-                      title={t('agentBus.cancelAgent')}
-                      aria-label={t('agentBus.cancelAgent')}
-                      className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
-                    >
-                      {cancelling ? (
-                        <Loader2 className="size-3 animate-spin" />
-                      ) : (
-                        <Square className="size-3 fill-current" />
-                      )}
-                    </button>
-                  )}
-                </div>
-              );
-            })}
+          <div className="flex max-h-[280px] flex-col gap-1.5 overflow-auto no-scrollbar">
+            {runningTree.map((node) => (
+              <RunningTreeNode
+                key={node.member.sessionId}
+                node={node}
+                selectedAgent={selectedAgent}
+                onSelect={(id) =>
+                  setSelectedAgent((prev) => (prev === id ? null : id))
+                }
+                onCancel={(member) => void cancelMember(member)}
+                cancellingSession={cancellingSession}
+              />
+            ))}
           </div>
         )}
       </div>
