@@ -20,6 +20,7 @@ import {
   isSystemScope,
   listAllMemories,
   memoryRoots,
+  moveMemoryToRoom,
   projectMemoryRoot,
   projectWing,
   removeMemoryFile,
@@ -92,7 +93,7 @@ export class MemoryEngineServiceImpl {
     const lines = facts.map(
       f => `- [${f.wing}/${f.room}] ${f.insight}${f.pinned ? ' 📌' : ''}`,
     );
-    return `[记忆 | 关键事实]\n以下是与本用户/项目相关的长期关键事实（跨会话持久）：\n${lines.join('\n')}`;
+    return `[记忆 | 关键事实]\n以下是与本用户/项目相关的长期关键事实（跨会话持久）：\n若下列记忆与当前事实或用户最新表述冲突：先核实；能判定就用 memory 工具更新（保留 id）或删除旧记忆，不能判定就用提问工具向用户澄清，不要并存矛盾记忆。\n${lines.join('\n')}`;
   }
 
   /**
@@ -157,7 +158,7 @@ export class MemoryEngineServiceImpl {
     }
 
     return {
-      text: `[记忆 | 相关记忆]\n以下是与当前任务相关的历史记忆：\n${parts.join('\n')}`,
+      text: `[记忆 | 相关记忆]\n以下是与当前任务相关的历史记忆：\n若下列记忆与当前事实或用户最新表述冲突：先核实；能判定就用 memory 工具更新（保留 id）或删除旧记忆，不能判定就用提问工具向用户澄清，不要并存矛盾记忆。\n${parts.join('\n')}`,
       count: included.length,
       recalledIds: included.map(m => m.id),
       queryChanged,
@@ -369,7 +370,14 @@ export class MemoryEngineServiceImpl {
       ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}),
       updatedAt: new Date().toISOString(),
     };
-    const result = rewriteMemory(found.file, updated, found.record.scope);
+    // room 变更必须迁移文件目录（宫殿树/列表按目录枚举）：只改 JSON 字段会让目录与记录长期不一致
+    let result: ScopedMemoryRecord;
+    if (patch.room !== undefined && patch.room !== found.record.room) {
+      moveMemoryToRoom(found.root, found.file, updated);
+      result = { ...updated, scope: found.record.scope };
+    } else {
+      result = rewriteMemory(found.file, updated, found.record.scope);
+    }
     this.retriever.invalidate();
     return result;
   }

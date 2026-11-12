@@ -64,7 +64,7 @@ export function projectWing(cwd: string): string {
 }
 
 /** 目录名安全化（wing/room 作为目录名：去非法字符） */
-function safeDirName(name: string): string {
+export function safeDirName(name: string): string {
   const cleaned = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
   return cleaned === '' || cleaned === '.' || cleaned === '..' ? '_' : cleaned;
 }
@@ -244,6 +244,26 @@ export function findMemoryAnywhere(
 export function rewriteMemory(file: string, record: MemoryRecord, scope: MemoryScope): ScopedMemoryRecord {
   writeFileSync(file, JSON.stringify(toDiskRecord(record), null, 2), 'utf8');
   return { ...record, scope };
+}
+
+/**
+ * 迁移记忆文件到 wing/room 对应的目录并重写内容（update 修改 room 时使用）。
+ * 宫殿树/列表按目录枚举，若只改 JSON 里的 room 字段而不移动文件，
+ * 目录结构与记录会长期不一致；这里统一搬迁（目标与源相同则原地重写）。
+ */
+export function moveMemoryToRoom(root: string, file: string, record: MemoryRecord): string {
+  const targetDir = join(root, safeDirName(record.wing), safeDirName(record.room));
+  ensureDir(targetDir);
+  const target = join(targetDir, `${record.id}.json`);
+  writeFileSync(target, JSON.stringify(toDiskRecord(record), null, 2), 'utf8');
+  if (target !== file) {
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // 旧文件删除失败：保留残留（内容已写入新位置），不阻断更新
+    }
+  }
+  return target;
 }
 
 /** 删除记忆 */

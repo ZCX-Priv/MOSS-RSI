@@ -354,6 +354,9 @@ export interface ResourceSnapshot {
   sampledAt: string;
 }
 
+/** 轻量实时快照（1s 轮询）：只含 CPU/内存，不含进程/网络/磁盘等重数据 */
+export type ResourceLive = Pick<ResourceSnapshot, 'cpu' | 'memory' | 'sampledAt'>;
+
 // ============================================================================
 // 设置-概览「用量」（GET /api/usage/overview）
 // ============================================================================

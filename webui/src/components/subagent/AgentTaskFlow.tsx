@@ -25,6 +25,7 @@ import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-previ
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
 import { TodoProgressCard } from '../shared/TodoProgressCard';
+import { ThinkingPreview } from '../shared/ThinkingPreview';
 import { buildToolResultIndex, isAgentCall, parseAgentArgs, type ToolResultEntry } from './agent-calls';
 import type { SubagentCallItem } from './SubagentCard';
 import type { TaskMessage, ToolCall } from '../../types/api';
@@ -148,12 +149,7 @@ const ThinkingLine = memo(function ThinkingLine({ message }: { message: TaskMess
             </span>
           </>
         )}
-        {preview && (
-          <span className="group-open:hidden flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0">·</span>
-            <span className="min-w-0 truncate text-muted-foreground/70">{preview}</span>
-          </span>
-        )}
+        {preview && <ThinkingPreview text={preview} />}
       </summary>
       <div className="mt-1">
         <MarkdownRenderer
@@ -278,8 +274,12 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
   const [failed, setFailed] = useState(false);
   const timerRef = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** 滚动内容包裹层：ResizeObserver 观察真实高度变化（水合/工具卡展开/结果补拉） */
+  const contentRef = useRef<HTMLDivElement | null>(null);
   /** 用户是否停留在底部（决定新内容到达时是否自动贴底） */
   const stickBottomRef = useRef(true);
+  /** 上一帧 scrollTop：仅「变小」才视为用户主动上滑 */
+  const lastTopRef = useRef(0);
 
   // 实时通道：该 agent 会话的消息由 subagent.event 实时写入 store
   const liveMessages = useStore((s) => (sessionId ? s.messagesBySession[sessionId] : undefined));
@@ -362,14 +362,39 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_BOTTOM_PX;
+    const top = el.scrollTop;
+    const dist = el.scrollHeight - top - el.clientHeight;
+    // 仅「用户主动上滑」（scrollTop 相对上一帧变小）才脱离跟随；
+    // 回到底部（向下滚动且距底 <= 阈值）才恢复。手动上滑后不再被内容增长拽回。
+    if (top < lastTopRef.current - 1) {
+      stickBottomRef.current = false;
+    } else if (top >= lastTopRef.current && dist <= STICK_BOTTOM_PX) {
+      stickBottomRef.current = true;
+    }
+    lastTopRef.current = top;
   }, []);
 
-  useEffect(() => {
+  /** 贴底：程序化滚动后同步 lastTop，避免下一次 scroll 事件被方向判定误判为用户上滑 */
+  const pinToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !stickBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [contentSig]);
+    lastTopRef.current = el.scrollTop;
+  }, []);
+
+  // 内容高度变化即跟随：Markdown 渐进水合、工具卡延迟展开、结果补拉都不会改变 contentSig，
+  // 只在「消息长度变化」时贴底会停在中途（子代理过程流不自动到位的根因）。
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const ro = new ResizeObserver(() => pinToBottom());
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [pinToBottom]);
+
+  useEffect(() => {
+    pinToBottom();
+  }, [contentSig, pinToBottom]);
 
   if (!sessionId) {
     return (
@@ -389,27 +414,38 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex max-h-[360px] flex-col gap-2 overflow-auto no-scrollbar"
+        // 滚轮向上 / 触摸位移立即脱离跟随：一档滚轮未超阈值时也不能被内容增长拽回
+        onWheel={(e) => {
+          if (e.deltaY < 0) stickBottomRef.current = false;
+        }}
+        onTouchMove={() => {
+          stickBottomRef.current = false;
+        }}
+        // 关闭浏览器原生滚动锚定：高度变化由 ResizeObserver 统一贴底，避免双重补偿抖动
+        style={{ overflowAnchor: 'none' }}
+        className="max-h-[360px] overflow-auto no-scrollbar"
       >
-        {visible.length === 0 && !loading && (
-          <div className="px-1 py-2 text-[11px] text-muted-foreground">
-            {running
-              ? t('subagent.card.starting')
-              : failed
-                ? t('subagent.card.flowLoadFailed')
-                : t('subagent.card.flowEmpty')}
-          </div>
-        )}
-        {visible.map((m) => (
-          <div key={m.id} className="flex flex-col gap-1">
-            <FlowAssistantMessage
-              message={m}
-              iconMap={toolIconMap}
-              toolResultIndex={toolResultIndex}
-              sessionId={sessionId}
-            />
-          </div>
-        ))}
+        <div ref={contentRef} className="flex flex-col gap-2">
+          {visible.length === 0 && !loading && (
+            <div className="px-1 py-2 text-[11px] text-muted-foreground">
+              {running
+                ? t('subagent.card.starting')
+                : failed
+                  ? t('subagent.card.flowLoadFailed')
+                  : t('subagent.card.flowEmpty')}
+            </div>
+          )}
+          {visible.map((m) => (
+            <div key={m.id} className="flex flex-col gap-1">
+              <FlowAssistantMessage
+                message={m}
+                iconMap={toolIconMap}
+                toolResultIndex={toolResultIndex}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       {showOpenButton && (

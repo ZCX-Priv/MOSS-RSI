@@ -405,6 +405,9 @@ function buildProgressText(
         const room = textOf(args.room);
         return room ? `已写入记忆「${truncate(room, QUERY_LIMIT)}」` : '已写入记忆';
       }
+      if (action === 'update') return '已修正记忆';
+      if (action === 'delete') return '已删除记忆';
+      if (action === 'pin') return '已更新记忆置顶';
       return '已操作记忆';
     }
     case 'context': {

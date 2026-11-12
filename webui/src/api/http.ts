@@ -76,6 +76,7 @@ import type {
   VoiceStatus,
   VoiceModelStatus,
   ResourceSnapshot,
+  ResourceLive,
   UsageOverview,
   UsageRange,
   ComputerHealth,
@@ -1010,8 +1011,14 @@ export const api = {
   // ==========================================================================
   // 资源监控（system-monitor）
   // ==========================================================================
-  /** 系统资源快照（资源页轮询数据源） */
-  getResourceSnapshot: () => request<ResourceSnapshot>('GET', '/api/system-monitor/snapshot'),
+  /** 轻量实时采样（1s 轮询）：只含 CPU/内存，不触发后端全量采样 */
+  getResourceLive: () => request<ResourceLive>('GET', '/api/system-monitor/snapshot?light=1'),
+  /** 系统资源全量快照（进程/网络/磁盘；按低频轮询，force=1 可请求立即刷新） */
+  getResourceSnapshot: (opts?: { force?: boolean }) =>
+    request<ResourceSnapshot>(
+      'GET',
+      `/api/system-monitor/snapshot${opts?.force ? '?force=1' : ''}`,
+    ),
 
   // ==========================================================================
   // 设置-概览「用量」（跨会话聚合，扫描 ~/.moss/tasks）

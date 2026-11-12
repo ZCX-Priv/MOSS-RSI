@@ -33,6 +33,21 @@ function hasReplyBody(m: TaskMessage): boolean {
 }
 
 /**
+ * 「不可见的空 assistant 占位」：无正文 / 无思考 / 无工具 / 非错误 / 非系统卡 / 非中断。
+ * 这类消息来自流式开始时的空占位或进程中断后的空回合：
+ * - MessageBubble 不渲染气泡；
+ * - 列表宿主必须把整条渲染为 null（含外层 padding），否则会留下几 px 的幽灵高度，
+ *   表现为「响应中」先出现、随后下移几 px 才出现正文。
+ */
+export function isEmptyAssistantPlaceholder(m: TaskMessage): boolean {
+  if (m.role !== 'assistant') return false;
+  if (m.isError || isSystemCard(m) || m.interrupted) return false;
+  if ((m.toolCalls?.length ?? 0) > 0) return false;
+  if ((m.thinking ?? '').trim().length > 0) return false;
+  return stripInjectBlock(m.content).trim().length === 0;
+}
+
+/**
  * assistant 消息是否为「一段 AI 回复的结尾」：
  * 其后的下一条「真实对话消息」是 user（或已到列表末尾）→ 是结尾。
  * 空占位 assistant（无正文/无工具调用/非错误）与系统卡片同样跳过。

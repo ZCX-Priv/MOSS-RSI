@@ -1,7 +1,7 @@
 {
   "name": "memory",
-  "description": "统一记忆工具（action 分派）。action=save 保存一条长期记忆到记忆宫殿（hall：decision/event/discovery/preference/suggestion；preference/suggestion 自动存入全局 user 翼，其余存入当前项目翼）；action=search 深度检索记忆宫殿（L3 全量跨翼 BM25，可按 wing/room/hall 过滤）；action=list_rooms 列出记忆宫殿结构（翼→房间→厅 与数量）。",
-  "description_en": "Unified memory tool (dispatched by action). action=save stores a long-term memory into the memory palace (hall: decision/event/discovery/preference/suggestion; preference/suggestion go to the global 'user' wing, others to the current project wing); action=search deep-searches the palace (L3 full cross-wing BM25, filterable by wing/room/hall); action=list_rooms lists the palace structure (wing→room→hall with counts).",
+  "description": "统一记忆工具（action 分派）。action=save 保存一条长期记忆到记忆宫殿（hall：decision/event/discovery/preference/suggestion；preference/suggestion 自动存入全局 user 翼，其余存入当前项目翼）；action=search 深度检索记忆宫殿（L3 全量跨翼 BM25，可按 wing/room/hall 过滤，结果含 id）；action=list_rooms 列出记忆宫殿结构（翼→房间→厅 与数量）；action=update 按 id 修正一条记忆（room/hall/verbatim/insight/tags/importance/pinned 任选，至少一项）；action=delete 按 id 删除被推翻的记忆；action=pin 按 id 置顶/取消置顶。发现新旧记忆矛盾时：先 search 取 id，能判定就 update 修正或 delete 旧条目，无法判定就用提问工具向用户澄清，禁止并存两条互斥记忆。",
+  "description_en": "Unified memory tool (dispatched by action). action=save stores a long-term memory into the memory palace (hall: decision/event/discovery/preference/suggestion; preference/suggestion go to the global 'user' wing, others to the current project wing); action=search deep-searches the palace (L3 full cross-wing BM25, filterable by wing/room/hall, results include ids); action=list_rooms lists the palace structure (wing→room→hall with counts); action=update revises a memory by id (any of room/hall/verbatim/insight/tags/importance/pinned, at least one); action=delete removes a superseded memory by id; action=pin pins/unpins a memory by id. On contradictory memories: search to get the id, then update or delete the outdated entry when the winner is clear; otherwise ask the user for clarification. Never keep two mutually exclusive memories.",
   "icon": "brain",
   "annotations": {
     "readOnlyHint": false,
@@ -12,41 +12,51 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["save", "search", "list_rooms"],
+        "enum": ["save", "search", "list_rooms", "update", "delete", "pin"],
         "description": "记忆操作",
         "description_en": "Memory operation"
       },
+      "id": {
+        "type": "string",
+        "description": "update/delete/pin：目标记忆 id（search 结果中提供）",
+        "description_en": "update/delete/pin: target memory id (provided in search results)"
+      },
       "room": {
         "type": "string",
-        "description": "save：主题房间名（英文小写连字符，如 context-engine；同类主题保持同名以形成关联）",
-        "description_en": "save: topic room name (lowercase hyphenated, e.g. context-engine; reuse the same name for related topics)"
+        "description": "save：主题房间名（英文小写连字符，如 context-engine；同类主题保持同名以形成关联）；update：可选，修改所属房间",
+        "description_en": "save: topic room name (lowercase hyphenated, e.g. context-engine; reuse the same name for related topics); update: optional, move to another room"
       },
       "hall": {
         "type": "string",
         "enum": ["decision", "event", "discovery", "preference", "suggestion"],
-        "description": "记忆分类（save 必填；search 可选过滤）",
-        "description_en": "Memory category (required for save; optional filter for search)"
+        "description": "记忆分类（save 必填；search 可选过滤；update 可选修改）",
+        "description_en": "Memory category (required for save; optional filter for search; optional change for update)"
       },
       "verbatim": {
         "type": "string",
-        "description": "save：对话原文片段（保留关键原话，供追溯）",
-        "description_en": "save: original text fragment from the conversation (keeps key quotes for traceability)"
+        "description": "save：对话原文片段（保留关键原话，供追溯）；update：可选修正",
+        "description_en": "save: original text fragment from the conversation (keeps key quotes for traceability); update: optional revision"
       },
       "insight": {
         "type": "string",
-        "description": "save：一句话洞察（将来注入上下文的内容，要自包含、无歧义）",
-        "description_en": "save: one-sentence insight (injected into future contexts; self-contained and unambiguous)"
+        "description": "save：一句话洞察（将来注入上下文的内容，要自包含、无歧义）；update：可选修正",
+        "description_en": "save: one-sentence insight (injected into future contexts; self-contained and unambiguous); update: optional revision"
       },
       "tags": {
         "type": "array",
         "items": { "type": "string" },
-        "description": "save：标签（可选，便于过滤）",
-        "description_en": "save: tags (optional, for filtering)"
+        "description": "save：标签（可选，便于过滤）；update：可选替换标签",
+        "description_en": "save: tags (optional, for filtering); update: optional replacement tags"
       },
       "importance": {
         "type": "number",
-        "description": "save：重要性 0-1（>=0.75 进入关键事实常驻层；默认 0.5）",
-        "description_en": "save: importance 0-1 (>=0.75 enters the always-on key facts layer; default 0.5)"
+        "description": "save：重要性 0-1（>=0.75 进入关键事实常驻层；默认 0.5）；update：可选修正",
+        "description_en": "save: importance 0-1 (>=0.75 enters the always-on key facts layer; default 0.5); update: optional revision"
+      },
+      "pinned": {
+        "type": "boolean",
+        "description": "pin：true=置顶（进入 L1 关键事实常驻层）/false=取消置顶；update 可选",
+        "description_en": "pin: true=pinned (enters the always-on L1 key facts layer) / false=unpin; optional for update"
       },
       "query": {
         "type": "string",

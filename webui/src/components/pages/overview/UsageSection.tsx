@@ -304,6 +304,7 @@ export function UsageSection() {
               <TrendAreaChart
                 points={series.map((point) => ({ day: point.day, value: point.requests }))}
                 color={TOKEN_COLORS.completion}
+                label={t('usage.chart.requests')}
               />
             )}
           </div>

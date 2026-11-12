@@ -172,9 +172,10 @@ export interface VirtualListProps<T> {
   items: readonly T[];
   itemKey: (item: T) => string;
   /**
-   * 渲染单条。第三个参数 inViewport = 该条目是否**稳定落在**精确视口内（不含 overscan）：
-   * 新进入视口（或切换会话后的首帧）为 false → 宿主走「纯文本占位 → 下一帧水合」，
-   * 避免快速滚动时同步解析大量 Markdown 阻塞主线程；稳定可见条目为 true → 直接终态。
+   * 渲染单条。第三个参数 inViewport = 该条目是否落在当前精确视口内（不含 overscan）：
+   * 宿主据此决定是否走「纯文本占位 → 水合」，或首帧直接渲染终态。
+   * 传「当前视口」而非「上一帧也可见」：新滚入视口的条目若先占位再升级，
+   * 长块高度变化会造成上滑时闪屏与位置抖动。
    */
   renderItem: (item: T, index: number, inViewport: boolean) => ReactNode;
   /** 附加到滚动容器的 className（默认已含 h-full overflow-y-auto） */
@@ -288,8 +289,6 @@ export function VirtualList<T>({
   startThresholdRef.current = startReachedThreshold;
   const autoFillRef = useRef(autoFill);
   autoFillRef.current = autoFill;
-  /** 上一帧的可见 key 集合：用于「新进入视口的条目首帧只占位、下一帧水合」 */
-  const prevVisibleKeysRef = useRef<Set<string>>(new Set());
   /** 已同步实测过的 key：避免每轮布局全量读 offsetHeight 强制回流 */
   const measuredKeysRef = useRef<Set<string>>(new Set());
   /** 连续自动补页计数：内容仍不足 1.5 屏时最多连续补 2 次 */
@@ -340,8 +339,10 @@ export function VirtualList<T>({
     const sc = scrollerRef.current;
     if (!sc) return;
     const dist = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
-    // 真贴底（严阈值）→ 恢复贴底跟随（内容缩短被浏览器钳制 scrollTop 也能自愈）
-    if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
+    // 这里只按几何派生对外 atBottom，**不再据此恢复贴底跟随**：
+    // 布局落定/内容缩短时浏览器会把 scrollTop 钳制回来，dist 会短暂变小；
+    // 若在此恢复跟随，用户上滑后被下一次内容增长拉回底部（「第一遍上滑失效」的根因）。
+    // 恢复跟随只允许两条通道：用户向下滚回底部（handleScroll）与显式 scrollToBottom。
     const ab = stickyRef.current ? true : dist <= thresholdRef.current;
     if (ab !== atBottomRef.current) {
       atBottomRef.current = ab;
@@ -722,7 +723,6 @@ export function VirtualList<T>({
     // 高度缓存按消息 key 索引，跨会话残留无引用且无限膨胀 → 清空重测
     heightsRef.current.clear();
     measuredKeysRef.current.clear();
-    prevVisibleKeysRef.current.clear();
     rangeStateRef.current = { start: 0, end: 0 };
     visibleStateRef.current = { start: 0, end: 0 };
     autoFillDepthRef.current = 0;
@@ -819,8 +819,10 @@ export function VirtualList<T>({
         // 仅「用户主动上滑」（scrollTop 相对上一帧变小）才脱离贴底跟随。
         // 内容增长（工具卡片展开 / 流式输出涌入）不改变 scrollTop，绝不脱离跟随。
         if (top < lastScrollTopRef.current - 1) stickyRef.current = false;
-        // 真贴底（严阈值）→ 恢复跟随（内容缩短被浏览器钳制 scrollTop 也能自愈恢复）。
-        if (dist <= STICKY_RESUME_PX) stickyRef.current = true;
+        // 恢复跟随必须同时满足「向下滚动」与「真的回到贴底」：
+        // 内容增长本身不产生 scroll 事件，若不加方向条件，任何一次 dist 变小的
+        // scroll（含布局钳制）都会把用户刚上滑出来的视口重新武装为跟随。
+        if (delta > 0 && dist <= STICKY_RESUME_PX) stickyRef.current = true;
         // 对外 atBottom（按钮显隐）：跟随中恒为「在底部」（距离变大只是内容变多，
         // 不代表用户离开了底部）；仅在脱离跟随后按几何距离判定。
         const ab = stickyRef.current ? true : dist <= thresholdRef.current;
@@ -1029,17 +1031,6 @@ export function VirtualList<T>({
   const topSpacer = prefix[rangeStart] ?? 0;
   const bottomSpacer = Math.max(0, (prefix[prefix.length - 1] ?? 0) - (prefix[rangeEnd] ?? 0));
 
-  // 精确视口的 key 集合：提交后写入 prevVisibleKeysRef，下一帧这些条目才算「稳定可见」。
-  // 新进入视口的条目（含切换会话后的全部条目）首帧走宿主 defer 分支（纯文本占位），
-  // 下一帧再水合 —— 快速滚动/切换会话不再同步解析大量 Markdown 阻塞主线程。
-  const visibleKeys = new Set<string>();
-  for (let i = Math.max(0, visibleRange.start); i < Math.min(items.length, visibleRange.end); i++) {
-    visibleKeys.add(itemKey(items[i]));
-  }
-  useLayoutEffect(() => {
-    prevVisibleKeysRef.current = visibleKeys;
-  });
-
   return (
     <div
       ref={scrollerRefCb}
@@ -1054,10 +1045,9 @@ export function VirtualList<T>({
         const index = rangeStart + i;
         const key = itemKey(item);
         const inViewport = index >= visibleRange.start && index < visibleRange.end;
-        const stableVisible = inViewport && prevVisibleKeysRef.current.has(key);
         return (
           <div key={key} data-vl-key={key} ref={cellRef} style={{ contain: 'layout style' }}>
-            {renderItem(item, index, stableVisible)}
+            {renderItem(item, index, inViewport)}
           </div>
         );
       })}

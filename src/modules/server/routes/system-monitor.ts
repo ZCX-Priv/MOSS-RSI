@@ -472,7 +472,16 @@ function sampleNetwork(counters: RawNet[], now: number): ResourceSnapshot['netwo
 // 快照：内存直返 + 后台全量采样
 // ============================================================================
 
-const SNAPSHOT_STALE_MS = 2000;
+/**
+ * 全量采样（进程/网络/磁盘）的新鲜窗口。
+ * 全量采样在 Windows 上会拉起 PowerShell + CIM 查询，成本高：
+ * 前端只在概览页每 15s、CPU/网络标签页每 5s 请求全量；这里取略小于 5s，
+ * 既让标签页的 5s 请求能拿到新数据，又不会出现更快的循环。
+ * 1s 级的 CPU/内存走 buildFastSnapshot 的轻量路径，不受此阈值影响。
+ */
+const HEAVY_STALE_MS = 4000;
+/** force=1 的最小触发间隔：防止快速切标签/连续点击造成连续全量采样 */
+const HEAVY_FORCE_MIN_INTERVAL_MS = 3000;
 let latestSnapshot: ResourceSnapshot | null = null;
 let latestAt = 0;
 let inflight: Promise<unknown> | null = null;
@@ -528,7 +537,9 @@ async function fullSample(env: Environment): Promise<ResourceSnapshot> {
     sampledAt: new Date().toISOString(),
   };
   latestSnapshot = snapshot;
-  latestAt = now;
+  // TTL 从采样「完成」时刻算起：采样本身可能耗时 1~2s，
+  // 若用开头的 now，慢采样一完成就被判过期 → 连续重采样（CPU 规律性尖峰根因）。
+  latestAt = Date.now();
   return snapshot;
 }
 
@@ -591,14 +602,34 @@ export async function sampleResourceSnapshot(env: Environment): Promise<Resource
   return fullSample(env);
 }
 
-/** GET /api/system-monitor/snapshot：只读内存，毫秒返回 */
+/**
+ * GET /api/system-monitor/snapshot
+ * - ?light=1：只返回 CPU/内存（1s 实时折线用），绝不触发全量采样；
+ * - 默认：全量快照（进程/网络/磁盘），按 HEAVY_STALE_MS 低频后台刷新；
+ * - &force=1：请求一次立即全量刷新（受 HEAVY_FORCE_MIN_INTERVAL_MS 兜底）。
+ * 所有路径的 CPU/内存都由 buildFastSnapshot 现采，成本与请求次数无关。
+ */
 export function createSystemMonitorSnapshotHandler(env: Environment): RouteHandler {
-  return async (_req: HttpRequest): Promise<HttpResponse> => {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
     try {
-      if (!latestSnapshot || Date.now() - latestAt > SNAPSHOT_STALE_MS) {
-        refreshResourceSnapshot(env);
+      const url = new URL(req.url, 'http://localhost');
+      const light = url.searchParams.get('light') === '1';
+      const force = url.searchParams.get('force') === '1';
+      if (!light) {
+        if (force) {
+          if (Date.now() - latestAt >= HEAVY_FORCE_MIN_INTERVAL_MS) refreshResourceSnapshot(env);
+        } else if (!latestSnapshot || Date.now() - latestAt > HEAVY_STALE_MS) {
+          refreshResourceSnapshot(env);
+        }
       }
-      return { status: 200, body: latestSnapshot ?? buildFastSnapshot(env) };
+      const snapshot = buildFastSnapshot(env);
+      if (light) {
+        return {
+          status: 200,
+          body: { cpu: snapshot.cpu, memory: snapshot.memory, sampledAt: snapshot.sampledAt },
+        };
+      }
+      return { status: 200, body: snapshot };
     } catch {
       // 极端兜底：任何意外都不让接口 5xx
       return {

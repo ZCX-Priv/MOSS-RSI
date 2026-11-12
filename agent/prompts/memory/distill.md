@@ -10,6 +10,7 @@
 5. 对未来工作有用的建议（hall: suggestion）
 
 丢弃：调试输出、临时性讨论、寒暄、已被后续消息否定的内容、纯代码细节。
+同一主题只输出最新结论：对话中先后出现相反判断时以最后一次明确表述为准，不要输出两条互斥条目。
 
 输出严格 JSON（不要 markdown 代码块，不要多余文本）：
 {"memories": [{"room": "主题名(英文小写连字符)", "hall": "decision|event|discovery|preference|suggestion", "verbatim": "对话中的原文片段(保留用户原话)", "insight": "一句话洞察(中文)", "tags": ["标签"], "importance": 0.0到1.0}]}

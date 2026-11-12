@@ -1,8 +1,10 @@
 // webui/src/components/pages/overview/ResourcesSection.tsx
 // 设置-概览「资源」：系统总量 + MOSS 自身占用（概览 / CPU 与内存 / 磁盘 / 网络）。
-// 数据源：GET /api/system-monitor/snapshot（2.5s 轮询）；AI 解读：WS 流式诊断（insight.diagnose kind=resource）。
+// 数据源：GET /api/system-monitor/snapshot——CPU/内存走 ?light=1 轻量实时（1s），
+// 进程/网络/磁盘走全量快照（概览 15s、CPU/网络标签页 5s，切标签立即刷新）；
+// AI 解读：WS 流式诊断（insight.diagnose kind=resource）。
 
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Activity,
@@ -25,17 +27,27 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { InsightDialog } from '@/components/insight/InsightDialog';
-import type { MossProcessInfo, ResourceSnapshot } from '@/types/api';
+import type { MossProcessInfo, ResourceLive, ResourceSnapshot } from '@/types/api';
 import {
   Donut,
   RESOURCE_COLORS,
-  Sparkline,
+  TASK_MANAGER_WINDOW_MS,
+  TaskManagerChart,
+  type TaskManagerPoint,
   formatBytes,
   formatRate,
 } from './charts';
 
-const POLL_MS = 2500;
-const HISTORY_MAX = 60;
+/** 轻量实时轮询间隔（ms）：CPU/内存 1 秒一点，与任务管理器一致 */
+const LIVE_POLL_MS = 1000;
+/** 全量快照轮询间隔（ms）：概览/磁盘低频，避免频繁拉起 PowerShell/CIM 采样 */
+const HEAVY_POLL_MS_DEFAULT = 15_000;
+/** 全量快照轮询间隔（ms）：CPU 与内存 / 网络标签页更实时 */
+const HEAVY_POLL_MS_DETAIL = 5_000;
+/** 历史安全上限（60 秒窗口 + 余量；正常约 60~62 条） */
+const HISTORY_MAX = 120;
+/** 折线时间窗（ms）：左端 60 秒前，右端当前 */
+const WINDOW_MS = TASK_MANAGER_WINDOW_MS;
 
 /** 首帧占位：真实快照到达前渲染骨架，避免整页 loading 遮罩 */
 const EMPTY_SNAPSHOT: ResourceSnapshot = {
@@ -63,6 +75,8 @@ type ResourceTab = 'overview' | 'cpu-memory' | 'disk' | 'network';
 type ProcessSort = 'memory' | 'cpu';
 
 interface Sample {
+  /** 采样时刻（毫秒时间戳）：折线按真实时间定位（右边缘=当前） */
+  at: number;
   cpu: number;
   mem: number;
   rx: number;
@@ -101,7 +115,7 @@ function SegmentedBar({ items }: { items: Array<{ key: string; bytes: number; co
   );
 }
 
-/** 资源主卡：环形进度 + 数值 + 迷你趋势 */
+/** 资源主卡：环形进度 + 数值 + 迷你实时趋势 */
 function RingCard({
   icon: Icon,
   title,
@@ -112,7 +126,6 @@ function RingCard({
   sub1,
   sub2,
   history,
-  sparkId,
 }: {
   icon: typeof Cpu;
   title: string;
@@ -123,8 +136,8 @@ function RingCard({
   badge?: string;
   sub1: string;
   sub2?: string;
-  history?: number[];
-  sparkId?: string;
+  /** 任务管理器式迷你趋势点（60 秒窗口，右端=当前） */
+  history?: TaskManagerPoint[];
 }) {
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card p-4 transition-colors hover:border-border">
@@ -147,45 +160,12 @@ function RingCard({
           )}
         </div>
       </div>
-      {history !== undefined && history.length > 1 && (
+      {history !== undefined && history.length > 0 && (
         <div className="pt-0.5 opacity-80">
-          <Sparkline points={history} color={color} width={220} height={26} id={sparkId ?? 'spark'} />
+          <TaskManagerChart points={history} color={color} variant="compact" height={26} />
         </div>
       )}
     </div>
-  );
-}
-
-/** CPU / 内存双线趋势（按数据范围自适应缩放，变化更清晰） */
-function TrendChart({ history }: { history: Sample[] }) {
-  const width = 560;
-  const height = 88;
-  if (history.length < 2) return <div className="h-[88px] rounded-md bg-muted/30" aria-hidden="true" />;
-  const values = history.flatMap((sample) => [sample.cpu, sample.mem]);
-  const lo = Math.max(0, Math.min(...values) - 8);
-  const hi = Math.min(100, Math.max(...values) + 8);
-  const span = Math.max(1, hi - lo);
-  const step = width / (history.length - 1);
-  const yOf = (value: number): string => (height - ((Math.min(hi, Math.max(lo, value)) - lo) / span) * height).toFixed(1);
-  const lineOf = (pick: (sample: Sample) => number): string =>
-    history.map((sample, index) => `${(index * step).toFixed(1)},${yOf(pick(sample))}`).join(' ');
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-[88px] w-full" aria-hidden="true">
-      {[0.25, 0.5, 0.75].map((p) => (
-        <line
-          key={p}
-          x1="0"
-          x2={width}
-          y1={(height * p).toFixed(1)}
-          y2={(height * p).toFixed(1)}
-          className="stroke-border/40"
-          strokeWidth="1"
-          strokeDasharray="3 3"
-        />
-      ))}
-      <polyline points={lineOf((s) => s.cpu)} fill="none" stroke={RESOURCE_COLORS.cpu} strokeWidth="1.6" strokeLinejoin="round" />
-      <polyline points={lineOf((s) => s.mem)} fill="none" stroke={RESOURCE_COLORS.memory} strokeWidth="1.6" strokeLinejoin="round" />
-    </svg>
   );
 }
 
@@ -200,7 +180,8 @@ function NetworkCard({
   rx: number;
   tx: number;
   count: number;
-  history: number[];
+  /** 任务管理器式迷你趋势点（60 秒窗口，右端=当前） */
+  history: TaskManagerPoint[];
   ready?: boolean;
 }) {
   const { t } = useTranslation();
@@ -231,17 +212,26 @@ function NetworkCard({
           </div>
         </div>
       </div>
-      {history.length > 1 && (
+      {history.length > 0 && (
         <div className="opacity-80">
-          <Sparkline points={history} color={RESOURCE_COLORS.network} width={220} height={26} id="net" />
+          <TaskManagerChart
+            points={history}
+            color={RESOURCE_COLORS.network}
+            variant="compact"
+            height={26}
+          />
         </div>
       )}
     </div>
   );
 }
 
-/** 进程表 */
-function ProcessTable({
+/**
+ * 进程表（memo）：页面 1s 轮询只为刷新 CPU/内存折线；
+ * 进程数组在两次全量采样之间引用不变（后端复用 latestSnapshot.moss），
+ * memo 可避免每秒重排/重渲最多 200 行进程。
+ */
+const ProcessTable = memo(function ProcessTable({
   processes,
   onlyHigh,
   onToggleHigh,
@@ -373,12 +363,15 @@ function ProcessTable({
       </div>
     </div>
   );
-}
+});
 
 export function ResourcesSection() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<ResourceTab>('overview');
+  /** 全量快照（进程/网络/磁盘/MOSS）：低频刷新 */
   const [snapshot, setSnapshot] = useState<ResourceSnapshot | null>(null);
+  /** 轻量实时快照（CPU/内存）：1s 刷新 */
+  const [live, setLive] = useState<ResourceLive | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<Sample[]>([]);
   const [onlyHigh, setOnlyHigh] = useState(false);
@@ -386,41 +379,132 @@ export function ResourcesSection() {
   const [procSort, setProcSort] = useState<ProcessSort>('memory');
   const [reportOpen, setReportOpen] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    const tick = async (): Promise<void> => {
-      if (document.hidden) return;
-      try {
-        const next = await api.getResourceSnapshot();
-        if (!alive) return;
-        setSnapshot(next);
-        setError(null);
-        const rx = next.network.interfaces.reduce((sum, n) => sum + n.rxRate, 0);
-        const tx = next.network.interfaces.reduce((sum, n) => sum + n.txRate, 0);
-        setHistory((prev) => {
-          const appended = [...prev, { cpu: next.cpu.usagePercent, mem: next.memory.usedPercent, rx, tx }];
-          return appended.length > HISTORY_MAX ? appended.slice(appended.length - HISTORY_MAX) : appended;
-        });
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
-      }
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), POLL_MS);
-    const onVisible = (): void => {
-      if (!document.hidden) void tick();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
+  /** 当前标签（轮询定时器内读取；变化时不重建定时器） */
+  const tabRef = useRef<ResourceTab>(tab);
+  tabRef.current = tab;
+  /** 暂停轮询：页面隐藏或窗口失焦（可见但不在前台也没有观看价值） */
+  const pausedRef = useRef(false);
+  /** 最近一次全量快照的网络合计：轻量 tick 追加历史时复用，避免额外拉起网卡采样 */
+  const netRef = useRef({ rx: 0, tx: 0 });
+  const liveInFlightRef = useRef(false);
+  const heavyInFlightRef = useRef(false);
+
+  /** 写入全量快照并缓存网络合计 */
+  const applyHeavy = useCallback((next: ResourceSnapshot) => {
+    setSnapshot(next);
+    netRef.current = {
+      rx: next.network.interfaces.reduce((sum, iface) => sum + iface.rxRate, 0),
+      tx: next.network.interfaces.reduce((sum, iface) => sum + iface.txRate, 0),
     };
   }, []);
 
-  const level = snapshot ? bannerLevel(snapshot) : 'ok';
-  const view = snapshot ?? EMPTY_SNAPSHOT;
-  const ready = snapshot !== null;
+  /** 全量采样（force=1 请求后端立即刷新；后端有最小间隔兜底，不会连续拉起 PowerShell） */
+  const refreshHeavy = useCallback(
+    async (force = false): Promise<void> => {
+      if (heavyInFlightRef.current) return;
+      heavyInFlightRef.current = true;
+      try {
+        const next = await api.getResourceSnapshot(force ? { force: true } : undefined);
+        applyHeavy(next);
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        heavyInFlightRef.current = false;
+      }
+    },
+    [applyHeavy],
+  );
+
+  /** 轻量采样：CPU/内存 1s 一点 + 历史落点（网络值沿用最近一次全量快照） */
+  const fetchLive = useCallback(async (): Promise<void> => {
+    if (liveInFlightRef.current) return;
+    liveInFlightRef.current = true;
+    try {
+      const next = await api.getResourceLive();
+      setLive(next);
+      setError(null);
+      const parsed = Date.parse(next.sampledAt);
+      const at = Number.isFinite(parsed) ? parsed : Date.now();
+      const { rx, tx } = netRef.current;
+      setHistory((prev) => {
+        // 同一采样重复返回（缓存命中）不重复落点
+        if (prev.length > 0 && prev[prev.length - 1].at === at) return prev;
+        const appended = [
+          ...prev,
+          { at, cpu: next.cpu.usagePercent, mem: next.memory.usedPercent, rx, tx },
+        ];
+        // 时间窗裁剪（保留 2s 余量给左边缘），再套条数安全上限
+        const cutoff = at - WINDOW_MS - 2000;
+        const kept = appended.filter((sample) => sample.at >= cutoff);
+        return kept.length > HISTORY_MAX ? kept.slice(kept.length - HISTORY_MAX) : kept;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      liveInFlightRef.current = false;
+    }
+  }, []);
+
+  // 主轮询：1s 轻量；按当前标签每 5s / 15s 触发一次全量。
+  // 页面隐藏或窗口失焦时完全暂停；恢复前台时立即补采（轻量 + 强制全量）。
+  useEffect(() => {
+    pausedRef.current = document.hidden;
+    let tickCount = 0;
+    const tick = (): void => {
+      if (pausedRef.current) return;
+      void fetchLive();
+      const detailTab = tabRef.current === 'cpu-memory' || tabRef.current === 'network';
+      const heavyEvery = Math.max(
+        1,
+        Math.round((detailTab ? HEAVY_POLL_MS_DETAIL : HEAVY_POLL_MS_DEFAULT) / LIVE_POLL_MS),
+      );
+      tickCount += 1;
+      if (tickCount % heavyEvery === 0) void refreshHeavy(false);
+    };
+    const resume = (): void => {
+      pausedRef.current = false;
+      void fetchLive();
+      void refreshHeavy(true);
+    };
+    const onVisibility = (): void => {
+      if (document.hidden) pausedRef.current = true;
+      else resume();
+    };
+    const onFocus = (): void => resume();
+    const onBlur = (): void => {
+      pausedRef.current = true;
+    };
+    void fetchLive();
+    void refreshHeavy(false);
+    const timer = window.setInterval(tick, LIVE_POLL_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [fetchLive, refreshHeavy]);
+
+  // 切到需要明细数据的标签：立即拉一次全量，避免等周期
+  useEffect(() => {
+    if (tab === 'cpu-memory' || tab === 'network' || tab === 'disk') {
+      void refreshHeavy(true);
+    }
+  }, [tab, refreshHeavy]);
+
+  /** 合并视图：CPU/内存取 1s 实时值，其余取全量快照 */
+  const view = useMemo<ResourceSnapshot>(() => {
+    const base = snapshot ?? EMPTY_SNAPSHOT;
+    return live ? { ...base, cpu: live.cpu, memory: live.memory } : base;
+  }, [snapshot, live]);
+  const ready = snapshot !== null || live !== null;
+  /** 状态条时间：优先实时采样时间 */
+  const sampledAt = live?.sampledAt ?? snapshot?.sampledAt ?? '';
+  const level = ready ? bannerLevel(view) : 'ok';
   const levelClass =
     level === 'high'
       ? 'border-danger/40 bg-danger/10 text-danger'
@@ -445,13 +529,8 @@ export function ResourcesSection() {
   const diskUsedBytes = snapshot ? view.disk.totalBytes - view.disk.freeBytes : 0;
 
   const refreshNow = async (): Promise<void> => {
-    try {
-      const next = await api.getResourceSnapshot();
-      setSnapshot(next);
-      setError(null);
-    } catch {
-      /* 轮询会重试 */
-    }
+    // 手动刷新 = 立即全量（force 受后端最小间隔兜底）
+    await refreshHeavy(true);
   };
 
   return (
@@ -464,7 +543,7 @@ export function ResourcesSection() {
         </div>
         {ready ? (
           <span className="text-[11px] text-muted-foreground">
-            {t('resourceMonitor.sampleAt', { time: new Date(view.sampledAt).toLocaleTimeString() })}
+            {t('resourceMonitor.sampleAt', { time: new Date(sampledAt).toLocaleTimeString() })}
           </span>
         ) : (
           <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -518,8 +597,7 @@ export function ResourcesSection() {
               badge={`${view.cpu.cores}${t('resourceMonitor.coresSuffix')}`}
               sub1={view.cpu.model}
               sub2={`${t('resourceMonitor.mossUsage')} ${pct(view.cpu.mossPercent)}`}
-              history={history.map((sample) => sample.cpu)}
-              sparkId="cpu"
+              history={history.map((sample) => ({ at: sample.at, value: sample.cpu }))}
             />
             <RingCard
               icon={MemoryStick}
@@ -530,8 +608,7 @@ export function ResourcesSection() {
               badge={`${t('resourceMonitor.total')} ${formatBytes(view.memory.totalBytes)}`}
               sub1={`${t('resourceMonitor.mossUsage')} ${formatBytes(view.memory.mossBytes)}`}
               sub2={`${t('resourceMonitor.available')} ${formatBytes(Math.max(0, view.memory.totalBytes - view.memory.usedBytes))}`}
-              history={history.map((sample) => sample.mem)}
-              sparkId="mem"
+              history={history.map((sample) => ({ at: sample.at, value: sample.mem }))}
             />
             <RingCard
               icon={HardDrive}
@@ -547,7 +624,7 @@ export function ResourcesSection() {
               rx={netRx}
               tx={netTx}
               count={view.network.interfaces.length}
-              history={history.map((sample) => sample.rx + sample.tx)}
+              history={history.map((sample) => ({ at: sample.at, value: sample.rx + sample.tx }))}
               ready={ready}
             />
           </div>
@@ -595,28 +672,47 @@ export function ResourcesSection() {
               </div>
             </section>
 
-            {/* 近 2 分钟趋势 */}
-            <section className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card p-4">
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                  <Activity className="size-4 text-muted-foreground" />
-                  {t('resourceMonitor.trendTitle')}
-                </span>
-                <span className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                  <span className="flex items-center gap-1">
-                    <span className="size-2 rounded-full" style={{ backgroundColor: RESOURCE_COLORS.cpu }} />
-                    CPU
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="size-2 rounded-full" style={{ backgroundColor: RESOURCE_COLORS.memory }} />
-                    {t('resourceMonitor.memory')}
-                  </span>
-                </span>
+            {/* 最近 60 秒（任务管理器式：右边缘=当前，从右向左实时打印） */}
+            <section className="flex flex-col gap-3 rounded-xl border border-border/60 bg-card p-4">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <Activity className="size-4 text-muted-foreground" />
+                {t('resourceMonitor.trendTitle')}
               </div>
-              <TrendChart history={history} />
-              <div className="flex justify-between text-[10px] text-muted-foreground">
-                <span>{t('resourceMonitor.trendWindow')}</span>
-                <span className="tabular-nums">{history.length} / {HISTORY_MAX}</span>
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <span className="size-2 rounded-full" style={{ backgroundColor: RESOURCE_COLORS.cpu }} />
+                      CPU
+                    </span>
+                    <span className="tabular-nums">{ready ? pct(view.cpu.usagePercent) : '—'}</span>
+                  </div>
+                  <TaskManagerChart
+                    points={history.map((sample) => ({ at: sample.at, value: sample.cpu }))}
+                    color={RESOURCE_COLORS.cpu}
+                    leftLabel={t('resourceMonitor.trendCpuAxis')}
+                    rightLabel={t('resourceMonitor.trendScaleMax')}
+                    footerLeft={t('resourceMonitor.trendWindowLeft')}
+                    footerRight={t('resourceMonitor.trendNow')}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <span className="size-2 rounded-full" style={{ backgroundColor: RESOURCE_COLORS.memory }} />
+                      {t('resourceMonitor.memory')}
+                    </span>
+                    <span className="tabular-nums">{ready ? pct(view.memory.usedPercent) : '—'}</span>
+                  </div>
+                  <TaskManagerChart
+                    points={history.map((sample) => ({ at: sample.at, value: sample.mem }))}
+                    color={RESOURCE_COLORS.memory}
+                    leftLabel={t('resourceMonitor.trendMemAxis')}
+                    rightLabel={t('resourceMonitor.trendScaleMax')}
+                    footerLeft={t('resourceMonitor.trendWindowLeft')}
+                    footerRight={t('resourceMonitor.trendNow')}
+                  />
+                </div>
               </div>
             </section>
           </div>

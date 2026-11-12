@@ -66,7 +66,7 @@ const BROWSER_OBSERVE_ACTIONS = new Set([
 /**
  * 风险分级：按工具名 + 注解综合判定。
  * 合并工具（memory/mcp/skill）按 params.action 分级，保持合并前的风险语义：
- *   memory: save=L3 / search|list_rooms=L0
+ *   memory: save|update|delete|pin=L3 / search|list_rooms=L0
  *   mcp:    list=L0 / call=L3（未标注 MCP 工具 fail-closed，保持合并前调用工具的风险等级）
  *   skill:  list|use=L0
  */
@@ -86,7 +86,12 @@ export function classifyRisk(
     if (action === 'setup') return 'L1';
     return 'L3';
   }
-  if (toolName === 'memory') return action === 'save' ? 'L3' : 'L0';
+  // memory：save/update/delete/pin 写文件（含破坏性的删除）→ L3；search/list_rooms 只读 → L0
+  if (toolName === 'memory') {
+    return action === 'save' || action === 'update' || action === 'delete' || action === 'pin'
+      ? 'L3'
+      : 'L0';
+  }
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
   if (toolName === 'skill') return 'L0';
   // set：资源管理合并工具。list/search 只读（L0）；create/update/delete/install 写文件/下载（L3）。

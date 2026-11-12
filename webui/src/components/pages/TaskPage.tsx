@@ -47,14 +47,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { FilePreviewPane, archiveEntrySource, fileNameOf, MarkdownRenderer } from '../../render';
-import { setHydrationPaused, subscribeDrained } from '../../render/core/hydration-scheduler';
+import { setHydrationPaused } from '../../render/core/hydration-scheduler';
 import type { OverlayType } from '../../types';
 import { cn } from '@/lib/utils';
 import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-block';
 import { stripInjectBlock } from '@/lib/inject-block';
 import { onSessionTruncated } from '@/lib/ws-events';
 import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
-import { computeReplyEnds, isSystemCard } from '@/lib/reply-end';
+import { computeReplyEnds, isEmptyAssistantPlaceholder, isSystemCard } from '@/lib/reply-end';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
@@ -95,6 +95,7 @@ import { stripMentionTokens } from '../shared/mention-data';
 import { MessageAttachmentCards } from '../shared/AttachmentCards';
 import { FileTypeIcon } from '../shared/FileTypeIcon';
 import { ScrollToBottomButton } from '../shared/ScrollToBottomButton';
+import { ThinkingPreview } from '../shared/ThinkingPreview';
 import { ConversationNodeRail, type ConversationNodeItem } from '../shared/ConversationNodeRail';
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
 import { VirtualList, type VirtualListApi } from '../../lib/virtual-list/VirtualList';
@@ -280,6 +281,15 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
 
   const messages = useStore((s) => s.messagesBySession[taskId] ?? EMPTY_MESSAGES);
   /**
+   * 列表项：过滤不可见的空 assistant 占位。
+   * 这类条目渲染为 0 高度，但虚拟列表会把「未测量项」按中位数估算，
+   * 留在 items 里会让前缀和与实际高度不一致（回复开始瞬间的轻微位移来源）。
+   */
+  const listItems = useMemo(
+    () => messages.filter((m) => !isEmptyAssistantPlaceholder(m)),
+    [messages],
+  );
+  /**
    * 工具结果全局索引（toolCallId → 结果文本/错误标记）。
    * 长耗时工具（subagent / 建队）的结果消息不保证紧邻其 assistant 消息，
    * 卡片必须跨整条消息列表取结果，否则刷新后报告与 teamId 全丢。
@@ -456,13 +466,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // ===== 滚动控制（自建虚拟列表：followOutput 仅在「已在底部」时跟随）=====
   const listApiRef = useRef<VirtualListApi | null>(null);
   const [atBottom, setAtBottom] = useState(true);
-  /**
-   * 列表是否正在滚动。
-   * 滚动期间强制走「纯文本占位」渲染：否则新进入视口的条目会在下一帧同步解析
-   * Markdown/代码高亮/图表，抢占主线程导致滚动突然变速甚至卡顿。
-   * 停止滚动后由 hydration-scheduler 按帧预算渐进升级，不再同步全量渲染。
-   */
-  const [isScrollingList, setIsScrollingList] = useState(false);
   /** 滚动容器 DOM 的 state 副本：供对话节点导航（当前节点判定 / 跳转）使用 */
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   /** 跟随态快照（供发送时读取最新值，不触发重渲染） */
@@ -678,20 +681,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       setAtBottom(true);
     });
   }, [taskId, messages.length]);
-
-  /**
-   * 渐进水合回锚：一批延迟渲染的块（hydration-scheduler）升级完成后，若视口仍在底部
-   * 则回锚最新消息一次——上方内容水合后高度变化会把底部顶出视口，这里拉回。
-   * rAF 再延迟一帧：等水合引发的重渲染/重排实际提交后再定位。
-   */
-  useEffect(() => {
-    return subscribeDrained(() => {
-      if (!atBottomRef.current) return;
-      requestAnimationFrame(() => {
-        listApiRef.current?.scrollToBottom('auto');
-      });
-    });
-  }, []);
 
   const contextFiles = context?.files ?? [];
   const totalTokens = context?.totalTokens ?? 0;
@@ -1367,6 +1356,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
    */
   const renderItem = useCallback(
     (msg: TaskMessage, _index: number, inViewport: boolean) => {
+      // 空 assistant 占位整条不渲染（含外层 padding）：否则会在页脚「响应中」上方
+      // 留下几 px 幽灵高度，表现为「响应中先出现、随后下移几 px 才出现正文」。
+      if (isEmptyAssistantPlaceholder(msg)) return null;
       // 复制按钮：每条「总 AI 消息」（每段回复结尾）都带
       const showActions = replyEndIds.has(msg.id);
       // 重新生成 / 诊断(Harness)：仅最新的一段回复结尾
@@ -1375,7 +1367,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       // 使多轮工具调用（每轮一个气泡）读起来像紧凑的工具序列；段结尾/用户/系统卡保留 16px 分隔。
       const isContinuation = msg.role === 'assistant' && !replyEndIds.has(msg.id) && !isSystemCard(msg);
       return (
-        <div className={isContinuation ? 'px-4 pb-1' : 'px-4 pb-4'}>
+        <div className={cn('min-w-0', isContinuation ? 'px-4 pb-1' : 'px-4 pb-4')}>
           <MessageErrorBoundary>
             <MessageBubble
               message={msg}
@@ -1395,7 +1387,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               onContinue={handleContinue}
               continueDisabled={isGenerating}
               onOpenAttachment={openAttachment}
-              deferContent={!inViewport || isScrollingList}
+              deferContent={!inViewport}
             />
           </MessageErrorBoundary>
         </div>
@@ -1408,7 +1400,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       replyEndIds,
       lastReplyEndId,
       isGenerating,
-      isScrollingList,
       handleTruncateClick,
       handleCopyMessage,
       handleRegenerate,
@@ -1482,7 +1473,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {/* 对话列：固定最大宽度（CHAT_MAX_WIDTH_PX）+ 水平居中；可用宽度不足时由 w-full 自动收缩。
             header 与消息区保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
         <div
-          className="mx-auto flex min-h-0 w-full flex-1 flex-col"
+          className="mx-auto flex min-h-0 min-w-0 w-full flex-1 flex-col"
           style={{ maxWidth: chatMaxWidth }}
         >
         {/* Task Messages（自建虚拟列表：无论会话多长，DOM 中只挂载视口附近的消息；
@@ -1500,7 +1491,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             <VirtualList
               className="task-scroll-area"
               apiRef={listApiRef}
-              items={messages}
+              items={listItems}
               // 会话标识：合并路由后切换会话不再重挂组件，列表需据此重置贴底跟随与高度缓存
               sessionKey={taskId}
               // 稳定 key：分页 prepend 后同一消息的 key 不变（不会整列表重挂载）
@@ -1520,11 +1511,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 if (!sc || m.scrollTop > sc.clientHeight * 2.5) return;
                 prefetchMore();
               }}
-              // 滚动期间暂停 Markdown 水合并强制占位渲染，停止 120ms 后恢复（滚动优先）；
-              // 停止后再补一页缓冲，保证「停下来继续上滑」仍然跟手。
+              // 滚动期间只暂停 Markdown 水合（帧预算让给滚动），不改变已渲染内容的形态：
+              // 强制退回纯文本占位会在上滑时闪一下再重排。停止 120ms 后恢复水合并补一页缓冲。
               onScrollingChange={(scrolling) => {
                 setHydrationPaused(scrolling);
-                setIsScrollingList(scrolling);
                 if (!scrolling) prefetchMore();
               }}
               initialBottom
@@ -2656,27 +2646,22 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
 
   // 历史空占位 assistant（无正文、无思考、无工具调用、无中断标记）：不渲染空气泡。
   // 这类消息来自进程中断/空回合，刷新后若渲染会留下无意义的空白间隙。
-  if (
-    !visibleContent.trim() &&
-    !message.thinking &&
-    !(message.toolCalls?.length) &&
-    !message.interrupted
-  ) {
+  if (isEmptyAssistantPlaceholder(message)) {
     return null;
   }
 
   // assistant 消息
   return (
-    <div className="group/message flex flex-col gap-2">
+    <div className="group/message flex min-w-0 flex-col gap-2">
       {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时）。
           折叠态不渲染正文：长会话 thinking 总量可达百万字符，折叠时仍解析/水合会把主线程打死。 */}
       {message.thinking && (
         <details
-          className="group"
+          className="group min-w-0 overflow-hidden"
           open={thinkingOpen}
           onToggle={(e) => setThinkingOpen((e.currentTarget as HTMLDetailsElement).open)}
         >
-          <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+          <summary className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
             <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
             {message.thinkingStreaming ? (
               <Loader2 className="size-3.5 shrink-0 animate-spin" />
@@ -2694,13 +2679,9 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
                 </span>
               </>
             )}
-            {/* 预览仅在折叠态展示：展开后全文可见，隐藏预览避免重复 */}
-            {thinkPreview && (
-              <span className="group-open:hidden flex min-w-0 items-center gap-1.5">
-                <span className="shrink-0">·</span>
-                <span className="min-w-0 truncate text-muted-foreground/70">{thinkPreview}</span>
-              </span>
-            )}
+            {/* 预览仅在折叠态展示：展开后全文可见，隐藏预览避免重复。
+                横向滚动发生在预览自身容器内，不撑宽会话布局。 */}
+            <ThinkingPreview text={thinkPreview} />
           </summary>
           {thinkingOpen && (
             <div className="mt-1">

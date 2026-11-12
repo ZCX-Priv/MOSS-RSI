@@ -1,7 +1,7 @@
 // webui/src/components/pages/overview/charts.tsx
 // 设置-概览自绘图表基础件（无第三方图表库）：
 // TrendAreaChart 面积趋势 / StackedTokenBars 三段堆叠柱 / Donut 环形图 /
-// Heatmap 活跃热力图 / Sparkline 迷你趋势 / StatTile KPI 卡，以及格式化工具。
+// Heatmap 活跃热力图 / TaskManagerChart 任务管理器式实时折线 / StatTile KPI 卡，以及格式化工具。
 // 所有颜色引用项目级色卡（lib/theme-palette.ts）写入的 --palette-* 变量。
 
 import { useId, useMemo, useState, type ReactNode } from 'react';
@@ -183,12 +183,17 @@ export function TrendAreaChart({
   points,
   color,
   height = 148,
+  label,
 }: {
   points: TrendPoint[];
   color: string;
   height?: number;
+  /** 悬停浮窗的指标行标签（如「请求次数」） */
+  label?: string;
 }) {
+  const { i18n } = useTranslation();
   const gradientId = useId().replace(/:/g, '');
+  const [hover, setHover] = useState<number | null>(null);
   const max = niceMax(Math.max(1, ...points.map((point) => point.value)));
   const width = 600;
   const step = points.length > 1 ? width / (points.length - 1) : width;
@@ -201,12 +206,37 @@ export function TrendAreaChart({
     points.length > 1
       ? `0,${height} ${line} ${width},${height}`
       : `0,${height} 0,${coords[0]?.y.toFixed(1) ?? height} ${width},${coords[0]?.y.toFixed(1) ?? height} ${width},${height}`;
+  // 悬停吸附：索引越界（切换日期范围后）按未悬停处理，等下一次鼠标移动自动校正
+  const safeHover = hover !== null && hover >= 0 && hover < points.length ? hover : null;
+  const hovered = safeHover !== null ? points[safeHover] : null;
+  const hoveredCoord = safeHover !== null ? coords[safeHover] : null;
+  const tooltipLeft =
+    safeHover !== null
+      ? points.length > 1
+        ? Math.min(88, Math.max(12, (safeHover / (points.length - 1)) * 100))
+        : 50
+      : 0;
 
   return (
     <div className="flex flex-col">
       <div className="flex items-stretch gap-1">
         <YAxis max={max} />
-        <div className="relative min-w-0 flex-1">
+        <div
+          className="relative min-w-0 flex-1"
+          // 吸附最近数据点：SVG 以 preserveAspectRatio="none" 铺满容器，x 与容器宽度线性对应
+          onMouseMove={(event) => {
+            if (points.length === 0) return;
+            if (points.length === 1) {
+              setHover(0);
+              return;
+            }
+            const rect = event.currentTarget.getBoundingClientRect();
+            const ratio = (event.clientX - rect.left) / Math.max(1, rect.width);
+            const index = Math.round(ratio * (points.length - 1));
+            setHover(Math.max(0, Math.min(points.length - 1, index)));
+          }}
+          onMouseLeave={() => setHover(null)}
+        >
           <svg
             viewBox={`0 0 ${width} ${height}`}
             preserveAspectRatio="none"
@@ -241,7 +271,47 @@ export function TrendAreaChart({
               strokeLinecap="round"
               style={{ stroke: color }}
             />
+            {/* 悬停参考线 + 数据点：盖在面积与折线之上 */}
+            {hoveredCoord && (
+              <g>
+                <line
+                  x1={hoveredCoord.x}
+                  x2={hoveredCoord.x}
+                  y1={0}
+                  y2={height}
+                  style={{ stroke: 'var(--foreground)' }}
+                  strokeOpacity="0.35"
+                  strokeWidth="1"
+                  strokeDasharray="4 4"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <circle
+                  cx={hoveredCoord.x}
+                  cy={hoveredCoord.y}
+                  r="3.2"
+                  strokeWidth="2"
+                  vectorEffect="non-scaling-stroke"
+                  style={{ fill: 'var(--background)', stroke: color }}
+                />
+              </g>
+            )}
           </svg>
+
+          {/* 浮窗：与 Token 柱状图同一套容器与排版（单指标版） */}
+          {hovered && hoveredCoord && (
+            <div
+              className="pointer-events-none absolute top-0 z-20 rounded-lg border border-border bg-popover px-3 py-2 text-[11px] shadow-lg"
+              style={{ left: `${tooltipLeft}%`, transform: 'translate(-50%, -6px)' }}
+            >
+              <div className="mb-1 font-medium text-foreground">{hovered.day}</div>
+              <div className="flex items-center justify-between gap-6 whitespace-nowrap">
+                <span className="text-muted-foreground">{label ?? ''}</span>
+                <span className="tabular-nums text-foreground">
+                  {formatCount(hovered.value, i18n.language)}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
       <XAxis points={points} />
@@ -640,50 +710,155 @@ export function Heatmap({
 }
 
 // ============================================================================
-// 迷你趋势线
+// 任务管理器式实时折线（固定时间窗，右边缘=当前，从右向左滚动）
 // ============================================================================
 
-export function Sparkline({
+/** 任务管理器式默认时间窗（毫秒）：左端 60 秒前，右端当前 */
+export const TASK_MANAGER_WINDOW_MS = 60_000;
+
+export interface TaskManagerPoint {
+  /** 采样时刻（毫秒时间戳） */
+  at: number;
+  /** 0-100 的百分比值 */
+  value: number;
+}
+
+/** 折线/网格的 1px 描边：preserveAspectRatio=none 拉伸时保持视觉宽度恒定 */
+const CRISP = 'non-scaling-stroke';
+
+/**
+ * Windows 任务管理器风格实时折线：
+ * - x 轴按真实时间定位（右边缘 = 当前时刻），新采样从右向左流动；
+ * - 最新值水平延伸到右边缘（实时落点）；
+ * - 浅色面积填充 + 细折线 + 网格；full 变体带四角标签，compact 变体用于卡片迷你趋势。
+ */
+export function TaskManagerChart({
   points,
   color,
-  width = 120,
-  height = 32,
-  id,
+  windowMs = TASK_MANAGER_WINDOW_MS,
+  height = 88,
+  variant = 'full',
+  leftLabel,
+  rightLabel,
+  footerLeft,
+  footerRight,
 }: {
-  points: number[];
+  points: readonly TaskManagerPoint[];
   color: string;
-  width?: number;
+  /** 时间窗（ms）；右边缘恒为当前时刻 */
+  windowMs?: number;
   height?: number;
-  id: string;
+  variant?: 'full' | 'compact';
+  /** full：左上标签（如「% 利用率」） */
+  leftLabel?: string;
+  /** full：右上标签（如「100%」） */
+  rightLabel?: string;
+  /** full：左下标签（如「60 秒」） */
+  footerLeft?: string;
+  /** full：右下标签（如「0」） */
+  footerRight?: string;
 }) {
-  if (points.length < 2) {
-    return <div style={{ width, height }} className="rounded bg-muted/40" aria-hidden="true" />;
-  }
-  const max = Math.max(1, ...points);
-  const min = Math.min(...points, 0);
-  const span = Math.max(1, max - min);
-  const step = width / (points.length - 1);
-  const coords = points.map((v, i) => `${(i * step).toFixed(2)},${(height - ((v - min) / span) * (height - 4) - 2).toFixed(2)}`);
-  const line = coords.join(' ');
-  const area = `0,${height} ${line} ${width},${height}`;
-  return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+  const clipId = useId().replace(/:/g, '');
+  const width = 560;
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  // 只画窗口内的点（按时间升序；窗口外的点交给裁剪）
+  const visible = points
+    .filter((point) => point.at >= cutoff)
+    .sort((a, b) => a.at - b.at);
+  const xOf = (at: number): number => width - ((now - at) / windowMs) * width;
+  const yOf = (value: number): number => height - (Math.min(100, Math.max(0, value)) / 100) * height;
+  const coords = visible.map((point) => ({ x: xOf(point.at), y: yOf(point.value) }));
+  const last = coords[coords.length - 1];
+  // 最新值延伸到右边缘：任务管理器的曲线始终顶在当前时刻
+  const lineCoords = last ? [...coords, { x: width, y: last.y }] : [];
+  const line = lineCoords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  const area =
+    lineCoords.length > 0
+      ? `${lineCoords[0].x.toFixed(1)},${height} ${line} ${width},${height}`
+      : '';
+  const compact = variant === 'compact';
+  const horizontal = compact
+    ? [0, 0.5, 1]
+    : Array.from({ length: 11 }, (_, index) => index / 10);
+  const vertical = compact ? [0, 0.5, 1] : Array.from({ length: 7 }, (_, index) => index / 6);
+
+  const plot = (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      className={compact ? 'block h-full w-full' : 'block w-full'}
+      style={compact ? undefined : { height }}
+      aria-hidden="true"
+    >
       <defs>
-        <linearGradient id={`spark-${id}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" style={{ stopColor: color, stopOpacity: 0.28 }} />
-          <stop offset="100%" style={{ stopColor: color, stopOpacity: 0 }} />
-        </linearGradient>
+        <clipPath id={`tm-clip-${clipId}`}>
+          <rect x="0" y="0" width={width} height={height} />
+        </clipPath>
       </defs>
-      <polygon points={area} style={{ fill: `url(#spark-${id})` }} />
-      <polyline
-        points={line}
-        fill="none"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        style={{ stroke: color }}
-      />
+      {/* 网格：full = 10% × 10 秒；compact = 三等分 */}
+      <g style={{ stroke: 'var(--palette-chart-grid)' }} strokeWidth="1" opacity="0.5">
+        {horizontal.map((ratio) => (
+          <line
+            key={`h-${ratio}`}
+            x1={0}
+            x2={width}
+            y1={height * ratio}
+            y2={height * ratio}
+            vectorEffect={CRISP}
+          />
+        ))}
+        {vertical.map((ratio) => (
+          <line
+            key={`v-${ratio}`}
+            x1={width * ratio}
+            x2={width * ratio}
+            y1={0}
+            y2={height}
+            vectorEffect={CRISP}
+          />
+        ))}
+      </g>
+      <g clipPath={`url(#tm-clip-${clipId})`}>
+        {area !== '' && <polygon points={area} fill={color} fillOpacity={compact ? 0.14 : 0.16} />}
+        {line !== '' && (
+          <polyline
+            points={line}
+            fill="none"
+            stroke={color}
+            strokeWidth={compact ? 1.2 : 1.3}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect={CRISP}
+          />
+        )}
+      </g>
     </svg>
+  );
+
+  if (compact) {
+    return (
+      <div
+        className="overflow-hidden rounded-[3px] border border-border/50 bg-background/40"
+        style={{ height }}
+      >
+        {plot}
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border/70 bg-background">
+      <div className="flex items-center justify-between gap-2 px-2 pt-1 text-[10px] text-muted-foreground">
+        <span className="truncate">{leftLabel ?? ''}</span>
+        <span className="shrink-0 tabular-nums">{rightLabel ?? ''}</span>
+      </div>
+      <div className="px-2">{plot}</div>
+      <div className="flex items-center justify-between px-2 pb-1 text-[10px] text-muted-foreground">
+        <span>{footerLeft ?? ''}</span>
+        <span>{footerRight ?? ''}</span>
+      </div>
+    </div>
   );
 }
 

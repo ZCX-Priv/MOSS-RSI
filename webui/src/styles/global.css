@@ -255,6 +255,11 @@ html[data-density='comfortable'] {
 .task-scroll-area {
   scrollbar-width: none;
   overflow-anchor: none;
+  /* 整列禁止横向滚动：overflow-y:auto 会让计算后的 overflow-x 也变成 auto，
+     一旦长思考预览/超长不可断词把 scrollWidth 撑大，触控板横向手势会把整个
+     会话区左右拖走（表现为布局左右跳动）。需要横向滚动的宽内容必须在自己的
+     容器内滚动（如思考预览行、代码块、表格）。 */
+  overflow-x: hidden;
 }
 
 /* 终端（xterm）移动端触摸滚动适配：
