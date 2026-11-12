@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA, type ManifestOptions } from 'vite-plugin-pwa'
 import path from 'node:path'
+import { mossCompat } from './compat/vite-plugin-compat.ts'
 
 // https://vite.dev/config/
 // 构建产物输出到项目根目录 dist/webui/，与 src/modules/server/static-assets.ts 对齐
@@ -52,6 +53,11 @@ function mossDevManifest(): Plugin {
 
 export default defineConfig({
   plugins: [
+    // 浏览器兼容层：index.html 头部内联 polyfills + CSS 降级（dev/build 共用）。
+    // 放在最前，保证 polyfill 脚本先于 PWA 的 registerSW 与业务 module 脚本执行。
+    ...mossCompat({
+      polyfillsFile: path.resolve(import.meta.dirname, 'compat/polyfills.js'),
+    }),
     react(),
     tailwindcss(),
     mossDevManifest(),
@@ -68,6 +74,9 @@ export default defineConfig({
       includeAssets: ['MOSS.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'],
       manifest: pwaManifest,
       workbox: {
+        // SW 运行时内联为单文件：跳过 workbox-build 的 Rollup + OMT + AMD + manualChunks
+        // 分包路径（该路径会额外加载原生 rollup/Babel/Terser，是构建收尾卡顿的主要来源）。
+        inlineWorkboxRuntime: true,
         // 含 html：保证 index.html 进入 precache。
         // 这是此前「硬刷新/更新拿不到新版本」的致命根因修复——旧配置漏了 html，
         // 导致 index.html 不在 precache，而 vite-plugin-pwa 仍注入
@@ -102,10 +111,19 @@ export default defineConfig({
       devOptions: { enabled: false },
     }),
   ],
+  // dev 转换也按 Chrome 80 降级语法（build.target 只作用于打包）。
+  // 否则源码里的 ??= / ||= / &&= 会在 dev(:3000) 原样下发，Chrome 80 直接 SyntaxError。
+  oxc: {
+    target: 'chrome80',
+  },
   // dev 预构建全部「懒加载重依赖」：避免运行中首次访问某依赖时触发重新预构建，
   // 使此前引用的 ?v=<hash> 模块 URL 失效 → 懒加载渲染器报
   // “Failed to fetch dynamically imported module”（需重启 dev 生效）。
   optimizeDeps: {
+    // 依赖预构建同样降到 Chrome 80（esbuildOptions 已弃用，使用 rolldown transform）
+    rolldownOptions: {
+      transform: { target: 'chrome80' },
+    },
     include: [
       'sql.js', '@e965/xlsx', 'epubjs', 'mermaid', 'shiki', 'pdfjs-dist', 'three',
       'docx-preview', 'libarchive.js', '@aiden0z/pptx-renderer', 'jszip',
@@ -174,7 +192,11 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, '../dist/webui'),
     emptyOutDir: true,
     sourcemap: false,
-    target: 'es2022',
+    // 语法下限 Chrome 80：统一降级 ??= / ||= / &&= / class static block 等语法。
+    // 运行时缺失的 API 由 compat/polyfills.js 补齐（Chrome 80/100 均可解析执行）。
+    target: ['chrome80'],
+    // 552 个 chunk 逐个计算 gzip 体积纯属构建开销，产物与功能不受影响
+    reportCompressedSize: false,
     // 主 chunk 体积告警阈值：应用外壳（React + 品牌图标 + 文件类型图标数据）约 5MB，
     // 重依赖（pdfjs/three/mermaid/shiki…）已全部走动态 import 拆分到独立 chunk。
     // 该阈值仅避免对「已知且有意为之」的入口体积重复告警，不改变产物结构。

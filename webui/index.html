@@ -23,6 +23,11 @@
           /* localStorage 不可用（隐私模式等）：默认暗色 */
         }
         document.documentElement.dataset.bootTheme = theme;
+        // 同步应用 .dark class：应用主题变量（global.css 的 .dark）依赖它。
+        // 若只等 ThemeContext 的 useEffect / IndexedDB 主题读取，React 首帧会用浅色
+        // 变量渲染一帧（白屏）再切回深色。这里在解析 HTML 时就定下来，首帧即正确。
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        document.documentElement.style.colorScheme = theme;
       })();
     </script>
   </head>
@@ -73,9 +78,12 @@
       }
       html {
         overflow: hidden;
+        /* hex 回退：Chrome 80/100 不支持 oklch，避免启动瞬间落到白色 */
+        background: #0a0a0a;
         background: oklch(0.145 0 0);
       }
       html[data-boot-theme='light'] {
+        background: #fff;
         background: oklch(1 0 0);
       }
       #moss-boot {
@@ -88,10 +96,12 @@
         justify-content: center;
         /* 四行式版式：logo → MOSS 字样 → 三点弹跳 → 文字 */
         gap: 24px;
+        background: #0a0a0a;
         background: oklch(0.145 0 0);
         font-family: system-ui, sans-serif;
       }
       html[data-boot-theme='light'] #moss-boot {
+        background: #fff;
         background: oklch(1 0 0);
       }
       .moss-boot-logo {

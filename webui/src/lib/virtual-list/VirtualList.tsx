@@ -584,6 +584,14 @@ export function VirtualList<T>({
         }
       }
       if (changed) {
+        // 异步高度变化（RunCode 流式输出 / 卡片展开）发生在两次布局之间：
+        // 若仍在贴底跟随，立即按真实 scrollHeight 贴住，避免只靠下一帧 rAF 导致露缝。
+        const sc = scrollerRef.current;
+        if (sc && followRef.current && stickyRef.current && !programmaticRef.current) {
+          selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
+          sc.scrollTop = sc.scrollHeight;
+          syncAtBottom();
+        }
         dirtyRef.current = true;
         scheduleLayout();
       }
@@ -598,7 +606,7 @@ export function VirtualList<T>({
       cellObserverRef.current = null;
       scrollerObserverRef.current = null;
     };
-  }, [scheduleLayout]);
+  }, [scheduleLayout, syncAtBottom]);
 
   /** 条目包裹层 ref（稳定回调 + React19 cleanup 卸载时反注册） */
   const cellRef = useCallback((el: HTMLElement | null) => {
@@ -818,7 +826,11 @@ export function VirtualList<T>({
       if (!programmaticRef.current && !selfInitiated) {
         // 仅「用户主动上滑」（scrollTop 相对上一帧变小）才脱离贴底跟随。
         // 内容增长（工具卡片展开 / 流式输出涌入）不改变 scrollTop，绝不脱离跟随。
-        if (top < lastScrollTopRef.current - 1) stickyRef.current = false;
+        // 仍在底部阈值内时，负 delta 来自内容缩短后浏览器钳制 scrollTop（页脚收起、
+        // RunCode 卡片折叠等），不是用户上滑 —— 不能据此脱跟，否则后续内容不再贴底。
+        if (top < lastScrollTopRef.current - 1 && dist > thresholdRef.current) {
+          stickyRef.current = false;
+        }
         // 恢复跟随必须同时满足「向下滚动」与「真的回到贴底」：
         // 内容增长本身不产生 scroll 事件，若不加方向条件，任何一次 dist 变小的
         // scroll（含布局钳制）都会把用户刚上滑出来的视口重新武装为跟随。

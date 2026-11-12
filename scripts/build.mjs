@@ -1,79 +1,136 @@
 // scripts/build.mjs
-// MOSS 构建脚本：构建后端 (Bun) + 前端 (Vite)
+// MOSS 构建脚本：构建后端 (Bun) + 前端 (Vite) + 静态资产拷贝
 // 使用：node scripts/build.mjs
+//
+// 性能设计：
+// - 全部子进程并发执行（后端打包 / 前端打包 / 前端类型检查 / 资产拷贝互不依赖）；
+// - 直接调用 node + vite/typescript 的入口 JS，绕开 npm.cmd / cmd.exe 包装层
+//   （Windows 上少两层进程，且避免 shell 包装器残留句柄导致构建完成后终端不返回）；
+// - 每个阶段输出耗时，便于定位卡点；
+// - 产物校验完成后显式 process.exit(0)，保证终端立即回到命令行。
 
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = resolve(__dirname, '..');
 
 const DIST = resolve(ROOT, 'dist');
+const WEBUI = resolve(ROOT, 'webui');
 const WEBUI_DIST = resolve(DIST, 'webui');
 // 入口产物：outdir + splitting 模式下 Bun 输出 dist/main.js（旧版单文件为 dist/server.js，
 // bin/moss.js 会做兼容读取）
 const BACKEND_OUT = resolve(DIST, 'main.js');
 
+const IS_WIN = process.platform === 'win32';
+const STARTED_AT = Date.now();
+
+function elapsed() {
+  return ((Date.now() - STARTED_AT) / 1000).toFixed(2);
+}
+
 function log(msg) {
-  console.log(`[build] ${msg}`);
+  console.log(`[build +${elapsed()}s] ${msg}`);
 }
 
 function error(msg) {
-  console.error(`[build] ERROR: ${msg}`);
+  console.error(`[build +${elapsed()}s] ERROR: ${msg}`);
 }
 
-const IS_WIN = process.platform === 'win32';
-
-/** shell 参数转义：仅含安全字符时原样，否则加双引号（路径可能含空格/中文） */
 function shellQuote(arg) {
   return /^[A-Za-z0-9_@%+=:,./\\-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '\\"')}"`;
 }
 
-function spawn(cmd, args, opts = {}) {
-  // Windows：npm / npx / bun 均为 .cmd/.ps1 包装器，Node 禁止无 shell 直接 spawn
-  // （CVE-2024-27980 之后）；但「args 数组 + shell:true」会触发 DEP0190 弃用警告
-  // （参数未转义、仅拼接）。故 Windows 下把命令与参数拼成单条命令串交给 shell。
-  // POSIX：直接以「命令 + 参数数组」形态 spawn，避免路径含空格时被错误拆分。
-  const options = { stdio: 'inherit', cwd: ROOT, ...opts };
-  return IS_WIN
-    ? spawnSync([cmd, ...args].map(shellQuote).join(' '), { ...options, shell: true })
-    : spawnSync(cmd, args, options);
+/**
+ * 异步 spawn：等待进程真正退出（close 而非 exit，stdio 全部结算后才返回）。
+ * Windows 下 windowsHide 避免弹窗；shell 默认关闭，避免 cmd.exe 包装层。
+ */
+function spawnAsync(command, args, opts = {}) {
+  return new Promise((resolvePromise) => {
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd: ROOT,
+        stdio: 'inherit',
+        windowsHide: true,
+        shell: false,
+        ...opts,
+      });
+    } catch (err) {
+      resolvePromise({ code: -1, error: err });
+      return;
+    }
+    child.on('error', (err) => resolvePromise({ code: -1, error: err }));
+    child.on('close', (code, signal) => resolvePromise({ code: code ?? -1, signal }));
+  });
 }
 
-function run(cmd, args, opts = {}) {
-  const result = spawn(cmd, args, opts);
-  if (result.status !== 0) {
-    error(`Command failed: ${cmd} ${args.join(' ')} (exit ${result.status})`);
-    process.exit(result.status ?? 1);
+/** Windows 下需要 shell 的兜底（npm 包装器） */
+function spawnShellAsync(commandLine, opts = {}) {
+  return new Promise((resolvePromise) => {
+    let child;
+    try {
+      child = spawn(commandLine, { cwd: ROOT, stdio: 'inherit', windowsHide: true, shell: true, ...opts });
+    } catch (err) {
+      resolvePromise({ code: -1, error: err });
+      return;
+    }
+    child.on('error', (err) => resolvePromise({ code: -1, error: err }));
+    child.on('close', (code, signal) => resolvePromise({ code: code ?? -1, signal }));
+  });
+}
+
+class BuildFailure extends Error {}
+
+async function runTask(label, command, args, opts = {}) {
+  const taskStart = Date.now();
+  const result = await spawnAsync(command, args, opts);
+  const cost = ((Date.now() - taskStart) / 1000).toFixed(2);
+  if (result.error) {
+    throw new BuildFailure(`${label} failed to spawn: ${result.error.message}`);
   }
-  return result;
+  if (result.code !== 0) {
+    throw new BuildFailure(
+      `${label} exited with ${result.code === -1 ? `signal ${result.signal ?? 'unknown'}` : `code ${result.code}`}`,
+    );
+  }
+  log(`${label} done in ${cost}s`);
+  return cost;
 }
 
-function probe(cmd, args) {
-  const options = IS_WIN
-    ? { shell: true, stdio: 'ignore' }
-    : { stdio: 'ignore' };
-  return IS_WIN
-    ? spawnSync([cmd, ...args].map(shellQuote).join(' '), options)
-    : spawnSync(cmd, args, options);
+function runSyncTask(label, fn) {
+  const taskStart = Date.now();
+  const value = fn();
+  const cost = ((Date.now() - taskStart) / 1000).toFixed(2);
+  log(`${label} done in ${cost}s`);
+  return value;
 }
 
-function detectBun() {
-  // 优先使用直接可用的 bun 命令
-  const r = probe('bun', ['--version']);
-  if (r.status === 0) return { cmd: 'bun', args: [] };
-  // 回退到 npx bun（兼容 bun 以 npm 包形式全局安装但不在 PATH 的场景）
-  const r2 = probe('npx', ['bun', '--version']);
-  if (r2.status === 0) return { cmd: 'npx', args: ['bun'] };
-  return null;
-}
-
-function detectNpx() {
-  const r = probe('npx', ['--version']);
-  if (r.status === 0) return 'npx';
+/**
+ * 解析 bun 真实可执行文件路径（与 bin/moss.js 同策略）：
+ * Windows 上 bun 常以 npm 全局 shim 安装，直接 spawn('bun') 会 ENOENT。
+ */
+function resolveBunExecutable() {
+  const exe = IS_WIN ? 'bun.exe' : 'bun';
+  const candidates = [];
+  if (process.env.BUN_INSTALL) candidates.push(join(process.env.BUN_INSTALL, 'bin', exe));
+  candidates.push(join(os.homedir(), '.bun', 'bin', exe));
+  for (const dir of (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')) {
+    if (!dir) continue;
+    candidates.push(join(dir, exe));
+    candidates.push(join(dir, 'node_modules', 'bun', 'bin', exe));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // 继续探测下一个候选
+    }
+  }
   return null;
 }
 
@@ -89,59 +146,61 @@ function cleanDist() {
 }
 
 // ============================================================================
-// 步骤 2: 构建后端 (Bun build -> dist/server.js)
+// 步骤 2: 构建后端 (Bun build -> dist/main.js)
 // ============================================================================
-function buildBackend() {
-  log('Building backend (Bun)...');
-  const bun = detectBun();
-  if (!bun) {
-    error('bun not found. Please install Bun >= 1.1.0 first.');
-    process.exit(1);
-  }
+async function buildBackend() {
+  const bunPath = resolveBunExecutable();
   const entry = resolve(ROOT, 'src/main.ts');
   if (!existsSync(entry)) {
-    error(`Backend entry not found: ${entry}`);
-    process.exit(1);
+    throw new BuildFailure(`Backend entry not found: ${entry}`);
   }
-  // bun build src/main.ts --outdir dist --splitting --target bun
-  // 单文件产物 15MB+，Bun 必须解析并求值整棵 import 树后才能进入 CLI（低配机器冷启动慢）。
-  // 改为 outdir + splitting：动态 import 的模块（工具实现/重依赖）拆成独立 chunk，
-  // 启动只加载关键路径代码。入口产物为 dist/main.js（bin/moss.js 会优先读取它）。
-  // --external 保持：sherpa-onnx 原生绑定/IM CJS SDK/ sharp 必须运行时从 node_modules 加载。
-  run(bun.cmd, [
-    ...bun.args,
+
+  const args = [
     'build',
     entry,
-    '--outdir', DIST,
-    '--target', 'bun',
-    '--format', 'esm',
-    // 低配机启动优化：minify 减少解析体积（标识符混淆已通过测试与运行时冒烟）
+    '--outdir',
+    DIST,
+    '--target',
+    'bun',
+    '--format',
+    'esm',
+    // 低配机启动优化：minify 减少解析体积
     '--minify-syntax',
     '--minify-whitespace',
     '--minify-identifiers',
     '--splitting',
-    '--external', 'sherpa-onnx-node',
-    '--external', 'sharp',
-    // IM SDK：均为 CJS/含动态 require，打包会破坏其运行时解析，运行时从 node_modules 加载
-    '--external', '@tencent-connect/qqbot-nodejs',
-    '--external', '@tencent-connect/qqbot-connector',
-  ]);
-  if (!existsSync(BACKEND_OUT)) {
-    error(`Backend build output not found: ${BACKEND_OUT}`);
-    process.exit(1);
+    // 原生绑定 / CJS SDK：运行时从 node_modules 加载，不能打包
+    '--external',
+    'sherpa-onnx-node',
+    '--external',
+    'sharp',
+    '--external',
+    '@tencent-connect/qqbot-nodejs',
+    '--external',
+    '@tencent-connect/qqbot-connector',
+  ];
+
+  if (bunPath) {
+    await runTask('backend (bun)', bunPath, args);
+  } else if (IS_WIN) {
+    // 兜底：PATH 中没有真实 bun.exe 时退回 shell 包装器
+    const result = await spawnShellAsync(`bun ${args.map(shellQuote).join(' ')}`);
+    if (result.code !== 0) {
+      throw new BuildFailure('backend (bun) failed: bun not found (install Bun >= 1.1.0)');
+    }
+    log('backend (bun) done via shell fallback');
+  } else {
+    await runTask('backend (bun)', 'bun', args);
   }
-  log(`Backend built: ${BACKEND_OUT}`);
+
+  if (!existsSync(BACKEND_OUT)) {
+    throw new BuildFailure(`Backend build output not found: ${BACKEND_OUT}`);
+  }
 }
 
 // ============================================================================
-// 步骤 3: 复制 tools 模块目录到 dist（供生产模式动态 import + tool.json 读取）
-// 含全部工具子目录 + shared/ 共享模块；顶层 .ts 已打包进 server.js，冗余但无害
+// 步骤 3: 复制 tools / 扩展 / prompts，并生成工具清单
 // ============================================================================
-/**
- * 生成内置工具配置清单（启动性能关键路径）：
- * 启动只读 dist/modules/tools/_config-manifest.json 一个文件，
- * 不再逐个工具目录 readdir/stat/read tool.json。
- */
 function generateToolConfigManifest() {
   log('Generating tool config manifest...');
   const src = resolve(ROOT, 'src', 'modules', 'tools');
@@ -165,9 +224,6 @@ function generateToolConfigManifest() {
       // 无效 tool.json 由运行时工具加载器单独告警
     }
   }
-  // 启动只读这两个文件：
-  // - _tools.json：完整工具描述符（loadToolDescriptorsFromPrebuilt）
-  // - _config-manifest.json：config 段（defaultAppConfig / config-schema）
   const tools = manifests.map(({ manifest }) => ({ name: manifest.name, config: manifest.config }));
   writeFileSync(resolve(destDir, '_tools.json'), JSON.stringify({ version: 1, tools: manifests }, null, 2), 'utf8');
   writeFileSync(resolve(destDir, '_config-manifest.json'), JSON.stringify({ version: 1, tools }, null, 2), 'utf8');
@@ -175,89 +231,112 @@ function generateToolConfigManifest() {
 }
 
 function copyToolsModule() {
-  log('Copying tools module...');
   const src = resolve(ROOT, 'src', 'modules', 'tools');
   const dest = resolve(DIST, 'modules', 'tools');
   if (!existsSync(src)) {
-    error(`Tools module source not found: ${src}`);
-    process.exit(1);
+    throw new BuildFailure(`Tools module source not found: ${src}`);
   }
-  // dist 已在 cleanDist 创建；递归复制保留目录结构（含 tool.json + index.ts）
-  // Bun 运行时可直接 import .TS，故复制源码即可
-  // 排除 *.test.ts：测试文件相对路径在 dist 结构下失效，会被 bun test 误扫报错
+  // dist 已在 cleanDist 创建；Bun 运行时可直接 import .TS，故复制源码即可。
+  // 排除 *.test.ts：测试文件相对路径在 dist 结构下失效，会被 bun test 误扫报错。
   cpSync(src, dest, {
     recursive: true,
     filter: (srcPath) => !srcPath.endsWith('.test.ts'),
   });
-  log(`Tools module copied: ${dest}`);
 }
 
-// ============================================================================
-// 步骤 3b: 复制浏览器扩展目录到 dist（browser 模块播种到 ~/.moss/browser/extension）
-// ============================================================================
 function copyBrowserExtension() {
-  log('Copying browser extension...');
   const src = resolve(ROOT, 'browser-extension');
   const dest = resolve(DIST, 'browser-extension');
   if (!existsSync(src)) {
-    error(`Browser extension source not found: ${src}`);
-    process.exit(1);
+    throw new BuildFailure(`Browser extension source not found: ${src}`);
   }
   cpSync(src, dest, { recursive: true });
-  log(`Browser extension copied: ${dest}`);
 }
 
-// ============================================================================
-// 步骤 3c: 复制 agent/ 提示词目录到 dist（播种源：首次运行复制到 ~/.moss/agent/，
-// 运行时只读用户目录，但种子模板必须随包分发）
-// ============================================================================
 function copyAgentPrompts() {
-  log('Copying agent prompts...');
   const src = resolve(ROOT, 'agent');
   const dest = resolve(DIST, 'agent');
   if (!existsSync(src)) {
-    error(`Agent prompts source not found: ${src}`);
-    process.exit(1);
+    throw new BuildFailure(`Agent prompts source not found: ${src}`);
   }
-  // 先清空旧产物：cpSync 只增量覆盖，已删除的源目录（如旧 prompts/）会残留在 dist
+  // 先清空旧产物：cpSync 只增量覆盖，已删除的源目录会残留在 dist
   rmSync(dest, { recursive: true, force: true });
   cpSync(src, dest, { recursive: true });
-  log(`Agent prompts copied: ${dest}`);
 }
 
 // ============================================================================
 // 步骤 4: 构建前端 (Vite build -> dist/webui/)
 // ============================================================================
-function buildFrontend() {
-  log('Building webui (Vite)...');
-  const uiDir = resolve(ROOT, 'webui');
-  if (!existsSync(uiDir)) {
-    error(`webui directory not found: ${uiDir}`);
-    process.exit(1);
+function resolveWebuiBin(relativePath) {
+  const full = resolve(WEBUI, relativePath);
+  return existsSync(full) ? full : null;
+}
+
+/**
+ * 前端打包 + 类型检查（并行）。
+ * tsc 与 vite 同时执行，任一失败都会让整体构建失败。
+ * 运行时顺带记录 index.html / sw.js 首次出现时间，用于观察 PWA 收尾阶段耗时。
+ */
+async function buildFrontend() {
+  const viteBin = resolveWebuiBin('node_modules/vite/bin/vite.js');
+  const tscBin = resolveWebuiBin('node_modules/typescript/bin/tsc');
+  if (!existsSync(resolve(WEBUI, 'package.json'))) {
+    throw new BuildFailure(`webui directory not found: ${WEBUI}`);
   }
-  // 在 webui/ 目录运行 npm run build（webui/ 有独立的 vite.config.ts，产物输出到 ../dist/webui）
-  run('npm', ['run', 'build'], { cwd: uiDir });
+
+  let htmlAt = 0;
+  let swAt = 0;
+  const indexHtml = resolve(WEBUI_DIST, 'index.html');
+  const swFile = resolve(WEBUI_DIST, 'sw.js');
+  const watcher = setInterval(() => {
+    if (!htmlAt && existsSync(indexHtml)) htmlAt = Date.now();
+    if (!swAt && existsSync(swFile)) swAt = Date.now();
+  }, 200);
+
+  const viteStart = Date.now();
+  const viteTask = viteBin
+    ? runTask('webui (vite)', process.execPath, [viteBin, 'build'], { cwd: WEBUI })
+    : (() => {
+        log('webui vite bin missing, fallback to npm run build');
+        return spawnShellAsync('npm run build', { cwd: WEBUI }).then((result) => {
+          if (result.code !== 0) throw new BuildFailure(`webui (vite) exited with code ${result.code}`);
+          log('webui (vite) done via npm fallback');
+        });
+      })();
+
+  const typecheckTask = tscBin
+    ? runTask('webui typecheck (tsc)', process.execPath, [tscBin, '--noEmit'], { cwd: WEBUI })
+    : (() => {
+        log('webui tsc bin missing, fallback to npm run typecheck');
+        return spawnShellAsync('npm run typecheck', { cwd: WEBUI }).then((result) => {
+          if (result.code !== 0) throw new BuildFailure(`webui typecheck exited with code ${result.code}`);
+          log('webui typecheck done via npm fallback');
+        });
+      })();
+
+  try {
+    await Promise.all([viteTask, typecheckTask]);
+  } finally {
+    clearInterval(watcher);
+  }
+
+  if (htmlAt && swAt && swAt > htmlAt) {
+    log(`PWA stage: index.html +${((htmlAt - viteStart) / 1000).toFixed(1)}s, sw.js +${((swAt - viteStart) / 1000).toFixed(1)}s`);
+  }
   if (!existsSync(WEBUI_DIST)) {
-    error(`WebUI build output not found: ${WEBUI_DIST}`);
-    process.exit(1);
+    throw new BuildFailure(`WebUI build output not found: ${WEBUI_DIST}`);
   }
-  log(`WebUI built: ${WEBUI_DIST}`);
 }
 
 // ============================================================================
-// 步骤 4: 校验关键产物
+// 步骤 5: 校验关键产物
 // ============================================================================
 function verifyArtifacts() {
   log('Verifying artifacts...');
-  const required = [
-    BACKEND_OUT,
-    WEBUI_DIST,
-    resolve(WEBUI_DIST, 'index.html'),
-  ];
+  const required = [BACKEND_OUT, WEBUI_DIST, resolve(WEBUI_DIST, 'index.html')];
   for (const p of required) {
     if (!existsSync(p)) {
-      error(`Missing artifact: ${p}`);
-      process.exit(1);
+      throw new BuildFailure(`Missing artifact: ${p}`);
     }
   }
   log('All artifacts present.');
@@ -266,23 +345,56 @@ function verifyArtifacts() {
 // ============================================================================
 // 主流程
 // ============================================================================
-function main() {
-  const startedAt = Date.now();
+async function main() {
   console.log('=========================================');
   console.log(' MOSS Build');
   console.log('=========================================');
+
   cleanDist();
-  buildBackend();
-  copyToolsModule();
-  generateToolConfigManifest();
-  copyBrowserExtension();
-  copyAgentPrompts();
-  buildFrontend();
+
+  const backendTask = buildBackend();
+  const frontendTask = buildFrontend();
+  const assetsTask = Promise.resolve().then(() => {
+    runSyncTask('copy tools', () => {
+      log('Copying tools module...');
+      copyToolsModule();
+    });
+    runSyncTask('tool manifest', generateToolConfigManifest);
+    runSyncTask('copy browser extension', () => {
+      log('Copying browser extension...');
+      copyBrowserExtension();
+    });
+    runSyncTask('copy agent prompts', () => {
+      log('Copying agent prompts...');
+      copyAgentPrompts();
+    });
+  });
+
+  const results = await Promise.allSettled([backendTask, frontendTask, assetsTask]);
+  const failures = results.filter((r) => r.status === 'rejected');
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      error(failure.reason instanceof Error ? failure.reason.message : String(failure.reason));
+    }
+    process.exit(1);
+  }
+
   verifyArtifacts();
-  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2);
+
   console.log('=========================================');
-  console.log(` Build complete in ${elapsed}s`);
+  console.log(` Build complete in ${elapsed()}s`);
   console.log('=========================================');
+
+  // 显式退出：所有产物已校验，第三方依赖可能残留句柄，不能依赖事件循环自然清空
+  if (process.env.MOSS_BUILD_DEBUG === '1') {
+    const handles = typeof process._getActiveHandles === 'function' ? process._getActiveHandles() : [];
+    const requests = typeof process._getActiveRequests === 'function' ? process._getActiveRequests() : [];
+    console.log(`[build] active handles=${handles.length} requests=${requests.length}`);
+  }
+  process.exit(0);
 }
 
-main();
+main().catch((err) => {
+  error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
