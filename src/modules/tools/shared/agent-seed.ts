@@ -55,6 +55,8 @@ const DEPRECATED_SEED_PATHS: ReadonlyArray<string> = [
   'prompts/main/rules.md',
   // 提示词精简（去英文/去 fallback/合并 distill）：清理用户目录残留
   'prompts/agenteam/usage-en.md',
+  // usage-zh.md 更名为 usage.md：清理用户目录旧文件（新文件由本次播种写入）
+  'prompts/subagent/usage-zh.md',
   // agenteam 模块整体废弃：旧工具说明与模板目录迁往 prompts/subagent
   'prompts/agenteam',
   'prompts/fallback',

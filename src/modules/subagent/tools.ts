@@ -101,12 +101,12 @@ function findMember(bus: AgentBus, rootSessionId: string, id: string): AgentBusM
 }
 
 function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
-  // 用法文案从 agent/prompts/subagent/usage-zh.md 加载；缺失时为空串降级
-  const usageZh = loadPromptFileOrNull(env, 'subagent/usage-zh.md') ?? '';
+  // 用法文案从 agent/prompts/subagent/usage.md 加载；缺失时为空串降级
+  const usage = loadPromptFileOrNull(env, 'subagent/usage.md') ?? '';
   return {
     name: 'agent',
     icon: 'bot',
-    description: `把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns）。多个相互独立的任务应在同一轮发起多个 async 调用并行执行；子代理在自己的隐藏会话中运行并返回最终报告，mode=async 时后台运行、用 agent_status 查询。${usageZh}`,
+    description: `把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns）。多个相互独立的任务应在同一轮发起多个 async 调用并行执行；子代理在自己的隐藏会话中运行并返回最终报告，mode=async 时后台运行、用 agent_status 查询。${usage}`,
     inputSchema: {
       type: 'object',
       properties: {

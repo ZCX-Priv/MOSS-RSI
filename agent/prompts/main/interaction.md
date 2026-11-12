@@ -4,6 +4,7 @@
 
 ## 1. 能力分工
 
+- 入口判据：任务只要包含「打开网址 / 登录 / 点击 / 填表 / 截图 / JS 渲染 / 验证码」任一特征，第一步就是 `browser`，不是 terminal 或 HTTP 抓取；包含「操作某个窗口 / 按钮 / 弹窗 / 非网页应用」任一特征，第一步就是 `computer`，不是 PowerShell 脚本。
 - 网页内容（含网页里的游戏、画布、iframe）一律优先 `browser`：它有快照、frame 子会话、截图、帧差和连续输入。
 - `computer` 只用于：窗口管理、非网页应用、系统对话框、需要前台输入的桌面程序。禁止用 `computer` 逐像素点击网页内容——浏览器内容走 CDP 更准、更快、不抢焦点。
 - 连续/实时操作（按住移动、连招、拖拽、逐步表单）优先写一段 `run_code`（PTC），在一次调用内完成「动作 → sleep → 截图/帧差 → 判断」，不要每按一个键就单独调用一次工具。
@@ -51,11 +52,13 @@
 4. **computer 超时/连接错误**
    - `action=status` → 必要时重连（下一次调用会自动重连）；不要连续等 120s。
    - 仍不可用：改用 `browser`（网页）或 COM/UIA（桌面应用）。
-5. **桌面应用有 COM 接口时优先 COM**
-   - Office：`New-Object -ComObject Excel.Application` / `Word.Application`（`Visible=$false`，打开文件、读写、保存、退出）。
-   - Explorer/Shell：`New-Object -ComObject Shell.Application`；脚本宿主：`New-Object -ComObject WScript.Shell`。
-   - UI Automation：`Add-Type -AssemblyName UIAutomationClient` 后用 `AutomationElement.FindFirst` 定位控件。
-   - COM 适合批量、结构化、无需模拟鼠标键盘的任务；涉及写文件/删除/发消息等不可逆操作，先向用户确认。
+5. **桌面应用有 COM 接口时，优先判断是否需要 UI 操作**
+   - 需要看界面、点按钮、填表单、处理弹窗 → 先用 `computer`（语义元素优先），不要直接写 COM/UIA 脚本。
+   - 仅当 `computer` 不可用，或任务是批量、结构化、无需 UI 的数据处理时，才用 COM：
+     - Office：`New-Object -ComObject Excel.Application` / `Word.Application`（`Visible=$false`，打开文件、读写、保存、退出）。
+     - Explorer/Shell：`New-Object -ComObject Shell.Application`；脚本宿主：`New-Object -ComObject WScript.Shell`。
+     - UI Automation：`Add-Type -AssemblyName UIAutomationClient` 后用 `AutomationElement.FindFirst` 定位控件。
+   - 涉及写文件/删除/发消息等不可逆操作，先向用户确认。
 6. **同一失败两次 → 三振出局**
    - 第 3 次必须换方法或向用户提问，并在回复里写清「已经试过什么、为什么不行、下一步换什么」。
 

@@ -100,7 +100,7 @@
         "mode": 420
       },
       {
-        "path": "agent/prompts/subagent/usage-zh.md",
+        "path": "agent/prompts/subagent/usage.md",
         "size": 807,
         "mode": 420
       },
@@ -255,7 +255,7 @@
         "mode": 420
       },
       {
-        "path": "dist/agent/prompts/subagent/usage-zh.md",
+        "path": "dist/agent/prompts/subagent/usage.md",
         "size": 807,
         "mode": 420
       },
