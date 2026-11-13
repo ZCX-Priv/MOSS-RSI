@@ -12,6 +12,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { release } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { SYSTEM_SCOPE, systemRoot } from '../filesys/roots';
 import { t } from '../../core/i18n';
 import type { Logger } from '../../core/types';
 import {
@@ -351,7 +352,9 @@ export class TerminalManager implements TerminalService {
     const interpreter = resolveInterpreter(this.isWindows, opts.interpreter);
     const cols = clamp(Math.floor(opts.cols ?? TERMINAL_LIMITS.defaultCols), 20, 500);
     const rows = clamp(Math.floor(opts.rows ?? TERMINAL_LIMITS.defaultRows), 5, 200);
-    const cwd = opts.cwd && opts.cwd.trim() ? opts.cwd : process.cwd();
+    // 未指定/本机作用域：从系统盘根启动（与 terminal 工具 / filesys 本机语义一致）
+    const requestedCwd = opts.cwd?.trim() ?? '';
+    const cwd = !requestedCwd || requestedCwd === SYSTEM_SCOPE ? systemRoot() : requestedCwd;
     const id = `term_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const index = live.length + 1;
 

@@ -8,8 +8,13 @@ const PROTOCOL_VERSION = 1;
 const PORT_SCAN_COUNT = 10;
 const KEEPALIVE_MS = 20000;
 const RECONNECT_MS = 2000;
-const CONNECT_TIMEOUT_MS = 1200;
-const WELCOME_TIMEOUT_MS = 1500;
+const RECONNECT_MAX_MS = 15000;
+/** 主端口握手给足时间：MOSS 繁忙/冷启动时 1.2s 会误判失败 */
+const CONNECT_TIMEOUT_MS = 4000;
+const WELCOME_TIMEOUT_MS = 5000;
+/** 备用端口只做快速探测，避免一次重连在 10 个端口上耗掉几十秒 */
+const FALLBACK_CONNECT_TIMEOUT_MS = 1500;
+const FALLBACK_WELCOME_TIMEOUT_MS = 2000;
 const COMMAND_TIMEOUT_MS = 25000;
 
 /** @type {{port:number, token:string, autoConnect:boolean, builtinTag:string, instanceId:string, extensionId:string, extensionVersion:string}} */
@@ -35,6 +40,8 @@ let wsKeepAliveTimer = null;
 let swKeepAliveTimer = null;
 let reconnectTimer = null;
 let connectSeq = 0;
+/** 连续连接失败次数（指数退避；连接成功后归零） */
+let reconnectAttempts = 0;
 
 function log(...args) {
   console.log('[MOSS Bridge offscreen]', ...args);
@@ -145,10 +152,12 @@ function startSwKeepAlive() {
 }
 
 /** 尝试连接单个端口：open 后发送 hello，等待 welcome */
-function tryPort(port, seq) {
+function tryPort(port, seq, timeouts) {
   return new Promise((resolve) => {
     let settled = false;
     let ws;
+    const connectTimeoutMs = timeouts && timeouts.connectMs ? timeouts.connectMs : CONNECT_TIMEOUT_MS;
+    const welcomeTimeoutMs = timeouts && timeouts.welcomeMs ? timeouts.welcomeMs : WELCOME_TIMEOUT_MS;
     try {
       ws = new WebSocket(`ws://127.0.0.1:${port}/browser`);
     } catch {
@@ -171,7 +180,7 @@ function tryPort(port, seq) {
       resolve(ok ? ws : false);
     };
 
-    const openTimer = setTimeout(() => finish(false), CONNECT_TIMEOUT_MS);
+    const openTimer = setTimeout(() => finish(false), connectTimeoutMs);
     let welcomeTimer = null;
 
     ws.onopen = () => {
@@ -192,7 +201,7 @@ function tryPort(port, seq) {
           builtinTag: config.builtinTag || '',
         }),
       );
-      welcomeTimer = setTimeout(() => finish(false), WELCOME_TIMEOUT_MS);
+      welcomeTimer = setTimeout(() => finish(false), welcomeTimeoutMs);
     };
 
     ws.onmessage = (event) => {
@@ -246,9 +255,18 @@ async function connect() {
   try {
     // 串行探测：优先当前端口，其次配置端口，最后少量扫描；
     // 绝不并发打开全部端口（否则每个成功握手都会在服务端创建一个实例）。
-    for (const port of candidatePorts()) {
+    const ports = candidatePorts();
+    for (let index = 0; index < ports.length; index += 1) {
       if (seq !== connectSeq || manuallyDisconnected) return;
-      const won = await tryPort(port, seq);
+      const port = ports[index];
+      // 首个端口用完整握手时间（MOSS 可能正忙）；其余端口只做快速探测
+      const won = await tryPort(
+        port,
+        seq,
+        index === 0
+          ? { connectMs: CONNECT_TIMEOUT_MS, welcomeMs: WELCOME_TIMEOUT_MS }
+          : { connectMs: FALLBACK_CONNECT_TIMEOUT_MS, welcomeMs: FALLBACK_WELCOME_TIMEOUT_MS },
+      );
       if (!won) continue;
       if (seq !== connectSeq || manuallyDisconnected) {
         try {
@@ -267,6 +285,7 @@ async function connect() {
       socket.onclose = onSocketClose;
       socket.onerror = () => {};
       connected = true;
+      reconnectAttempts = 0;
       activePort = Number(new URL(socket.url).port);
       startWsKeepAlive();
       startSwKeepAlive();
@@ -289,10 +308,14 @@ function scheduleReconnect() {
   void reportStatus();
   if (manuallyDisconnected) return;
   if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  // 指数退避 + 少量抖动：避免 MOSS 未启动时每 2s 扫 10 个端口；最长 15s。
+  const base = Math.min(RECONNECT_MAX_MS, RECONNECT_MS * Math.pow(2, reconnectAttempts));
+  reconnectAttempts += 1;
+  const delay = base + Math.floor(Math.random() * 400);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     void connect();
-  }, RECONNECT_MS);
+  }, delay);
 }
 
 function onSocketClose() {
@@ -321,6 +344,7 @@ function disconnect() {
 
 async function reconnectNow() {
   manuallyDisconnected = false;
+  reconnectAttempts = 0;
   ++connectSeq;
   if (socket) {
     try {

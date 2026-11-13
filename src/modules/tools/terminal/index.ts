@@ -122,9 +122,9 @@ export default {
 function resolveCwd(cwd: string | undefined, ctx: ToolContext, filesys: FilesysService): string | null {
   return cwd
     ? filesys.resolve(cwd, ctx.cwd)
-    : ctx.cwd === SYSTEM_SCOPE
+    : !ctx.cwd || ctx.cwd === SYSTEM_SCOPE
       ? systemRoot()
-      : ctx.cwd || process.cwd();
+      : ctx.cwd;
 }
 
 /** 校验并解析工作目录（越界/不存在/非目录 → 返回错误文本，否则返回绝对路径） */

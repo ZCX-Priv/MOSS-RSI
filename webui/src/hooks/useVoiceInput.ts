@@ -28,49 +28,59 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
     this.chunks = [];
     this.length = 0;
     const ratio = sampleRate / this.target;
-    this.integerRatio = Math.abs(ratio - Math.round(ratio)) < 0.01 ? Math.round(ratio) : 0;
     this.ratio = ratio;
-    this.sum = 0;
-    this.count = 0;
-    this.tail = null;
-    this.pos = 0;
-  }
-  _resample(ch) {
-    if (this.integerRatio === 1) return ch;
-    if (this.integerRatio > 1) {
-      const R = this.integerRatio;
-      const out = [];
-      let sum = this.sum;
-      let count = this.count;
-      for (let i = 0; i < ch.length; i++) {
-        sum += ch[i];
-        count++;
-        if (count === R) { out.push(sum / R); sum = 0; count = 0; }
+    this.identity = Math.abs(ratio - 1) < 1e-6;
+    this.phases = 32;
+    this.taps = 24;
+    this.half = this.taps / 2;
+    const cutoff = 0.45 * Math.min(1, this.target / sampleRate);
+    this.coeffs = new Array(this.phases);
+    for (let ph = 0; ph < this.phases; ph++) {
+      const frac = ph / this.phases;
+      const h = new Float32Array(this.taps);
+      let sum = 0;
+      for (let k = 0; k < this.taps; k++) {
+        const t = k - (this.taps / 2 - 1) - frac;
+        const sinc = t === 0 ? 2 * cutoff : Math.sin(2 * Math.PI * cutoff * t) / (Math.PI * t);
+        const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / this.taps);
+        h[k] = sinc * w;
+        sum += h[k];
       }
-      this.sum = sum;
-      this.count = count;
-      return out.length ? Float32Array.from(out) : null;
+      if (Math.abs(sum) > 1e-9) {
+        for (let k = 0; k < this.taps; k++) h[k] /= sum;
+      }
+      this.coeffs[ph] = h;
     }
-    let buf;
-    if (!this.tail || this.tail.length === 0) buf = ch;
-    else {
-      buf = new Float32Array(this.tail.length + ch.length);
-      buf.set(this.tail, 0);
-      buf.set(ch, this.tail.length);
-    }
-    const M = buf.length;
+    this.pending = new Float32Array(0);
+    this.nextPos = this.half;
+    this.dcPrevIn = 0;
+    this.dcPrevOut = 0;
+  }
+  _resample(input) {
+    const buf = new Float32Array(this.pending.length + input.length);
+    buf.set(this.pending);
+    buf.set(input, this.pending.length);
     const out = [];
-    let pos = this.pos;
-    for (;;) {
-      const i = Math.floor(pos);
-      if (i + 1 >= M) break;
-      const f = pos - i;
-      out.push(buf[i] + (buf[i + 1] - buf[i]) * f);
+    const limit = buf.length - this.taps;
+    let pos = this.nextPos;
+    while (pos <= limit) {
+      const base = Math.floor(pos);
+      const frac = pos - base;
+      const ph = Math.min(this.phases - 1, Math.round(frac * this.phases));
+      const c = this.coeffs[ph];
+      let acc = 0;
+      for (let k = 0; k < this.taps; k++) acc += buf[base + k] * c[k];
+      out.push(acc);
       pos += this.ratio;
     }
-    const keepFrom = Math.min(Math.floor(pos), Math.max(0, M - 1));
-    this.tail = buf.slice(keepFrom);
-    this.pos = pos - keepFrom;
+    const keepFrom = Math.max(0, Math.floor(pos) - this.taps);
+    if (keepFrom > 0) {
+      this.pending = buf.slice(keepFrom);
+      this.nextPos = pos - keepFrom;
+    } else {
+      this.pending = buf;
+      this.nextPos = pos;
+    }
     return out.length ? Float32Array.from(out) : null;
   }
   process(inputs) {
@@ -93,12 +103,23 @@ class VoiceCaptureProcessor extends AudioWorkletProcessor {
       }
       ch = input[best];
     }
-    if (this.target && sampleRate !== this.target) {
-      ch = this._resample(ch);
-      if (!ch || ch.length === 0) return true;
+    // DC 阻断 + 复制：输入数组可能被音频线程复用，绝不能直接保存引用
+    const filtered = new Float32Array(ch.length);
+    for (let i = 0; i < ch.length; i++) {
+      const x = ch[i];
+      const y = x - this.dcPrevIn + 0.995 * this.dcPrevOut;
+      this.dcPrevIn = x;
+      this.dcPrevOut = y;
+      filtered[i] = y;
     }
-    this.chunks.push(ch);
-    this.length += ch.length;
+    let outChunk;
+    if (this.identity) outChunk = filtered;
+    else {
+      outChunk = this._resample(filtered);
+      if (!outChunk || outChunk.length === 0) return true;
+    }
+    this.chunks.push(outChunk);
+    this.length += outChunk.length;
     if (this.length >= 1024) {
       const out = new Float32Array(this.length);
       let off = 0;
@@ -218,10 +239,14 @@ export interface UseVoiceModelsResult {
 /** 本地模型目录 + 安装状态（设置页用；下载中自动轮询刷新进度） */
 export function useVoiceModels(): UseVoiceModelsResult {
   const [models, setModels] = useState<VoiceModelStatus[]>([]);
+  /** 请求序号：轮询并发时只接受最新一次请求，避免旧的 deploying 响应覆盖 installed */
+  const refreshSeqRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeqRef.current;
     try {
       const resp = await api.listVoiceModels();
+      if (seq !== refreshSeqRef.current) return;
       setModels(resp.models);
     } catch {
       // 忽略
@@ -233,13 +258,13 @@ export function useVoiceModels(): UseVoiceModelsResult {
     runWhenIdle(() => void refresh());
   }, [refresh]);
 
-  // 存在下载中的模型时轮询进度
-  const downloading = models.some((m) => m.state === 'downloading');
+  // 存在下载/部署中的模型时轮询进度（部署阶段也要持续刷新到 installed）
+  const installing = models.some((m) => m.state === 'downloading' || m.state === 'deploying');
   useEffect(() => {
-    if (!downloading) return;
+    if (!installing) return;
     const timer = setInterval(() => void refresh(), 800);
     return () => clearInterval(timer);
-  }, [downloading, refresh]);
+  }, [installing, refresh]);
 
   return { models, refresh };
 }
@@ -638,7 +663,6 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       rafRef.current = requestAnimationFrame(tick);
 
       setRecording(true);
-      setBusy(false);
       armNoResultWatchdog();
     },
     [armNoResultWatchdog],
@@ -679,9 +703,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         waiter?.reject(new VoiceStartError('READY_TIMEOUT'));
       }, READY_TIMEOUT_MS);
 
-      const [stream] = await Promise.all([streamPromise, readyPromise]);
+      const stream = await streamPromise;
       pending.stream = null;
+      // 先收音：模型加载期间音频由后端缓冲，用户开口即录、不丢字；
+      // ready 只控制「模型可解码」的时机，不再阻塞麦克风采集。
       await beginCapture(stream);
+      await readyPromise;
+      setBusy(false);
     } catch (err) {
       pending.cancelled = true;
       pending.stream?.getTracks().forEach((t) => t.stop());

@@ -62,7 +62,7 @@ export class HttpRouter {
 
     // 2. API 路由
     if (path.startsWith('/api/')) {
-      return await this.handleApi(method, path, urlObj.query, headers, body);
+      return await this.handleApi(method, url, path, urlObj.query, headers, body);
     }
 
     // 3. 根路径 / SPA fallback
@@ -85,6 +85,7 @@ export class HttpRouter {
 
   private async handleApi(
     method: string,
+    url: string,
     path: string,
     query: Record<string, string>,
     headers: Record<string, string>,
@@ -133,7 +134,9 @@ export class HttpRouter {
       const body = parseBody(rawBody, headers['content-type'] ?? '');
       const req: HttpRequest = {
         method: method.toUpperCase(),
-        url: path,
+        // 必须保留完整 URL（含 query）：memory/rules/hooks 等路由通过 new URL(req.url) 读取查询参数，
+        // 只传 pathname 会让 cwd/scope/origin/q 等过滤条件全部失效。
+        url,
         path,
         query,
         headers,

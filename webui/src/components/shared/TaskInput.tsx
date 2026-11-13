@@ -552,11 +552,11 @@ export function TaskInput({
   const voiceMobileUnavailable = platform.isAndroid;
   const { status: voiceStatus } = useVoiceStatus();
   const voiceEnabled = Boolean(voiceStatus?.available && voiceStatus.enabled);
-  // 服务端可用：配置了在线语音服务商，或运行时可用且已安装本地模型
-  const serverVoiceReady =
-    Boolean(voiceStatus?.providerId) ||
-    Boolean(voiceStatus?.runtimeAvailable && (voiceStatus?.installed?.length ?? 0) > 0);
-  // 语音统一在后端运行（本地模型 / 在线服务商）；移动端按产品策略直接置灰
+  // 服务端可用：运行时可用且已安装本地模型
+  const serverVoiceReady = Boolean(
+    voiceStatus?.runtimeAvailable && (voiceStatus?.installed?.length ?? 0) > 0,
+  );
+  // 语音统一在后端本地运行；移动端按产品策略直接置灰
   const voiceReady = serverVoiceReady && !voiceMobileUnavailable;
 
   const voice = useVoiceInput({

@@ -68,10 +68,6 @@ function mergeThinking(
 
 /** 按服务商用位 cfg（供 provider.resolveHeaders 构造鉴权头） */
 function pseudoModelConfig(p: ProviderConfig): ModelConfig {
-  // 语音服务商没有 LLM 端点（调用方已拦截，此处兜底）
-  if (p.format === 'voice') {
-    throw new Error('provider has no LLM endpoint');
-  }
   return {
     id: p.id,
     name: p.name,
@@ -148,51 +144,15 @@ export function createCreateProviderHandler(config: ConfigService): RouteHandler
   return async (req: HttpRequest): Promise<HttpResponse> => {
     const body = (req.body ?? {}) as {
       name?: string;
-      /** 服务商类型：model（默认）= 模型服务商；voice = 语音服务商 */
-      kind?: 'model' | 'voice';
       format?: ProviderConfig['format'];
-      /** 语音引擎（kind='voice' 必填）：openai-transcriptions */
-      voiceEngine?: ProviderConfig['voiceEngine'];
-      /** 语音模型名（kind='voice' 可选，如 whisper-1） */
-      voiceModel?: string;
       endpoint?: string;
       apiKey?: string;
       balanceUrl?: string;
       modelsUrl?: string;
       icon?: string;
     };
-    const kind = body.kind ?? 'model';
 
-    if (kind === 'voice') {
-      // 语音服务商：name + voiceEngine 必填；format 固定 'voice'；endpoint 为转写端点
-      if (!body.name || !body.voiceEngine) {
-        return { status: 400, body: { error: ErrorCode.PROVIDER_FIELDS_REQUIRED } };
-      }
-      try {
-        const apiConfig = config.getApiConfig();
-        const newProvider: ProviderConfig = {
-          id: generateProviderId(),
-          name: body.name,
-          kind: 'voice',
-          format: 'voice',
-          voiceEngine: body.voiceEngine,
-          ...(body.voiceModel?.trim() ? { voiceModel: body.voiceModel.trim() } : {}),
-          endpoint: body.endpoint?.trim() ?? '',
-          apiKey: body.apiKey ?? '',
-          models: [],
-          ...(body.icon?.trim() ? { icon: body.icon.trim() } : {}),
-        };
-        await config.updateApiConfig({ providers: [...apiConfig.providers, newProvider] });
-        return { status: 201, body: newProvider };
-      } catch (err) {
-        return {
-          status: 400,
-          body: { error: err instanceof Error ? err.message : String(err) },
-        };
-      }
-    }
-
-    // 模型服务商（默认/向后兼容）：name + format + endpoint 必填
+    // 模型服务商：name + format + endpoint 必填
     if (!body.name || !body.format || !body.endpoint) {
       return { status: 400, body: { error: ErrorCode.PROVIDER_FIELDS_REQUIRED } };
     }
@@ -229,10 +189,7 @@ export function createUpdateProviderHandler(config: ConfigService): RouteHandler
     }
     const body = (req.body ?? {}) as {
       name?: string;
-      kind?: 'model' | 'voice';
       format?: ProviderConfig['format'];
-      voiceEngine?: ProviderConfig['voiceEngine'];
-      voiceModel?: string;
       endpoint?: string;
       apiKey?: string;
       balanceUrl?: string;
@@ -247,43 +204,6 @@ export function createUpdateProviderHandler(config: ConfigService): RouteHandler
         return { status: 404, body: { error: ErrorCode.PROVIDER_NOT_FOUND } };
       }
       const existing = apiConfig.providers[idx];
-      const isVoice = body.kind === 'voice' || existing.kind === 'voice';
-
-      if (isVoice) {
-        // 语音服务商：voiceEngine 必填（body 缺省沿用原值）；format 固定 'voice'
-        const nextEngine = body.voiceEngine ?? existing.voiceEngine;
-        if (!nextEngine) {
-          return { status: 400, body: { error: 'VOICE_ENGINE_REQUIRED' } };
-        }
-        const newProvider: ProviderConfig = {
-          id: existing.id,
-          name: body.name ?? existing.name,
-          kind: 'voice',
-          format: 'voice',
-          voiceEngine: nextEngine,
-          ...(body.voiceModel !== undefined
-            ? body.voiceModel.trim()
-              ? { voiceModel: body.voiceModel.trim() }
-              : {}
-            : existing.voiceModel !== undefined
-              ? { voiceModel: existing.voiceModel }
-              : {}),
-          endpoint: body.endpoint ?? existing.endpoint,
-          apiKey: body.apiKey ?? existing.apiKey,
-          models: [],
-          ...(body.icon !== undefined
-            ? body.icon.trim()
-              ? { icon: body.icon.trim() }
-              : {}
-            : existing.icon !== undefined
-              ? { icon: existing.icon }
-              : {}),
-        };
-        const newProviders = [...apiConfig.providers];
-        newProviders[idx] = newProvider;
-        await config.updateApiConfig({ providers: newProviders });
-        return { status: 200, body: newProvider };
-      }
 
       const newProvider: ProviderConfig = {
         id: existing.id,
@@ -349,12 +269,6 @@ export function createDeleteProviderHandler(config: ConfigService): RouteHandler
       if (appConfig.agent.defaultModel && provider.models.some((m) => m.id === appConfig.agent.defaultModel)) {
         await config.updateAppConfig({
           agent: { ...appConfig.agent, defaultModel: '' },
-        });
-      }
-      // 被删服务商是默认语音服务商时回退到本地引擎（''）
-      if (appConfig.voice?.providerId && appConfig.voice.providerId === id) {
-        await config.updateAppConfig({
-          voice: { ...appConfig.voice, providerId: '' },
         });
       }
       return { status: 200, body: { deleted: true } };
@@ -900,10 +814,7 @@ export function createFetchProviderModelsHandler(
     if (!provider) {
       return { status: 404, body: { error: ErrorCode.PROVIDER_NOT_FOUND } };
     }
-    // 语音服务商无模型列表概念
-    if (provider.kind === 'voice' || provider.format === 'voice') {
-      return { status: 200, body: { success: false, error: 'NOT_A_MODEL_PROVIDER' } };
-    }
+    // 语音服务商已移除：这里只处理模型服务商
     const url = resolveModelsUrl(provider);
     try {
       const provider0 = getProvider(provider.format);
@@ -952,10 +863,7 @@ export function createProviderBalanceHandler(
     if (!provider) {
       return { status: 404, body: { error: ErrorCode.PROVIDER_NOT_FOUND } };
     }
-    // 语音服务商无余额查询概念
-    if (provider.kind === 'voice' || provider.format === 'voice') {
-      return { status: 200, body: { success: false, error: 'NOT_A_MODEL_PROVIDER' } };
-    }
+    // 语音服务商已移除：这里只处理模型服务商
     if (!provider.balanceUrl || !provider.balanceUrl.trim()) {
       return {
         status: 200,

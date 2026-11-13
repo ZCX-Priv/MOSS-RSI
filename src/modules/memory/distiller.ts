@@ -185,6 +185,8 @@ export async function distillSession(
         tags: m.tags,
         importance: m.importance,
         source: { sessionId: session.id, at: now },
+        // 蒸馏自动提取
+        origin: 'auto',
       },
       now,
     );

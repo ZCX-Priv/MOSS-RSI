@@ -383,4 +383,34 @@ describe('buildRecallSection（query 切换：同消息稳定 / 新消息防重�
     expect(session.memoryState?.excludeFromRecall).toEqual(r1.recalledIds);
     expect(session.memoryState?.currentRecalled).toHaveLength(0);
   });
+
+  test('listMemories 按 scope/origin 过滤', () => {
+    const manual = engine.save(cwd, {
+      wing: 'proj',
+      room: 'r',
+      hall: 'event',
+      verbatim: '项目手动记忆原文',
+      insight: '项目手动记忆',
+      origin: 'manual',
+    });
+    const active = engine.save(cwd, {
+      wing: 'proj',
+      room: 'r',
+      hall: 'event',
+      verbatim: '项目主动记忆原文',
+      insight: '项目主动记忆',
+      origin: 'active',
+    });
+
+    const project = engine.listMemories(cwd, { scope: 'project' });
+    expect(project.every(m => m.scope === 'project')).toBe(true);
+    expect(new Set(project.map(m => m.id))).toEqual(new Set([manual.id, active.id]));
+
+    const global = engine.listMemories(cwd, { scope: 'global' });
+    expect(global.length).toBeGreaterThanOrEqual(1);
+    expect(global.every(m => m.scope === 'global')).toBe(true);
+
+    expect(engine.listMemories(cwd, { origin: 'manual' }).map(m => m.id)).toEqual([manual.id]);
+    expect(engine.listMemories(cwd, { origin: 'active' }).map(m => m.id)).toEqual([active.id]);
+  });
 });

@@ -134,6 +134,20 @@ export function createUpdateRuleHandler(services: ServicesLike): RouteHandler {
   };
 }
 
+/** DELETE /api/rules?cwd=&scope=all|global|project：批量清空规则 */
+export function createClearRulesHandler(services: ServicesLike): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const engine = resolveEngine(services);
+    if (!engine) return { status: 503, body: { error: 'rules engine unavailable' } };
+    const url = new URL(req.url, 'http://localhost');
+    const cwd = url.searchParams.get('cwd') || process.cwd();
+    const raw = url.searchParams.get('scope');
+    const scope: 'all' | 'global' | 'project' = raw === 'global' || raw === 'project' ? raw : 'all';
+    const removed = engine.clear(cwd, scope);
+    return { status: 200, body: { ok: true, removed } };
+  };
+}
+
 export function createDeleteRuleHandler(services: ServicesLike): RouteHandler {
   return async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
     const id = params?.id;

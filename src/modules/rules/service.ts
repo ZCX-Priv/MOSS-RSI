@@ -6,6 +6,7 @@ import type { ConfigService, Environment, Logger } from '../../core/types';
 import type { ContextSessionLike } from '../context/types';
 import { DEFAULT_RULES_CONFIG } from '../context/types';
 import {
+  clearRules,
   deleteRuleAnywhere,
   getRuleAnywhere,
   globalRulesDir,
@@ -111,6 +112,19 @@ export class RulesEngineServiceImpl {
       project: listRules(projectRulesDir(cwd), 'project'),
       global: listRules(globalRulesDir(this.env), 'global'),
     };
+  }
+
+  /** 批量清空规则（scope: all=全局+当前项目 | global | project）。返回删除条数。 */
+  clear(cwd: string, scope: 'all' | 'global' | 'project'): number {
+    let removed = 0;
+    if (scope === 'all' || scope === 'global') {
+      removed += clearRules(globalRulesDir(this.env));
+    }
+    if (scope === 'all' || scope === 'project') {
+      removed += clearRules(projectRulesDir(cwd));
+    }
+    if (removed > 0) invalidateRuleCache();
+    return removed;
   }
 
   /** 按 id 读取（双作用域查找） */

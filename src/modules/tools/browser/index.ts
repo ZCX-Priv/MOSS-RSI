@@ -85,7 +85,12 @@ function formatPageInfo(info: BrowserPageInfo): string {
         title: info.openedTab.title || '(untitled)',
       })}`
     : '';
-  return `${base}${loading}${opened}`;
+  // 自动确认的弹窗必须回传给模型：alert('成功') 的文案往往就是任务判据。
+  const dialogs =
+    info.dialogs && info.dialogs.length > 0
+      ? `\n弹窗（已自动确认）：\n${info.dialogs.map((item) => `- ${item}`).join('\n')}`
+      : '';
+  return `${base}${loading}${opened}${dialogs}`;
 }
 
 function formatInstaller(status: BrowserStatus['installer']): string {
@@ -277,7 +282,8 @@ export default {
       if (autoFocus && !['status', 'setup', 'tabs', 'close', 'open', 'focus'].includes(action)) {
         const key = tab ?? service.getStatus().currentTab;
         if (key) {
-          await service.ensureFocused(key).catch(() => undefined);
+          // 例行操作只切标签，不抬操作系统窗口：避免整个浏览器窗口反复闪到前台
+          await service.ensureFocused(key, { focusWindow: false }).catch(() => undefined);
         }
       }
 
@@ -414,7 +420,9 @@ export default {
               : {}),
           });
           if (autoFocus && info.openedTab) {
-            await service.ensureFocused(info.openedTab.tab, { force: true }).catch(() => undefined);
+            await service
+              .ensureFocused(info.openedTab.tab, { force: true, focusWindow: false })
+              .catch(() => undefined);
           }
           return textResult(`${t('browserTool.clicked')}\n${formatPageInfo(info)}`);
         }
@@ -447,7 +455,9 @@ export default {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
           });
           if (autoFocus && info.openedTab) {
-            await service.ensureFocused(info.openedTab.tab, { force: true }).catch(() => undefined);
+            await service
+              .ensureFocused(info.openedTab.tab, { force: true, focusWindow: false })
+              .catch(() => undefined);
           }
           return textResult(`${t('browserTool.keyPressed', { key })}\n${formatPageInfo(info)}`);
         }
@@ -465,7 +475,7 @@ export default {
               ? ` rect=(${Math.round(frame.rect.x)},${Math.round(frame.rect.y)},${Math.round(frame.rect.width)},${Math.round(frame.rect.height)})`
               : '';
             lines.push(
-              `- ${frame.frame}${frame.active ? ' [active]' : ''}${rect}\n  ${frame.title || '(no title)'}\n  ${frame.url}`,
+              `- ${frame.frame} (mode=${frame.mode}${frame.inputFocused ? ', inputFocused' : ''})${frame.active ? ' [active]' : ''}${rect}\n  ${frame.title || '(no title)'}\n  ${frame.url}`,
             );
           }
           lines.push('提示：游戏/画布优先用 frame=auto 或上述 key；frame 内坐标使用该 iframe 的 CSS 坐标。');

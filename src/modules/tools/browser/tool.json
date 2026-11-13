@@ -50,8 +50,8 @@
       },
       "auto_focus": {
         "type": "boolean",
-        "description": "操作前自动聚焦目标标签页/窗口（缺省 true）；目标已在前台时不重复激活，避免闪屏；false 时保持后台",
-        "description_en": "Auto-focus the target tab/window before acting (default true); no-op when already foreground to avoid flicker; false keeps it in the background."
+        "description": "操作前自动聚焦目标标签页（缺省 true）；只切换活动标签、不把浏览器窗口抬到前台，避免整窗闪烁；需要置前请单独调用 action=focus",
+        "description_en": "Auto-focus the target tab before acting (default true); only switches the active tab and never raises the browser window (prevents window flashing); use action=focus when the window must come to front."
       },
       "browser": {
         "type": "string",

@@ -153,26 +153,95 @@ export interface NavigateOptions {
   reload?: boolean;
 }
 
+/**
+ * 等待主 frame 真正提交导航（而不是旧文档的 readyState 仍是 complete）。
+ * 事件优先：Page.frameNavigated（主 frame 无 parentId）/ Page.navigatedWithinDocument；
+ * URL 变化作为兜底（覆盖部分重定向/同文档跳转的事件时序差异）。
+ */
+async function waitForNavigationCommit(
+  session: CdpSession,
+  beforeUrl: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  let committed = false;
+  const off = session.onEvent((method, params) => {
+    if (method === 'Page.frameNavigated') {
+      const frame = isObject(params) && isObject(params.frame) ? params.frame : null;
+      // 主 frame 没有 parentId；子 frame 的导航不能作为提交信号
+      if (frame && !frame.parentId) committed = true;
+      return;
+    }
+    if (method === 'Page.navigatedWithinDocument') committed = true;
+  });
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  try {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error('操作已中断');
+      if (committed) return true;
+      try {
+        const info = await getPageInfo(session);
+        if (beforeUrl && info.url && info.url !== beforeUrl) return true;
+      } catch {
+        // 导航切换瞬间 evaluate 可能失败，继续等待
+      }
+      await sleep(100, signal);
+    }
+    return committed;
+  } finally {
+    off();
+  }
+}
+
 export async function navigatePage(
   session: CdpSession,
   options: NavigateOptions,
   run: PageRunOptions,
 ): Promise<{ info: PageInfo; loading: boolean }> {
+  const timeoutMs = Math.max(1000, run.timeoutMs);
+  const before = await getPageInfo(session).catch(() => ({ url: '', title: '', readyState: 'unknown' }));
+  let waitCommit = false;
   if (options.back) {
+    waitCommit = true;
     await session.send('Runtime.evaluate', { expression: 'history.back()' });
   } else if (options.forward) {
+    waitCommit = true;
     await session.send('Runtime.evaluate', { expression: 'history.forward()' });
   } else if (options.reload) {
     await session.send('Page.reload', { ignoreCache: true });
   } else if (options.url) {
+    waitCommit = true;
     const url = normalizeUrl(options.url);
     const result = await session.send<{ errorText?: string }>('Page.navigate', { url });
     if (result.errorText) throw new Error(`导航失败：${result.errorText}`);
   } else {
     throw new Error('navigate 需要 url / back / forward / reload 之一');
   }
-  const ready = await waitForReady(session, run.timeoutMs, run.signal);
+
+  const deadline = Date.now() + timeoutMs;
+  if (waitCommit) {
+    const committed = await waitForNavigationCommit(session, before.url, timeoutMs, run.signal);
+    if (!committed) {
+      const now = await getPageInfo(session).catch(() => null);
+      // URL 完全没变 = 导航没有提交：必须明确报错，不能把启动占位页/旧页面当成功结果返回。
+      if (!now?.url || now.url === before.url) {
+        const stayed = now?.url || before.url || '当前页';
+        throw new Error(
+          `导航未完成：页面仍停留在 ${stayed}（可能被拦截、DNS/网络不可达或目标拒绝连接）`,
+        );
+      }
+    }
+  }
+
+  const remaining = Math.max(1000, deadline - Date.now());
+  const ready = await waitForReady(session, remaining, run.signal);
   const info = await getPageInfo(session);
+  // Chrome 的网络错误页是 chrome-error://chromewebdata/：它不是目标页面，必须按失败处理。
+  if (/^chrome-error:\/\//i.test(info.url)) {
+    throw new Error(
+      '导航失败：浏览器返回错误页（DNS 解析失败、连接被拒绝、证书错误或被安全软件/扩展拦截）',
+    );
+  }
   return { info, loading: !ready };
 }
 
@@ -288,8 +357,14 @@ function truncateText(text: string, max: number): string {
 /**
  * 构建可读 AX 树，给交互元素分配 ref=eN。
  * refs 表供 click/type 等动作按 ref 定位。
+ * refPrefix：跨域 iframe 合并时使用（如 f1:），保证 ref 全局唯一并可路由回子会话。
  */
-export async function buildSnapshot(session: CdpSession, maxNodes: number): Promise<SnapshotBuild> {
+export async function buildSnapshot(
+  session: CdpSession,
+  maxNodes: number,
+  options: { refPrefix?: string } = {},
+): Promise<SnapshotBuild> {
+  const refPrefix = options.refPrefix ?? '';
   const tree = await session.send<{ nodes?: AxNode[] }>('Accessibility.getFullAXTree');
   const nodes = Array.isArray(tree.nodes) ? tree.nodes : [];
   const byId = new Map<string, AxNode>();
@@ -343,7 +418,7 @@ export async function buildSnapshot(session: CdpSession, maxNodes: number): Prom
       let refPart = '';
       if (typeof node.backendDOMNodeId === 'number') {
         refSeq += 1;
-        const ref = `e${refSeq}`;
+        const ref = `${refPrefix}e${refSeq}`;
         refs.set(ref, node.backendDOMNodeId);
         refPart = ` [ref=${ref}]`;
       }
@@ -533,12 +608,23 @@ export async function clickElement(
   const button = options.button ?? 'left';
   const clickCount = Math.max(1, Math.min(3, Math.trunc(options.clickCount ?? 1)));
   const modifiers = modifierMask(options.modifiers);
+  // 先移动再按下：Canvas 游戏依赖 mousemove/pointermove 更新指针命中状态，
+  // 直接 pressed 会出现「坐标正确但游戏无反应」。
+  await session.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x,
+    y,
+    button: 'none',
+    buttons: 0,
+    modifiers,
+  });
   await session.send('Input.dispatchMouseEvent', {
     type: 'mousePressed',
     x,
     y,
     button,
     clickCount,
+    buttons: mouseButtonsMask(button),
     modifiers,
   });
   await session.send('Input.dispatchMouseEvent', {
@@ -547,6 +633,7 @@ export async function clickElement(
     y,
     button,
     clickCount,
+    buttons: 0,
     modifiers,
   });
   return getPageInfo(session);

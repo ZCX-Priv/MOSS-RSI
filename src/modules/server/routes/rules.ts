@@ -7,4 +7,5 @@ export {
   createGetRuleHandler,
   createUpdateRuleHandler,
   createDeleteRuleHandler,
+  createClearRulesHandler,
 } from '../../rules/api/routes';

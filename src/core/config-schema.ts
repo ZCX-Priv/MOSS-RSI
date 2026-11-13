@@ -151,52 +151,18 @@ const providerServiceSchema = z.object({
   quotaUnit: z.enum(['MB', 'GB', 'TB']).optional(),
 });
 
-const providerConfigSchema = z
-  .object({
-    id: z.string().min(1),
-    name: z.string(),
-    /** 服务商类型：model（默认/缺省）= 模型服务商；voice = 语音服务商 */
-    kind: z.enum(['model', 'voice']).optional(),
-    format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini', 'voice']),
-    /** 语音引擎类型（kind='voice' 时必填）：openai-transcriptions（OpenAI 兼容整段转写） */
-    voiceEngine: z.enum(['openai-transcriptions']).optional(),
-    /** 语音模型名（kind='voice' 时使用，如 'whisper-1'） */
-    voiceModel: z.string().optional(),
-    endpoint: z.string(),
-    apiKey: z.string(),
-    balanceUrl: z.string().optional(),
-    modelsUrl: z.string().optional(),
-    icon: z.string().optional(),
-    services: z.array(providerServiceSchema).optional(),
-    models: z.array(providerModelConfigSchema).default([]),
-  })
-  .superRefine((p, ctx) => {
-    if (p.kind === 'voice') {
-      if (!p.voiceEngine) {
-        ctx.addIssue({
-          code: 'custom',
-          message: "voice provider requires 'voiceEngine' (openai-transcriptions)",
-        });
-      }
-      if (p.format !== 'voice') {
-        ctx.addIssue({
-          code: 'custom',
-          message: "voice provider format must be 'voice'",
-        });
-      }
-      if (p.models.length > 0) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'voice provider must not carry models',
-        });
-      }
-    } else if (p.voiceEngine !== undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: "voiceEngine is only allowed on kind='voice' providers",
-      });
-    }
-  });
+const providerConfigSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  format: z.enum(['openai-chat', 'openai-responses', 'anthropic', 'gemini']),
+  endpoint: z.string(),
+  apiKey: z.string(),
+  balanceUrl: z.string().optional(),
+  modelsUrl: z.string().optional(),
+  icon: z.string().optional(),
+  services: z.array(providerServiceSchema).optional(),
+  models: z.array(providerModelConfigSchema).default([]),
+});
 
 const fileHistorySchema = z.object({
   enabled: z.boolean(),
@@ -437,9 +403,8 @@ export const appConfigSchema = z.object({
   voice: z
     .object({
       enabled: z.boolean().default(false),
-      providerId: z.string().default(''),
       localModel: z.string().default(''),
-      language: z.string().default('auto'),
+      language: z.string().default('zh'),
     })
     .prefault({}),
 });
@@ -451,10 +416,23 @@ function isLegacySearchProvider(value: unknown): boolean {
   return record.kind === 'search' || record.format === 'search';
 }
 
+/**
+ * 旧版在线语音服务商（已彻底移除）：加载时过滤。
+ * 语音识别只保留本地 sherpa-onnx 引擎，voice 服务商条目及其 API Key 一并清理。
+ */
+function isLegacyVoiceProvider(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as { kind?: unknown; format?: unknown };
+  return record.kind === 'voice' || record.format === 'voice';
+}
+
 export const apiConfigSchema = z.object({
   version: z.number().int().positive(),
   providers: z.preprocess(
-    (value) => (Array.isArray(value) ? value.filter((item) => !isLegacySearchProvider(item)) : value),
+    (value) =>
+      Array.isArray(value)
+        ? value.filter((item) => !isLegacySearchProvider(item) && !isLegacyVoiceProvider(item))
+        : value,
     z.array(providerConfigSchema),
   ),
 });

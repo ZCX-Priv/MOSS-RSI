@@ -2,17 +2,27 @@
 // 语音识别（ASR）模块类型定义。
 //
 // 设计口径：
-//   - 本地引擎统一由 sherpa-onnx 承载三种模型架构：
+//   - 本地引擎统一由 sherpa-onnx 承载多种模型架构：
 //       zipformer  = 流式 transducer（真流式，边说边出字）
-//       sensevoice = 非流式 CTC（极快，配合 VAD 分段）
+//       paraformer = 离线 CTC（中文高精度，配合 VAD 分段）
+//       sensevoice = 非流式 CTC（多语言，配合 VAD 分段）
+//       dolphin    = 离线多语言 CTC（40 语种，配合 VAD 分段）
 //       whisper    = 非流式 encoder-decoder（多语言，配合 VAD 分段）
-//   - 在线语音服务商（可插拔）与本地引擎共用同一会话抽象。
+//   - 语音识别只使用本地模型，不再支持在线语音服务商。
 
 /** 本地引擎类别（均由 sherpa-onnx 承载不同模型架构） */
-export type VoiceLocalEngine = 'zipformer' | 'sensevoice' | 'whisper';
+export type VoiceLocalEngine = 'zipformer' | 'paraformer' | 'sensevoice' | 'dolphin' | 'whisper';
 
 /** 解码模式：流式（online）整段累积 vs 离线（offline）整段解码 */
 export type VoiceDecodeMode = 'streaming' | 'offline';
+
+/** 单个直链模型文件（HuggingFace 预解压文件，免解压安装） */
+export interface VoiceModelFile {
+  /** 仓库内相对路径（如 encoder.int8.onnx） */
+  path: string;
+  /** 文件字节数（进度与校验） */
+  size: number;
+}
 
 /** 内置模型目录项（静态元数据，不含本地状态） */
 export interface VoiceModelDef {
@@ -21,11 +31,19 @@ export interface VoiceModelDef {
   mode: VoiceDecodeMode;
   name: string;
   description: string;
-  /** 模型归档下载地址（tar.bz2） */
+  /** 模型归档下载地址（tar.bz2；HF 直链不可用时的兜底） */
   url: string;
+  /**
+   * HuggingFace 预解压文件清单（优先使用）：
+   * 直链 https://hf-mirror.com/<repo>/resolve/main/<path>，下载后无需 bzip2 解压。
+   */
+  hf?: {
+    repo: string;
+    files: VoiceModelFile[];
+  };
   /** 归档体积（字节）：用于展示与下载进度估算 */
   sizeBytes: number;
-  /** 归档解压后的顶层目录名 */
+  /** 归档解压后的顶层目录名（HF 直链安装同样落到该目录） */
   rootDir: string;
   /** 覆盖语言标签 */
   languages: string[];
@@ -33,8 +51,11 @@ export interface VoiceModelDef {
   recommended?: boolean;
 }
 
-/** 模型安装状态 */
-export type VoiceModelState = 'not-installed' | 'downloading' | 'installed' | 'error';
+/**
+ * 模型安装状态。
+ * deploying = 下载已完成，正在解压/校验/落盘（前端显示「部署中」而非卡在 90%）。
+ */
+export type VoiceModelState = 'not-installed' | 'downloading' | 'deploying' | 'installed' | 'error';
 
 /** 暴露给前端的模型状态 */
 export interface VoiceModelStatus {
@@ -78,7 +99,7 @@ export interface VoiceSession {
   acceptSamples(samples: Float32Array): void;
   /** 取当前结果（可能是 partial）；无变化返回 null */
   poll(): VoiceResult | null;
-  /** 结束输入并冲刷剩余结果（可能返回 final；在线服务商需异步完成上传转写） */
+  /** 结束输入并冲刷剩余结果（可能返回 final） */
   finish(): Promise<VoiceResult | null>;
   /** 释放底层资源 */
   close(): void;
@@ -102,8 +123,8 @@ export interface VoiceStatus {
   defaultModel: string;
   /** 已安装模型 id 列表 */
   installed: string[];
-  /** 当前语音服务商 id（空串 = 内置本地引擎） */
-  providerId: string;
+  /** 识别语言（'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue'） */
+  language: string;
 }
 
 /** 语音服务对外接口 */
@@ -113,9 +134,11 @@ export interface VoiceService {
   /** 模型目录 + 本地安装状态 */
   listModels(): VoiceModelStatus[];
   /** 设置全局开关 */
-  setEnabled(enabled: boolean): VoiceStatus;
+  setEnabled(enabled: boolean): Promise<VoiceStatus>;
   /** 设置默认本地模型（必须已安装） */
-  setDefaultModel(id: string): VoiceStatus;
+  setDefaultModel(id: string): Promise<VoiceStatus>;
+  /** 设置识别语言（'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue'） */
+  setLanguage(language: string): Promise<VoiceStatus>;
   /** 下载并安装模型（进度回调）；已安装则直接返回 */
   installModel(id: string, onProgress?: (p: number) => void): Promise<void>;
   /** 卸载（删除本地文件） */

@@ -33,6 +33,8 @@ declare module 'sherpa-onnx-node' {
   export interface OfflineModelConfig {
     transducer?: TransducerModelConfig;
     paraformer?: { model?: string };
+    dolphin?: { model?: string };
+    zipformerCtc?: { model?: string };
     whisper?: {
       encoder?: string;
       decoder?: string;
@@ -100,6 +102,41 @@ declare module 'sherpa-onnx-node' {
     decode(stream: OfflineStream): void;
     decodeAsync(stream: OfflineStream): Promise<RecognizerResult>;
     getResult(stream: OfflineStream): RecognizerResult;
+  }
+
+  export interface SileroVadModelConfig {
+    model: string;
+    threshold?: number;
+    minSilenceDuration?: number;
+    minSpeechDuration?: number;
+    windowSize?: number;
+    maxSpeechDuration?: number;
+  }
+
+  export interface VadConfig {
+    sileroVad?: SileroVadModelConfig;
+    sampleRate?: number;
+    numThreads?: number;
+    provider?: string;
+    debug?: boolean | number;
+  }
+
+  export interface SpeechSegment {
+    start: number;
+    samples: Float32Array;
+  }
+
+  /** Silero VAD：只对检测到的语音段做解码，避免噪声/静音送进识别模型 */
+  export class Vad {
+    constructor(config: VadConfig, bufferSizeInSeconds: number);
+    acceptWaveform(samples: Float32Array): void;
+    isEmpty(): boolean;
+    isDetected(): boolean;
+    pop(): void;
+    clear(): void;
+    front(enableExternalBuffer?: boolean): SpeechSegment;
+    reset(): void;
+    flush(): void;
   }
 
   export function readWave(filename: string): Waveform;

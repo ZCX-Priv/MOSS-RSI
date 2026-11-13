@@ -9,6 +9,7 @@ import type { WSMessage, WSMessageHandler, WSConnection } from './types';
 import type { AgentEngine, AgentEvent, GuidanceMessage, TerminalService, InterpreterKind } from '../contracts';
 import type { AutomationService } from '../automation';
 import { ErrorCode } from '../../core/error-codes';
+import { SYSTEM_SCOPE } from '../filesys/roots';
 import { VoiceSessionHost } from './voice-session-host';
 import { runInsightDiagnose, type InsightEvent, type InsightKind } from './insight-diagnose';
 
@@ -250,6 +251,8 @@ export class WsHandler {
       bytesSent: 0,
       backpressureStreak: 0,
     });
+    // 预置语音启动前缓冲：voice.start 被延迟时音频帧也不会丢
+    this.voiceHost.prepare(conn.id);
     this.logger.debug(t('server.wsConnected', { id: conn.id }));
   }
 
@@ -277,6 +280,15 @@ export class WsHandler {
     } catch {
       state.conn.send({ type: 'error', payload: { message: ErrorCode.WS_INVALID_JSON } });
       return;
+    }
+
+    // 语音控制消息必须最先处理：不能排在异步 messageHandlers 之后，
+    // 否则模型加载/慢 handler 期间到达的音频帧会因尚未登记 starting 而被丢弃。
+    if (msg.type === 'voice.start') {
+      return this.voiceHost.start(connId, (m) => state.conn.send(m), readVoiceModelId(msg));
+    }
+    if (msg.type === 'voice.stop') {
+      return this.voiceHost.stop(connId);
     }
 
     // 1. 通知注册的 handler
@@ -310,10 +322,6 @@ export class WsHandler {
         return this.handleTaskSwitch(state, msg);
       case 'automation.run':
         return this.handleAutomationRun(state, msg);
-      case 'voice.start':
-        return this.voiceHost.start(connId, (m) => state.conn.send(m), readVoiceModelId(msg));
-      case 'voice.stop':
-        return this.voiceHost.stop(connId);
       case 'terminal.list':
         return this.handleTerminalList(state, msg);
       case 'terminal.create':
@@ -590,7 +598,8 @@ export class WsHandler {
           attachments: currentAttachments,
           model: payload.model,
           agentId: payload.agentId,
-          cwd: payload.cwd || process.cwd(),
+          // 空工作目录 = 本机（全盘访问）；不能回退 process.cwd，否则工具会被限制在 MOSS 安装目录
+          cwd: payload.cwd || SYSTEM_SCOPE,
           onEvent,
           signal: abortController.signal,
           runId: currentRunId,

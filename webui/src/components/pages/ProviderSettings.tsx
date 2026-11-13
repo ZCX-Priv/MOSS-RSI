@@ -166,13 +166,6 @@ export function ProviderSettings() {
   // 语音统一在后端运行；移动端（Android）按产品策略整体置灰
   const { platform } = usePlatform();
   const voiceMobileUnavailable = platform.isAndroid;
-  // 推理位置标签：在线服务商 / 服务端本地引擎 / 不可用
-  const voiceInferLabel = voiceMobileUnavailable
-    ? t('common.mobileUnavailable')
-    : voiceStatus?.providerId ||
-        (voiceStatus?.runtimeAvailable && (voiceStatus.installed?.length ?? 0) > 0)
-      ? t('settings.provider.voiceInferServer')
-      : t('settings.provider.voiceInferUnavailable');
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderItem | null>(null);
   const [pickProvider, setPickProvider] = useState<ProviderItem | null>(null);
@@ -262,12 +255,12 @@ export function ProviderSettings() {
     }
   };
 
-  const selectVoiceProvider = async (providerId: string) => {
+  const selectVoiceLanguage = async (language: string) => {
     try {
-      await api.setVoiceProvider(providerId);
+      await api.setVoiceLanguage(language);
       await refreshVoiceStatus();
     } catch {
-      toast.error(t('settings.provider.voiceProviderFailed'));
+      toast.error(t('settings.provider.voiceLanguageFailed'));
     }
   };
 
@@ -327,14 +320,9 @@ export function ProviderSettings() {
     void reorderProviders(newOrder);
   };
 
-  // 类别归属：voice 为独立类别；其余归模型
-  const kindOf = (p: ProviderItem): 'model' | 'voice' =>
-    p.kind === 'voice' ? 'voice' : 'model';
-
   // 搜索（服务商名/地址/旗下模型名或 id）+ API 格式筛选（实时本地过滤）
   const q = query.trim().toLowerCase();
   const visibleProviders = providers.filter((p) => {
-    if (kindOf(p) !== category) return false;
     const matchQ =
       !q ||
       p.name.toLowerCase().includes(q) ||
@@ -426,7 +414,8 @@ export function ProviderSettings() {
             </SelectContent>
           </Select>
           )}
-          {/* 桌面端搜索框 + 添加按钮（移动端由 header 按钮替代） */}
+          {/* 桌面端搜索框 + 添加按钮（移动端由 header 按钮替代；语音类别不展示服务商操作） */}
+          {category !== 'voice' && (
           <div className="hidden items-center gap-2 sm:flex">
             <div className="relative w-full sm:w-64 sm:shrink-0">
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -443,10 +432,11 @@ export function ProviderSettings() {
               {t('settings.provider.addProvider')}
             </Button>
           </div>
+          )}
         </div>
       </div>
 
-      {/* 语音类别：能力开关 + 默认服务商 + 本地模型管理 */}
+      {/* 语音类别：能力开关 + 识别语言 + 本地模型管理 */}
       {category === 'voice' && (
         <div className="flex flex-col gap-4">
           {voiceMobileUnavailable && (
@@ -490,47 +480,35 @@ export function ProviderSettings() {
             />
           </div>
 
-          {/* 推理位置（在线服务商 / 服务端本地引擎） */}
-          <div className="flex items-center justify-between rounded-xl border border-border p-4">
-            <span className="text-sm font-medium text-foreground">
-              {t('settings.provider.voiceInferLocation')}
-            </span>
-            <span className="text-xs text-muted-foreground">{voiceInferLabel}</span>
-          </div>
-
-          {/* 默认语音服务商（本地引擎 / 在线服务商） */}
+          {/* 识别语言（仅 SenseVoice / Whisper 生效；流式中文模型固定中文） */}
           <div className="flex flex-col gap-2 rounded-xl border border-border p-4">
             <div className="flex flex-col gap-0.5">
               <span className="text-sm font-medium text-foreground">
-                {t('settings.provider.voiceProvider')}
+                {t('settings.provider.voiceLanguage')}
               </span>
               <span className="text-xs text-muted-foreground">
-                {t('settings.provider.voiceProviderDesc')}
+                {t('settings.provider.voiceLanguageDesc')}
               </span>
             </div>
             <Select
-              value={voiceStatus?.providerId || '__local__'}
-              onValueChange={(v) => void selectVoiceProvider(v === '__local__' ? '' : v)}
+              value={voiceStatus?.language ?? 'zh'}
+              onValueChange={(v) => void selectVoiceLanguage(v)}
             >
               <SelectTrigger className="w-full sm:w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__local__">
-                  {t('settings.provider.voiceLocalEngine')}
-                </SelectItem>
-                {providers
-                  .filter((p) => p.kind === 'voice')
-                  .map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
+                <SelectItem value="zh">{t('settings.provider.voiceLangZh')}</SelectItem>
+                <SelectItem value="auto">{t('settings.provider.voiceLangAuto')}</SelectItem>
+                <SelectItem value="en">{t('settings.provider.voiceLangEn')}</SelectItem>
+                <SelectItem value="ja">{t('settings.provider.voiceLangJa')}</SelectItem>
+                <SelectItem value="ko">{t('settings.provider.voiceLangKo')}</SelectItem>
+                <SelectItem value="yue">{t('settings.provider.voiceLangYue')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          {/* 本地模型：三类引擎（Zipformer / SenseVoice / Whisper）模型管理 */}
+          {/* 本地模型：流式 / 离线多种引擎模型管理 */}
           <div
             className={
               voiceMobileUnavailable
@@ -596,6 +574,11 @@ export function ProviderSettings() {
                               <Trash2 className="size-4" />
                             </Button>
                           </>
+                        ) : m.state === 'deploying' ? (
+                          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                            <Loader2 className="size-3.5 animate-spin" />
+                            {t('settings.provider.voiceDeploying')}
+                          </span>
                         ) : m.state === 'downloading' ? (
                           <span className="text-xs text-muted-foreground">
                             {Math.round((m.progress ?? 0) * 100)}%
@@ -616,6 +599,9 @@ export function ProviderSettings() {
                     {m.state === 'downloading' && (
                       <Progress value={(m.progress ?? 0) * 100} className="h-1" />
                     )}
+                    {m.state === 'deploying' && (
+                      <Progress value={100} className="h-1 animate-pulse" />
+                    )}
                     {m.state === 'error' && m.error && (
                       <span className="text-xs text-destructive">{m.error}</span>
                     )}
@@ -624,23 +610,13 @@ export function ProviderSettings() {
               })}
             </div>
           </div>
-
-          {/* 在线语音服务商列表标题 */}
-          <div className="flex flex-col gap-0.5">
-            <span className="text-sm font-medium text-foreground">
-              {t('settings.provider.voiceOnlineProviders')}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {t('settings.provider.voiceOnlineProvidersDesc')}
-            </span>
-          </div>
         </div>
       )}
 
-      {/* 服务商卡片列表（按类别过滤） */}
-      {visibleProviders.length === 0 ? (
+      {/* 服务商卡片列表（仅模型类别；语音类别只保留本地模型管理） */}
+      {category !== 'voice' && (visibleProviders.length === 0 ? (
         <div className="flex items-center justify-center rounded-xl border border-dashed border-border p-8 text-sm text-muted-foreground">
-          {providers.filter((p) => kindOf(p) === category).length === 0
+          {providers.length === 0
             ? t('settings.provider.empty')
             : t('settings.provider.noMatch')}
         </div>
@@ -670,7 +646,7 @@ export function ProviderSettings() {
             </div>
           </SortableContext>
         </DndContext>
-      )}
+      ))}
 
       {/* 服务商新建/编辑弹窗 */}
       <AddProviderDialog
@@ -1081,10 +1057,8 @@ function AddProviderDialog({
   const isEdit = !!editingProvider;
   const { createProvider, updateProvider } = useProviders();
 
-  const [kind, setKind] = useState<'model' | 'voice'>('model');
   const [name, setName] = useState('');
   const [format, setFormat] = useState<ProviderItem['format']>('openai-chat');
-  const [voiceModel, setVoiceModel] = useState('');
   const [endpoint, setEndpoint] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [balanceUrl, setBalanceUrl] = useState('');
@@ -1097,9 +1071,7 @@ function AddProviderDialog({
     if (!open) return;
     if (editingProvider) {
       setName(editingProvider.name);
-      setKind(editingProvider.kind === 'voice' ? 'voice' : 'model');
       setFormat(editingProvider.format);
-      setVoiceModel(editingProvider.voiceModel ?? '');
       setEndpoint(editingProvider.endpoint);
       setApiKey(''); // 留空 = 不修改
       setBalanceUrl(editingProvider.balanceUrl ?? '');
@@ -1107,9 +1079,7 @@ function AddProviderDialog({
       setIcon(editingProvider.icon ?? '');
     } else {
       setName('');
-      setKind('model');
       setFormat('openai-chat');
-      setVoiceModel('');
       setEndpoint('');
       setApiKey('');
       setBalanceUrl('');
@@ -1118,52 +1088,30 @@ function AddProviderDialog({
     }
   }, [open, editingProvider]);
 
-  const isVoice = kind === 'voice';
-
   const handleSubmit = async () => {
-    // 语音服务商：名称 + 引擎必填，endpoint 可选；模型服务商：名称 + endpoint 必填
-    if (!name.trim() || (!isVoice && !endpoint.trim())) {
+    // 模型服务商：名称 + endpoint 必填
+    if (!name.trim() || !endpoint.trim()) {
       toast.error(t('settings.provider.fieldsRequired'));
       return;
     }
     setSubmitting(true);
     try {
-      if (isVoice) {
-        const payload = {
-          kind: 'voice' as const,
-          name: name.trim(),
-          voiceEngine: 'openai-transcriptions' as const,
-          ...(voiceModel.trim() ? { voiceModel: voiceModel.trim() } : {}),
-          endpoint: endpoint.trim(),
-          apiKey: apiKey.trim(),
-          ...(icon ? { icon } : {}),
-        };
-        if (isEdit && editingProvider) {
-          await updateProvider(editingProvider.id, payload);
-          toast.success(t('settings.provider.updateSuccess'));
-        } else {
-          await createProvider(payload);
-          toast.success(t('settings.provider.createSuccess'));
-        }
+      const payload = {
+        name: name.trim(),
+        format,
+        endpoint: endpoint.trim(),
+        apiKey: apiKey.trim(),
+        ...(balanceUrl.trim() ? { balanceUrl: balanceUrl.trim() } : {}),
+        ...(modelsUrl.trim() ? { modelsUrl: modelsUrl.trim() } : {}),
+        ...(icon ? { icon } : {}),
+      };
+      if (isEdit && editingProvider) {
+        await updateProvider(editingProvider.id, payload);
+        toast.success(t('settings.provider.updateSuccess'));
       } else {
-        const payload = {
-          kind: 'model' as const,
-          name: name.trim(),
-          format,
-          endpoint: endpoint.trim(),
-          apiKey: apiKey.trim(),
-          ...(balanceUrl.trim() ? { balanceUrl: balanceUrl.trim() } : {}),
-          ...(modelsUrl.trim() ? { modelsUrl: modelsUrl.trim() } : {}),
-          ...(icon ? { icon } : {}),
-        };
-        if (isEdit && editingProvider) {
-          await updateProvider(editingProvider.id, payload);
-          toast.success(t('settings.provider.updateSuccess'));
-        } else {
-          await createProvider(payload);
-          toast.success(t('settings.provider.createSuccess'));
-          // 不再自动拉取模型列表（用户手动点"获取模型列表"）
-        }
+        await createProvider(payload);
+        toast.success(t('settings.provider.createSuccess'));
+        // 不再自动拉取模型列表（用户手动点"获取模型列表"）
       }
       onOpenChange(false);
     } catch {
@@ -1185,28 +1133,6 @@ function AddProviderDialog({
         </DialogHeader>
 
         <DialogBody>
-          {/* 服务商类型（新建时可切换；编辑时锁定避免数据语义漂移） */}
-          <div className="flex flex-col gap-1.5">
-            <Label>{t('settings.provider.providerKind')}</Label>
-            <Select
-              value={kind}
-              onValueChange={(v) => setKind(v as 'model' | 'voice')}
-              disabled={isEdit}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="model">{t('settings.provider.kindModel')}</SelectItem>
-                <SelectItem value="voice">{t('settings.provider.kindVoice')}</SelectItem>
-              </SelectContent>
-            </Select>
-            {isEdit && (
-              <span className="text-xs text-muted-foreground">
-                {t('settings.provider.kindLocked')}
-              </span>
-            )}
-          </div>
           {/* 品牌图标 */}
           <div className="flex flex-col gap-1.5">
             <Label>{t('settings.provider.icon')}</Label>
@@ -1223,60 +1149,7 @@ function AddProviderDialog({
             />
           </div>
 
-          {isVoice ? (
-            <>
-              {/* 语音引擎（当前仅 OpenAI 兼容整段转写） */}
-              <div className="flex flex-col gap-1.5">
-                <Label>{t('settings.provider.voiceEngine')}</Label>
-                <Input value="openai-transcriptions" readOnly className="text-muted-foreground" />
-                <span className="text-xs text-muted-foreground">
-                  {t('settings.provider.voiceEngineHint')}
-                </span>
-              </div>
-              {/* 语音模型名 */}
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="provider-voice-model">{t('settings.provider.voiceModelName')}</Label>
-                <Input
-                  id="provider-voice-model"
-                  value={voiceModel}
-                  onChange={(e) => setVoiceModel(e.target.value)}
-                  placeholder={t('settings.provider.voiceModelNamePlaceholder')}
-                />
-              </div>
-              {/* API Key */}
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="provider-voice-apikey">{t('settings.provider.apiKey')}</Label>
-                <Input
-                  id="provider-voice-apikey"
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={isEdit ? t('settings.provider.apiKeyKeep') : 'sk-...'}
-                />
-              </div>
-              {/* 高级设置：转写端点（留空 = 官方端点） */}
-              <Collapsible defaultOpen={false}>
-                <CollapsibleTrigger className="group flex w-full items-center gap-1 rounded-md py-1 text-sm text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-foreground">
-                  <ChevronRight className="size-3.5 transition-transform group-data-[state=open]:rotate-90" />
-                  <span>{t('settings.provider.advancedConfig')}</span>
-                </CollapsibleTrigger>
-                <CollapsibleContent>
-                  <div className="flex flex-col gap-1.5 pt-1">
-                    <Label htmlFor="provider-voice-endpoint">
-                      {t('settings.provider.endpoint')}
-                    </Label>
-                    <Input
-                      id="provider-voice-endpoint"
-                      value={endpoint}
-                      onChange={(e) => setEndpoint(e.target.value)}
-                      placeholder="https://api.openai.com/v1/audio/transcriptions"
-                    />
-                  </div>
-                </CollapsibleContent>
-              </Collapsible>
-            </>
-          ) : (
-            <>
+          <>
               {/* API 格式 */}
               <div className="flex flex-col gap-1.5">
                 <Label>{t('settings.provider.apiFormat')}</Label>
@@ -1344,7 +1217,6 @@ function AddProviderDialog({
                 </CollapsibleContent>
               </Collapsible>
             </>
-          )}
         </DialogBody>
 
         <DialogFooter>

@@ -17,6 +17,30 @@ export function generateModelId(): string {
 }
 
 /**
+ * 剔除已彻底移除的服务商类型（voice / 旧 search）。
+ * 快速路径（启动）与完整校验（zod preprocess）使用同一判定口径。
+ * 原地修改 raw.providers；返回 true 表示发生删除（调用方需落盘）。
+ */
+export function stripRemovedProviders(raw: Record<string, unknown> | null): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const providers = raw.providers;
+  if (!Array.isArray(providers)) return false;
+  const kept = providers.filter((item) => {
+    if (!item || typeof item !== 'object') return true;
+    const record = item as { kind?: unknown; format?: unknown };
+    return (
+      record.kind !== 'voice' &&
+      record.format !== 'voice' &&
+      record.kind !== 'search' &&
+      record.format !== 'search'
+    );
+  });
+  if (kept.length === providers.length) return false;
+  raw.providers = kept;
+  return true;
+}
+
+/**
  * 将 providers 结构展开为扁平 ModelConfig 列表：
  * provider 的 format/endpoint/apiKey 合并进每个模型，模型自身字段原样保留。
  * 供 LLMRouter / context / agent 等运行时消费。
@@ -24,10 +48,6 @@ export function generateModelId(): string {
 export function flattenModels(cfg: ApiConfig): ModelConfig[] {
   const out: ModelConfig[] = [];
   for (const provider of cfg.providers) {
-    // 语音服务商无 LLM 端点，models 恒空，跳过并让 format 收窄
-    if (provider.kind === 'voice' || provider.format === 'voice') {
-      continue;
-    }
     for (const model of provider.models) {
       out.push({
         id: model.id,

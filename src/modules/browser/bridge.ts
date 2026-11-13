@@ -10,8 +10,12 @@ const PROTOCOL_VERSION = 1;
 const PORT_SCAN_COUNT = 10;
 const HELLO_TIMEOUT_MS = 8000;
 const SERVER_PING_MS = 20_000;
-/** 超过该时长未收到任何帧（含 pong）视为连接假死，主动关闭避免幽灵实例 */
-const INSTANCE_IDLE_MS = 60_000;
+/**
+ * 超过该时长未收到任何帧（含 pong）视为连接假死，主动关闭避免幽灵实例。
+ * 放宽到 180s：MV3 offscreen 文档在后台会被 Chrome 节流定时器，20s 心跳可能被拉长到
+ * 60s 以上；60s 窗口会把正常连接误判为假死并反复断开重连。
+ */
+const INSTANCE_IDLE_MS = 180_000;
 
 export interface BridgeSocketData {
   connectionId: string;

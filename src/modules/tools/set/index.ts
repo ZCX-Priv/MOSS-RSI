@@ -23,9 +23,13 @@ import type { RuleScope, ScopedRuleRecord } from '../../rules/types';
 import type { HookEvent, HookScope, ScopedHookRecord } from '../../hooks/types';
 import { HOOK_EVENTS } from '../../hooks/types';
 import { installMarketSkill, queryMarketSkills, SkillMarketError } from '../shared/skill-market';
+import type { AgentEngine } from '../../contracts';
+import type { PermissionMode } from '../../safety/types';
 
-type SetKind = 'skill' | 'rule' | 'hook' | 'command';
-type SetAction = 'list' | 'create' | 'update' | 'delete' | 'search' | 'install';
+type SetKind = 'skill' | 'rule' | 'hook' | 'command' | 'mode';
+type SetAction = 'list' | 'create' | 'update' | 'delete' | 'search' | 'install' | 'set';
+
+const PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set<PermissionMode>(['ask', 'auto', 'skip']);
 
 interface SetParams {
   kind?: string;
@@ -49,6 +53,7 @@ interface SetParams {
   argumentHint?: string;
   keyword?: string;
   canonicalName?: string;
+  mode?: string;
 }
 
 /** 工具内部错误：execute 统一转为 isError 结果 */
@@ -78,7 +83,15 @@ function failResult(message: string): ToolResult {
 }
 
 function parseKind(value: unknown): SetKind {
-  if (value === 'skill' || value === 'rule' || value === 'hook' || value === 'command') return value;
+  if (
+    value === 'skill' ||
+    value === 'rule' ||
+    value === 'hook' ||
+    value === 'command' ||
+    value === 'mode'
+  ) {
+    return value;
+  }
   throw new SetError(t('tools.setKindInvalid'));
 }
 
@@ -89,7 +102,8 @@ function parseAction(value: unknown): SetAction {
     value === 'update' ||
     value === 'delete' ||
     value === 'search' ||
-    value === 'install'
+    value === 'install' ||
+    value === 'set'
   ) {
     return value;
   }
@@ -362,6 +376,8 @@ async function dispatchSkill(
       return searchMarket(p);
     case 'install':
       return installFromMarket(p, ctx, env);
+    default:
+      throw new SetError(t('tools.setModeActionOnly'));
   }
 }
 
@@ -713,6 +729,28 @@ function deleteCommand(p: SetParams, ctx: ToolContext): ToolResult {
 }
 
 // ============================================================================
+// mode（会话权限模式）
+// ============================================================================
+
+function setSessionMode(p: SetParams, ctx: ToolContext): ToolResult {
+  const mode = p.mode === 'ask' || p.mode === 'auto' || p.mode === 'skip' ? p.mode : undefined;
+  if (!mode || !PERMISSION_MODES.has(mode)) {
+    throw new SetError(t('tools.setModeInvalid'));
+  }
+  const engine = ctx.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
+  if (!engine?.setPermissionMode) {
+    throw new SetError(t('tools.setModeUnavailable'));
+  }
+  const ok = engine.setPermissionMode(ctx.sessionId, mode);
+  if (!ok) throw new SetError(t('tools.setModeUnavailable'));
+  return textResult(t('tools.setModeApplied', { mode }), {
+    kind: 'mode',
+    action: 'set',
+    mode,
+  });
+}
+
+// ============================================================================
 // 分派
 // ============================================================================
 
@@ -720,8 +758,17 @@ async function dispatch(p: SetParams, ctx: ToolContext, env: Environment): Promi
   const kind = parseKind(p.kind);
   const action = parseAction(p.action);
 
+  if (kind === 'mode') {
+    if (action !== 'set') throw new SetError(t('tools.setModeActionOnly'));
+    return setSessionMode(p, ctx);
+  }
+
   if (kind !== 'skill' && (action === 'search' || action === 'install')) {
     throw new SetError(t('tools.setMarketSkillOnly'));
+  }
+  if (action === 'set') {
+    // set 仅用于 kind=mode
+    throw new SetError(t('tools.setModeActionOnly'));
   }
 
   switch (kind) {

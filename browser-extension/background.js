@@ -10,6 +10,17 @@
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { port: 7799, token: '', autoConnect: true, builtinTag: '' };
 const OFFSCREEN_PATH = 'offscreen.html';
+/** MV3 offscreen 文档被回收后无人重建：用 alarms 周期唤醒 SW 并确保它存在 */
+const KEEPALIVE_ALARM = 'moss-bridge-keepalive';
+
+/** 创建/刷新保活闹钟（periodInMinutes 最小 1 分钟；重复 create 会覆盖为同一周期） */
+function ensureKeepAliveAlarm() {
+  try {
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+  } catch {
+    // alarms 不可用（旧浏览器）：忽略，仍有 sendToOffscreen 按需创建兜底
+  }
+}
 
 let cachedBridgeStatus = {
   connected: false,
@@ -176,7 +187,7 @@ async function dispatch(method, params) {
     case 'tabs.list':
       return listTabs();
     case 'tabs.activate':
-      return activateTab(Number(params.tabId));
+      return activateTab(Number(params.tabId), params);
     case 'tabs.close':
       return closeTab(Number(params.tabId));
     case 'groups.query':
@@ -321,12 +332,15 @@ async function listTabs() {
   }));
 }
 
-async function activateTab(tabId) {
+async function activateTab(tabId, params) {
   const tab = await chrome.tabs.get(tabId);
   if (!tab) throw new Error(`标签页不存在：${tabId}`);
-  // 已激活且窗口已在前台 → 不做任何 update（避免每次操作都前置/刷新导致闪屏）
+  // focusWindow=false（例行操作）：只把标签设为该窗口的活动标签，绝不把窗口抬到前台。
+  // 旧实现每次操作都 windows.update({focused:true})，用户切回其他窗口后下一次操作又置前，
+  // 表现就是整个浏览器窗口反复闪烁。
+  const focusWindow = params && params.focusWindow === true;
   let windowFocused = false;
-  if (typeof tab.windowId === 'number') {
+  if (focusWindow && typeof tab.windowId === 'number') {
     try {
       const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
       windowFocused = win.id === tab.windowId && win.focused === true;
@@ -334,14 +348,14 @@ async function activateTab(tabId) {
       windowFocused = false;
     }
   }
-  if (tab.active === true && windowFocused) {
-    return { tabId, windowId: tab.windowId, focused: true, noop: true };
+  if (tab.active === true && (!focusWindow || windowFocused)) {
+    return { tabId, windowId: tab.windowId, focused: windowFocused, noop: true };
   }
   const updated = await chrome.tabs.update(tabId, { active: true });
-  if (typeof updated.windowId === 'number') {
+  if (focusWindow && typeof updated.windowId === 'number') {
     await chrome.windows.update(updated.windowId, { focused: true }).catch(() => {});
   }
-  return { tabId, windowId: updated.windowId, focused: true, noop: false };
+  return { tabId, windowId: updated.windowId, focused: focusWindow, noop: false };
 }
 
 async function closeTab(tabId) {
@@ -660,10 +674,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  ensureKeepAliveAlarm();
   void ensureOffscreen();
 });
 chrome.runtime.onInstalled.addListener(() => {
+  ensureKeepAliveAlarm();
+  void ensureOffscreen();
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  // offscreen 文档持有 WebSocket；被浏览器回收后靠这里重建并触发自动重连
   void ensureOffscreen();
 });
 
+ensureKeepAliveAlarm();
 void ensureOffscreen();

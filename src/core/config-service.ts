@@ -8,7 +8,7 @@
 // - 配置文件的 watch 也延后启动，不占启动关键路径。
 
 import { setBackendLocale, t } from './i18n';
-import { migrateLegacyApiConfig } from './provider-utils';
+import { migrateLegacyApiConfig, stripRemovedProviders } from './provider-utils';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../utils/fs-atomic';
 import type {
@@ -97,7 +97,7 @@ export function defaultAppConfig(): AppConfig {
         maxIntentChars: 4000,
       },
     },
-    voice: { enabled: false, providerId: '', localModel: '', language: 'auto' },
+    voice: { enabled: false, localModel: '', language: 'zh' },
   };
 }
 
@@ -352,8 +352,15 @@ class ConfigServiceImpl implements ConfigService {
     } catch (err) {
       throw new Error(t('config.apiJsonInvalid', { error: err instanceof Error ? err.message : String(err) }));
     }
+    let dirty = false;
     if (migrateLegacyApiConfig(raw as Record<string, unknown>)) {
       this.logger.info(t('config.apiConfigMigrated'));
+      dirty = true;
+    }
+    // 已移除的服务商类型（语音 / 旧搜索）：快速路径同步剔除并落盘，
+    // 避免旧条目在 UI 上短暂出现，也确保「彻底删除」不依赖后续完整校验。
+    if (stripRemovedProviders(raw as Record<string, unknown>)) dirty = true;
+    if (dirty) {
       this.fs.writeText(path, JSON.stringify(raw, null, 2));
     }
     return deepMerge(defaultApiConfig(), raw) as ApiConfig;

@@ -30,6 +30,7 @@ import {
 import { tokenize } from './tokenizer';
 import type {
   MemoryHall,
+  MemoryOrigin,
   MemoryPalaceTree,
   MemoryRecallSection,
   MemoryScope,
@@ -295,7 +296,14 @@ export class MemoryEngineServiceImpl {
    */
   listMemories(
     cwd: string,
-    filter?: { wing?: string; room?: string; hall?: MemoryHall; pinned?: boolean },
+    filter?: {
+      wing?: string;
+      room?: string;
+      hall?: MemoryHall;
+      pinned?: boolean;
+      origin?: MemoryOrigin;
+      scope?: MemoryScope;
+    },
     limit = 200,
   ): ScopedMemoryRecord[] {
     const { global: globalRoot, project } = memoryRoots(this.env, cwd);
@@ -309,14 +317,26 @@ export class MemoryEngineServiceImpl {
           (!filter?.wing || m.wing === filter.wing) &&
           (!filter?.room || m.room === filter.room) &&
           (!filter?.hall || m.hall === filter.hall) &&
-          (filter?.pinned === undefined || m.pinned === filter.pinned),
+          (filter?.pinned === undefined || m.pinned === filter.pinned) &&
+          (!filter?.origin || m.origin === filter.origin) &&
+          (!filter?.scope || m.scope === filter.scope),
       )
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, Math.max(1, limit));
   }
 
   /** 关键词包含搜索（REST q= 参数：BM25 无结果时回退） */
-  searchContains(cwd: string, q: string): ScopedMemoryRecord[] {
+  searchContains(
+    cwd: string,
+    q: string,
+    filter?: {
+      wing?: string;
+      room?: string;
+      hall?: MemoryHall;
+      origin?: MemoryOrigin;
+      scope?: MemoryScope;
+    },
+  ): ScopedMemoryRecord[] {
     const needle = q.toLowerCase();
     const { global: globalRoot, project } = memoryRoots(this.env, cwd);
     return [
@@ -324,9 +344,14 @@ export class MemoryEngineServiceImpl {
       ...(project ? listAllMemories(project, 'project') : []),
     ].filter(
       m =>
-        m.insight.toLowerCase().includes(needle) ||
-        m.verbatim.toLowerCase().includes(needle) ||
-        m.tags.some(t => t.toLowerCase().includes(needle)),
+        (!filter?.wing || m.wing === filter.wing) &&
+        (!filter?.room || m.room === filter.room) &&
+        (!filter?.hall || m.hall === filter.hall) &&
+        (!filter?.origin || m.origin === filter.origin) &&
+        (!filter?.scope || m.scope === filter.scope) &&
+        (m.insight.toLowerCase().includes(needle) ||
+          m.verbatim.toLowerCase().includes(needle) ||
+          m.tags.some(t => t.toLowerCase().includes(needle))),
     );
   }
 

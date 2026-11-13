@@ -1,7 +1,7 @@
 {
   "name": "set",
-  "description": "统一管理 MOSS 用户资源（kind = skill / rule / hook / command）。action：list 列出全部（只读）；create 新建；update 修改现有项（名称不可变，未提供的字段保持原值）；delete 删除；kind=skill 额外支持 search（按 keyword 搜索 SkillHub 技能市场）与 install（按 canonicalName（@owner/slug）从市场安装）。skill/command 名称必须匹配 ^[a-z][a-z0-9-]*$。rule 支持 scope=global/project、paths（空数组=始终注入，有值=访问匹配文件时注入）、priority；hook 支持 event / matcher / hookType / command / modulePath / timeout，terminal 钩子会执行任意命令，请谨慎使用；command 的 content 是斜杠命令提示词模板（可含 $ARGUMENTS）。list/search 只读放行；create/update/delete/install 属于写操作，可能触发用户确认。",
-  "description_en": "Unified management of MOSS user resources (kind = skill / rule / hook / command). action: list all (read-only); create; update an existing item (name is immutable; omitted fields keep their current values); delete; for kind=skill, search the SkillHub market by keyword or install by canonicalName (@owner/slug). skill/command names must match ^[a-z][a-z0-9-]*$. rule supports scope=global/project, paths (empty = always injected, non-empty = injected when matching files are accessed), and priority; hook supports event / matcher / hookType / command / modulePath / timeout — terminal hooks execute arbitrary commands, use with caution; command content is the slash-command prompt template (may contain $ARGUMENTS). list/search are read-only; create/update/delete/install are write operations and may require user confirmation.",
+  "description": "统一管理 MOSS 用户资源与权限模式（kind = skill / rule / hook / command / mode）。action：list 列出全部（只读）；create 新建；update 修改现有项（名称不可变，未提供的字段保持原值）；delete 删除；kind=skill 额外支持 search（按 keyword 搜索 SkillHub 技能市场）与 install（按 canonicalName（@owner/slug）从市场安装）；kind=mode 仅支持 action=set，用 mode=ask/auto/skip 申请切换当前会话权限模式（提权会触发用户确认）。skill/command 名称必须匹配 ^[a-z][a-z0-9-]*$。rule 支持 scope=global/project、paths（空数组=始终注入，有值=访问匹配文件时注入）、priority；hook 支持 event / matcher / hookType / command / modulePath / timeout，terminal 钩子会执行任意命令，请谨慎使用；command 的 content 是斜杠命令提示词模板（可含 $ARGUMENTS）。list/search 只读放行；create/update/delete/install/set 属于写操作，可能触发用户确认。",
+  "description_en": "Unified management of MOSS user resources and permission mode (kind = skill / rule / hook / command / mode). action: list all (read-only); create; update an existing item (name is immutable; omitted fields keep their current values); delete; for kind=skill, search the SkillHub market by keyword or install by canonicalName (@owner/slug); kind=mode only supports action=set with mode=ask/auto/skip to request switching the current session permission mode (escalation requires user confirmation). skill/command names must match ^[a-z][a-z0-9-]*$. rule supports scope=global/project, paths (empty = always injected, non-empty = injected when matching files are accessed), and priority; hook supports event / matcher / hookType / command / modulePath / timeout — terminal hooks execute arbitrary commands, use with caution; command content is the slash-command prompt template (may contain $ARGUMENTS). list/search are read-only; create/update/delete/install/set are write operations and may require user confirmation.",
   "icon": "settings",
   "annotations": {
     "readOnlyHint": false,
@@ -13,15 +13,21 @@
     "properties": {
       "kind": {
         "type": "string",
-        "enum": ["skill", "rule", "hook", "command"],
-        "description": "资源类型",
-        "description_en": "Resource kind"
+        "enum": ["skill", "rule", "hook", "command", "mode"],
+        "description": "资源类型；mode 用于切换当前会话权限模式",
+        "description_en": "Resource kind; mode switches the current session permission mode"
       },
       "action": {
         "type": "string",
-        "enum": ["list", "create", "update", "delete", "search", "install"],
-        "description": "操作类型；search/install 仅用于 kind=skill",
-        "description_en": "Operation; search/install are only valid for kind=skill"
+        "enum": ["list", "create", "update", "delete", "search", "install", "set"],
+        "description": "操作类型；search/install 仅用于 kind=skill，set 仅用于 kind=mode",
+        "description_en": "Operation; search/install are only valid for kind=skill, set is only valid for kind=mode"
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["ask", "auto", "skip"],
+        "description": "kind=mode 时要切换到的权限模式：ask=逐项确认 / auto=AI 审查 / skip=全部放行",
+        "description_en": "Target permission mode for kind=mode: ask = per-action confirmation / auto = AI review / skip = allow all"
       },
       "name": {
         "type": "string",

@@ -300,8 +300,8 @@ export default function App() {
                     </Button>
                   </>
                 )}
-                {/* 服务商设置页：搜索 + 添加（移动端收纳进 header；页面内工具行仅筛选占一行） */}
-                {isProviderRoute && (
+                {/* 服务商设置页：搜索 + 添加（语音类别只保留本地模型，不展示服务商操作） */}
+                {isProviderRoute && !pathname.startsWith('/settings/provider/voice') && (
                   <>
                     <Button
                       variant="ghost"

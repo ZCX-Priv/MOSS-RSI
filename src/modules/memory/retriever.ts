@@ -10,7 +10,13 @@
 import type { Environment } from '../../core/types';
 import { memoryRoots, projectWing, readMemoryFile, scanMemoryFileInfos } from './storage';
 import { tokenize, tokenOverlap } from './tokenizer';
-import type { MemoryHall, ScoredMemoryRecord, ScopedMemoryRecord } from './types';
+import type {
+  MemoryHall,
+  MemoryOrigin,
+  MemoryScope,
+  ScoredMemoryRecord,
+  ScopedMemoryRecord,
+} from './types';
 
 /** 检索过滤条件 */
 export interface RecallFilter {
@@ -20,6 +26,10 @@ export interface RecallFilter {
   room?: string;
   hall?: MemoryHall;
   tag?: string;
+  /** 来源分类过滤（手动创建 / 主动记录 / 自动提取） */
+  origin?: MemoryOrigin;
+  /** 作用域过滤（全局 / 项目） */
+  scope?: MemoryScope;
   /** 仅置顶 */
   pinnedOnly?: boolean;
 }
@@ -241,6 +251,8 @@ export class MemoryRetriever {
     if (filter.wings && !filter.wings.includes(r.wing)) return false;
     if (filter.room && r.room !== filter.room) return false;
     if (filter.hall && r.hall !== filter.hall) return false;
+    if (filter.origin && r.origin !== filter.origin) return false;
+    if (filter.scope && r.scope !== filter.scope) return false;
     if (filter.tag && !r.tags.includes(filter.tag)) return false;
     if (filter.pinnedOnly && !r.pinned) return false;
     return true;

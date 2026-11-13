@@ -1105,12 +1105,14 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         task?: TaskItem;
         taskId?: string;
         running?: boolean;
+        /** set 工具切换会话权限模式后的实时徽章同步（后端新增；旧后端缺省） */
+        permissionMode?: 'ask' | 'auto' | 'skip';
         /** 该广播所描述的那一轮 run 身份（后端新增；旧后端缺省） */
         runId?: string;
       };
       const st = useStore.getState();
+      const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
       if (typeof payload.running === 'boolean') {
-        const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
         if (sid) {
           const localRunId = st.activeRunBySession[sid]?.runId ?? pendingRunId.get(sid);
           if (payload.running) {
@@ -1143,6 +1145,14 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         }
       }
       if (payload.task) st.updateTask(payload.task.id, payload.task);
+      if (
+        sid &&
+        (payload.permissionMode === 'ask' ||
+          payload.permissionMode === 'auto' ||
+          payload.permissionMode === 'skip')
+      ) {
+        st.setPermissionMode(payload.permissionMode, sid);
+      }
       break;
     }
     case 'task.deleted': {

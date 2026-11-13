@@ -132,6 +132,22 @@ export function upsertRule(
   return record;
 }
 
+/** 清空某作用域目录下全部规则文件（保留目录）。返回删除条数。 */
+export function clearRules(dir: string): number {
+  if (!existsSync(dir)) return 0;
+  let removed = 0;
+  for (const entry of readdirSync(dir)) {
+    if (!entry.endsWith('.json')) continue;
+    try {
+      rmSync(join(dir, entry));
+      removed++;
+    } catch {
+      // 单文件删除失败：跳过，不阻断其余清理
+    }
+  }
+  return removed;
+}
+
 /** 删除规则（按 id） */
 export function deleteRule(dir: string, id: string): boolean {
   const file = join(dir, `${id}.json`);

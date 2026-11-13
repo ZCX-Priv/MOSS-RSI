@@ -7,7 +7,7 @@
 // 仅当无外层路径的内存源（压缩包套压缩包，无法持久化标签页）时才退回「内嵌预览」兜底。
 // 本组件经 React.lazy 懒加载（FilePreviewPane 分发）。
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Archive, ChevronLeft, Download, Folder, Loader2, TriangleAlert } from 'lucide-react';
 import { Button } from '../../components/ui/button';
@@ -32,6 +32,13 @@ const MAX_ENTRY_BYTES = 50 * 1024 * 1024;
 /** 允许继续嵌套预览（内存源回退路径）的最大深度（压缩包套压缩包） */
 const MAX_NEST_DEPTH = 2;
 
+/**
+ * 每个压缩包标签最近浏览的内层目录（模块级内存）。
+ * 点击内层文件会新开预览标签并卸载本组件；返回 ZIP 标签时据此恢复目录，
+ * 而不是回到压缩包根目录。键 = sessionId + 外层路径（内存源无外层路径，不缓存）。
+ */
+const archiveDirMemory = new Map<string, string>();
+
 export interface ArchivePaneProps {
   buffer: ArrayBuffer;
   ext: string;
@@ -54,10 +61,23 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
   const tabSession = sessionId !== undefined ? sessionId : (activeSessionId ?? undefined);
   const [entries, setEntries] = useState<ArchiveEntryInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [currentDir, setCurrentDir] = useState('');
+  /** 目录记忆键：仅磁盘源（有外层路径）可恢复 */
+  const dirKey = archivePath ? `${sessionId ?? ''}::${archivePath}` : null;
+  const [currentDir, setCurrentDir] = useState(() =>
+    dirKey ? (archiveDirMemory.get(dirKey) ?? '') : '',
+  );
   const [selected, setSelected] = useState<{ name: string; buffer: ArrayBuffer } | null>(null);
   const [extracting, setExtracting] = useState(false);
   const readerRef = useRef<ArchiveReaderLike | null>(null);
+
+  /** 更新目录并同步写入目录记忆（组件卸载/切标签后返回仍能恢复） */
+  const updateDir = useCallback(
+    (next: string) => {
+      setCurrentDir(next);
+      if (dirKey) archiveDirMemory.set(dirKey, next);
+    },
+    [dirKey],
+  );
 
   // 下载整包
   const downloadUrl = useMemo(() => URL.createObjectURL(new Blob([buffer])), [buffer]);
@@ -68,7 +88,8 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
     setEntries(null);
     setError(null);
     setSelected(null);
-    setCurrentDir('');
+    // 重新打开同一压缩包时恢复上次目录；首次打开则从根开始
+    setCurrentDir(dirKey ? (archiveDirMemory.get(dirKey) ?? '') : '');
     void (async () => {
       try {
         const reader = await openArchiveReader(buffer, fileName);
@@ -89,7 +110,7 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
       void readerRef.current?.close().catch(() => undefined);
       readerRef.current = null;
     };
-  }, [buffer, fileName]);
+  }, [buffer, fileName, dirKey]);
 
   /** 从条目推导全部目录（含祖先，均以 '/' 结尾，'' 为根） */
   const dirs = useMemo(() => {
@@ -104,6 +125,12 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
     }
     return set;
   }, [entries]);
+
+  // 记忆目录在压缩包内容变化后可能已不存在：回退到根，避免展示空目录
+  useEffect(() => {
+    if (!entries) return;
+    if (currentDir !== '' && !dirs.has(currentDir)) updateDir('');
+  }, [entries, dirs, currentDir, updateDir]);
 
   /** 当前目录的直接子目录 */
   const subDirs = useMemo(() => {
@@ -227,20 +254,20 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
           {currentDir !== '' && (
             <button
               type="button"
-              onClick={() => setCurrentDir(currentDir.replace(/[^/]+\/$/, ''))}
+              onClick={() => updateDir(currentDir.replace(/[^/]+\/$/, ''))}
               className="rounded px-1 hover:bg-muted"
             >
               <ChevronLeft className="size-3.5" />
             </button>
           )}
-          <button type="button" onClick={() => setCurrentDir('')} className="rounded px-1 hover:bg-muted">
+          <button type="button" onClick={() => updateDir('')} className="rounded px-1 hover:bg-muted">
             /
           </button>
           {breadcrumbSegments.map((seg, i) => (
             <span key={i} className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => setCurrentDir(`${breadcrumbSegments.slice(0, i + 1).join('/')}/`)}
+                onClick={() => updateDir(`${breadcrumbSegments.slice(0, i + 1).join('/')}/`)}
                 className="max-w-32 truncate rounded px-1 hover:bg-muted"
               >
                 {seg}
@@ -278,7 +305,7 @@ export function ArchivePane({ buffer, ext, fileName, depth = 0, archivePath, ses
                 <button
                   key={d}
                   type="button"
-                  onClick={() => setCurrentDir(d)}
+                  onClick={() => updateDir(d)}
                   className="flex w-full items-center gap-1.5 truncate rounded px-2 py-1 text-left font-mono text-xs text-foreground hover:bg-muted"
                 >
                   <Folder className="size-3.5 shrink-0 text-primary-strong" />

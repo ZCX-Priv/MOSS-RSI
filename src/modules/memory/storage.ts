@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { basename, join } from 'node:path';
 import type { Environment } from '../../core/types';
 import { MEMORY_HALLS } from './types';
-import type { MemoryHall, MemoryRecord, MemoryScope, MemoryUpsertInput, ScopedMemoryRecord } from './types';
+import type { MemoryHall, MemoryOrigin, MemoryRecord, MemoryScope, MemoryUpsertInput, ScopedMemoryRecord } from './types';
 
 /** 计算记忆内容哈希（sha256 前 16 位 hex） */
 export function computeMemoryId(input: {
@@ -96,6 +96,11 @@ export function readMemoryFile(file: string, scope: MemoryScope): ScopedMemoryRe
       verbatim: rec.verbatim ?? '',
       insight: rec.insight,
       source: rec.source ?? { at: new Date().toISOString() },
+      // 历史记忆没有来源字段：按自动提取归类（蒸馏是主要写入路径）
+      origin:
+        rec.origin === 'manual' || rec.origin === 'active' || rec.origin === 'auto'
+          ? rec.origin
+          : 'auto',
       tags: Array.isArray(rec.tags) ? rec.tags.filter((x): x is string => typeof x === 'string') : [],
       importance: typeof rec.importance === 'number' ? Math.min(1, Math.max(0, rec.importance)) : 0.5,
       pinned: rec.pinned === true,
@@ -202,6 +207,7 @@ export function buildMemoryRecord(input: MemoryUpsertInput, at = new Date().toIS
     verbatim: input.verbatim,
     insight: input.insight,
     source: { ...(input.source ?? {}), at },
+    origin: input.origin ?? 'auto',
     tags: input.tags ?? [],
     importance,
     pinned: input.pinned === true,

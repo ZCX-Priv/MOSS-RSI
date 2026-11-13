@@ -13,7 +13,7 @@ import type { HttpRequest, HttpResponse, RouteHandler } from '../../server/types
 import { ServiceNames } from '../../../core/types';
 import type { MemoryEngineServiceImpl } from '../service';
 import { MEMORY_HALLS } from '../types';
-import type { MemoryHall } from '../types';
+import type { MemoryHall, MemoryOrigin, MemoryScope } from '../types';
 
 type ServicesLike = { tryResolve: <T>(name: string) => T | null };
 
@@ -46,6 +46,14 @@ function parseHall(v: unknown): MemoryHall | undefined {
     : undefined;
 }
 
+function parseOrigin(v: unknown): MemoryOrigin | undefined {
+  return v === 'manual' || v === 'active' || v === 'auto' ? v : undefined;
+}
+
+function parseScope(v: unknown): MemoryScope | undefined {
+  return v === 'global' || v === 'project' ? v : undefined;
+}
+
 export function createMemoryTreeHandler(services: ServicesLike): RouteHandler {
   return async (req: HttpRequest): Promise<HttpResponse> => {
     const engine = resolveEngine(services);
@@ -63,31 +71,28 @@ export function createListMemoryHandler(services: ServicesLike): RouteHandler {
     const wing = url.searchParams.get('wing') ?? undefined;
     const room = url.searchParams.get('room') ?? undefined;
     const hall = parseHall(url.searchParams.get('hall'));
+    const origin = parseOrigin(url.searchParams.get('origin'));
+    const scope = parseScope(url.searchParams.get('scope'));
     const q = url.searchParams.get('q') ?? '';
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+    const metaFilter = {
+      ...(wing ? { wing } : {}),
+      ...(room ? { room } : {}),
+      ...(hall ? { hall } : {}),
+      ...(origin ? { origin } : {}),
+      ...(scope ? { scope } : {}),
+    };
 
     let items;
     if (q !== '') {
       // BM25 检索优先（带相关度分数供 UI 展示）；无结果回退关键词包含
-      const searched = engine.searchScored(cwd, q, {
-        ...(wing ? { wing } : {}),
-        ...(room ? { room } : {}),
-        ...(hall ? { hall } : {}),
-      }, limit);
+      const searched = engine.searchScored(cwd, q, metaFilter, limit);
       items = searched.length > 0
         ? searched.map((hit) => ({ ...hit, score: Math.round(hit.score * 1000) / 1000 }))
-        : engine.searchContains(cwd, q).slice(0, limit);
+        : engine.searchContains(cwd, q, metaFilter).slice(0, limit);
     } else {
       // 无查询：枚举全量记忆（全局 ∪ 项目），按元数据过滤后 updatedAt 降序
-      items = engine.listMemories(
-        cwd,
-        {
-          ...(wing ? { wing } : {}),
-          ...(room ? { room } : {}),
-          ...(hall ? { hall } : {}),
-        },
-        limit,
-      );
+      items = engine.listMemories(cwd, metaFilter, limit);
     }
     return { status: 200, body: { items, count: items.length } };
   };
@@ -117,6 +122,8 @@ export function createCreateMemoryHandler(services: ServicesLike): RouteHandler 
           : {}),
         ...(typeof body.importance === 'number' ? { importance: body.importance } : {}),
         ...(body.pinned === true ? { pinned: true } : {}),
+        // 设置页手动创建：来源固定为 manual
+        origin: 'manual',
       });
       return { status: 201, body: record };
     } catch (err) {

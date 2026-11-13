@@ -11,6 +11,7 @@ import { Glob } from 'bun';
 import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
 import type { FilesysService } from '../../contracts';
+import { SYSTEM_SCOPE, systemRoot } from '../../filesys/roots';
 import { stripBom } from '../../../utils/encoding';
 import {
   walkFiles,
@@ -185,7 +186,8 @@ export default {
       }
       searchPath = confined;
     } else {
-      searchPath = ctx.cwd || process.cwd();
+      // 未传 path：由 filesys 解析「.」；System 作用域会得到系统盘根（而不是字面量 __system__）
+      searchPath = filesys.resolve('.', ctx.cwd) ?? process.cwd();
     }
 
     let pathIsFile = false;
@@ -224,7 +226,7 @@ export default {
     /** 达到收集窗口后提前终止（truncated 保守标记用） */
     let stoppedEarly = false;
 
-    const displayBase = ctx.cwd || process.cwd();
+    const displayBase = !ctx.cwd || ctx.cwd === SYSTEM_SCOPE ? systemRoot() : ctx.cwd;
     const collectLimit = offset + maxResults;
 
     const processFile = async (rel: string, abs: string): Promise<void> => {

@@ -88,10 +88,15 @@ export class StaticAssets {
     const ext = extname(filePath).toLowerCase();
     const mime = MIME[ext] ?? 'application/octet-stream';
     // SW 注册脚本与 manifest 固定文件名（无 hash）：强制 no-cache 保证新版本及时生效；
-    // index.html 同理；其余（hashed 资源名）长缓存
+    // index.html 同理；语音采集 worklet 也是无 hash 的运行时脚本，必须 no-cache，
+    // 否则更新采集算法后浏览器会继续使用最长 24 小时的旧缓存。
     const fileName = filePath.split(/[\\/]/).pop() ?? '';
     const noCache =
-      ext === '.html' || fileName === 'sw.js' || fileName === 'registerSW.js' || fileName === 'manifest.webmanifest';
+      ext === '.html' ||
+      fileName === 'sw.js' ||
+      fileName === 'registerSW.js' ||
+      fileName === 'manifest.webmanifest' ||
+      fileName === 'voice-capture-worklet.js';
     const resp = {
       status: 200,
       headers: {

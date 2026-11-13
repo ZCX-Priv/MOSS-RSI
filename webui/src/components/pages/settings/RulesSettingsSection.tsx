@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react';
+import { Plus, RefreshCw, Pencil, Trash2, Loader2, Settings2, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,14 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   Dialog,
   DialogBody,
@@ -22,8 +30,10 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
 import { useConfig } from '@/hooks/useConfig';
 import { api } from '@/api/http';
+import { useStore, SYSTEM_WORKING_DIRECTORY } from '@/store';
 import type { RuleItem, RuleUpsertBody, RuleScope } from '@/types/api';
 
 /** 规则编辑表单状态 */
@@ -42,21 +52,28 @@ export function RulesSettingsSection() {
   const { appConfig, updateAppConfig } = useConfig();
   const context = appConfig?.context;
   const rulesConfig = context?.rules ?? { enabled: true, maxAlwaysTokens: 4000, maxInjectPerSession: 20 };
+  // 当前工作目录：项目规则必须按会话 cwd 读取/写入；系统作用域无项目根
+  const workingDirectory = useStore(s => s.workingDirectory);
+  const rulesCwd =
+    workingDirectory && workingDirectory !== SYSTEM_WORKING_DIRECTORY ? workingDirectory : undefined;
 
   const [loading, setLoading] = useState(true);
   const [projectRules, setProjectRules] = useState<RuleItem[]>([]);
   const [globalRules, setGlobalRules] = useState<RuleItem[]>([]);
+  const [scopeTab, setScopeTab] = useState<RuleScope>(() => (rulesCwd ? 'project' : 'global'));
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<RuleForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [clearScope, setClearScope] = useState<'all' | RuleScope | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await api.listRules();
+      const result = await api.listRules(rulesCwd);
       setProjectRules(result.project);
       setGlobalRules(result.global);
     } catch (err) {
@@ -64,7 +81,7 @@ export function RulesSettingsSection() {
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [t, rulesCwd]);
 
   useEffect(() => {
     void load();
@@ -79,7 +96,7 @@ export function RulesSettingsSection() {
 
   const openCreate = () => {
     setEditingId(null);
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, scope: scopeTab });
     setDialogOpen(true);
   };
 
@@ -111,10 +128,10 @@ export function RulesSettingsSection() {
         scope: form.scope,
       };
       if (editingId) {
-        await api.updateRule(editingId, body);
+        await api.updateRule(editingId, body, rulesCwd);
         toast.success(t('settings.rules.updated'));
       } else {
-        await api.createRule(body);
+        await api.createRule(body, rulesCwd);
         toast.success(t('settings.rules.created'));
       }
       setDialogOpen(false);
@@ -131,13 +148,30 @@ export function RulesSettingsSection() {
     if (!window.confirm(t('settings.rules.deleteConfirm', { name: rule.name }))) return;
     setDeleting(rule.id);
     try {
-      await api.deleteRule(rule.id);
+      await api.deleteRule(rule.id, rulesCwd);
       toast.success(t('settings.rules.deleted'));
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('settings.rules.deleteFailed'));
     } finally {
       setDeleting(null);
+    }
+  };
+
+  /** 批量清空（全局 / 项目 / 全部），带确认弹窗 */
+  const doClear = async () => {
+    if (!clearScope || clearing) return;
+    setClearing(true);
+    try {
+      const res = await api.clearRules(clearScope, rulesCwd);
+      toast.success(t('settings.rules.cleared', { count: res.removed }));
+      setClearScope(null);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('settings.rules.clearFailed'));
+      setClearScope(null);
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -150,7 +184,7 @@ export function RulesSettingsSection() {
         paths: rule.paths,
         scope: rule.scope,
         enabled,
-      });
+      }, rulesCwd);
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('settings.rules.saveFailed'));
@@ -273,31 +307,61 @@ export function RulesSettingsSection() {
             <Button variant="ghost" size="icon-sm" title={t('common.refresh')} onClick={() => void load()}>
               <RefreshCw className="size-3.5" />
             </Button>
-            <Button className="gap-1.5" onClick={openCreate}>
-              <Plus className="size-3.5" />
-              <span className="hidden sm:inline">{t('settings.rules.create')}</span>
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="gap-1.5">
+                  <Settings2 className="size-3.5" />
+                  {t('common.manage')}
+                  <ChevronDown className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8} className="min-w-44">
+                <DropdownMenuItem onSelect={openCreate}>
+                  <Plus className="size-3.5" />
+                  {t('settings.rules.create')}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={globalRules.length === 0 || clearing}
+                  onSelect={() => setClearScope('global')}
+                >
+                  {t('settings.rules.clearGlobal')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={!rulesCwd || projectRules.length === 0 || clearing}
+                  onSelect={() => setClearScope('project')}
+                >
+                  {t('settings.rules.clearProject')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={!rulesCwd || (globalRules.length + projectRules.length === 0) || clearing}
+                  onSelect={() => setClearScope('all')}
+                >
+                  {t('settings.rules.clearAll')}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
+
+        {/* 作用域胶囊导航：全局 / 项目 */}
+        <Tabs value={scopeTab} onValueChange={(v) => setScopeTab(v as RuleScope)}>
+          <TabsList aria-label={t('settings.rules.listTitle')}>
+            <TabsTrigger value="global">{t('settings.rules.tabGlobal')}</TabsTrigger>
+            <TabsTrigger value="project">{t('settings.rules.tabProject')}</TabsTrigger>
+          </TabsList>
+        </Tabs>
 
         {loading ? (
           <div className="flex items-center justify-center py-10 text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
           </div>
         ) : (
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-col rounded-lg border border-border">
-              <div className="border-b border-border bg-muted/40 px-4 py-2 text-xs font-medium text-muted-foreground">
-                {t('settings.rules.scopeProject')}
-              </div>
-              {renderRuleList(projectRules, 'project')}
-            </div>
-            <div className="flex flex-col rounded-lg border border-border">
-              <div className="border-b border-border bg-muted/40 px-4 py-2 text-xs font-medium text-muted-foreground">
-                {t('settings.rules.scopeGlobal')}
-              </div>
-              {renderRuleList(globalRules, 'global')}
-            </div>
+          <div className="flex flex-col rounded-lg border border-border">
+            {renderRuleList(scopeTab === 'project' ? projectRules : globalRules, scopeTab)}
           </div>
         )}
       </div>
@@ -387,6 +451,24 @@ export function RulesSettingsSection() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 清空规则确认（全局 / 项目 / 全部） */}
+      <ConfirmDialog
+        open={clearScope !== null}
+        title={t('settings.rules.clearTitle')}
+        description={
+          clearScope === 'global'
+            ? t('settings.rules.clearGlobalConfirm')
+            : clearScope === 'project'
+              ? t('settings.rules.clearProjectConfirm')
+              : t('settings.rules.clearAllConfirm')
+        }
+        destructive
+        loading={clearing}
+        confirmText={t('settings.rules.clearConfirmAction')}
+        onConfirm={() => void doClear()}
+        onOpenChange={(o) => !o && !clearing && setClearScope(null)}
+      />
     </div>
   );
 }

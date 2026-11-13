@@ -199,9 +199,9 @@ async function startDaemon(): Promise<number> {
     // 静默
   }
 
-  // 等待子进程写 PID 文件（最多 5 秒）；同样要求身份校验通过，避免把复用该号的
-  // 系统进程误认为刚拉起的守护进程。
-  const deadline = Date.now() + 5000;
+  // 等待子进程写 PID 文件（最多 15 秒；首次冷启动/deferred 模块预热可能超过 5 秒）；
+  // 同样要求身份校验通过，避免把复用该号的系统进程误认为刚拉起的守护进程。
+  const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     const info = readPidFile(env.pidFile);
     if (info && inspectPid(info).isMoss) {

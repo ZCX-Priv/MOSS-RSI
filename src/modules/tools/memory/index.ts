@@ -63,6 +63,8 @@ function runSave(p: MemoryParams, ctx: ToolContext): ToolResult {
       ...(Array.isArray(p.tags) ? { tags: p.tags } : {}),
       ...(typeof p.importance === 'number' ? { importance: p.importance } : {}),
       source: { sessionId: ctx.sessionId },
+      // Agent 主动记录
+      origin: 'active',
     });
     return {
       content: [

@@ -37,6 +37,7 @@ export { MemoryEngineServiceImpl, MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } f
 export type { MemoryEngineServiceDeps } from './service';
 export type {
   MemoryHall,
+  MemoryOrigin,
   MemoryRecord,
   MemoryScope,
   MemoryUpsertInput,

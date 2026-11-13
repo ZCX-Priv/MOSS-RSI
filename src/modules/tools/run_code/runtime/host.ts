@@ -6,6 +6,7 @@
 
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { SYSTEM_SCOPE, systemRoot } from '../../../filesys/roots';
 import type { Logger } from '../../../../core/types';
 import type { RunCodeProgressEvent, ToolResult } from '../../types';
 import {
@@ -777,11 +778,13 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 }
 
 function resolveCwd(cwd: string): string {
+  // 本机（System 作用域）统一落到系统盘根，与 terminal / filesys 语义一致
+  if (!cwd || cwd === SYSTEM_SCOPE) return systemRoot();
   try {
     const abs = isAbsolute(cwd) ? cwd : resolvePath(cwd);
     return abs;
   } catch {
-    return process.cwd();
+    return systemRoot();
   }
 }
 

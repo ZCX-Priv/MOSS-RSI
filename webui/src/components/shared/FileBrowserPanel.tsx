@@ -81,10 +81,22 @@ function triggerDownload(buffer: ArrayBuffer, fileName: string, mime: string): v
 
 /** 根 → 目标目录的相对路径（统一 / 显示；目标即根时返回空串） */
 function relPath(root: string, full: string): string {
-  const r = root.replace(/[\\/]+$/, '').replace(/\\/g, '/');
   const f = full.replace(/\\/g, '/');
-  if (!r || !f || f === r) return '';
+  const r = root.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!f || f === '/') return '';
+  // 根为 POSIX '/'（归一化后为空串）：目标相对根即去掉开头分隔符
+  if (!r) return f.replace(/^\/+/, '');
+  const fr = f.replace(/\/+$/, '');
+  if (fr === r) return '';
   return f.startsWith(`${r}/`) ? f.slice(r.length + 1) : '';
+}
+
+/** 目标是否位于根之内（含根自身；仅用于地址栏展示，不替代后端边界校验） */
+function isUnderRoot(root: string, full: string): boolean {
+  const r = root.replace(/\\/g, '/').replace(/\/+$/, '');
+  const f = full.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!r) return f.startsWith('/');
+  return f === r || f.startsWith(`${r}/`);
 }
 
 /** 根显示形式：末尾用平台分隔符闭合（根自身即完整闭合路径，避免空尾） */
@@ -100,11 +112,14 @@ function toSuffixDisplay(root: string, full: string, sep: Sep = '\\'): string {
   return `${rel.replace(/\//g, sep)}${sep}`;
 }
 
-/** 拼接根 + 后缀（去首尾分隔符后按平台分隔符拼接；空后缀 = 根；盘符根回补分隔符） */
+/** 拼接根 + 后缀（去首尾分隔符后按平台分隔符拼接；空后缀 = 根；盘符/POSIX 根回补分隔符） */
 function joinPath(root: string, suffix: string, sep: Sep = '\\'): string {
   const base = root.replace(/[\\/]+$/, '');
   const tail = suffix.replace(/^[\\/]+/, '').replace(/[\\/]+$/, '');
-  if (!tail) return base.endsWith(':') ? `${base}${sep}` : base;
+  if (!tail) {
+    if (!base) return sep; // 根为 '/'：归一化后为空串，仍需返回根
+    return base.endsWith(':') ? `${base}${sep}` : base;
+  }
   return `${base}${sep}${tail}`;
 }
 
@@ -140,6 +155,11 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
   const [error, setError] = useState<string | null>(null);
   /** 地址栏输入：普通模式 = 相对根的子路径后缀；本机模式 = 可编辑的绝对路径 */
   const [subPath, setSubPath] = useState('');
+  /** 地址栏展示根与分隔符：独立于 listing，保证首次加载失败时仍能显示错误路径 */
+  const [navRoot, setNavRoot] = useState('');
+  const [navSep, setNavSep] = useState<Sep>('\\');
+  /** 地址栏展示根：优先 navRoot（失败路径也能显示），回退成功后 listing 的根 */
+  const addressRoot = navRoot || listing?.root || '';
   /** 当前视图（本机模式可在驱动器/目录间切换；普通模式恒为 dir） */
   const [view, setView] = useState<BrowserView>('dir');
   /** 驱动器列表（本机模式） */
@@ -179,6 +199,8 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
         listingRef.current = resp;
         setListing(resp);
         setView('dir');
+        setNavRoot(resp.root);
+        setNavSep(resp.sep);
         setSubPath(systemMode ? resp.path : toSuffixDisplay(resp.root, resp.path, resp.sep));
         remember({ root: resp.root, path: resp.path, view: 'dir' });
       } catch (err) {
@@ -186,14 +208,23 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
         // 失败也要把地址栏推进到「正在尝试进入」的目标路径：
         // 否则地址栏停留在上一级，与实际访问的目录不一致，用户无从得知报错的是哪个目录。
         // 不写位置记忆（remember），重新打开标签仍回到上次有效位置。
-        if (target) {
+        // target 为空（首次加载/以工作目录为根）时，用工作目录作为尝试路径。
+        const attempted = target ?? (systemMode ? null : workingDirectory || null);
+        if (attempted) {
           if (systemMode) {
-            setSubPath(target);
+            setSubPath(attempted);
           } else {
-            const baseRoot = root ?? listingRef.current?.root ?? '';
-            if (baseRoot) {
-              const sep: Sep = listingRef.current?.sep ?? (target.includes('\\') ? '\\' : '/');
-              setSubPath(toSuffixDisplay(baseRoot, target, sep));
+            const baseRoot = root ?? listingRef.current?.root ?? (workingDirectory || '');
+            const sep: Sep = listingRef.current?.sep ?? (attempted.includes('\\') ? '\\' : '/');
+            if (baseRoot && isUnderRoot(baseRoot, attempted)) {
+              setNavRoot(baseRoot);
+              setNavSep(sep);
+              setSubPath(toSuffixDisplay(baseRoot, attempted, sep));
+            } else {
+              // 目标越界或尚无有效根：把错误路径本身作为展示根，确保路径栏完整可见
+              setNavRoot(attempted);
+              setNavSep(sep);
+              setSubPath('');
             }
           }
         }
@@ -394,13 +425,13 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
       void load(typed, null);
       return;
     }
-    if (!listing) return;
-    void load(joinPath(listing.root, subPath.trim(), listing.sep), listing.root);
-  }, [systemMode, listing, subPath, load]);
+    if (!addressRoot) return;
+    void load(joinPath(addressRoot, subPath.trim(), navSep), addressRoot);
+  }, [systemMode, addressRoot, navSep, subPath, load]);
 
   // ── 上级 / 根状态 ──
   /** 普通模式：已在导航根（上级按钮禁用；后端在根时 parent 为 null，双保险） */
-  const atRoot = !!listing && relPath(listing.root, listing.path) === '';
+  const atRoot = !!listing && relPath(addressRoot || listing.root, listing.path) === '';
   /** 本机模式：当前目录已是某盘/卷根（再上级应回到「本机」视图） */
   const atDriveRoot =
     systemMode &&
@@ -435,11 +466,12 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
   // 地址栏内容 ≠ 当前所在目录 → 视为有未提交的新地址（右侧按钮变为「前进」）
   const typedTarget = systemMode
     ? subPath.trim()
-    : listing
-      ? joinPath(listing.root, subPath.trim(), listing.sep)
+    : addressRoot
+      ? joinPath(addressRoot, subPath.trim(), navSep)
       : '';
+  // listing 为空（首次加载失败）也允许按地址栏路径重试
   const jumpPending =
-    view === 'dir' && !!listing && !!typedTarget && !samePathLoose(typedTarget, listing.path);
+    view === 'dir' && !!typedTarget && (!listing || !samePathLoose(typedTarget, listing.path));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -464,9 +496,9 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
           ) : systemMode ? null : (
             <span
               className="max-w-[50%] shrink-0 truncate font-mono text-xs text-muted-foreground"
-              title={listing ? rootDisplay(listing.root, listing.sep) : ''}
+              title={addressRoot ? rootDisplay(addressRoot, navSep) : ''}
             >
-              {listing ? rootDisplay(listing.root, listing.sep) : ''}
+              {addressRoot ? rootDisplay(addressRoot, navSep) : ''}
             </span>
           )}
           <input
@@ -511,6 +543,9 @@ export function FileBrowserPanel({ sessionId }: FileBrowserPanelProps) {
               submitSubPath();
             } else if (listing) {
               void load(listing.path, systemMode ? null : listing.root);
+            } else if (addressRoot) {
+              // 首次加载失败：按地址栏展示根重试
+              void load(addressRoot, systemMode ? null : addressRoot);
             }
           }}
         >

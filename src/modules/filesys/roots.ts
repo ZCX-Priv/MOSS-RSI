@@ -78,8 +78,9 @@ export function isMossAccessAllowed(absPath: string): boolean {
  * 任何路径若命中 .moss 屏蔽规则均返回 null（优先于一切放行分支）。
  */
 export function resolveInRoots(rawPath: string, cwd: string, extraRoots: readonly string[]): string | null {
-  const systemScope = cwd === SYSTEM_SCOPE;
-  const base = systemScope ? systemRoot() : cwd || process.cwd();
+  // 空 cwd 与 __system__ 一致：均表示「本机（全盘访问）」，避免旧任务/空白会话被 process.cwd 意外限制
+  const systemScope = !cwd || cwd === SYSTEM_SCOPE;
+  const base = systemScope ? systemRoot() : cwd;
   const abs = isAbsolute(rawPath) ? normalize(rawPath) : normalize(resolve(base, rawPath));
   if (!isMossAccessAllowed(abs)) return null;
   if (systemScope) return abs;

@@ -167,6 +167,7 @@ import {
   createGetRuleHandler,
   createUpdateRuleHandler,
   createDeleteRuleHandler,
+  createClearRulesHandler,
 } from './routes/rules';
 import {
   createGetProjectRulesHandler,
@@ -196,7 +197,7 @@ import {
   createVoiceModelsHandler,
   createVoiceEnableHandler,
   createVoiceSetDefaultModelHandler,
-  createVoiceSetProviderHandler,
+  createVoiceSetLanguageHandler,
   createVoiceInstallHandler,
   createVoiceUninstallHandler,
 } from './routes/voice';
@@ -559,6 +560,7 @@ class ServerModule implements Module {
     // rules（规则引擎：双作用域 CRUD）
     this.router.addRoute({ method: 'GET', pattern: '/api/rules', handler: createListRulesHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/rules', handler: createCreateRuleHandler(services), auth: true });
+    this.router.addRoute({ method: 'DELETE', pattern: '/api/rules', handler: createClearRulesHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/rules/:id', handler: createGetRuleHandler(services), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/rules/:id', handler: createUpdateRuleHandler(services), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/rules/:id', handler: createDeleteRuleHandler(services), auth: true });
@@ -587,7 +589,7 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/voice/models', handler: createVoiceModelsHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/voice/enable', handler: createVoiceEnableHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/voice/default-model', handler: createVoiceSetDefaultModelHandler(services), auth: true });
-    this.router.addRoute({ method: 'PUT', pattern: '/api/voice/provider', handler: createVoiceSetProviderHandler(services, config), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/voice/language', handler: createVoiceSetLanguageHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/voice/models/:id/install', handler: createVoiceInstallHandler(services, this.ctx.logger), auth: true });
     this.router.addRoute({ method: 'DELETE', pattern: '/api/voice/models/:id', handler: createVoiceUninstallHandler(services), auth: true });
   }
@@ -610,7 +612,10 @@ class ServerModule implements Module {
       bound = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!/EADDRINUSE|address already in use/i.test(msg)) {
+      // Bun 在 Windows 的端口占用错误文本是「Failed to start server. Is port X in use?」，
+      // 不包含 EADDRINUSE；必须统一识别，否则端口保卫流程不会触发（不会回收残留/识别健康实例），
+      // 模块只会记一条「server 初始化失败」然后空跑。
+      if (!isPortConflictMessage(msg)) {
         this.ctx.logger.error(
           t('server.startFailed', { host, port, msg }),
           { error: msg, host, port },
@@ -640,6 +645,8 @@ class ServerModule implements Module {
             configuredPort: cfg.server.port,
           });
         }
+        // 端口刚释放/回收后可能有短暂的套接字状态残留，重试前让出一个事件循环周期。
+        await new Promise(resolve => setTimeout(resolve, 200));
         this.server = this.createServerInstance(port, host);
       } catch (err) {
         if (err instanceof LiveMossPortError) {
@@ -690,7 +697,7 @@ class ServerModule implements Module {
         } catch (err) {
           lastErr = err;
           const msg = err instanceof Error ? err.message : String(err);
-          if (!/EADDRINUSE|address already in use/i.test(msg)) break;
+          if (!isPortConflictMessage(msg)) break;
           // 端口竞态：短暂等待后重试原端口
           await new Promise(resolve => setTimeout(resolve, 200));
         }
@@ -860,6 +867,15 @@ function buildGuardContext(req: Request, srv: BunServer): GuardRequestContext {
     clientIp = '';
   }
   return { method: req.method, url: req.url, headers, clientIp };
+}
+
+/**
+ * 是否为「端口被占用」类绑定失败。
+ * Bun 在 Windows 抛出的文本为「Failed to start server. Is port 7766 in use?」，
+ * 必须与 POSIX 的 EADDRINUSE / address already in use 一并识别，否则端口保卫流程不会触发。
+ */
+function isPortConflictMessage(msg: string): boolean {
+  return /EADDRINUSE|address already in use|Failed to start server|Is port .* in use/i.test(msg);
 }
 
 async function isPortFree(host: string, port: number): Promise<boolean> {

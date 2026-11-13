@@ -173,8 +173,8 @@ export function evaluate(req: SafetyRequest, env: PolicyEnv): SafetyDecision {
   const projectRules = env.projectRules ?? EMPTY_RULES;
   const globalRules = env.globalRules ?? EMPTY_RULES;
   const isTerminal = req.toolName === 'terminal';
-  // System 作用域哨兵下规则路径匹配以系统盘根为基准（与 filesys 相对路径解析一致）
-  const ruleCwd = req.cwd === SYSTEM_SCOPE ? env.systemRoot : req.cwd;
+  // System 作用域（含空 cwd）下规则路径匹配以系统盘根为基准（与 filesys 相对路径解析一致）
+  const ruleCwd = !req.cwd || req.cwd === SYSTEM_SCOPE ? env.systemRoot : req.cwd;
 
   // 2. deny 规则（会话 > 项目 > 全局；所有模式生效，含 skip）
   for (const rule of [...sessionRules.deny, ...projectRules.deny, ...globalRules.deny]) {

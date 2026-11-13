@@ -304,11 +304,9 @@ export interface AppConfig {
   voice?: {
     /** 总开关（默认关闭；关闭时输入框麦克风按钮隐藏） */
     enabled: boolean;
-    /** 语音服务商 id；空串 = 内置本地引擎（sherpa-onnx 承载三类模型） */
-    providerId: string;
     /** 本地模型 id；空串 = 使用推荐默认模型 */
     localModel: string;
-    /** 识别语言提示（'auto' | 'zh' | 'en' 等） */
+    /** 识别语言提示（'auto' | 'zh' | 'en' 等；仅 SenseVoice / Whisper 生效） */
     language: string;
   };
 }
@@ -325,18 +323,7 @@ export interface ProviderConfig {
   id: string;
   /** 显示名，如 "OpenAI" */
   name: string;
-  /**
-   * 服务商类型：model=模型服务商（默认，缺省等同）、voice=语音服务商。
-   */
-  kind?: 'model' | 'voice';
-  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'voice';
-  /**
-   * 语音引擎类型（kind='voice' 时必填）：openai-transcriptions = OpenAI 兼容
-   * /audio/transcriptions 整段转写接口。本地引擎不占用服务商条目（providerId 空串即本地）。
-   */
-  voiceEngine?: 'openai-transcriptions';
-  /** 语音模型名（kind='voice' 时使用，如 'whisper-1'；本地引擎忽略此字段） */
-  voiceModel?: string;
+  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini';
   endpoint: string;
   apiKey: string;
   /** 自定义余额查询地址（OpenAI 兼容 subscription 接口完整 URL；空 = 不提供余额查询） */

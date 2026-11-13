@@ -776,6 +776,9 @@ export interface HookHistoryEntry {
 
 export type MemoryHall = 'decision' | 'event' | 'discovery' | 'preference' | 'suggestion';
 
+/** 记忆来源分类：手动创建 / 主动记录 / 自动提取 */
+export type MemoryOrigin = 'manual' | 'active' | 'auto';
+
 /** 单条记忆 */
 export interface MemoryItem {
   id: string;
@@ -785,6 +788,8 @@ export interface MemoryItem {
   verbatim: string;
   insight: string;
   source: { sessionId?: string; taskId?: string; at: string };
+  /** 来源分类（历史数据后端兜底为 auto） */
+  origin: MemoryOrigin;
   tags: string[];
   importance: number;
   pinned: boolean;
@@ -1306,13 +1311,7 @@ export interface ProviderItem {
   id: string;
   /** 显示名，如 "OpenAI" */
   name: string;
-  /** 服务商类型：model（缺省）= 模型服务商；voice = 语音服务商 */
-  kind?: 'model' | 'voice';
-  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini' | 'voice';
-  /** 语音引擎类型（kind='voice' 时存在）：openai-transcriptions（OpenAI 兼容整段转写） */
-  voiceEngine?: 'openai-transcriptions';
-  /** 语音模型名（kind='voice' 时使用，如 whisper-1） */
-  voiceModel?: string;
+  format: 'openai-chat' | 'openai-responses' | 'anthropic' | 'gemini';
   endpoint: string;
   apiKey: string;
   /** 自定义余额查询地址（OpenAI 兼容 subscription 接口完整 URL；空 = 不提供余额查询） */
@@ -1327,7 +1326,7 @@ export interface ProviderItem {
 }
 
 /** 本地语音引擎类别（均由 sherpa-onnx 承载不同模型架构） */
-export type VoiceLocalEngine = 'zipformer' | 'sensevoice' | 'whisper';
+export type VoiceLocalEngine = 'zipformer' | 'paraformer' | 'sensevoice' | 'dolphin' | 'whisper';
 
 /** 语音能力总览（GET /api/voice/status） */
 export interface VoiceStatus {
@@ -1348,8 +1347,8 @@ export interface VoiceStatus {
   defaultModel: string;
   /** 已安装模型 id 列表 */
   installed: string[];
-  /** 当前语音服务商 id（空串 = 内置本地引擎） */
-  providerId: string;
+  /** 识别语言（'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue'） */
+  language: string;
 }
 
 /** 语音模型（内置目录项 + 本地安装状态；GET /api/voice/models） */
@@ -1362,7 +1361,7 @@ export interface VoiceModelStatus {
   sizeBytes: number;
   languages: string[];
   recommended: boolean;
-  state: 'not-installed' | 'downloading' | 'installed' | 'error';
+  state: 'not-installed' | 'downloading' | 'deploying' | 'installed' | 'error';
   progress?: number;
   installedBytes?: number;
   error?: string;

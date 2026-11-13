@@ -178,6 +178,8 @@ export interface BrowserPageInfo {
   title: string;
   /** 页面仍在加载（navigate 超时） */
   loading?: boolean;
+  /** 本次动作期间出现并已自动确认的 JavaScript 弹窗 */
+  dialogs?: string[];
   /** click/press_key 打开了新标签页并已接管 */
   openedTab?: { tab: string; url: string; title: string };
 }
@@ -212,6 +214,8 @@ export interface BrowserFrameInfo {
   url: string;
   title: string;
   active: boolean;
+  /** 该 frame 已获得键盘焦点（真实 CDP 输入会发送到这里） */
+  inputFocused?: boolean;
   rect?: BrowserRect;
 }
 
@@ -463,10 +467,15 @@ export interface BrowserService {
   listNativeTabs(target?: BrowserTarget): Promise<NativeTabInfo[]>;
   focusTab(tab?: string): Promise<BrowserTabInfo>;
   /**
-   * 自动聚焦目标标签页/窗口（含新标签页/弹窗）。
-   * 目标已在前台时直接 no-op，避免每次操作都前置导致闪屏；失败时回退到 opener/当前标签。
+   * 自动聚焦目标标签页（含新标签页/弹窗）。
+   * 例行操作只切标签，不抬操作系统窗口（focusWindow 默认 false），避免整窗反复闪烁；
+   * 只有显式 focus 才传 focusWindow: true 把窗口置前。
+   * 失败时回退到 opener/当前标签。
    */
-  ensureFocused(tab?: string, options?: { force?: boolean }): Promise<BrowserFocusResult>;
+  ensureFocused(
+    tab?: string,
+    options?: { force?: boolean; focusWindow?: boolean },
+  ): Promise<BrowserFocusResult>;
   closeTab(tab?: string): Promise<void>;
 
   navigate(tab: string | undefined, options: BrowserNavigateOptions): Promise<BrowserPageInfo>;

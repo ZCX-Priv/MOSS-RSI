@@ -25,6 +25,8 @@ const WEBUI_DIST = resolve(DIST, 'webui');
 // 入口产物：outdir + splitting 模式下 Bun 输出 dist/main.js（旧版单文件为 dist/server.js，
 // bin/moss.js 会做兼容读取）
 const BACKEND_OUT = resolve(DIST, 'main.js');
+// 语音识别 Worker（独立入口：模型加载/解码在其线程内，避免阻塞主线程）
+const VOICE_WORKER_OUT = resolve(DIST, 'voice-engine-worker.js');
 
 const IS_WIN = process.platform === 'win32';
 const STARTED_AT = Date.now();
@@ -196,6 +198,45 @@ async function buildBackend() {
   if (!existsSync(BACKEND_OUT)) {
     throw new BuildFailure(`Backend build output not found: ${BACKEND_OUT}`);
   }
+
+  await buildVoiceWorker(bunPath);
+}
+
+/** 构建语音识别 Worker（独立单文件入口） */
+async function buildVoiceWorker(bunPath) {
+  const entry = resolve(ROOT, 'src', 'modules', 'voice', 'engine-worker.ts');
+  if (!existsSync(entry)) {
+    throw new BuildFailure(`Voice worker entry not found: ${entry}`);
+  }
+  const args = [
+    'build',
+    entry,
+    '--outfile',
+    VOICE_WORKER_OUT,
+    '--target',
+    'bun',
+    '--format',
+    'esm',
+    '--minify-syntax',
+    '--minify-whitespace',
+    '--minify-identifiers',
+    '--external',
+    'sherpa-onnx-node',
+  ];
+  if (bunPath) {
+    await runTask('voice worker (bun)', bunPath, args);
+  } else if (IS_WIN) {
+    const result = await spawnShellAsync(`bun ${args.map(shellQuote).join(' ')}`);
+    if (result.code !== 0) {
+      throw new BuildFailure('voice worker (bun) failed: bun not found (install Bun >= 1.1.0)');
+    }
+    log('voice worker (bun) done via shell fallback');
+  } else {
+    await runTask('voice worker (bun)', 'bun', args);
+  }
+  if (!existsSync(VOICE_WORKER_OUT)) {
+    throw new BuildFailure(`Voice worker output not found: ${VOICE_WORKER_OUT}`);
+  }
 }
 
 // ============================================================================
@@ -333,7 +374,7 @@ async function buildFrontend() {
 // ============================================================================
 function verifyArtifacts() {
   log('Verifying artifacts...');
-  const required = [BACKEND_OUT, WEBUI_DIST, resolve(WEBUI_DIST, 'index.html')];
+  const required = [BACKEND_OUT, VOICE_WORKER_OUT, WEBUI_DIST, resolve(WEBUI_DIST, 'index.html')];
   for (const p of required) {
     if (!existsSync(p)) {
       throw new BuildFailure(`Missing artifact: ${p}`);

@@ -84,10 +84,7 @@ export function useProviders() {
   const createProvider = useCallback(
     async (data: {
       name: string;
-      kind?: 'model' | 'voice';
       format?: ProviderItem['format'];
-      voiceEngine?: 'openai-transcriptions';
-      voiceModel?: string;
       endpoint: string;
       apiKey: string;
       balanceUrl?: string;

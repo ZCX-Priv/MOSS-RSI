@@ -2,10 +2,10 @@
 // 记忆引擎设置分区（嵌入 /settings/context/memory Tab）：
 // 配置区（启停/蒸馏模型/召回参数/L1）+ 宫殿浏览（wing/room 过滤）+ 记忆卡片列表 + 新建/编辑/删除/置顶。
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, RefreshCw, Pencil, Trash2, Loader2, Pin, PinOff, Search, ChevronDown, ChevronRight, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,10 +13,12 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
@@ -33,7 +35,7 @@ import {
 import { useConfig } from '@/hooks/useConfig';
 import { api } from '@/api/http';
 import { useStore } from '@/store';
-import type { MemoryHall, MemoryItem, MemoryPalaceTree, MemoryUpsertBody } from '@/types/api';
+import type { MemoryHall, MemoryItem, MemoryOrigin, MemoryPalaceTree, MemoryUpsertBody } from '@/types/api';
 
 const MEMORY_HALLS: MemoryHall[] = ['decision', 'event', 'discovery', 'preference', 'suggestion'];
 
@@ -43,6 +45,12 @@ const HALL_LABEL_KEYS: Record<MemoryHall, string> = {
   discovery: 'settings.memory.hallDiscovery',
   preference: 'settings.memory.hallPreference',
   suggestion: 'settings.memory.hallSuggestion',
+};
+
+const ORIGIN_LABEL_KEYS: Record<MemoryOrigin, string> = {
+  manual: 'settings.memory.originManual',
+  active: 'settings.memory.originActive',
+  auto: 'settings.memory.originAuto',
 };
 
 interface MemoryForm {
@@ -96,6 +104,8 @@ export function MemorySettingsSection() {
   const [items, setItems] = useState<MemoryItem[]>([]);
 
   const [query, setQuery] = useState('');
+  const [scopeFilter, setScopeFilter] = useState<'all' | 'global' | 'project'>('all');
+  const [originFilter, setOriginFilter] = useState<'all' | MemoryOrigin>('all');
   const [wingFilter, setWingFilter] = useState<string>('all');
   const [roomFilter, setRoomFilter] = useState<string>('all');
 
@@ -107,28 +117,35 @@ export function MemorySettingsSection() {
   const [deleteTarget, setDeleteTarget] = useState<MemoryItem | null>(null);
   const [clearScope, setClearScope] = useState<'all' | 'global' | 'project' | null>(null);
   const [clearing, setClearing] = useState(false);
+  /** 请求序号：过滤条件快速切换时只接受最新一次请求的结果，避免旧响应覆盖新列表 */
+  const loadSeqRef = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const [treeResult, listResult] = await Promise.all([
         api.getMemoryTree(cwd),
         api.listMemory({
           cwd,
+          ...(scopeFilter !== 'all' ? { scope: scopeFilter } : {}),
+          ...(originFilter !== 'all' ? { origin: originFilter } : {}),
           ...(wingFilter !== 'all' ? { wing: wingFilter } : {}),
           ...(roomFilter !== 'all' ? { room: roomFilter } : {}),
           ...(query.trim() ? { q: query.trim() } : {}),
           limit: 200,
         }),
       ]);
+      if (seq !== loadSeqRef.current) return;
       setTree(treeResult);
       setItems(listResult.items);
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       toast.error(err instanceof Error ? err.message : t('settings.memory.loadFailed'));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
-  }, [wingFilter, roomFilter, query, t, cwd]);
+  }, [scopeFilter, originFilter, wingFilter, roomFilter, query, t, cwd]);
 
   useEffect(() => {
     void load();
@@ -241,11 +258,12 @@ export function MemorySettingsSection() {
     }
   };
 
-  const rooms = tree?.wings.find(w => w.wing === wingFilter)?.rooms ?? [];
-  const allRooms = [...new Set((tree?.wings ?? []).flatMap(w => w.rooms.map(r => r.room)))].sort();
-  const wings = tree?.wings ?? [];
-  const globalCount = wings.filter(w => w.scope === 'global').reduce((s, w) => s + w.total, 0);
-  const projectCount = wings.filter(w => w.scope === 'project').reduce((s, w) => s + w.total, 0);
+  const allWings = tree?.wings ?? [];
+  const wings = allWings.filter(w => scopeFilter === 'all' || w.scope === scopeFilter);
+  const rooms = wings.find(w => w.wing === wingFilter)?.rooms ?? [];
+  const allRooms = [...new Set(wings.flatMap(w => w.rooms.map(r => r.room)))].sort();
+  const globalCount = allWings.filter(w => w.scope === 'global').reduce((s, w) => s + w.total, 0);
+  const projectCount = allWings.filter(w => w.scope === 'project').reduce((s, w) => s + w.total, 0);
   const hasAnyMemory = globalCount + projectCount > 0;
 
   return (
@@ -509,57 +527,72 @@ export function MemorySettingsSection() {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm font-medium text-foreground">{t('settings.memory.listTitle')}</div>
           <div className="flex items-center gap-1.5">
-            <Button variant="ghost" size="icon-sm" title={t('common.refresh')} onClick={() => void load()}>
-              <RefreshCw className="size-3.5" />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title={t('common.refresh')}
+              disabled={loading}
+              onClick={() => void load()}
+            >
+              {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             </Button>
-            <div className="flex items-center">
-              <Button
-                variant="outline"
-                className="gap-1.5 rounded-r-none"
-                disabled={!hasAnyMemory || clearing}
-                onClick={() => setClearScope('all')}
-              >
-                <Trash2 className="size-3.5" />
-                <span className="hidden sm:inline">{t('settings.memory.clear')}</span>
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    className="rounded-l-none border-l-0"
-                    title={t('settings.memory.clear')}
-                    disabled={!hasAnyMemory || clearing}
-                  >
-                    <ChevronDown className="size-3.5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8}>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    disabled={globalCount === 0}
-                    onSelect={() => setClearScope('global')}
-                  >
-                    {t('settings.memory.clearGlobal')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    disabled={projectCount === 0}
-                    onSelect={() => setClearScope('project')}
-                  >
-                    {t('settings.memory.clearProject')}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-            <Button className="gap-1.5" onClick={openCreate}>
-              <Plus className="size-3.5" />
-              <span className="hidden sm:inline">{t('settings.memory.create')}</span>
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="gap-1.5">
+                  <Settings2 className="size-3.5" />
+                  {t('common.manage')}
+                  <ChevronDown className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8} className="min-w-40">
+                <DropdownMenuItem onSelect={openCreate}>
+                  <Plus className="size-3.5" />
+                  {t('settings.memory.create')}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={globalCount === 0 || clearing}
+                  onSelect={() => setClearScope('global')}
+                >
+                  {t('settings.memory.clearGlobal')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={projectCount === 0 || clearing}
+                  onSelect={() => setClearScope('project')}
+                >
+                  {t('settings.memory.clearProject')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={!hasAnyMemory || clearing}
+                  onSelect={() => setClearScope('all')}
+                >
+                  {t('settings.memory.clearAll')}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
-        {/* 过滤器：搜索 + wing + room */}
+        {/* 作用域胶囊导航：全部 / 全局 / 项目 */}
+        <Tabs
+          value={scopeFilter}
+          onValueChange={(v) => {
+            setScopeFilter(v as 'all' | 'global' | 'project');
+            setWingFilter('all');
+            setRoomFilter('all');
+          }}
+        >
+          <TabsList aria-label={t('settings.memory.listTitle')}>
+            <TabsTrigger value="all">{t('settings.memory.scopeAll')}</TabsTrigger>
+            <TabsTrigger value="global">{t('settings.memory.scopeGlobal')}</TabsTrigger>
+            <TabsTrigger value="project">{t('settings.memory.scopeProject')}</TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        {/* 过滤器：搜索 + 分类 + wing + room */}
         <div className="flex flex-col gap-2 sm:flex-row">
           <div className="relative flex-1">
             <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -571,13 +604,24 @@ export function MemorySettingsSection() {
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
+          <Select value={originFilter} onValueChange={(v) => setOriginFilter(v as 'all' | MemoryOrigin)}>
+            <SelectTrigger className="w-full sm:w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{t('settings.memory.originAll')}</SelectItem>
+              <SelectItem value="manual">{t('settings.memory.originManual')}</SelectItem>
+              <SelectItem value="active">{t('settings.memory.originActive')}</SelectItem>
+              <SelectItem value="auto">{t('settings.memory.originAuto')}</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={wingFilter} onValueChange={(v) => { setWingFilter(v); setRoomFilter('all'); }}>
             <SelectTrigger className="w-full sm:w-44">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">{t('settings.memory.allWings')}</SelectItem>
-              {(tree?.wings ?? []).map(w => (
+              {wings.map(w => (
                 <SelectItem key={w.wing} value={w.wing}>
                   {w.wing}（{w.total}）
                 </SelectItem>
@@ -599,7 +643,8 @@ export function MemorySettingsSection() {
           </Select>
         </div>
 
-        {loading ? (
+        {/* 重新加载时保留旧列表（避免整块闪屏）；仅首次加载显示全屏 spinner */}
+        {loading && items.length === 0 ? (
           <div className="flex items-center justify-center py-10 text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
           </div>
@@ -608,7 +653,7 @@ export function MemorySettingsSection() {
             {t('settings.memory.empty')}
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className={loading ? 'flex flex-col gap-2 opacity-60 transition-opacity' : 'flex flex-col gap-2'}>
             {items.map(m => (
               <div key={m.id} className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
                 <div className="flex items-start gap-2">
@@ -619,6 +664,9 @@ export function MemorySettingsSection() {
                       </Badge>
                       <Badge variant="outline" className="text-[10px]">
                         {t(HALL_LABEL_KEYS[m.hall])}
+                      </Badge>
+                      <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                        {t(ORIGIN_LABEL_KEYS[m.origin])}
                       </Badge>
                       <Badge variant="outline" className="text-[10px] tabular-nums">
                         ★{m.importance.toFixed(2)}

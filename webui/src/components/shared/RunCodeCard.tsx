@@ -141,7 +141,7 @@ export const RunCodeCard = memo(function RunCodeCard({
             status={status}
             isError={isError}
             durationMs={meta?.durationMs}
-            liveElapsedMs={liveElapsedMs}
+            startedAtMs={running ? startedAtMs : undefined}
             truncated={meta?.truncated === true}
             hasUi={hasUi}
           />
@@ -327,15 +327,15 @@ function RunStatusText({
   status,
   isError,
   durationMs,
-  liveElapsedMs,
+  startedAtMs,
   truncated,
   hasUi,
 }: {
   status: NonNullable<ToolCall['status']>;
   isError: boolean;
   durationMs?: number;
-  /** 执行中实时已用时（ms；仅 running 时存在） */
-  liveElapsedMs?: number;
+  /** 执行中实时计时的起点（epoch ms）；由 LiveElapsed 自己按 100ms 刷新 */
+  startedAtMs?: number;
   truncated: boolean;
   hasUi: boolean;
 }) {
@@ -353,10 +353,10 @@ function RunStatusText({
       <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         {t('task.runCode.running')}
-        {liveElapsedMs !== undefined && (
+        {startedAtMs !== undefined && (
           <>
             <span>·</span>
-            <span className="tabular-nums">{formatDuration(liveElapsedMs)}</span>
+            <LiveElapsed startedAtMs={startedAtMs} />
           </>
         )}
       </span>
@@ -391,6 +391,17 @@ function RunStatusText({
       )}
     </span>
   );
+}
+
+/** 执行中计时：自身 100ms 刷新，避免整张代码卡按 10Hz 重渲染 */
+function LiveElapsed({ startedAtMs }: { startedAtMs: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [startedAtMs]);
+  return <span className="tabular-nums">{formatDuration(Math.max(0, now - startedAtMs))}</span>;
 }
 
 function resultText(result: ToolResult | undefined, fallback?: string): string {

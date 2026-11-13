@@ -120,6 +120,8 @@ interface ModuleEntry {
   name: string;
   instance: Module;
   state: ModuleState;
+  /** 初始化失败原因（critical 模块据此中止启动，避免无服务空跑） */
+  error?: string;
 }
 
 export interface KernelStartOptions {
@@ -313,6 +315,21 @@ export class Microkernel {
     }
 
     await this.initModuleWave(criticalEntries, depsByName, disabled, settled, moduleCtx);
+    // critical 模块是主服务/对话核心的硬依赖：任何一个失败都必须中止启动。
+    // 旧实现只记日志继续跑，会出现「server 初始化失败但进程仍在」的幽灵实例
+    // （端口被占时还会额外起浏览器桥接），用户看到的就是「server 启动失败」。
+    const failedCritical = criticalEntries.filter((entry) => entry.state === 'error');
+    if (failedCritical.length > 0) {
+      const detail = failedCritical
+        .map((entry) => `${entry.name}${entry.error ? `（${entry.error}）` : ''}`)
+        .join('；');
+      this.logger?.error('kernel: 关键模块初始化失败，启动中止', {
+        modules: failedCritical.map((entry) => entry.name),
+      });
+      // 标记已启动，确保调用方 catch 后的 kernel.stop() 能销毁已激活模块（释放监听套接字）。
+      this.started = true;
+      throw new Error(`关键模块初始化失败，启动中止：${detail}`);
+    }
     startupProfiler.mark('critical.ready');
 
     // 暴露模块状态服务（供 health 路由使用）
@@ -483,8 +500,9 @@ export class Microkernel {
             });
           } catch (err) {
             entry.state = 'error';
+            entry.error = err instanceof Error ? err.message : String(err);
             moduleCtx.logger.error(t('kernel.moduleInitFailed', { name: entry.name }), {
-              error: err instanceof Error ? err.message : String(err),
+              error: entry.error,
             });
           } finally {
             startupProfiler.recordModule(entry.name, startedAt, syncEndAt, performance.now());

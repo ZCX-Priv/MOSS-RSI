@@ -13,6 +13,14 @@ export const MEMORY_HALLS: readonly MemoryHall[] = [
   'suggestion',
 ];
 
+/**
+ * 记忆来源分类：
+ * - manual：用户在设置页手动创建；
+ * - active：Agent 通过 memory 工具主动记录；
+ * - auto：会话结束后蒸馏自动提取。
+ */
+export type MemoryOrigin = 'manual' | 'active' | 'auto';
+
 /** 单条记忆（一个 JSON 文件：{scope}/memory/{wing}/{room}/{hash}.json） */
 export interface MemoryRecord {
   /** 内容哈希（sha256 前 16 位 hex） */
@@ -33,6 +41,8 @@ export interface MemoryRecord {
     taskId?: string;
     at: string;
   };
+  /** 来源分类（手动创建 / 主动记录 / 自动提取） */
+  origin: MemoryOrigin;
   /** 标签 */
   tags: string[];
   /** 重要性 0-1（>= l1ImportanceThreshold 进入 L1 关键事实） */
@@ -85,6 +95,8 @@ export interface MemoryUpsertInput {
   tags?: string[];
   importance?: number;
   pinned?: boolean;
+  /** 来源分类（缺省按自动提取处理，兼容旧调用） */
+  origin?: MemoryOrigin;
   source?: { sessionId?: string; taskId?: string; at?: string };
 }
 

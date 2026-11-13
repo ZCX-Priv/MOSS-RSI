@@ -4,7 +4,7 @@
 // 安装为长耗时操作（模型 100MB+），走「启动后台任务 + 立即返回」模式，
 // 前端轮询 /api/voice/models 读取 state/progress。
 
-import type { ConfigService, Logger, ServiceRegistry } from '../../../core/types';
+import type { Logger, ServiceRegistry } from '../../../core/types';
 import { ServiceNames } from '../../../core/types';
 import type { VoiceService } from '../../voice';
 import type { HttpResponse, RouteHandler } from '../types';
@@ -40,57 +40,44 @@ export function createVoiceModelsHandler(services: ServiceRegistry): RouteHandle
 
 /** POST /api/voice/enable：设置总开关 */
 export function createVoiceEnableHandler(services: ServiceRegistry): RouteHandler {
-  return (req): HttpResponse => {
+  return async (req): Promise<HttpResponse> => {
     const voice = resolveVoice(services);
     if (!voice) return { status: 503, body: { error: 'VOICE_UNAVAILABLE' } };
     if (!req.body || typeof req.body !== 'object') {
       return { status: 400, body: { error: 'INVALID_BODY' } };
     }
     const enabled = Boolean((req.body as { enabled?: unknown }).enabled);
-    return { status: 200, body: voice.setEnabled(enabled) };
+    return { status: 200, body: await voice.setEnabled(enabled) };
   };
 }
 
 /** POST /api/voice/default-model：设置默认本地模型（须已安装） */
 export function createVoiceSetDefaultModelHandler(services: ServiceRegistry): RouteHandler {
-  return (req): HttpResponse => {
+  return async (req): Promise<HttpResponse> => {
     const voice = resolveVoice(services);
     if (!voice) return { status: 503, body: { error: 'VOICE_UNAVAILABLE' } };
     const id = readStringField(req.body, 'id');
     if (!id) return { status: 400, body: { error: 'MODEL_ID_REQUIRED' } };
     try {
-      return { status: 200, body: voice.setDefaultModel(id) };
+      return { status: 200, body: await voice.setDefaultModel(id) };
     } catch (err) {
       return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
     }
   };
 }
 
-/** PUT /api/voice/provider：设置默认语音服务商（'' = 内置本地引擎） */
-export function createVoiceSetProviderHandler(
-  services: ServiceRegistry,
-  config: ConfigService,
-): RouteHandler {
+/** POST /api/voice/language：设置识别语言（auto/zh/en/ja/ko/yue） */
+export function createVoiceSetLanguageHandler(services: ServiceRegistry): RouteHandler {
   return async (req): Promise<HttpResponse> => {
     const voice = resolveVoice(services);
     if (!voice) return { status: 503, body: { error: 'VOICE_UNAVAILABLE' } };
-    const providerId = readStringField(req.body, 'providerId') ?? '';
-    if (providerId) {
-      const provider = config.getApiConfig().providers.find((p) => p.id === providerId);
-      if (!provider) return { status: 404, body: { error: 'PROVIDER_NOT_FOUND' } };
-      if (provider.kind !== 'voice') {
-        return { status: 400, body: { error: 'NOT_A_VOICE_PROVIDER' } };
-      }
+    const language = readStringField(req.body, 'language');
+    if (!language) return { status: 400, body: { error: 'LANGUAGE_REQUIRED' } };
+    try {
+      return { status: 200, body: await voice.setLanguage(language) };
+    } catch (err) {
+      return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
     }
-    const appConfig = config.getAppConfig();
-    const current = appConfig.voice ?? {
-      enabled: false,
-      providerId: '',
-      localModel: '',
-      language: 'auto',
-    };
-    await config.updateAppConfig({ voice: { ...current, providerId } });
-    return { status: 200, body: voice.getStatus() };
   };
 }
 

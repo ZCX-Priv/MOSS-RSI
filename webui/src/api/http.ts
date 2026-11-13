@@ -58,6 +58,7 @@ import type {
   HookTestResult,
   HookHistoryEntry,
   MemoryItem,
+  MemoryOrigin,
   MemoryPalaceTree,
   MemoryUpsertBody,
   MemoryDistillResult,
@@ -590,13 +591,7 @@ export const api = {
     request<{ current: string }>('PUT', '/api/providers/current', { modelId }),
   createProvider: (data: {
     name: string;
-    /** 服务商类型：model（缺省）= 模型服务商；voice = 语音服务商 */
-    kind?: 'model' | 'voice';
     format?: ProviderItem['format'];
-    /** 语音引擎（kind='voice' 必填）：openai-transcriptions */
-    voiceEngine?: 'openai-transcriptions';
-    /** 语音模型名（kind='voice' 可选） */
-    voiceModel?: string;
     endpoint: string;
     apiKey: string;
     balanceUrl?: string;
@@ -764,6 +759,12 @@ export const api = {
     request<RuleItem>('PATCH', `/api/rules/${encodeURIComponent(id)}${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`, data),
   deleteRule: (id: string, cwd?: string) =>
     request<{ ok: boolean }>('DELETE', `/api/rules/${encodeURIComponent(id)}${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
+  /** 批量清空规则（scope: all=全局+当前项目 | global | project） */
+  clearRules: (scope: 'all' | 'global' | 'project', cwd?: string) =>
+    request<{ ok: boolean; removed: number }>(
+      'DELETE',
+      `/api/rules?scope=${scope}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''}`,
+    ),
 
   // ==========================================================================
   // 钩子引擎（/api/hooks）
@@ -788,12 +789,23 @@ export const api = {
   // ==========================================================================
   getMemoryTree: (cwd?: string) =>
     request<MemoryPalaceTree>('GET', `/api/memory/tree${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
-  listMemory: (opts: { cwd?: string; wing?: string; room?: string; hall?: string; q?: string; limit?: number }) => {
+  listMemory: (opts: {
+    cwd?: string;
+    wing?: string;
+    room?: string;
+    hall?: string;
+    origin?: MemoryOrigin;
+    scope?: 'global' | 'project';
+    q?: string;
+    limit?: number;
+  }) => {
     const params = new URLSearchParams();
     if (opts.cwd) params.set('cwd', opts.cwd);
     if (opts.wing) params.set('wing', opts.wing);
     if (opts.room) params.set('room', opts.room);
     if (opts.hall) params.set('hall', opts.hall);
+    if (opts.origin) params.set('origin', opts.origin);
+    if (opts.scope) params.set('scope', opts.scope);
     if (opts.q) params.set('q', opts.q);
     if (opts.limit) params.set('limit', String(opts.limit));
     const qs = params.toString();
@@ -991,7 +1003,7 @@ export const api = {
     request<{ ok: boolean; cwd: string; sessionId: string }>('POST', '/api/filesystem/watch', { cwd, sessionId }),
 
   // ==========================================================================
-  // 语音识别（voice：本地引擎 sherpa-onnx + 在线语音服务商）
+  // 语音识别（voice：本地引擎 sherpa-onnx）
   // ==========================================================================
   getVoiceStatus: () => request<VoiceStatus>('GET', '/api/voice/status'),
   listVoiceModels: () => request<{ models: VoiceModelStatus[] }>('GET', '/api/voice/models'),
@@ -999,9 +1011,8 @@ export const api = {
     request<VoiceStatus>('POST', '/api/voice/enable', { enabled }),
   setVoiceDefaultModel: (id: string) =>
     request<VoiceStatus>('POST', '/api/voice/default-model', { id }),
-  /** providerId 空串 = 内置本地引擎 */
-  setVoiceProvider: (providerId: string) =>
-    request<VoiceStatus>('PUT', '/api/voice/provider', { providerId }),
+  setVoiceLanguage: (language: string) =>
+    request<VoiceStatus>('POST', '/api/voice/language', { language }),
   /** 启动后台下载安装（长耗时，轮询 listVoiceModels 看 progress） */
   installVoiceModel: (id: string) =>
     request<{ started: boolean }>('POST', `/api/voice/models/${encodeURIComponent(id)}/install`),

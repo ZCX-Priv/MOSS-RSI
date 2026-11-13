@@ -1548,6 +1548,35 @@ export class AgentEngineImpl implements AgentEngine {
     return this.sessions.get(sessionId)?.permissionMode;
   }
 
+  /**
+   * 切换会话权限模式（set 工具 kind=mode 调用）。
+   * 权限决策在每次工具调用前读取 session 的实时模式，因此同一 run 内立即生效；
+   * 同时广播 task.updated，让前端权限徽章不需要刷新即可更新。
+   */
+  setSessionPermissionMode(sessionId: string, mode: PermissionMode): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    this.sessions.setPermissionMode(session, mode);
+    try {
+      const task = this.tasks.getTask(sessionId);
+      const server = this.services.tryResolve<{ broadcastWS?: (message: unknown) => void }>(
+        ServiceNames.SERVER_INSTANCE,
+      );
+      server?.broadcastWS?.({
+        type: 'task.updated',
+        payload: { taskId: sessionId, permissionMode: mode, ...(task ? { task } : {}) },
+      });
+    } catch {
+      // 广播失败不影响模式切换本身
+    }
+    return true;
+  }
+
+  /** 权限决策读取实时会话模式：避免 run 启动时复制的 ctx.permissionMode 让 set 切换失效 */
+  private sessionPermissionMode(sessionId: string, fallback: PermissionMode): PermissionMode {
+    return this.sessions.get(sessionId)?.permissionMode ?? fallback;
+  }
+
   /** 获取会话当前激活的 skill 模式（供路由刷新恢复 Badge；内容运行时从注册表解析） */
   getActiveSkill(sessionId: string): ActiveSkill | undefined {
     return this.sessions.get(sessionId)?.activeSkill;
@@ -2124,7 +2153,7 @@ export class AgentEngineImpl implements AgentEngine {
         toolName: fullToolName,
         params: args,
         mcpAnnotations: annotations ?? undefined,
-        mode: ctx.permissionMode,
+        mode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
         sessionId,
         cwd,
         enabled: true,
@@ -2148,7 +2177,7 @@ export class AgentEngineImpl implements AgentEngine {
         toolName: healedName,
         params: args,
         annotations: tool?.annotations,
-        mode: ctx.permissionMode,
+        mode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
         sessionId,
         cwd,
         enabled: toolRegistry.isEnabled(healedName),
@@ -2375,6 +2404,18 @@ export class AgentEngineImpl implements AgentEngine {
         .join('\n');
     } catch (err) {
       resultText = `Error: failed to serialize tool result: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    // 空结果必须显式化：模型看不到任何观察时容易反复调用或直接放弃。
+    if (!resultText.trim()) {
+      resultText = result.isError ? 'Error: 工具执行失败（无错误详情）' : '（工具执行成功，无文本输出）';
+    }
+    if (result.isError) {
+      this.logger.warn('agent: tool call failed', {
+        sessionId,
+        toolName: healedName,
+        toolCallId,
+        error: resultText.slice(0, 500),
+      });
     }
     this.sessions.addToolMessage(
       this.sessions.get(sessionId)!,
@@ -2605,7 +2646,7 @@ export class AgentEngineImpl implements AgentEngine {
         toolName: name,
         params: args,
         annotations: tool?.annotations,
-        mode: ctx.permissionMode,
+        mode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
         sessionId: ctx.sessionId,
         cwd: ctx.cwd,
         enabled: toolRegistry.isEnabled(name),
@@ -2624,7 +2665,7 @@ export class AgentEngineImpl implements AgentEngine {
           toolCallId: ctx.toolCallId,
           onEvent: ctx.onEvent,
           ...(ctx.signal ? { signal: ctx.signal } : {}),
-          permissionMode: ctx.permissionMode,
+          permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
           model: ctx.model ?? '',
           ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
         });
@@ -2765,7 +2806,7 @@ export class AgentEngineImpl implements AgentEngine {
             parentToolCallId: ctx.toolCallId,
             onEvent: ctx.onEvent,
             signal: opts?.signal ?? ctx.signal,
-            permissionMode: ctx.permissionMode,
+            permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
             model: ctx.model ?? '',
             ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
           },
@@ -2882,7 +2923,7 @@ export class AgentEngineImpl implements AgentEngine {
         }
       },
       signal: ctx.signal,
-      permissionMode: ctx.permissionMode,
+      permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
       model: ctx.model ?? '',
       ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
     };
@@ -3297,7 +3338,7 @@ export class AgentEngineImpl implements AgentEngine {
         toolName: fullToolName,
         params: args,
         mcpAnnotations: annotations ?? undefined,
-        mode: ctx.permissionMode,
+        mode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
         sessionId: ctx.sessionId,
         cwd: ctx.cwd,
         enabled: true,
@@ -3316,7 +3357,7 @@ export class AgentEngineImpl implements AgentEngine {
           toolCallId: ctx.toolCallId,
           onEvent: ctx.onEvent,
           ...(ctx.signal ? { signal: ctx.signal } : {}),
-          permissionMode: ctx.permissionMode,
+          permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
           model: ctx.model ?? '',
           ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
         });
