@@ -9,6 +9,8 @@ export interface RenderBlock {
   raw: string;
   /** 是否已闭合（后面出现过空行/新块边界）；文本末尾的块为 false（活跃块） */
   closed: boolean;
+  /** 顶层围栏代码块的语言标识（'' = 无语言）；普通 markdown 块为 undefined */
+  fenceLang?: string;
 }
 
 /** 文件预览类型（按扩展名检测） */

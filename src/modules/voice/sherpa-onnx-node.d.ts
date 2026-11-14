@@ -74,6 +74,11 @@ declare module 'sherpa-onnx-node' {
     text: string;
     tokens?: string[];
     timestamps?: number[];
+    /** SenseVoice/Whisper 等模型返回的语言（如 zh/en/ja/ko/yue） */
+    lang?: string;
+    /** SenseVoice 情绪/事件标签（可选） */
+    emotion?: string;
+    event?: string;
   }
 
   export class OnlineStream {

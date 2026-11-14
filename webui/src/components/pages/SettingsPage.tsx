@@ -231,6 +231,7 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.agent.builtIn', section: 'agent' },
   { labelKey: 'settings.agent.custom', section: 'agent' },
   { labelKey: 'settings.agent.createAgent', section: 'agent' },
+  { labelKey: 'settings.agent.maxSubagentDepthLabel', descriptionKey: 'settings.agent.maxSubagentDepthDesc', section: 'agent' },
 
   // 服务商设置详细项
   { labelKey: 'settings.provider.addProvider', section: 'provider' },
@@ -1862,12 +1863,43 @@ export function GeneralSettings() {
 export function AgentSettings() {
   const { t } = useTranslation();
   const { agents, setDefaultAgent, deleteAgent, reload } = useAgents();
+  const { appConfig, updateAppConfig } = useConfig();
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<AgentDetail | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const builtInAgents = agents.filter((a) => a.builtIn);
   const customAgents = agents.filter((a) => !a.builtIn);
+
+  // 子代理嵌套是全局执行策略：放在「智能体」面板，而不是工具面板
+  const agentCfg = appConfig?.agent;
+  const maxSubagentDepth = agentCfg?.maxSubagentDepth ?? 2;
+  const [maxSubagentDepthDraft, setMaxSubagentDepthDraft] = useState(String(maxSubagentDepth));
+  useEffect(() => {
+    setMaxSubagentDepthDraft(String(maxSubagentDepth));
+  }, [maxSubagentDepth]);
+
+  const patchMaxSubagentDepth = async (v: number) => {
+    if (!agentCfg || v === maxSubagentDepth) return;
+    try {
+      await updateAppConfig({ agent: { ...agentCfg, maxSubagentDepth: v } });
+    } catch {
+      // toast 已在 useConfig 内处理
+    }
+  };
+
+  /** 子代理嵌套层级：clamp 到 [1,5]；非法回退当前值 */
+  const commitMaxSubagentDepthDraft = () => {
+    const raw = maxSubagentDepthDraft.trim();
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n) || n <= 0) {
+      setMaxSubagentDepthDraft(String(maxSubagentDepth));
+      return;
+    }
+    const clamped = Math.max(1, Math.min(5, n));
+    setMaxSubagentDepthDraft(String(clamped));
+    void patchMaxSubagentDepth(clamped);
+  };
 
   const handleEdit = async (id: string) => {
     try {
@@ -1975,6 +2007,36 @@ export function AgentSettings() {
       <div className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold text-foreground">{t('settings.agent.title')}</h1>
         <p className="text-sm text-muted-foreground">{t('settings.agent.subtitle')}</p>
+      </div>
+
+      {/* 全局子代理执行策略 */}
+      <div className="flex flex-col gap-3">
+        <div className="text-sm font-medium text-foreground">
+          {t('settings.agent.subagentExecTitle')}
+        </div>
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm text-foreground">
+              {t('settings.agent.maxSubagentDepthLabel')}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {t('settings.agent.maxSubagentDepthDesc')}
+            </span>
+          </div>
+          <Input
+            type="number"
+            min={1}
+            max={5}
+            value={maxSubagentDepthDraft}
+            onChange={(e) => setMaxSubagentDepthDraft(e.target.value)}
+            onBlur={commitMaxSubagentDepthDraft}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+            className="h-8 w-24 shrink-0 text-right"
+            aria-label={t('settings.agent.maxSubagentDepthLabel')}
+          />
+        </div>
       </div>
 
       <div className="flex flex-col gap-3">

@@ -62,12 +62,16 @@ function formatMode(mode: BrowserStatus['mode']): string {
 }
 
 function formatTabLine(tab: BrowserTabInfo): string {
+  const groupLabel =
+    tab.groupTitle && tab.groupId !== null
+      ? `${tab.groupTitle} (${tab.groupId})`
+      : tab.groupId;
   return t('browserTool.tabLine', {
     tab: tab.tab,
     kind: formatKind(tab.instanceKind),
     title: tab.title || '(untitled)',
     url: tab.url || 'about:blank',
-    group: tab.groupId ?? t('browserTool.groupNoneShort'),
+    group: groupLabel ?? t('browserTool.groupNoneShort'),
   });
 }
 
@@ -255,6 +259,31 @@ function addImage(content: ToolResultContent[], path: string, data: string, mime
   content.push({ type: 'image', source: { data, mimeType }, path });
 }
 
+/** 必须携带本会话 AI 标签页的 action（wait 的纯等待、status/setup/tabs/open 除外） */
+const TAB_REQUIRED_ACTIONS: ReadonlySet<string> = new Set([
+  'focus',
+  'close',
+  'navigate',
+  'snapshot',
+  'screenshot',
+  'frames',
+  'click',
+  'hover',
+  'type',
+  'press_key',
+  'key_down',
+  'key_up',
+  'hold',
+  'macro',
+  'select',
+  'scroll',
+  'drag',
+  'evaluate',
+  'wait_stable',
+  'wait_change',
+  'console',
+]);
+
 export default {
   execute: async (params: unknown, ctx: ToolContext): Promise<ToolResult> => {
     if (!isObject(params)) return errorResult(t('browserTool.invalidParams'));
@@ -268,23 +297,21 @@ export default {
     const browser = pickString(params, 'browser');
     const cdpEndpoint = pickString(params, 'cdp_endpoint');
     const timeoutMs = pickNumber(params, 'timeout_ms');
-    // 自动焦点：操作前把目标标签页/窗口带到前台；已在前台时扩展内部 no-op（不闪屏）
-    const autoFocus =
-      pickBoolean(params, 'auto_focus') ?? (ctx.toolConfig?.autoFocus !== false);
+    // 每个会话独立当前标签：无显式 tab 时只取本会话标签。
+    // 不再回退全局 currentTab，避免 A 会话误操作 B 会话最近打开的标签（多会话抢标签的根因）。
+    const sessionId = ctx.sessionId;
+    const effectiveTab = tab ?? service.getSessionTab(sessionId) ?? undefined;
+    // 自动聚焦仅作为单次调用的显式开关：默认关闭，绝不跟随每次操作切换用户标签。
+    const autoFocus = pickBoolean(params, 'auto_focus') === true;
+    // 需要标签的 action 必须有本会话（或无归属）标签，禁止落到其它会话的全局当前标签
+    if (TAB_REQUIRED_ACTIONS.has(action) && !effectiveTab) {
+      return errorResult(t('browserTool.sessionTabMissing'));
+    }
 
     try {
       // CDP 按次端点：先连接，再执行本次动作（后续调用沿用该连接）
       if (cdpEndpoint && (action === 'open' || action === 'status' || action === 'tabs')) {
         await service.connectCdp(cdpEndpoint);
-      }
-
-      // 自动聚焦（open 在服务内按 focus 参数处理；focus 动作本身即聚焦）
-      if (autoFocus && !['status', 'setup', 'tabs', 'close', 'open', 'focus'].includes(action)) {
-        const key = tab ?? service.getStatus().currentTab;
-        if (key) {
-          // 例行操作只切标签，不抬操作系统窗口：避免整个浏览器窗口反复闪到前台
-          await service.ensureFocused(key, { focusWindow: false }).catch(() => undefined);
-        }
       }
 
       switch (action) {
@@ -311,8 +338,9 @@ export default {
             ...(pickString(params, 'url') ? { url: pickString(params, 'url') } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
             focus: autoFocus,
+            sessionId,
           });
-          const groupTitle = service.getStatus().config.tabGroupTitle;
+          const groupTitle = info.groupTitle ?? service.getStatus().config.tabGroupTitle;
           return textResult(
             t('browserTool.opened', {
               tab: info.tab,
@@ -325,7 +353,9 @@ export default {
 
         case 'tabs': {
           const all = pickBoolean(params, 'all') === true;
-          const tabs = await service.listTabs(all, cdpEndpoint ? 'cdp' : browser);
+          let tabs = await service.listTabs(all, cdpEndpoint ? 'cdp' : browser);
+          // 非 all：只展示本会话标签（无归属的旧标签作为兜底保留，避免升级后旧页不可见）
+          if (!all) tabs = tabs.filter((item) => item.sessionId === sessionId || !item.sessionId);
           if (tabs.length === 0) {
             return textResult(all ? t('browserTool.nativeTabsEmpty') : t('browserTool.tabsNone'));
           }
@@ -338,13 +368,21 @@ export default {
         }
 
         case 'focus': {
-          const key = resolveTabKey(service, tab);
-          const info = await service.focusTab(key);
-          return textResult(t('browserTool.focused', { tab: info.tab, url: info.url }));
+          const key = requireTabKey(effectiveTab);
+          const result = await service.ensureFocused(key);
+          if (!result.focused) {
+            return textResult(
+              t('browserTool.focusSkipped', {
+                tab: result.tab,
+                reason: result.reason ?? '',
+              }),
+            );
+          }
+          return textResult(t('browserTool.focused', { tab: result.tab }));
         }
 
         case 'close': {
-          const key = resolveTabKey(service, tab);
+          const key = requireTabKey(effectiveTab);
           await service.closeTab(key);
           return textResult(t('browserTool.closed', { tab: key }));
         }
@@ -357,7 +395,7 @@ export default {
           if (!url && !back && !forward && !reload) {
             return errorResult(t('browserTool.navigateNeedsOption'));
           }
-          const info = await service.navigate(tab, {
+          const info = await service.navigate(effectiveTab, {
             ...(url ? { url } : {}),
             ...(back ? { back: true } : {}),
             ...(forward ? { forward: true } : {}),
@@ -369,7 +407,7 @@ export default {
 
         case 'snapshot': {
           const maxNodes = pickNumber(params, 'max_nodes');
-          const snapshot = await service.snapshot(tab, maxNodes);
+          const snapshot = await service.snapshot(effectiveTab, maxNodes);
           const footer = t('browserTool.snapshotDone', {
             tab: snapshot.tab,
             count: snapshot.refCount,
@@ -379,7 +417,7 @@ export default {
         }
 
         case 'screenshot': {
-          const shot = await service.screenshot(tab, {
+          const shot = await service.screenshot(effectiveTab, {
             fullPage: pickBoolean(params, 'full_page') === true,
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickRegion(params) ? { region: pickRegion(params) } : {}),
@@ -404,7 +442,7 @@ export default {
         }
 
         case 'click': {
-          const info = await service.click(tab, {
+          const info = await service.click(effectiveTab, {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
             ...(pickNumber(params, 'x') !== undefined ? { x: pickNumber(params, 'x') } : {}),
@@ -420,15 +458,13 @@ export default {
               : {}),
           });
           if (autoFocus && info.openedTab) {
-            await service
-              .ensureFocused(info.openedTab.tab, { force: true, focusWindow: false })
-              .catch(() => undefined);
+            await service.ensureFocused(info.openedTab.tab).catch(() => undefined);
           }
           return textResult(`${t('browserTool.clicked')}\n${formatPageInfo(info)}`);
         }
 
         case 'hover': {
-          const info = await service.hover(tab, {
+          const info = await service.hover(effectiveTab, {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
           });
@@ -437,7 +473,7 @@ export default {
 
         case 'type': {
           const text = requireString(params, 'text');
-          const info = await service.typeText(tab, {
+          const info = await service.typeText(effectiveTab, {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
             text,
@@ -449,21 +485,19 @@ export default {
 
         case 'press_key': {
           const key = requireString(params, 'key');
-          const info = await service.pressKey(tab, {
+          const info = await service.pressKey(effectiveTab, {
             key,
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
           });
           if (autoFocus && info.openedTab) {
-            await service
-              .ensureFocused(info.openedTab.tab, { force: true, focusWindow: false })
-              .catch(() => undefined);
+            await service.ensureFocused(info.openedTab.tab).catch(() => undefined);
           }
           return textResult(`${t('browserTool.keyPressed', { key })}\n${formatPageInfo(info)}`);
         }
 
         case 'frames': {
-          const frames = await service.listFrames(tab);
+          const frames = await service.listFrames(effectiveTab);
           if (frames.length === 0) {
             return textResult(
               '当前标签页没有可用的 iframe 子会话（可能没有跨域 iframe，或浏览器不支持子会话）。可先用 action=screenshot 查看页面。',
@@ -484,7 +518,7 @@ export default {
 
         case 'key_down': {
           const key = requireString(params, 'key');
-          const info = await service.keyDown(tab, key, {
+          const info = await service.keyDown(effectiveTab, key, {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
           });
@@ -493,7 +527,7 @@ export default {
 
         case 'key_up': {
           const key = requireString(params, 'key');
-          const info = await service.keyUp(tab, key, {
+          const info = await service.keyUp(effectiveTab, key, {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
           });
@@ -504,7 +538,7 @@ export default {
           const keys = pickStringArray(params, 'keys') ?? (pickString(params, 'key') ? [pickString(params, 'key')!] : []);
           if (keys.length === 0) return errorResult('hold 需要 keys 或 key');
           const duration = pickNumber(params, 'duration_ms') ?? 500;
-          const info = await service.hold(tab, {
+          const info = await service.hold(effectiveTab, {
             keys,
             durationMs: duration,
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
@@ -519,7 +553,7 @@ export default {
             return errorResult('macro 需要 actions 数组（1-32 步）');
           }
           const steps = rawSteps.filter(isObject) as unknown as BrowserMacroStep[];
-          const result = await service.macro(tab, steps, {
+          const result = await service.macro(effectiveTab, steps, {
             verify: pickBoolean(params, 'verify') !== false,
           });
           const lines = [
@@ -558,8 +592,8 @@ export default {
           };
           const result =
             action === 'wait_stable'
-              ? await service.waitStable(tab, waitOptions)
-              : await service.waitChange(tab, waitOptions);
+              ? await service.waitStable(effectiveTab, waitOptions)
+              : await service.waitChange(effectiveTab, waitOptions);
           return textResult(
             `wait_${result.reason}（${result.elapsedMs}ms，采样 ${result.samples} 次，diff=${result.diffPercent}%）${
               result.matched ? '' : '：超时未满足条件'
@@ -570,7 +604,7 @@ export default {
         case 'select': {
           const values = pickStringArray(params, 'values');
           if (!values) return errorResult(t('browserTool.missingParam', { name: 'values' }));
-          const info = await service.selectOption(tab, {
+          const info = await service.selectOption(effectiveTab, {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
             values,
@@ -579,7 +613,7 @@ export default {
         }
 
         case 'scroll': {
-          const info = await service.scroll(tab, {
+          const info = await service.scroll(effectiveTab, {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickNumber(params, 'delta_x') !== undefined ? { deltaX: pickNumber(params, 'delta_x') } : {}),
             ...(pickNumber(params, 'delta_y') !== undefined ? { deltaY: pickNumber(params, 'delta_y') } : {}),
@@ -592,7 +626,7 @@ export default {
           const fromY = pickNumber(params, 'from_y');
           const toX = pickNumber(params, 'to_x');
           const toY = pickNumber(params, 'to_y');
-          const info = await service.drag(tab, {
+          const info = await service.drag(effectiveTab, {
             ...(pickString(params, 'from_ref') ? { fromRef: pickString(params, 'from_ref') } : {}),
             ...(pickString(params, 'from_selector')
               ? { fromSelector: pickString(params, 'from_selector') }
@@ -614,7 +648,7 @@ export default {
 
         case 'evaluate': {
           const expression = requireString(params, 'expression');
-          const result = await service.evaluate(tab, {
+          const result = await service.evaluate(effectiveTab, {
             expression,
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
           });
@@ -628,13 +662,13 @@ export default {
           if (waitMs === undefined && !selector && !text) {
             return errorResult(t('browserTool.waitNeedsOption'));
           }
-          const hasTab = Boolean(tab) || Boolean(service.getStatus().currentTab);
-          if (!hasTab && !selector && !text) {
+          if (!effectiveTab && !selector && !text) {
             // 无 AI 标签页时，纯等待退化为本地 sleep
             await sleep(Math.min(10_000, Math.max(0, waitMs ?? 0)));
             return textResult(t('browserTool.waited'));
           }
-          const info = await service.waitFor(tab, {
+          if (!effectiveTab) return errorResult(t('browserTool.sessionTabMissing'));
+          const info = await service.waitFor(effectiveTab, {
             ...(waitMs !== undefined ? { waitMs } : {}),
             ...(selector ? { selector } : {}),
             ...(text ? { text } : {}),
@@ -645,7 +679,7 @@ export default {
 
         case 'console': {
           const clear = pickBoolean(params, 'clear') === true;
-          const result = await service.consoleLogs(tab, clear);
+          const result = await service.consoleLogs(effectiveTab, clear);
           const lines = [t('browserTool.consoleTitle', { count: result.entries.length })];
           if (result.entries.length === 0) {
             lines.push(t('browserTool.consoleEmpty'));
@@ -668,10 +702,9 @@ export default {
   },
 };
 
-function resolveTabKey(service: BrowserService, tab: string | undefined): string {
-  const key = tab ?? service.getStatus().currentTab;
-  if (!key) throw new Error(t('browserTool.tabRequired'));
-  return key;
+function requireTabKey(tab: string | undefined): string {
+  if (!tab) throw new Error(t('browserTool.sessionTabMissing'));
+  return tab;
 }
 
 function clickButton(params: Record<string, unknown>): 'left' | 'right' | 'middle' | undefined {

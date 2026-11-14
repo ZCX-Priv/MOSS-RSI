@@ -64,6 +64,11 @@ const DEFAULT_START_REACH_THRESHOLD = 600;
 const PREPEND_APPLY_RETRIES = 10;
 /** 滚动后距底小于该值才恢复贴底跟随（比对外 atBottom 宽阈值严——真贴底才恢复） */
 const STICKY_RESUME_PX = 32;
+/**
+ * 用户上滑意图冷却窗口（ms）：贴底重贴在流式期间每帧都会发生，
+ * 同一帧内用户上滑与重贴底竞态时以用户意图为准，冷却窗口内不允许重贴底。
+ */
+const USER_INTENT_COOLDOWN_MS = 200;
 /** 「返回底部」超远距离阈值（px）：超过则平滑降级为瞬时定位（超长平滑耗时过久） */
 const INSTANT_SCROLL_DISTANCE_PX = 3000;
 /** 程序滚动窗口期兜底时长（ms）：scrollend 不可用时据此关闭窗口 */
@@ -309,12 +314,18 @@ export function VirtualList<T>({
   const lastScrollAtRef = useRef(0);
   /** 上一次布局使用的 items 快照：prefix 实测修正时按「视口顶部消息 key」锚定 scrollTop */
   const layoutItemsRef = useRef(items);
+  /** 上一次布局的 item key 序列：仅尾部内容变化时跳过前缀和重建 */
+  const itemKeysRef = useRef<string[]>([]);
   /** prepend 锚定合并：同一帧多次 anchorPrepend 复用同一个 apply（只修正一次 scrollTop） */
   const pendingAnchorRef = useRef<{ apply: () => void } | null>(null);
   /** onScrollMetrics 上次回调时刻（节流：滚动中最多 10 次/秒通知宿主） */
   const lastMetricsAtRef = useRef(0);
   /** 上一帧滚动位移（px）：用于把「单帧跳变」计入 overscan，避免拖动滚动条一步到位时空窗 */
   const lastScrollDeltaRef = useRef(0);
+  /** 上一帧滚动内容高度（px）：区分「内容缩短导致浏览器钳制 scrollTop」与「用户主动上滑」 */
+  const lastScrollHeightRef = useRef(0);
+  /** 最近一次用户上滑意图时间戳（ms）：贴底重贴的冷却窗口，吸收同帧竞态 */
+  const userIntentAtRef = useRef(0);
   /**
    * startReached 武装时刻：首屏挂载 / 切换会话后 400ms 内不触发加载更早历史。
    * 初始化阶段的「贴底 + 估算→实测收敛」会让 scrollTop 被浏览器被动钳制（表现为负 delta），
@@ -349,6 +360,21 @@ export function VirtualList<T>({
       bottomCbRef.current?.(ab);
     }
   }, []);
+
+  /**
+   * 是否允许贴底跟随（三处贴底落点共用）：
+   * - 跟随态（sticky）与 followOutput 开启；
+   * - 不在程序滚动窗口期（平滑「返回底部」）；
+   * - 距上一次用户上滑意图已过冷却窗口（吸收「用户上滑 vs 同帧重贴底」的竞态）。
+   */
+  const canFollowSticky = useCallback(
+    () =>
+      followRef.current &&
+      stickyRef.current &&
+      !programmaticRef.current &&
+      performance.now() - userIntentAtRef.current > USER_INTENT_COOLDOWN_MS,
+    [],
+  );
 
   // ===== 核心：布局计算（前缀和 + 可视区间 + 跟随） =====
   const runLayout = useCallback(() => {
@@ -438,7 +464,7 @@ export function VirtualList<T>({
       // 贴底的真实落点就是内容底部，可直接由前缀和给出（total - viewport），不依赖 DOM 高度。
       // 程序滚动窗口期（平滑「返回底部」）例外：期间由 handleScroll 驱动区间，沿动画路径挂载。
       const total = prefixRef.current[prefixRef.current.length - 1] ?? 0;
-      const bottomIntent = followRef.current && stickyRef.current && !programmaticRef.current;
+      const bottomIntent = canFollowSticky();
       const effectiveTop = bottomIntent ? Math.max(0, total - sc.clientHeight) : sc.scrollTop;
       // 速度预测 + 单帧跳变：跳变幅度直接计入 overscan（覆盖拖动滚动条一步到位），
       // 由 MAX_DYNAMIC_OVERSCAN_PX 与 MAX_RENDER_ITEMS 双重兜底，不会无限挂载。
@@ -478,13 +504,17 @@ export function VirtualList<T>({
       // 贴底跟随：sticky 期间每次布局后贴底（用实时 scrollHeight——估算→实测的
       // 收敛过程中每轮 RO→layout 都重贴，视觉上持续贴住最新消息不跳动）。
       // 双 rAF 等待本次渲染提交（新 spacer DOM）后再滚，避免互相打架。
-      if (followRef.current && stickyRef.current) {
+      if (canFollowSticky()) {
         requestAnimationFrame(() => {
           const s = scrollerRef.current;
-          if (s && followRef.current && stickyRef.current) {
+          if (s && canFollowSticky()) {
             // scrollTop 会被浏览器钳制到 scrollHeight - clientHeight，预期值必须同口径
             selfScrollTopRef.current = Math.max(0, s.scrollHeight - s.clientHeight);
             s.scrollTop = s.scrollHeight;
+            // 贴底后同步方向判定基准：否则紧随其后的用户 scroll 事件会与陈旧基准比较，
+            // 把「自身贴底」误判成用户上滑/未上滑（手动上滑被吞的直接来源）。
+            lastScrollTopRef.current = s.scrollTop;
+            lastScrollHeightRef.current = s.scrollHeight;
             // 贴底后的 scroll 事件会被识别为「自身滚动」而跳过 atBottom 改写：
             // 这里直接以几何校准，避免残留 false 让「返回底部」按钮一直显示
             syncAtBottom();
@@ -494,7 +524,7 @@ export function VirtualList<T>({
     } else {
       setLayoutSeq((v) => v + 1);
     }
-  }, [syncAtBottom]);
+  }, [syncAtBottom, canFollowSticky]);
 
   const scheduleLayout = useCallback(() => {
     if (rafLayoutRef.current !== null) return;
@@ -587,9 +617,11 @@ export function VirtualList<T>({
         // 异步高度变化（RunCode 流式输出 / 卡片展开）发生在两次布局之间：
         // 若仍在贴底跟随，立即按真实 scrollHeight 贴住，避免只靠下一帧 rAF 导致露缝。
         const sc = scrollerRef.current;
-        if (sc && followRef.current && stickyRef.current && !programmaticRef.current) {
+        if (sc && canFollowSticky()) {
           selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
           sc.scrollTop = sc.scrollHeight;
+          lastScrollTopRef.current = sc.scrollTop;
+          lastScrollHeightRef.current = sc.scrollHeight;
           syncAtBottom();
         }
         dirtyRef.current = true;
@@ -606,7 +638,7 @@ export function VirtualList<T>({
       cellObserverRef.current = null;
       scrollerObserverRef.current = null;
     };
-  }, [scheduleLayout, syncAtBottom]);
+  }, [scheduleLayout, syncAtBottom, canFollowSticky]);
 
   /** 条目包裹层 ref（稳定回调 + React19 cleanup 卸载时反注册） */
   const cellRef = useCallback((el: HTMLElement | null) => {
@@ -672,6 +704,50 @@ export function VirtualList<T>({
   // 随后贴底把视口移到底部却只挂了顶部条目 → 可见区空 spacer（「先错位、再排好」）。
   // 真实落位统一交给下方「无依赖」layout effect（用真实 scrollHeight，且此时 range 已是尾部）。
   useLayoutEffect(() => {
+    // 流式更新通常只替换尾部消息对象（key 序列不变）：此时高度变化由 ResizeObserver
+    // 负责，前缀和无需重建。长会话中每帧 O(n) 重建是「越用越卡」的主要来源之一。
+    const prevItems = layoutItemsRef.current;
+    const prevKeys = itemKeysRef.current;
+    let keysChanged = false;
+
+    if (items.length > 0 && items.length === prevKeys.length) {
+      // 快速路径：逐引用比较前 n-1 项，只有尾部对象变化时不再全量 map 计算 key
+      let tailOnly = true;
+      for (let i = 0; i < items.length - 1; i += 1) {
+        if (items[i] !== prevItems[i]) {
+          tailOnly = false;
+          break;
+        }
+      }
+      if (tailOnly) {
+        const lastKey = itemKeyRef.current(items[items.length - 1]);
+        if (prevKeys[prevKeys.length - 1] === lastKey) {
+          layoutItemsRef.current = items;
+          return;
+        }
+        prevKeys[prevKeys.length - 1] = lastKey;
+        keysChanged = true;
+      }
+    }
+
+    if (!keysChanged) {
+      const keys = items.map((item) => itemKeyRef.current(item));
+      let sameKeys = prevKeys.length === keys.length;
+      if (sameKeys) {
+        for (let i = 0; i < keys.length; i += 1) {
+          if (keys[i] !== prevKeys[i]) {
+            sameKeys = false;
+            break;
+          }
+        }
+      }
+      itemKeysRef.current = keys;
+      if (sameKeys) {
+        layoutItemsRef.current = items;
+        return;
+      }
+    }
+
     dirtyRef.current = true;
     if (items.length > 0) {
       if (initialBottom && !bottomDoneRef.current) {
@@ -702,15 +778,17 @@ export function VirtualList<T>({
     if (!sc) return;
     syncMeasure();
     runLayout();
-    if (followRef.current && stickyRef.current) {
+    if (canFollowSticky()) {
       // 同上：预期值按钳制后的 scrollTop 记录
       selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
       sc.scrollTop = sc.scrollHeight;
+      lastScrollTopRef.current = sc.scrollTop;
+      lastScrollHeightRef.current = sc.scrollHeight;
     }
     // ④ 贴底态校准：布局/高度变化（流式增长、回复结束的操作栏出现、页脚收起）后以几何为准，
     // 纠正被 self-initiated 跳过而残留的 atBottom=false（「已在底部仍显示返回底部」的根因）
     syncAtBottom();
-  }, [range, visibleRange, layoutSeq, syncAtBottom]);
+  }, [range, visibleRange, layoutSeq, syncAtBottom, canFollowSticky]);
 
   // ===== 会话切换重置（组件不重挂的参数变化场景） =====
   useEffect(() => {
@@ -722,6 +800,8 @@ export function VirtualList<T>({
     bottomDoneRef.current = false;
     // 清掉跨会话的滚动基准，避免新会话首帧被误判为「用户上滑」
     lastScrollTopRef.current = 0;
+    lastScrollHeightRef.current = 0;
+    userIntentAtRef.current = 0;
     selfScrollTopRef.current = null;
     // 新会话 / 首次挂载一律从底部开始：无条件告知宿主「在底部」。
     // 不能只在内部 atBottomRef 为 false 时才通知——首次挂载时内部 ref 本就为 true，
@@ -731,6 +811,7 @@ export function VirtualList<T>({
     // 高度缓存按消息 key 索引，跨会话残留无引用且无限膨胀 → 清空重测
     heightsRef.current.clear();
     measuredKeysRef.current.clear();
+    itemKeysRef.current = [];
     rangeStateRef.current = { start: 0, end: 0 };
     visibleStateRef.current = { start: 0, end: 0 };
     autoFillDepthRef.current = 0;
@@ -767,13 +848,36 @@ export function VirtualList<T>({
         return;
       }
       stickyRef.current = false;
+      userIntentAtRef.current = performance.now();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   // ===== 滚动处理（rAF 节流） =====
+  /**
+   * 同步判定「用户主动上滑」并立即退出贴底跟随。
+   * 必须在 rAF 之前执行：流式内容增长时，贴底重贴会在同一帧把 scrollTop 拉回底部，
+   * 若等 rAF 再判定方向，用户的位移已经被吃掉（表现为「怎么滑都回到底部」）。
+   * 内容缩短时浏览器会钳制 scrollTop（不是用户上滑），用 scrollHeight 是否变小排除。
+   */
+  const noteUserScrollIntent = useCallback(() => {
+    const sc = scrollerRef.current;
+    if (!sc || programmaticRef.current) return;
+    const top = sc.scrollTop;
+    const expected = selfScrollTopRef.current;
+    const selfInitiated = expected !== null && Math.abs(expected - top) <= 2;
+    const shrunk = sc.scrollHeight < lastScrollHeightRef.current - 1;
+    if (!selfInitiated && !shrunk && top < lastScrollTopRef.current - 1) {
+      stickyRef.current = false;
+      userIntentAtRef.current = performance.now();
+    }
+    lastScrollHeightRef.current = sc.scrollHeight;
+  }, []);
+
   const handleScroll = useCallback(() => {
+    // 同步阶段先记上滑意图（不等 rAF，避免被同帧重贴底吞掉）
+    noteUserScrollIntent();
     if (rafScrollRef.current !== null) return;
     rafScrollRef.current = requestAnimationFrame(() => {
       rafScrollRef.current = null;
@@ -824,13 +928,8 @@ export function VirtualList<T>({
       // 程序滚动窗口期（平滑滚到底途中）：不让平滑过程中的中间态改写 atBottom/sticky，
       // 否则按钮会「先消失→中途闪现→再消失」，贴底也会被中间态误判为脱跟。
       if (!programmaticRef.current && !selfInitiated) {
-        // 仅「用户主动上滑」（scrollTop 相对上一帧变小）才脱离贴底跟随。
-        // 内容增长（工具卡片展开 / 流式输出涌入）不改变 scrollTop，绝不脱离跟随。
-        // 仍在底部阈值内时，负 delta 来自内容缩短后浏览器钳制 scrollTop（页脚收起、
-        // RunCode 卡片折叠等），不是用户上滑 —— 不能据此脱跟，否则后续内容不再贴底。
-        if (top < lastScrollTopRef.current - 1 && dist > thresholdRef.current) {
-          stickyRef.current = false;
-        }
+        // 脱离贴底跟随已在同步阶段（noteUserScrollIntent）完成：这里不再按 dist 阈值二次判定，
+        // 否则小步上滑（<100px）永远退不出跟随，随后每次内容增长又被拉回底部。
         // 恢复跟随必须同时满足「向下滚动」与「真的回到贴底」：
         // 内容增长本身不产生 scroll 事件，若不加方向条件，任何一次 dist 变小的
         // scroll（含布局钳制）都会把用户刚上滑出来的视口重新武装为跟随。
@@ -844,6 +943,7 @@ export function VirtualList<T>({
         }
       }
       lastScrollTopRef.current = top;
+      lastScrollHeightRef.current = sc.scrollHeight;
       if (top > startThresholdRef.current) suppressStartRef.current = false;
       if (prefixRef.current.length > 1) {
         const r = clampRenderRange(
@@ -882,7 +982,7 @@ export function VirtualList<T>({
         startCbRef.current?.();
       }
     });
-  }, []);
+  }, [noteUserScrollIntent]);
 
   /** 滚轮：向上（deltaY < 0）立即退出贴底跟随。
    *  竞态根治点：滚轮一档 ≈100px 未超 atBottom 宽阈值时，scroll 判定仍「在底部」，
@@ -893,6 +993,7 @@ export function VirtualList<T>({
       if (e.deltaY < 0) {
         closeProgrammatic();
         stickyRef.current = false;
+        userIntentAtRef.current = performance.now();
       }
     },
     [closeProgrammatic],
@@ -902,6 +1003,7 @@ export function VirtualList<T>({
   const handleTouchMove = useCallback(() => {
     closeProgrammatic();
     stickyRef.current = false;
+    userIntentAtRef.current = performance.now();
   }, [closeProgrammatic]);
 
   // ===== 挂载即触发一次布局（scroller 就绪后） =====
@@ -979,6 +1081,8 @@ export function VirtualList<T>({
       //（修复「点返回底部后仍差一截/被增长顶走」）。smooth 滚动的落点基于当前
       // scrollHeight，期间内容增长导致的偏差由 sticky 的后续重贴收敛。
       stickyRef.current = true;
+      // 显式「返回底部」= 用户意图与冷却窗口无关，立即解除上滑冷却
+      userIntentAtRef.current = 0;
       // 点击即隐藏按钮：内部状态翻转必须显式通知宿主——此前只改 ref 不回调，
       // 宿主 atBottom 恒为 false，按钮永不消失（一直贴在消息底部）。
       if (!atBottomRef.current) {

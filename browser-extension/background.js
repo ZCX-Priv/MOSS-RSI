@@ -33,6 +33,101 @@ let cachedBridgeStatus = {
 const attachedTabs = new Set();
 let creatingOffscreen = null;
 
+/**
+ * MOSS 专属窗口登记表：windowId → 分组基名。
+ * 只有登记过的窗口才允许复用/自动激活；用户窗口即使存在同名「MOSS」分组也绝不触碰。
+ * 存本地存储（浏览器重启后窗口 id 可能失效，加载时会用「窗口内是否只有 MOSS 分组标签」重新校验）。
+ */
+const MOSS_WINDOWS_KEY = 'mossWindows';
+let mossWindows = null;
+let loadingMossWindows = null;
+
+/** 判断分组标题是否属于某个 MOSS 会话分组（MOSS、MOSS-0、MOSS-1…） */
+function isMossGroupTitle(title, base) {
+  if (typeof title !== 'string' || !title || typeof base !== 'string' || !base) return false;
+  if (title === base) return true;
+  return title.startsWith(`${base}-`) && /^\d+$/.test(title.slice(base.length + 1));
+}
+
+/**
+ * 校验窗口是否仍是 MOSS 专属窗口：
+ * 有标签、无固定标签，且每个标签都属于该基名的 MOSS 分组。
+ * 用户把个人标签拖进 MOSS 窗口后校验失败，下次会另建后台窗口，避免误激活用户标签。
+ */
+async function isDedicatedMossWindow(windowId, base) {
+  try {
+    const tabs = await chrome.tabs.query({ windowId });
+    if (tabs.length === 0 || tabs.some((tab) => tab.pinned === true)) return false;
+    const groups = await chrome.tabGroups.query({ windowId });
+    const groupIds = new Set(
+      groups.filter((group) => isMossGroupTitle(group.title, base)).map((group) => group.id),
+    );
+    if (groupIds.size === 0) return false;
+    return tabs.every(
+      (tab) => typeof tab.groupId === 'number' && tab.groupId >= 0 && groupIds.has(tab.groupId),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function persistMossWindows() {
+  try {
+    const list = Array.from((mossWindows ?? new Map()).entries()).map(([windowId, baseTitle]) => ({
+      windowId,
+      baseTitle,
+    }));
+    await chrome.storage.local.set({ [MOSS_WINDOWS_KEY]: list });
+  } catch {
+    // 存储不可用：仅保留内存态
+  }
+}
+
+/** 加载并校验登记表（Service Worker 重启后从存储恢复） */
+async function loadMossWindows() {
+  if (mossWindows) return mossWindows;
+  if (loadingMossWindows) return loadingMossWindows;
+  loadingMossWindows = (async () => {
+    let records = [];
+    try {
+      const stored = await chrome.storage.local.get(MOSS_WINDOWS_KEY);
+      records = Array.isArray(stored[MOSS_WINDOWS_KEY]) ? stored[MOSS_WINDOWS_KEY] : [];
+    } catch {
+      records = [];
+    }
+    const valid = new Map();
+    for (const record of records) {
+      if (!record || typeof record.windowId !== 'number' || typeof record.baseTitle !== 'string') continue;
+      if (await isDedicatedMossWindow(record.windowId, record.baseTitle)) {
+        valid.set(record.windowId, record.baseTitle);
+      }
+    }
+    mossWindows = valid;
+    if (valid.size !== records.length) void persistMossWindows();
+    return mossWindows;
+  })().finally(() => {
+    loadingMossWindows = null;
+  });
+  return loadingMossWindows;
+}
+
+async function rememberMossWindow(windowId, baseTitle) {
+  if (typeof windowId !== 'number' || typeof baseTitle !== 'string' || !baseTitle) return;
+  const owned = await loadMossWindows();
+  owned.set(windowId, baseTitle);
+  await persistMossWindows();
+}
+
+async function forgetMossWindow(windowId) {
+  const owned = await loadMossWindows();
+  if (!owned.delete(windowId)) return;
+  await persistMossWindows();
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  void forgetMossWindow(windowId);
+});
+
 void restoreAttachedTabs();
 
 async function restoreAttachedTabs() {
@@ -252,32 +347,116 @@ async function createTab(params) {
 }
 
 /**
- * 确保存在 MOSS 专属窗口：优先复用已有「MOSS」分组所在窗口；
- * 没有分组时新建后台窗口（focused:false），并把首个标签归入「MOSS」分组。
- * tabs.create 的 active 只影响窗口内活动标签，不影响窗口焦点。
+ * 确保存在 MOSS 专属窗口：只在登记过的 MOSS 窗口内复用分组/建页；
+ * 用户窗口里的同名分组绝不复用，避免把 AI 标签页建到用户窗口并抢活动标签。
+ * 建页一律 active:false：marker 加载完成前不切换标签，页面就绪后由后端显式激活。
  */
 async function ensureMossWindow(params) {
-  const url = typeof params.url === 'string' && params.url ? params.url : 'about:blank';
+  const markerUrl = typeof params.url === 'string' && params.url ? params.url : 'about:blank';
+  // 新窗口首个标签页必然 active：有目标网址时直接用它建窗，避免短暂显示 /blank#moss-...
+  const initialUrl =
+    typeof params.initialUrl === 'string' && /^https?:\/\//i.test(params.initialUrl)
+      ? params.initialUrl
+      : '';
   const title = typeof params.title === 'string' && params.title.trim() ? params.title.trim() : 'MOSS';
+  // 窗口归属按「分组基名」判定（MOSS / MOSS-N 都属于同一个 MOSS 窗口），不能用会话分组名本身
+  const baseTitle =
+    typeof params.baseTitle === 'string' && params.baseTitle.trim()
+      ? params.baseTitle.trim()
+      : title;
   const color = GROUP_COLORS.has(params.color) ? params.color : 'blue';
   const legacyTitles = Array.isArray(params.legacyTitles)
     ? params.legacyTitles.filter((value) => typeof value === 'string' && value.trim())
     : [];
-  const active = params.focus !== undefined ? params.focus !== false : params.active !== false;
+  const windowIdParam =
+    typeof params.windowId === 'number' && Number.isFinite(params.windowId)
+      ? params.windowId
+      : undefined;
+  const isolateWindow = params.isolateWindow !== false;
+
+  // 兼容模式：在当前窗口建页 + 分组；不登记为 MOSS 窗口，也不会被自动激活
+  if (!isolateWindow) {
+    try {
+      const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+      if (win && typeof win.id === 'number') {
+        const tab = await chrome.tabs.create({ url: markerUrl, active: false, windowId: win.id });
+        const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+        await chrome.tabGroups.update(groupId, { title, color });
+        return {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          groupId,
+          createdWindow: false,
+          createdWithUrl: false,
+          windowOwned: false,
+        };
+      }
+    } catch {
+      // 回退到新建后台窗口
+    }
+  }
+
+  // 只认登记表中仍存在的 MOSS 窗口；旧 windowId 不可信（可能已被用户窗口复用）
+  const owned = await loadMossWindows();
+  let normalWindows = [];
+  try {
+    normalWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  } catch {
+    normalWindows = [];
+  }
+  const existingWindowIds = new Set(
+    normalWindows.map((win) => win.id).filter((id) => typeof id === 'number'),
+  );
+  const staleWindowIds = Array.from(owned.keys()).filter((id) => !existingWindowIds.has(id));
+  for (const id of staleWindowIds) owned.delete(id);
+  if (staleWindowIds.length > 0) void persistMossWindows();
+  let ownedWindowIds = new Set(owned.keys());
+  // 升级/存储丢失后的兜底：扫描现存的「只含 MOSS 分组标签」窗口并接管，避免重复开窗
+  if (ownedWindowIds.size === 0) {
+    for (const win of normalWindows) {
+      if (typeof win.id !== 'number') continue;
+      if (await isDedicatedMossWindow(win.id, baseTitle)) {
+        owned.set(win.id, baseTitle);
+      }
+    }
+    if (owned.size > 0) {
+      await persistMossWindows();
+      ownedWindowIds = new Set(owned.keys());
+    }
+  }
+  const preferredWindowId =
+    typeof windowIdParam === 'number' && ownedWindowIds.has(windowIdParam)
+      ? windowIdParam
+      : undefined;
 
   const groups = await chrome.tabGroups.query({ title });
   for (const legacyTitle of legacyTitles) {
     if (legacyTitle === title) continue;
     const legacy = await chrome.tabGroups.query({ title: legacyTitle });
     for (const group of legacy) {
+      // 只迁移 MOSS 窗口里的旧分组，绝不改用户窗口的分组
+      if (!ownedWindowIds.has(group.windowId)) continue;
       await chrome.tabGroups.update(group.id, { title, color });
       groups.push({ ...group, title, color });
     }
   }
 
-  const existing = groups.find((group) => typeof group.windowId === 'number');
+  const existing =
+    groups.find(
+      (group) =>
+        typeof group.windowId === 'number' &&
+        ownedWindowIds.has(group.windowId) &&
+        (preferredWindowId === undefined || group.windowId === preferredWindowId),
+    ) ??
+    groups.find(
+      (group) => typeof group.windowId === 'number' && ownedWindowIds.has(group.windowId),
+    );
   if (existing) {
-    const tab = await chrome.tabs.create({ url, active, windowId: existing.windowId });
+    const tab = await chrome.tabs.create({
+      url: markerUrl,
+      active: false,
+      windowId: existing.windowId,
+    });
     await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
     if (existing.color !== color) {
       await chrome.tabGroups.update(existing.id, { color });
@@ -287,20 +466,57 @@ async function ensureMossWindow(params) {
       windowId: tab.windowId,
       groupId: existing.id,
       createdWindow: false,
+      createdWithUrl: false,
+      windowOwned: true,
     };
   }
 
-  // focused:false 是核心：新窗口开在后台，不激活、不置顶，不抢用户当前焦点
-  const win = await chrome.windows.create({ url, focused: false, type: 'normal' });
+  // 已有 MOSS 窗口但没有目标分组：在该窗口内建页 + 新建分组（不新建窗口）
+  const targetWindowId = preferredWindowId ?? Array.from(ownedWindowIds)[0];
+  if (targetWindowId !== undefined) {
+    const tab = await chrome.tabs.create({
+      url: markerUrl,
+      active: false,
+      windowId: targetWindowId,
+    });
+    const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+    await chrome.tabGroups.update(groupId, { title, color });
+    return {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      groupId,
+      createdWindow: false,
+      createdWithUrl: false,
+      windowOwned: true,
+    };
+  }
+
+  // 没有任何 MOSS 窗口：新开后台窗口（focused:false），登记后供后续复用
+  const createWindow = (url) => chrome.windows.create({ url, focused: false, type: 'normal' });
+  let createdWithUrl = Boolean(initialUrl);
+  let win;
+  try {
+    win = await createWindow(initialUrl || markerUrl);
+  } catch (err) {
+    if (!initialUrl) throw err;
+    // 目标网址建窗失败（非法 URL 等）：回退 marker，由后端导航重试
+    createdWithUrl = false;
+    win = await createWindow(markerUrl);
+  }
   const first = win.tabs && win.tabs[0];
   if (!first || typeof first.id !== 'number') throw new Error('新建窗口未返回标签页');
   const groupId = await chrome.tabs.group({ tabIds: [first.id] });
   await chrome.tabGroups.update(groupId, { title, color });
+  if (typeof win.id === 'number') {
+    await rememberMossWindow(win.id, baseTitle);
+  }
   return {
     tabId: first.id,
     windowId: win.id,
     groupId,
     createdWindow: true,
+    createdWithUrl,
+    windowOwned: true,
   };
 }
 
@@ -332,30 +548,62 @@ async function listTabs() {
   }));
 }
 
+/**
+ * 组内焦点：只有目标标签与当前活动标签属于同一个「本会话 MOSS 分组」时才切换。
+ * - 未分组 / 被用户拖到其它分组 → skipped
+ * - 当前活动标签不在同组（用户正在用其它分组或未分组标签）→ skipped
+ * - 永不调用 windows.update({focused:true})：不抬窗口、不抢用户焦点
+ */
 async function activateTab(tabId, params) {
   const tab = await chrome.tabs.get(tabId);
   if (!tab) throw new Error(`标签页不存在：${tabId}`);
-  // focusWindow=false（例行操作）：只把标签设为该窗口的活动标签，绝不把窗口抬到前台。
-  // 旧实现每次操作都 windows.update({focused:true})，用户切回其他窗口后下一次操作又置前，
-  // 表现就是整个浏览器窗口反复闪烁。
-  const focusWindow = params && params.focusWindow === true;
-  let windowFocused = false;
-  if (focusWindow && typeof tab.windowId === 'number') {
-    try {
-      const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
-      windowFocused = win.id === tab.windowId && win.focused === true;
-    } catch {
-      windowFocused = false;
-    }
+  const skipped = (reason) => ({
+    tabId,
+    windowId: tab.windowId,
+    focused: false,
+    activated: false,
+    noop: true,
+    skipped: true,
+    reason,
+  });
+  const groupTitle = params && typeof params.groupTitle === 'string' ? params.groupTitle.trim() : '';
+  if (typeof tab.groupId !== 'number' || tab.groupId < 0) {
+    return skipped('目标标签页未分组');
   }
-  if (tab.active === true && (!focusWindow || windowFocused)) {
-    return { tabId, windowId: tab.windowId, focused: windowFocused, noop: true };
+  if (!groupTitle) return skipped('目标标签页缺少所属分组信息');
+  let group;
+  try {
+    group = await chrome.tabGroups.get(tab.groupId);
+  } catch {
+    return skipped('无法读取目标标签页所在分组');
+  }
+  if (!group || group.title !== groupTitle) {
+    return skipped('目标标签页不在本会话的 MOSS 分组内');
+  }
+  if (tab.active === true) {
+    return { tabId, windowId: tab.windowId, focused: false, activated: false, noop: true };
+  }
+  let activeTab;
+  try {
+    [activeTab] = await chrome.tabs.query({ windowId: tab.windowId, active: true });
+  } catch {
+    activeTab = undefined;
+  }
+  if (!activeTab) return skipped('未找到窗口的活动标签页');
+  if (activeTab.id === tab.id) {
+    return { tabId, windowId: tab.windowId, focused: false, activated: false, noop: true };
+  }
+  if (activeTab.groupId !== tab.groupId) {
+    return skipped('当前活动标签不在同一分组，保持用户手动焦点');
   }
   const updated = await chrome.tabs.update(tabId, { active: true });
-  if (focusWindow && typeof updated.windowId === 'number') {
-    await chrome.windows.update(updated.windowId, { focused: true }).catch(() => {});
-  }
-  return { tabId, windowId: updated.windowId, focused: focusWindow, noop: false };
+  return {
+    tabId,
+    windowId: updated.windowId,
+    focused: false,
+    activated: true,
+    noop: false,
+  };
 }
 
 async function closeTab(tabId) {
@@ -578,6 +826,15 @@ function tabPayload(tab) {
 
 chrome.tabs.onCreated.addListener((tab) => {
   forwardEvent('tab.created', { tab: tabPayload(tab) });
+});
+
+// 手动切换标签不会触发 tabs.onUpdated：单独同步 active 状态，避免 MOSS 用过期焦点做判断
+chrome.tabs.onActivated.addListener((info) => {
+  if (!info || typeof info.tabId !== 'number') return;
+  chrome.tabs
+    .get(info.tabId)
+    .then((tab) => forwardEvent('tab.updated', { tab: tabPayload(tab) }))
+    .catch(() => undefined);
 });
 
 chrome.tabs.onRemoved.addListener((tabId, info) => {

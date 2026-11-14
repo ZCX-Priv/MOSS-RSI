@@ -503,6 +503,10 @@ export interface AppConfig {
     maxTokens: number;
     maxTurns: number;
     workingDirectory: string;
+    /** 同轮并发子代理上限（可选；后端缺省 4） */
+    maxConcurrentSubagents?: number;
+    /** 子代理最大嵌套层级（可选；后端缺省 2） */
+    maxSubagentDepth?: number;
     codeMode: CodeModeConfig;
   };
   tools: Record<string, { enabled: boolean; requireConfirmation?: boolean; timeout?: number }>;
@@ -2088,6 +2092,10 @@ export interface BrowserTabInfo {
   nativeTabId: number;
   windowId?: number;
   groupId: number | null;
+  /** 所属会话（会话独立标签组） */
+  sessionId?: string;
+  /** 会话标签组名（MOSS、MOSS-0…） */
+  groupTitle?: string;
   url: string;
   title: string;
   active: boolean;

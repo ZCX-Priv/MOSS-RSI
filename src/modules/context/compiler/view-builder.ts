@@ -44,6 +44,8 @@ export const ACTIVE_RULES_MSG_NAME = 'active-rules';
 export const MEMORY_L1_MSG_NAME = 'memory-l1';
 /** L2 记忆召回临时消息 name（ephemeral；仅本次请求视图） */
 export const MEMORY_RECALL_MSG_NAME = 'memory-recall';
+/** L1+L2 合并后的背景记忆消息 name（ephemeral；仅本次请求视图） */
+export const MEMORY_CONTEXT_MSG_NAME = 'memory-context';
 
 /** 单张图片大小上限（与主流 provider 限制对齐；超出跳过，避免单张巨图导致整轮请求失败） */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -233,6 +235,11 @@ export function buildRequestView(
       !m.compacted &&
       m.name !== MAX_TURNS_NOTICE_MSG_NAME &&
       m.name !== SYSTEM_ERROR_MSG_NAME &&
+      // 旧版本把记忆注入成持久 user 消息（且可能落在用户请求之后）。
+      // 现在记忆改为每轮 ephemeral 背景块；历史里的旧注入一律从发送视图剔除，
+      // 避免旧会话继续把记忆当成尾随用户指令（「收到/明白」复现）。
+      m.name !== MEMORY_L1_MSG_NAME &&
+      m.name !== MEMORY_RECALL_MSG_NAME &&
       // 丢弃「只有 thinking、没有正文/工具调用/图片」的中断 assistant 消息：
       // thinking 被裁掉后会变成空 assistant 消息，DeepSeek 思考模式会因此报 400。
       !(
@@ -414,7 +421,23 @@ export function buildRequestView(
 
   // ===== 4. 发送前自愈：tool_use/tool_result 配对完整性 =====
   const sanitized = sanitizeMessages(windowed);
-  const full = [...sanitized.messages, ...ephemeral];
+  // ephemeral 注入位置：最后一条「真实用户消息」之前。
+  // 不能追加到消息流末尾——那样记忆/提醒会成为模型看到的最后一条 user 指令，
+  // 模型会只回复「收到/明白」而不执行任务（长会话中的高频复现问题）。
+  // 工具循环中最后一条消息是 tool 结果，插入到用户请求之前同样不会破坏 tool 配对。
+  let insertAt = sanitized.messages.length;
+  for (let i = sanitized.messages.length - 1; i >= 0; i -= 1) {
+    const m = sanitized.messages[i];
+    if (m.role === 'user' && !m.name) {
+      insertAt = i;
+      break;
+    }
+  }
+  const full = [
+    ...sanitized.messages.slice(0, insertAt),
+    ...ephemeral,
+    ...sanitized.messages.slice(insertAt),
+  ];
 
   // ===== 5. 转 UnifiedMessage =====
   // 多模态图片在此实时读盘编码（base64 不落库，仅存在于本次请求视图）；
@@ -456,7 +479,13 @@ export function buildRequestView(
     if (m.name === ENV_CONTEXT_MSG_NAME) envTokens += t;
     else if (m.name === COMPACTION_SUMMARY_MSG_NAME) summaryTokens += t;
     else if (m.name === ACTIVE_RULES_MSG_NAME) rulesTokens += t;
-    else if (m.name === MEMORY_L1_MSG_NAME || m.name === MEMORY_RECALL_MSG_NAME) memoryTokens += t;
+    else if (
+      m.name === MEMORY_L1_MSG_NAME ||
+      m.name === MEMORY_RECALL_MSG_NAME ||
+      m.name === MEMORY_CONTEXT_MSG_NAME
+    ) {
+      memoryTokens += t;
+    }
     else historyTokens += t;
   }
 

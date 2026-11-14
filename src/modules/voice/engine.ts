@@ -27,8 +27,10 @@ import type {
   OfflineStream,
   OnlineRecognizer as OnlineRecognizerT,
   OnlineStream,
+  RecognizerResult,
   Vad as VadT,
 } from 'sherpa-onnx-node';
+import { normalizeAsrText, resolveLanguage } from './language';
 
 export type SherpaModule = typeof import('sherpa-onnx-node');
 
@@ -233,6 +235,7 @@ class SerialQueue {
 class StreamingSession implements VoiceSession {
   private stream: OnlineStream;
   private last = '';
+  private lastLanguage: string | undefined;
   private closed = false;
 
   constructor(private readonly recognizer: OnlineRecognizerT) {
@@ -264,15 +267,19 @@ class StreamingSession implements VoiceSession {
     try {
       if (!this.recognizer.isReady(this.stream)) return null;
       this.recognizer.decode(this.stream);
-      const text = (this.recognizer.getResult(this.stream).text ?? '').trim();
+      const result = this.recognizer.getResult(this.stream) as RecognizerResult;
+      const text = normalizeAsrText(result.text ?? '');
+      const language = resolveLanguage(result.lang, text, this.lastLanguage);
       if (this.recognizer.isEndpoint(this.stream)) {
         // 端点后直接换新流：避免 reset 失败时永久停在 endpoint 状态（后续句子不出字）
         this.rotateStream();
-        return text ? { text, isFinal: true } : null;
+        if (!text) return null;
+        if (language) this.lastLanguage = language;
+        return { text, isFinal: true, ...(language ? { language } : {}) };
       }
       if (text && text !== this.last) {
         this.last = text;
-        return { text, isFinal: false };
+        return { text, isFinal: false, ...(language ? { language } : {}) };
       }
       return null;
     } catch (err) {
@@ -288,9 +295,13 @@ class StreamingSession implements VoiceSession {
     try {
       this.stream.inputFinished();
       while (this.recognizer.isReady(this.stream)) this.recognizer.decode(this.stream);
-      const text = (this.recognizer.getResult(this.stream).text ?? '').trim();
+      const result = this.recognizer.getResult(this.stream) as RecognizerResult;
+      const text = normalizeAsrText(result.text ?? '');
+      const language = resolveLanguage(result.lang, text, this.lastLanguage);
       this.last = '';
-      return text ? { text, isFinal: true } : null;
+      if (!text) return null;
+      if (language) this.lastLanguage = language;
+      return { text, isFinal: true, ...(language ? { language } : {}) };
     } catch (err) {
       console.warn('[voice] streaming finish failed', err);
       this.last = '';
@@ -332,6 +343,8 @@ class OfflineSession implements VoiceSession {
   private results: VoiceResult[] = [];
   private lastPartialAt = 0;
   private lastPartialText = '';
+  /** 会话内最近一次稳定的识别语言（短句/噪声段复用以减少误判抖动） */
+  private lastLanguage: string | undefined;
   private closed = false;
 
   constructor(
@@ -347,9 +360,11 @@ class OfflineSession implements VoiceSession {
           {
             sileroVad: {
               model: opts.vadModel,
-              threshold: 0.5,
-              minSilenceDuration: 0.35,
-              minSpeechDuration: 0.2,
+              // 略降阈值提升小音量拾音；minSilenceDuration 放宽到 0.55s，
+              // 避免短停顿把一句话切碎（语音输入法通常 0.5~0.8s 断句）。
+              threshold: 0.45,
+              minSilenceDuration: 0.55,
+              minSpeechDuration: 0.15,
               windowSize: 512,
               maxSpeechDuration: MAX_SEGMENT_MS / 1000,
             },
@@ -455,15 +470,18 @@ class OfflineSession implements VoiceSession {
         try {
           const stream: OfflineStream = this.recognizer.createStream();
           stream.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
-          const res = await this.recognizer.decodeAsync(stream);
-          const text = (res.text ?? '').trim();
+          const res = (await this.recognizer.decodeAsync(stream)) as RecognizerResult;
+          // 文本后处理：去控制标签/非语音标记/重复标点；语言由模型 lang + 文字脚本共同判定。
+          const text = normalizeAsrText(res.text ?? '');
           if (!text) return;
+          const language = resolveLanguage(res.lang, text, this.lastLanguage);
           if (isFinal) {
-            this.results.push({ text, isFinal: true });
+            if (language) this.lastLanguage = language;
+            this.results.push({ text, isFinal: true, ...(language ? { language } : {}) });
             this.lastPartialText = '';
           } else if (text !== this.lastPartialText) {
             this.lastPartialText = text;
-            this.results.push({ text, isFinal: false });
+            this.results.push({ text, isFinal: false, ...(language ? { language } : {}) });
           }
         } catch {
           // 单段解码失败忽略；不阻断后续段
@@ -502,9 +520,15 @@ class OfflineSession implements VoiceSession {
     await this.pending.catch(() => undefined);
 
     // 汇总尚未取走的 final（已通过 poll 发出的不再重复）
-    const texts = this.results.filter((r) => r.isFinal).map((r) => r.text);
+    const finals = this.results.filter((r) => r.isFinal);
+    const texts = finals.map((r) => r.text);
     this.results = [];
-    if (texts.length > 0) return { text: texts.join(' '), isFinal: true };
+    if (texts.length > 0) {
+      const text = texts.join(' ');
+      const language =
+        resolveLanguage(undefined, text, this.lastLanguage) ?? this.lastLanguage;
+      return { text, isFinal: true, ...(language ? { language } : {}) };
+    }
     return null;
   }
 

@@ -118,13 +118,37 @@ export class VoiceServiceImpl implements VoiceService {
     });
   }
 
-  private voiceCfg(): { enabled: boolean; localModel: string; language: string } {
-    const cfg = this.deps.config.getAppConfig().voice;
-    return cfg ?? { enabled: false, localModel: '', language: 'zh' };
+  private voiceCfg(): {
+    enabled: boolean;
+    localModel: string;
+    language: string;
+    languageExplicit: boolean;
+  } {
+    const raw = this.deps.config.getAppConfig().voice ?? {
+      enabled: false,
+      localModel: '',
+      language: 'auto',
+      languageExplicit: false,
+    };
+    // 旧版本默认写入 language='zh' 且没有显式选择标记：按新默认自动迁移为 auto。
+    // 用户一旦通过 UI/API 显式选择语言，languageExplicit=true，之后不再迁移。
+    const explicit = raw.languageExplicit === true;
+    const language = !explicit && raw.language === 'zh' ? 'auto' : raw.language;
+    return {
+      enabled: raw.enabled,
+      localModel: raw.localModel,
+      language,
+      languageExplicit: explicit,
+    };
   }
 
   private async patchVoice(
-    patch: Partial<{ enabled: boolean; localModel: string; language: string }>,
+    patch: Partial<{
+      enabled: boolean;
+      localModel: string;
+      language: string;
+      languageExplicit: boolean;
+    }>,
   ): Promise<void> {
     await this.deps.config.updateAppConfig({ voice: { ...this.voiceCfg(), ...patch } });
   }
@@ -150,12 +174,19 @@ export class VoiceServiceImpl implements VoiceService {
   }
 
   /**
-   * 当前有效本地模型：优先「已配置且已安装」→ 任一已安装 → 目录默认项。
-   * 避免卸载默认模型后回退到一个并未安装的模型，导致语音整体不可用。
+   * 当前有效本地模型：优先「已配置且已安装」→ auto 模式优先多语种模型 → 任一已安装 → 目录默认项。
+   * 注意：默认 zipformer 推荐项保持不变；只有用户未显式选择模型且安装了多语种模型时才切换。
    */
   private activeModelId(): string {
     const cfg = this.voiceCfg();
     if (cfg.localModel && this.isInstalled(cfg.localModel)) return cfg.localModel;
+    if (cfg.language === 'auto') {
+      // 自动语言优先顺序：SenseVoice（中英日韩粤）→ Dolphin（40 语种）→ Whisper。
+      // 不把 Paraformer/zipformer 放进优先列表：它们不是全语种模型，避免改变默认选择。
+      for (const id of ['sensevoice-multi', 'dolphin-multi', 'whisper-base']) {
+        if (this.isInstalled(id)) return id;
+      }
+    }
     const installed = VOICE_MODEL_CATALOG.find((m) => this.isInstalled(m.id));
     return installed ? installed.id : defaultModelId();
   }
@@ -241,7 +272,8 @@ export class VoiceServiceImpl implements VoiceService {
 
   async setLanguage(language: string): Promise<VoiceStatus> {
     if (!SUPPORTED_LANGUAGES.has(language)) throw new Error(`不支持的语言：${language}`);
-    await this.patchVoice({ language });
+    // 显式选择后不再参与「旧配置 zh → auto」迁移
+    await this.patchVoice({ language, languageExplicit: true });
     this.schedulePrewarm();
     return this.getStatus();
   }

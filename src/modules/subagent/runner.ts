@@ -5,7 +5,7 @@
 // 子代理事件广播（subagent:event）、多智能体总线注册与 async 结果回执。
 // 生命周期：父 run 正常完成不终止 async（后台跑完并回执）；只有 abort/删除/手动终止才级联取消。
 
-import type { EventBus, Logger, ServiceRegistry } from '../../core/types';
+import type { ConfigService, EventBus, Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { AgentEngine, AgentEvent } from '../contracts';
 import type { PermissionMode } from '../safety/types';
@@ -16,8 +16,8 @@ import type { AgentRegistry } from './types';
 /** subagent 隐藏分组固定 id（dir=subagent，平坦存放每次会话） */
 const SUBAGENT_GROUP_ID = 'subagent';
 
-/** 子代理最大嵌套深度（主=0 → 子=1 → 孙=2；再深直接拒绝，防止递归派发拖垮进程） */
-const MAX_SUBAGENT_DEPTH = 2;
+/** 子代理默认最大嵌套深度（配置缺失时的兜底；用户可在设置中调整） */
+const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 
 /** 子代理运行输入 */
 export interface SubagentRunInput {
@@ -32,6 +32,8 @@ export interface SubagentRunInput {
   toolAllowlist?: string[];
   /** 本次运行的最大轮数覆盖（0=不限制；不传=模板/全局配置） */
   maxTurns?: number;
+  /** 父会话最近一条用户请求（仅用于帮助子代理理解目标，不扩大任务范围） */
+  parentGoal?: string;
   /** 父会话中触发本次子代理的工具调用 id（前端卡片据此精确关联运行过程） */
   parentToolCallId?: string;
   /** 父会话 id（用于继承权限模式、计算嵌套深度、注册总线成员） */
@@ -48,6 +50,8 @@ export interface SubagentRunInput {
 export interface SubagentRunOutput {
   sessionId: string;
   taskId: string;
+  /** 模板显示名（自定义 Agent 的名称；解析失败回退 id） */
+  name: string;
   finishReason: string;
   result: string;
 }
@@ -58,6 +62,8 @@ export interface SubagentStartOutput {
   sessionId: string;
   taskId: string;
   template: string;
+  /** 模板显示名（前端卡片直接展示，避免运行时新建的自定义 Agent 显示 id） */
+  name: string;
   status: 'running';
 }
 
@@ -121,6 +127,7 @@ export class SubagentRunner {
       sessionId: prepared.taskId,
       taskId: prepared.taskId,
       template: input.template,
+      name: this.templateName(input.template),
       status: 'running',
     };
     void this.execute(input, prepared, { forwardParentSignal: true }).catch((err) => {
@@ -201,18 +208,33 @@ export class SubagentRunner {
     return this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
   }
 
+  /** 实时读取子代理最大嵌套层级（设置热更新立即生效） */
+  private maxSubagentDepth(): number {
+    try {
+      const config = this.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
+      const value = config?.getAppConfig().agent.maxSubagentDepth;
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+        return Math.min(5, Math.floor(value));
+      }
+    } catch {
+      // 配置不可用：使用默认值
+    }
+    return DEFAULT_MAX_SUBAGENT_DEPTH;
+  }
+
   /** 校验 + 创建隐藏任务 + 深度/权限/中断登记 */
   private prepare(input: SubagentRunInput): PreparedRun {
     if (!input.template?.trim()) throw new Error('template required');
     if (!input.task?.trim()) throw new Error('task required');
 
-    // 嵌套深度保护：主会话 0 → 子代理 1 → 孙 2；再深拒绝。
+    // 嵌套深度保护：主会话 0 → 子代理 1 → 孙 2；上限由设置实时读取。
+    const maxDepth = this.maxSubagentDepth();
     const parentDepth = input.parentSessionId
       ? this.sessionDepth.get(input.parentSessionId) ?? 0
       : 0;
-    if (parentDepth >= MAX_SUBAGENT_DEPTH) {
+    if (parentDepth >= maxDepth) {
       throw new Error(
-        `子代理嵌套层级已达上限（${MAX_SUBAGENT_DEPTH} 层）：拒绝在 depth=${parentDepth} 的会话上继续派发`,
+        `子代理嵌套层级已达上限（${maxDepth} 层）：拒绝在 depth=${parentDepth} 的会话上继续派发。可在「设置 → 智能体」中调整最大嵌套层级。`,
       );
     }
 
@@ -266,10 +288,14 @@ export class SubagentRunner {
     this.registerBusMember(input, prepared);
 
     try {
+      // 父任务目标只用于理解上下文，明确标注「不是本次任务范围」，避免子代理扩大范围。
+      const userMessage = input.parentGoal?.trim()
+        ? `父任务目标（仅用于理解上下文，不是本次任务范围）：\n${input.parentGoal.trim()}\n\n任务：\n${input.task}`
+        : input.task;
       const result = await this.engine.run({
         sessionId: taskId,
         agentId: input.template,
-        userMessage: input.task,
+        userMessage,
         permissionMode,
         cwd: input.cwd,
         ...(input.toolAllowlist ? { toolAllowlist: input.toolAllowlist } : {}),
@@ -295,6 +321,7 @@ export class SubagentRunner {
       const output: SubagentRunOutput = {
         sessionId: taskId,
         taskId,
+        name: this.templateName(input.template),
         finishReason: result.finishReason,
         result: result.finalText,
       };

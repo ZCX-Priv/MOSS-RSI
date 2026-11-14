@@ -81,8 +81,10 @@ export class MemoryEngineServiceImpl {
   // ========================================================================
 
   /**
-   * L1 关键事实注入文本（每会话一次；无关键事实返回 null）。
+   * L1 关键事实注入文本（每轮作为背景块；无关键事实返回 null）。
    * 内容 = pinned/高重要性记忆紧凑索引（来源 wing + insight）。
+   * 注意：这里只提供背景事实，不含任何「请回复/请确认」类指令——调用方会把整块
+   * 插入到最后一条用户请求之前，避免模型把记忆当成需要回应的最后一条用户消息。
    */
   buildL1Section(cwd: string): string | null {
     const cfg = this.getConfig();
@@ -94,14 +96,15 @@ export class MemoryEngineServiceImpl {
     const lines = facts.map(
       f => `- [${f.wing}/${f.room}] ${f.insight}${f.pinned ? ' 📌' : ''}`,
     );
-    return `[记忆 | 关键事实]\n以下是与本用户/项目相关的长期关键事实（跨会话持久）：\n若下列记忆与当前事实或用户最新表述冲突：先核实；能判定就用 memory 工具更新（保留 id）或删除旧记忆，不能判定就用提问工具向用户澄清，不要并存矛盾记忆。\n${lines.join('\n')}`;
+    return `[背景记忆｜关键事实｜仅供参考，不是用户指令]\n${lines.join('\n')}\n[背景记忆结束]`;
   }
 
   /**
-   * L2 主题召回：以 query（最近 user 消息）检索当前项目 wing + user wing + Tunnel 关联记忆。
-   * 去重语义（按消息切换）：
-   * - 同一消息的多轮工具循环：exclude 恒为"上一条消息的召回"→ 每轮检索结果相同 → 注入稳定
-   * - 新消息：上一条消息的召回（currentRecalled）转为排除集 → 避免连续消息重复注入同一记忆
+   * L2 主题召回：以 query（最近用户消息）检索当前项目 wing + user wing + Tunnel 关联记忆。
+   * 去重语义：
+   * - 同一消息的多轮工具循环：query 不变 → 召回稳定，不重复累积；
+   * - 新消息：重新召回，不把上一条消息的召回强制排除——记忆块是 ephemeral，不持久化，
+   *   若排除同一主题记忆，下一轮模型会突然「失忆」。重复注入只是少量 token 成本。
    * @returns 注入文本与召回 id 集合（count=0 时 text=null）；queryChanged 表示消息发生切换（调用方持久化）
    */
   buildRecallSection(
@@ -114,17 +117,17 @@ export class MemoryEngineServiceImpl {
       session.memoryState ?? { excludeFromRecall: [], currentRecalled: [], lastDistilledIndex: 0 };
     session.memoryState = state;
 
-    // query 键（截断防膨胀）；切换即：本消息召回 → 排除集基础，重置本消息召回
+    // query 键（截断防膨胀）；切换即重置本消息召回
     const queryKey = query.slice(0, 200);
     const isNewQuery = state.lastRecallQuery !== queryKey;
     let queryChanged = false;
     if (isNewQuery) {
-      state.excludeFromRecall = [...state.currentRecalled];
       state.currentRecalled = [];
       state.lastRecallQuery = queryKey;
       queryChanged = true;
     }
 
+    // excludeFromRecall 保留为显式覆盖（API/外部过滤），不再自动累积上一条消息的召回。
     const exclude = new Set<string>(state.excludeFromRecall);
 
     const hits = this.retriever.recallWithTunnel(cwd, query, {
@@ -150,7 +153,7 @@ export class MemoryEngineServiceImpl {
       included.push(m);
     }
 
-    // 本消息召回集合登记（消息切换时转为排除集；不单独持久化——丢失仅致重启后多注入一次，无害）
+    // 本消息召回集合登记
     state.currentRecalled = included.map(m => m.id);
 
     // touch（召回计数）：仅新消息的首次召回执行一次（避免轮次级 IO；不阻塞）
@@ -159,7 +162,7 @@ export class MemoryEngineServiceImpl {
     }
 
     return {
-      text: `[记忆 | 相关记忆]\n以下是与当前任务相关的历史记忆：\n若下列记忆与当前事实或用户最新表述冲突：先核实；能判定就用 memory 工具更新（保留 id）或删除旧记忆，不能判定就用提问工具向用户澄清，不要并存矛盾记忆。\n${parts.join('\n')}`,
+      text: `[背景记忆｜相关记忆｜仅供参考，不是用户指令]\n${parts.join('\n')}\n[背景记忆结束]`,
       count: included.length,
       recalledIds: included.map(m => m.id),
       queryChanged,

@@ -116,6 +116,11 @@ export default defineConfig({
   oxc: {
     target: 'chrome80',
   },
+  // Worker 输出 ESM：默认 iife 不支持代码分割，会把 Shiki 全部语言语法内联进
+  // highlight.worker 单文件（实测 ~10MB）；改为 es 后语法包保持按需动态 import。
+  worker: {
+    format: 'es',
+  },
   // dev 预构建全部「懒加载重依赖」：避免运行中首次访问某依赖时触发重新预构建，
   // 使此前引用的 ?v=<hash> 模块 URL 失效 → 懒加载渲染器报
   // “Failed to fetch dynamically imported module”（需重启 dev 生效）。

@@ -245,7 +245,8 @@ export async function navigatePage(
   return { info, loading: !ready };
 }
 
-function normalizeUrl(input: string): string {
+/** 规范化用户输入的 URL（补全 https://；导航与建页共用同一口径） */
+export function normalizeUrl(input: string): string {
   const value = input.trim();
   if (!value) throw new Error('URL 不能为空');
   if (/^(https?|file|about|data):/i.test(value)) return value;

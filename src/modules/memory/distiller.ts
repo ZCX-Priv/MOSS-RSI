@@ -13,11 +13,21 @@ import { tokenOverlap, tokenize } from './tokenizer';
 import type { DistilledMemory } from './types';
 import { MEMORY_HALLS } from './types';
 
+/** 纯确认类回复：不参与蒸馏，避免「收到/明白」被写成记忆后自我污染 */
+const TRIVIAL_ACK_RE = /^(?:收到|明白|好的|了解|已收到|ok|got it)[。.!！]?$/i;
+
+/** 是否为无信息量的确认/寒暄（长度上限防误伤正文） */
+function isTrivialAcknowledgement(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length > 0 && trimmed.length <= 32 && TRIVIAL_ACK_RE.test(trimmed);
+}
+
 /** 可蒸馏消息筛选：user/assistant 且非锚定/非工具消息 */
 function distillableMessages(messages: readonly ContextMessage[], fromIndex: number): ContextMessage[] {
   return messages.slice(fromIndex).filter(m => {
     if (m.deletedAt || m.compacted) return false;
     if (m.name) return false; // 锚定消息（env-context/day-rollover/active-rules/memory-l1 等）
+    if (m.role === 'assistant' && isTrivialAcknowledgement(m.content)) return false;
     return m.role === 'user' || m.role === 'assistant';
   });
 }
@@ -40,6 +50,7 @@ function parseDistillOutput(text: string): DistilledMemory[] {
         rec.room === '' ||
         typeof rec.insight !== 'string' ||
         rec.insight === '' ||
+        isTrivialAcknowledgement(rec.insight) ||
         !MEMORY_HALLS.includes(rec.hall as DistilledMemory['hall'])
       ) {
         continue;

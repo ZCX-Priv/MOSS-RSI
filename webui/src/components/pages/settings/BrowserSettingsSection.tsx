@@ -8,13 +8,19 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, Outlet, Navigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Earth, Loader2, PlugZap, Puzzle } from 'lucide-react';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { api } from '@/api/http';
 import { usePlatform } from '@/hooks/usePlatform';
 import type { BrowserMode } from '@/types/api';
 import { useBrowserToolConfig } from './useBrowserStatus';
 
-const MODE_TABS: Array<{ id: BrowserMode; Icon: typeof Earth }> = [
+const BROWSER_MODES: Array<{ id: BrowserMode; Icon: typeof Earth }> = [
   { id: 'builtin', Icon: Earth },
   { id: 'extension', Icon: Puzzle },
   { id: 'cdp', Icon: PlugZap },
@@ -93,20 +99,36 @@ export function BrowserSettingsSection() {
         </div>
       ) : (
         <>
-          <Tabs value={tab} onValueChange={(value) => switchMode(value as BrowserMode)}>
-            <div className="px-6 py-3">
-              <TabsList>
-                {MODE_TABS.map(({ id, Icon }) => (
-                  <TabsTrigger key={id} value={id} className="gap-1.5">
-                    <Icon className="size-3.5" />
-                    {t(`settings.browser.modeTabs.${id}`)}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
+          {/* 普通设置条目 + 下拉框（替代胶囊导航；切换仍写入 tools.browser.mode + 子路由） */}
+          <div className="flex flex-col gap-2 px-6 py-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-sm font-medium text-foreground">
+                  {t('settings.browser.modeRowLabel')}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {t(`settings.browser.modeTabs.${tab}Desc`)}
+                </span>
+              </div>
+              <Select value={tab} onValueChange={(value) => switchMode(value as BrowserMode)}>
+                <SelectTrigger className="w-56 shrink-0" aria-label={t('settings.browser.modeRowLabel')}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {BROWSER_MODES.map(({ id, Icon }) => (
+                    <SelectItem key={id} value={id}>
+                      <span className="flex items-center gap-2">
+                        <Icon className="size-3.5" />
+                        {t(`settings.browser.modeTabs.${id}`)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-          </Tabs>
+          </div>
 
-          {/* 子页切换入场动画（key=pathname：Tab 切换时重播） */}
+          {/* 子页切换入场动画（key=pathname：模式切换时重播） */}
           <div
             key={pathname}
             className="anim-route animate-in fade-in slide-in-from-bottom-1 duration-200 flex-1 overflow-auto"

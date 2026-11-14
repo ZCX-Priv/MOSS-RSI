@@ -5,7 +5,7 @@
 // 参数结构（template + task）作为兜底。长耗时工具的结果消息会落在会话很后面，
 // 必须在整条消息列表上按 toolCallId 匹配，而不是只看邻近消息。
 
-import type { TaskMessage, ToolCall } from '../../types/api';
+import type { TaskMessage, ToolCall, ToolResult } from '../../types/api';
 
 /** agent 工具参数（宽松解析，未知字段忽略） */
 export interface AgentCallArgs {
@@ -46,6 +46,25 @@ export interface ToolResultEntry {
   isError: boolean;
   /** 分页历史轻量投影：展开卡片时需按 toolCallId 拉取完整结果 */
   lazy?: boolean;
+  /** agent 工具结果里的模板显示名（运行时新建的自定义 Agent 也能显示名称） */
+  agentName?: string;
+}
+
+/** 单条工具结果 → 索引项（统一提取文本/错误/懒加载/agent 名称） */
+export function toToolResultEntry(result: ToolResult): ToolResultEntry {
+  const text = result.content
+    .filter((c) => c.type === 'text')
+    .map((c) => (c.type === 'text' ? c.text : ''))
+    .join('\n');
+  const meta = result.metadata as { agentRun?: { name?: unknown } } | undefined;
+  const rawName = meta?.agentRun?.name;
+  const agentName = typeof rawName === 'string' ? rawName.trim() : '';
+  return {
+    text,
+    isError: result.isError === true,
+    ...(result.metadata?.__mossLazy ? { lazy: true } : {}),
+    ...(agentName ? { agentName } : {}),
+  };
 }
 
 /**
@@ -61,15 +80,7 @@ export function buildToolResultIndex(
     if (!results || results.length === 0) continue;
     for (const entry of results) {
       if (!entry.toolCallId || index.has(entry.toolCallId)) continue;
-      const text = entry.result.content
-        .filter((c) => c.type === 'text')
-        .map((c) => (c.type === 'text' ? c.text : ''))
-        .join('\n');
-      index.set(entry.toolCallId, {
-        text,
-        isError: entry.result.isError === true,
-        ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
-      });
+      index.set(entry.toolCallId, toToolResultEntry(entry.result));
     }
   }
   return index;

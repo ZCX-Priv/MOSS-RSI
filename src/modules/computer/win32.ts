@@ -40,7 +40,7 @@ export interface NativeWindowInfo {
 
 type BunFfi = typeof import('bun:ffi');
 
-/** user32 的最小绑定集合（只读 API） */
+/** user32 的最小绑定集合（只读 API + 用户输入/光标检测） */
 interface User32Bindings {
   EnumWindows: (callback: unknown, lParam: bigint) => boolean;
   GetForegroundWindow: () => bigint;
@@ -54,10 +54,22 @@ interface User32Bindings {
   GetWindowLongW: (hwnd: bigint, index: number) => number;
   GetWindow: (hwnd: bigint, cmd: number) => bigint;
   GetLastActivePopup: (hwnd: bigint) => bigint;
+  /** 光标位置（POINT：LONG x, LONG y） */
+  GetCursorPos: (pointOut: unknown) => boolean;
+  /** 设置光标位置（仅在用户优先守卫通过后调用） */
+  SetCursorPos: (x: number, y: number) => boolean;
+  /** 最近一次用户输入（LASTINPUTINFO：UINT cbSize, DWORD dwTime） */
+  GetLastInputInfo: (infoOut: unknown) => boolean;
+}
+
+/** kernel32 最小绑定（GetTickCount 与 LASTINPUTINFO.dwTime 同一时间基准） */
+interface Kernel32Bindings {
+  GetTickCount: () => number;
 }
 
 let ffi: BunFfi | null = null;
 let user32: User32Bindings | null = null;
+let kernel32: Kernel32Bindings | null = null;
 let initPromise: Promise<boolean> | null = null;
 
 const GW_OWNER = 4;
@@ -126,13 +138,21 @@ export async function initNativeWindows(): Promise<boolean> {
         GetWindowLongW: { args: [mod.FFIType.i64, mod.FFIType.i32], returns: mod.FFIType.i32 },
         GetWindow: { args: [mod.FFIType.i64, mod.FFIType.u32], returns: mod.FFIType.i64 },
         GetLastActivePopup: { args: [mod.FFIType.i64], returns: mod.FFIType.i64 },
+        GetCursorPos: { args: [mod.FFIType.ptr], returns: mod.FFIType.bool },
+        SetCursorPos: { args: [mod.FFIType.i32, mod.FFIType.i32], returns: mod.FFIType.bool },
+        GetLastInputInfo: { args: [mod.FFIType.ptr], returns: mod.FFIType.bool },
+      });
+      const k32 = mod.dlopen('kernel32.dll', {
+        GetTickCount: { args: [], returns: mod.FFIType.u32 },
       });
       ffi = mod;
       user32 = symbols as unknown as User32Bindings;
+      kernel32 = k32.symbols as unknown as Kernel32Bindings;
       return true;
     } catch {
       ffi = null;
       user32 = null;
+      kernel32 = null;
       return false;
     }
   })();
@@ -323,6 +343,57 @@ export function getNativeLastActivePopup(hwnd: number): NativeWindowInfo | null 
       0,
       api.GetForegroundWindow(),
     );
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
+// 用户输入 / 光标（用户优先守卫）
+// ============================================================================
+
+/** 读取当前光标位置（屏幕坐标；不可用返回 null） */
+export function getCursorPosition(): { x: number; y: number } | null {
+  const api = user32;
+  const ffiApi = ffi;
+  if (!api || !ffiApi) return null;
+  try {
+    const buf = Buffer.alloc(8);
+    if (!api.GetCursorPos(ffiApi.ptr(buf))) return null;
+    return { x: buf.readInt32LE(0), y: buf.readInt32LE(4) };
+  } catch {
+    return null;
+  }
+}
+
+/** 设置光标位置（仅在确认用户空闲后调用） */
+export function setCursorPosition(x: number, y: number): boolean {
+  const api = user32;
+  if (!api) return false;
+  try {
+    return api.SetCursorPos(Math.round(x), Math.round(y));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 距最近一次物理鼠标/键盘输入的毫秒数（GetLastInputInfo + GetTickCount）。
+ * 不可用返回 null；调用方据此关闭用户优先守卫（不阻断 computer 基本能力）。
+ */
+export function getUserIdleMs(): number | null {
+  const api = user32;
+  const k32 = kernel32;
+  const ffiApi = ffi;
+  if (!api || !k32 || !ffiApi) return null;
+  try {
+    // LASTINPUTINFO { UINT cbSize; DWORD dwTime; } = 8 字节
+    const buf = Buffer.alloc(8);
+    buf.writeUInt32LE(8, 0);
+    if (!api.GetLastInputInfo(ffiApi.ptr(buf))) return null;
+    const last = buf.readUInt32LE(4);
+    const now = k32.GetTickCount() >>> 0;
+    return (now - (last >>> 0)) >>> 0;
   } catch {
     return null;
   }

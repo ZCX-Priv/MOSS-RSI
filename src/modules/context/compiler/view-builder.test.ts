@@ -25,7 +25,7 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     { role: 'tool', toolCallId: 'tc1', name: 'read', content: '文件内容...' },
   ];
 
-  test('ephemeral 消息追加在消息流末尾（不进 session）', () => {
+  test('ephemeral 消息插入到最后一条用户请求之前（不成为尾随指令）', () => {
     const session = mkSession(baseMessages);
     const ephemeral: ContextMessage[] = [
       { role: 'user', name: MEMORY_RECALL_MSG_NAME, content: '[记忆 | 相关记忆]\n- xxx' },
@@ -33,12 +33,33 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     const view = buildRequestView(session, 'SYSTEM', {
       ephemeralMessages: ephemeral,
     });
-    // 最后一条对话消息是 ephemeral
-    const last = view.messages[view.messages.length - 1];
-    expect(last.name).toBe(MEMORY_RECALL_MSG_NAME);
-    expect(last.content).toContain('相关记忆');
+    const userIndex = view.messages.findIndex(
+      (m) => m.role === 'user' && m.content.includes('如何优化缓存'),
+    );
+    const memIndex = view.messages.findIndex((m) => m.name === MEMORY_RECALL_MSG_NAME);
+    expect(userIndex).toBeGreaterThan(-1);
+    expect(memIndex).toBeGreaterThan(-1);
+    // 记忆块在用户请求之前，不会成为模型看到的最后一条用户指令
+    expect(memIndex).toBeLessThan(userIndex);
+    // 工具循环场景：最后一条是 tool 结果，模型继续执行而不是回确认
+    expect(view.messages[view.messages.length - 1]?.role).toBe('tool');
     // session 未被修改
     expect(session.messages).toHaveLength(4);
+  });
+
+  test('ephemeral 不改变最后一条用户消息的身份', () => {
+    const session = mkSession([
+      { role: 'user', name: 'env-context', content: '[环境上下文]' },
+      { role: 'user', content: '请只回答：已执行' },
+    ]);
+    const view = buildRequestView(session, 'SYSTEM', {
+      ephemeralMessages: [
+        { role: 'user', name: MEMORY_RECALL_MSG_NAME, content: '[记忆 | 相关记忆]\n- xxx' },
+      ],
+    });
+    const last = view.messages[view.messages.length - 1];
+    expect(last.role).toBe('user');
+    expect(last.content).toBe('请只回答：已执行');
   });
 
   test('breakdown：rules/memory 段独立统计', () => {

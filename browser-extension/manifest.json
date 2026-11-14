@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MOSS Browser Bridge",
-  "version": "1.2.2",
-  "description": "允许本机 MOSS 通过 CDP 操作本浏览器；AI 标签页会自动归入「MOSS」分组。",
+  "version": "1.3.0",
+  "description": "允许本机 MOSS 通过 CDP 操作本浏览器；AI 标签页按会话自动归入独立「MOSS / MOSS-N」分组，互不抢焦点。",
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "tabs", "tabGroups", "storage", "offscreen", "alarms"],
   "host_permissions": ["<all_urls>"],

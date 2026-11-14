@@ -208,6 +208,7 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
       status: indexed ? 'done' : tc.status,
       ...(indexed ? { resultText: indexed.text, isError: indexed.isError } : {}),
       ...(indexed?.lazy ? { lazy: true } : {}),
+      ...(indexed?.agentName ? { name: indexed.agentName } : {}),
     };
   });
   return (

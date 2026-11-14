@@ -212,6 +212,17 @@ export interface AgentEngine {
   /** 会话级权限模式（子代理继承父会话模式 / 刷新恢复徽章用） */
   getPermissionMode?(sessionId: string): PermissionMode | undefined;
 
+  /** 读取会话上下文（子代理派发时提取父任务目标；未知会话返回 null） */
+  getSessionForContext?(sessionId: string): {
+    messages: Array<{
+      role: string;
+      content: string;
+      name?: string;
+      deletedAt?: string;
+      compacted?: boolean;
+    }>;
+  } | null;
+
   /** 切换会话权限模式（set 工具 kind=mode / WS permission.set 调用；需用户确认的提权由 safety 管线拦截） */
   setSessionPermissionMode?(sessionId: string, mode: PermissionMode): boolean;
 
@@ -341,6 +352,9 @@ export interface HistorySearchResult {
 export interface AgentProfileLike {
   id: string;
   name: string;
+  description?: string;
+  /** 是否内置模板（内置模板的工具白名单不可被 UI 修改） */
+  builtIn?: boolean;
   systemPrompt?: string;
   model?: string;
   /** 工具白名单；空/缺省 = 全部工具 */
@@ -352,6 +366,14 @@ export interface AgentProfileLike {
 /** Agent 注册表最小查询契约 */
 export interface AgentRegistryLike {
   get(id: string): AgentProfileLike | null;
+  /** 列出全部 Agent（内置模板 + 自定义）；未实现时调用方降级为仅按 id 查询 */
+  list?(): Array<{
+    id: string;
+    name: string;
+    description?: string;
+    builtIn?: boolean;
+    default?: boolean;
+  }>;
 }
 
 export interface AgentRunInput {

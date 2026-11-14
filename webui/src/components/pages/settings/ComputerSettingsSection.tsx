@@ -32,6 +32,8 @@ const COMPUTER_DEFAULTS = {
   maxImageDimension: 1280,
   maxTreeElements: 250,
   allowForeground: true,
+  respectUserInput: true,
+  restoreCursor: true,
 };
 
 function connectionVariant(
@@ -43,7 +45,12 @@ function connectionVariant(
 }
 
 type NumberKey = 'timeout' | 'maxImageDimension' | 'maxTreeElements';
-type BooleanKey = 'enabled' | 'requireConfirmation' | 'allowForeground';
+type BooleanKey =
+  | 'enabled'
+  | 'requireConfirmation'
+  | 'allowForeground'
+  | 'respectUserInput'
+  | 'restoreCursor';
 
 function readNumber(
   values: Record<string, unknown>,
@@ -171,6 +178,12 @@ export function ComputerSettingsSection() {
     'allowForeground',
     COMPUTER_DEFAULTS.allowForeground,
   );
+  const respectUserInput = readBoolean(
+    values,
+    'respectUserInput',
+    COMPUTER_DEFAULTS.respectUserInput,
+  );
+  const restoreCursor = readBoolean(values, 'restoreCursor', COMPUTER_DEFAULTS.restoreCursor);
   const timeout = readNumber(values, 'timeout', COMPUTER_DEFAULTS.timeout);
   const maxImageDimension = readNumber(
     values,
@@ -450,6 +463,32 @@ export function ComputerSettingsSection() {
                 checked={allowForeground}
                 onCheckedChange={(checked) => saveConfig({ allowForeground: checked })}
                 aria-label={t('settings.computer.allowForeground')}
+              />
+            </Row>
+            <Row>
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-sm text-foreground">{t('settings.computer.respectUserInput')}</span>
+                <span className="text-xs text-muted-foreground">
+                  {t('settings.computer.respectUserInputDesc')}
+                </span>
+              </div>
+              <Switch
+                checked={respectUserInput}
+                onCheckedChange={(checked) => saveConfig({ respectUserInput: checked })}
+                aria-label={t('settings.computer.respectUserInput')}
+              />
+            </Row>
+            <Row>
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-sm text-foreground">{t('settings.computer.restoreCursor')}</span>
+                <span className="text-xs text-muted-foreground">
+                  {t('settings.computer.restoreCursorDesc')}
+                </span>
+              </div>
+              <Switch
+                checked={restoreCursor}
+                onCheckedChange={(checked) => saveConfig({ restoreCursor: checked })}
+                aria-label={t('settings.computer.restoreCursor')}
               />
             </Row>
             <Row>

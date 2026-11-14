@@ -5,6 +5,11 @@ interface MessageErrorBoundaryProps {
   children: ReactNode;
   /** 出错时的兜底文案（缺省按 <html lang> 双语直出，避免依赖 i18n） */
   label?: string;
+  /**
+   * 重置键：变化时清除错误态并重新渲染子内容。
+   * 流式消息每次增长都应传入（如 id+content.length），否则一次瞬时异常会让该条消息永久显示错误卡。
+   */
+  resetKey?: string;
 }
 
 interface MessageErrorBoundaryState {
@@ -25,6 +30,13 @@ export class MessageErrorBoundary extends Component<MessageErrorBoundaryProps, M
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('Message render error caught by MessageErrorBoundary:', error, info.componentStack);
+  }
+
+  /** resetKey 变化（消息继续增长 / 内容更新）→ 清除错误态，重新尝试渲染 */
+  componentDidUpdate(prevProps: MessageErrorBoundaryProps): void {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error !== null) {
+      this.setState({ error: null });
+    }
   }
 
   render(): ReactNode {

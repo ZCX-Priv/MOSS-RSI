@@ -183,7 +183,16 @@ export class VoiceSessionHost {
           for (const text of this.drainFinalResults(session)) {
             send({ type: 'voice.final', payload: { text, gen } });
           }
-          if (final) send({ type: 'voice.final', payload: { text: final.text, gen } });
+          if (final) {
+            send({
+              type: 'voice.final',
+              payload: {
+                text: final.text,
+                gen,
+                ...(final.language ? { language: final.language } : {}),
+              },
+            });
+          }
         } catch {
           // 忽略
         }
@@ -299,7 +308,16 @@ export class VoiceSessionHost {
         peak: Number(entry.peak.toFixed(4)),
         hasText: entry.hasText,
       });
-      if (final) entry.send({ type: 'voice.final', payload: { text: final.text, gen: entry.gen } });
+      if (final) {
+        entry.send({
+          type: 'voice.final',
+          payload: {
+            text: final.text,
+            gen: entry.gen,
+            ...(final.language ? { language: final.language } : {}),
+          },
+        });
+      }
     } catch (err) {
       this.logger.warn('voice session finish failed', {
         error: err instanceof Error ? err.message : String(err),

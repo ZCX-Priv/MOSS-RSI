@@ -29,8 +29,6 @@ export interface BrowserToolConfig {
   autoDownloadChromeForTesting: boolean;
   autoInstallExtensions: boolean;
   allowEvaluate: boolean;
-  /** 操作前自动聚焦目标窗口（已在前台时 no-op；默认 true） */
-  autoFocus: boolean;
 }
 
 /** 桥接 WebSocket 服务状态 */
@@ -99,6 +97,10 @@ export interface BrowserTabInfo {
   nativeTabId: number;
   windowId?: number;
   groupId: number | null;
+  /** 所属会话（会话独立标签组/当前标签；缺省=共享） */
+  sessionId?: string;
+  /** 该会话的标签组名（MOSS、MOSS-0…） */
+  groupTitle?: string;
   url: string;
   title: string;
   active: boolean;
@@ -148,18 +150,19 @@ export interface BrowserOpenOptions {
   target?: BrowserTarget;
   url?: string;
   timeoutMs?: number;
-  /** 是否在打开后聚焦新标签页/窗口（缺省取工具配置 autoFocus；false 时后台建页，不抢焦点） */
+  /** 是否在页面就绪后尝试切换活动标签（缺省 false；仅同分组内允许，绝不抬窗口/抢用户焦点） */
   focus?: boolean;
   /** 临时 CDP 端点；传入时本次及后续调用使用该端点（覆盖目标为 cdp） */
   cdpEndpoint?: string;
+  /** 调用方会话 id：每个会话独立标签组/窗口/当前标签；缺省=shared */
+  sessionId?: string;
 }
 
 /** 聚焦结果（自动焦点/显式 focus 共用） */
 export interface BrowserFocusResult {
   tab: string;
   focused: boolean;
-  /** 目标无法聚焦，已回退到上一级标签页/窗口 */
-  fallback: boolean;
+  /** 未切换的原因（跨分组/未分组/模式不支持等） */
   reason?: string;
 }
 
@@ -462,20 +465,17 @@ export interface BrowserService {
 
   /** 打开 AI 标签页（自动归组） */
   openTab(options: BrowserOpenOptions): Promise<BrowserTabInfo>;
+  /** 指定会话当前的 AI 标签页 key（无则 null） */
+  getSessionTab(sessionId: string): string | null;
   listTabs(all?: boolean, target?: BrowserTarget): Promise<BrowserTabInfo[]>;
   /** 列出该实例的原生标签页（all=true 用） */
   listNativeTabs(target?: BrowserTarget): Promise<NativeTabInfo[]>;
-  focusTab(tab?: string): Promise<BrowserTabInfo>;
+  focusTab(tab?: string): Promise<BrowserFocusResult>;
   /**
-   * 自动聚焦目标标签页（含新标签页/弹窗）。
-   * 例行操作只切标签，不抬操作系统窗口（focusWindow 默认 false），避免整窗反复闪烁；
-   * 只有显式 focus 才传 focusWindow: true 把窗口置前。
-   * 失败时回退到 opener/当前标签。
+   * 组内聚焦：只有目标标签与当前活动标签属于同一个「本会话 MOSS 分组」时才切换。
+   * 绝不回退到其它标签，绝不把窗口抬到前台。
    */
-  ensureFocused(
-    tab?: string,
-    options?: { force?: boolean; focusWindow?: boolean },
-  ): Promise<BrowserFocusResult>;
+  ensureFocused(tab?: string): Promise<BrowserFocusResult>;
   closeTab(tab?: string): Promise<void>;
 
   navigate(tab: string | undefined, options: BrowserNavigateOptions): Promise<BrowserPageInfo>;

@@ -5,6 +5,7 @@
 //
 // - splitBlocks 把全文切成块序列（闭块 closed=true / 活跃块 closed=false）
 // - 闭块由 MarkdownBlock(memo) 冻结，流式 token 只重渲染最后一个活跃块
+// - 顶层围栏块自带 fenceLang，直接渲染代码卡片（流式过程中也成立）
 // - streaming=false 时所有块视为闭合（代码高亮/图表/公式回退链全部就位）
 // - markdownEnabled=false 回退旧纯文本渲染（whitespace-pre-wrap，样式与消息区原实现一致）
 
@@ -37,7 +38,14 @@ export function MarkdownRenderer({
   defer = false,
 }: MarkdownRendererProps) {
   const settings = useRenderSettings();
-  const blocks = useMemo(() => splitBlocks(text), [text]);
+  const blocks = useMemo(() => {
+    try {
+      return splitBlocks(text);
+    } catch {
+      // 分块器自身异常不应让消息白屏：退化为单块（内容完整保留，走普通 markdown 渲染）
+      return [{ index: 0, raw: text, closed: true }];
+    }
+  }, [text]);
   const sizeClass = variant === 'compact' ? 'text-xs text-muted-foreground' : 'text-sm text-foreground';
 
   // 总开关关闭：回退纯文本（与消息区旧渲染完全一致的样式类）
@@ -57,10 +65,8 @@ export function MarkdownRenderer({
           key={block.index}
           raw={block.raw}
           closed={block.closed || !streaming}
+          fenceLang={block.fenceLang}
           defer={defer}
-          // 流式活跃块：超长时按纯文本渲染（避免每个 token 全量 markdown 解析把主线程占满），
-          // 结束后 closed=true，自动升级为完整 markdown。
-          plain={streaming && !block.closed}
         />
       ))}
       {cursor !== undefined && <span className="md-cursor">{cursor}</span>}

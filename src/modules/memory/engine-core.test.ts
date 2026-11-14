@@ -371,17 +371,17 @@ describe('buildRecallSection（query 切换：同消息稳定 / 新消息防重�
     expect(session.memoryState?.currentRecalled).toHaveLength(1);
   });
 
-  test('新消息：上一条召回转为排除集（防重复注入）', () => {
+  test('新消息：重新召回同一主题记忆（不再强制排除，避免下一轮失忆）', () => {
     const r1 = engine.buildRecallSection(session, '请给我简洁的回复', cwd);
     expect(r1.text).not.toBeNull();
     // 新消息（语义仍命中同一条记忆）
     const r2 = engine.buildRecallSection(session, '回答请保持简洁一些', cwd);
     expect(r2.queryChanged).toBe(true);
-    // 唯一命中的记忆已在排除集中 → 本次不注入
-    expect(r2.text).toBeNull();
-    expect(r2.count).toBe(0);
-    expect(session.memoryState?.excludeFromRecall).toEqual(r1.recalledIds);
-    expect(session.memoryState?.currentRecalled).toHaveLength(0);
+    // 同一主题记忆继续注入；excludeFromRecall 不再自动累积
+    expect(r2.text).not.toBeNull();
+    expect(r2.count).toBe(1);
+    expect(session.memoryState?.excludeFromRecall).toHaveLength(0);
+    expect(session.memoryState?.currentRecalled).toHaveLength(1);
   });
 
   test('listMemories 按 scope/origin 过滤', () => {

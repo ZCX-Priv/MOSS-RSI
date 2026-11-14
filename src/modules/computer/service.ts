@@ -32,14 +32,17 @@ import type {
   ComputerWindowTarget,
 } from './types';
 import {
+  getCursorPosition as getNativeCursorPosition,
   getForegroundWindowInfo as getNativeForegroundWindow,
   getNativeLastActivePopup,
+  getUserIdleMs as getNativeUserIdleMs,
   initNativeWindows,
   isCuaOverlayWindow,
   isInternalWindowClass,
   isNativeWindowEnumerationAvailable,
   isTransientWindowClass,
   listNativeWindows,
+  setCursorPosition as setNativeCursorPosition,
   type NativeWindowInfo,
 } from './win32';
 import {
@@ -57,6 +60,13 @@ const CONNECT_TIMEOUT_MS = 15_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const INSTALL_TIMEOUT_MS = 300_000;
 const MAX_ACTIVITIES = 50;
+/** 需要前台投递/抢焦点的动作：用户正在操作时让路 */
+const USER_PRIORITY_TOOLS = new Set([
+  'bring_to_front',
+  'focus',
+  'run_steps',
+  'run_script',
+]);
 /** 会话复活（start_session）超时：失败即轮换标签，不拖住截图 */
 const SESSION_REVIVE_TIMEOUT_MS = 8_000;
 /** 面板会话预热超时（best-effort，不阻塞连接） */
@@ -624,6 +634,65 @@ export class ComputerServiceImpl implements ComputerService {
     this.emitStatus();
   }
 
+  /** 用户优先配置（读取 tools.computer；配置不可用时用安全默认值） */
+  private userPriorityConfig(): {
+    enabled: boolean;
+    graceMs: number;
+    waitMs: number;
+    restoreCursor: boolean;
+  } {
+    const defaults = { enabled: true, graceMs: 700, waitMs: 5000, restoreCursor: true };
+    try {
+      const tools = this.config.getAppConfig().tools as Record<string, Record<string, unknown>>;
+      const cfg = tools.computer ?? {};
+      return {
+        enabled: typeof cfg.respectUserInput === 'boolean' ? cfg.respectUserInput : defaults.enabled,
+        graceMs:
+          typeof cfg.userInputGraceMs === 'number' && cfg.userInputGraceMs >= 0
+            ? cfg.userInputGraceMs
+            : defaults.graceMs,
+        waitMs:
+          typeof cfg.userInputWaitMs === 'number' && cfg.userInputWaitMs >= 0
+            ? cfg.userInputWaitMs
+            : defaults.waitMs,
+        restoreCursor:
+          typeof cfg.restoreCursor === 'boolean' ? cfg.restoreCursor : defaults.restoreCursor,
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  /** 距最近一次物理输入毫秒数（null=原生不可用） */
+  getUserIdleMs(): number | null {
+    return getNativeUserIdleMs();
+  }
+
+  /**
+   * 等待用户空闲。返回 true 表示可以继续（原本就空闲 / 等待后空闲 / 原生不可用）；
+   * false 表示用户在 timeoutMs 内持续操作，调用方应暂缓前台动作。
+   */
+  async waitForUserIdle(
+    opts: { graceMs?: number; timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const graceMs = Math.max(0, opts.graceMs ?? 700);
+    const timeoutMs = Math.max(0, opts.timeoutMs ?? 5000);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (opts.signal?.aborted) return false;
+      const idle = getNativeUserIdleMs();
+      if (idle === null) return true;
+      if (idle >= graceMs) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+  }
+
+  /** 是否为需要用户优先让路的动作 */
+  private isForegroundSensitive(tool: string, args: Record<string, unknown>): boolean {
+    return args.delivery_mode === 'foreground' || USER_PRIORITY_TOOLS.has(tool);
+  }
+
   listToolNames(): string[] {
     return this.tools.map(tool => tool.name);
   }
@@ -648,6 +717,25 @@ export class ComputerServiceImpl implements ComputerService {
 
     await this.ensureConnected();
 
+    // 用户优先守卫：用户正在操作键鼠时，前台/聚焦类动作先等待让路。
+    const priority = this.userPriorityConfig();
+    const foregroundSensitive =
+      source !== 'panel' &&
+      priority.enabled &&
+      this.isForegroundSensitive(tool, args);
+    if (foregroundSensitive) {
+      const idleOk = await this.waitForUserIdle({
+        graceMs: priority.graceMs,
+        timeoutMs: priority.waitMs,
+        signal: opts.signal,
+      });
+      if (!idleOk) {
+        throw new Error(t('computer.userBusy'));
+      }
+    }
+    const cursorBefore =
+      foregroundSensitive && priority.restoreCursor ? getNativeCursorPosition() : null;
+
     const startedAt = Date.now();
     try {
       const { raw, retried } = await this.invokeWithRetry(tool, args, opts);
@@ -670,6 +758,25 @@ export class ComputerServiceImpl implements ComputerService {
       // 工具级错误由 cua 以 isError 返回；这里抛出的多为传输/超时错误 → 标记连接失效，下次调用重连。
       if (!opts.signal?.aborted) this.markConnectionError(message);
       throw err;
+    } finally {
+      // 前台动作可能移动真实光标：若动作已结束且光标未被用户接手，恢复原位。
+      if (cursorBefore && foregroundSensitive && priority.restoreCursor) {
+        // 短暂观察窗口：先取动作落点，稍后再取一次；两次一致说明用户没有接手，
+        // 才恢复光标（避免用户正在移动鼠标时被我们抢回去）。
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const after = getNativeCursorPosition();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const settled = getNativeCursorPosition();
+        if (
+          after &&
+          settled &&
+          after.x === settled.x &&
+          after.y === settled.y &&
+          (after.x !== cursorBefore.x || after.y !== cursorBefore.y)
+        ) {
+          setNativeCursorPosition(cursorBefore.x, cursorBefore.y);
+        }
+      }
     }
   }
 

@@ -491,15 +491,15 @@ export function ProviderSettings() {
               </span>
             </div>
             <Select
-              value={voiceStatus?.language ?? 'zh'}
+              value={voiceStatus?.language ?? 'auto'}
               onValueChange={(v) => void selectVoiceLanguage(v)}
             >
               <SelectTrigger className="w-full sm:w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="zh">{t('settings.provider.voiceLangZh')}</SelectItem>
                 <SelectItem value="auto">{t('settings.provider.voiceLangAuto')}</SelectItem>
+                <SelectItem value="zh">{t('settings.provider.voiceLangZh')}</SelectItem>
                 <SelectItem value="en">{t('settings.provider.voiceLangEn')}</SelectItem>
                 <SelectItem value="ja">{t('settings.provider.voiceLangJa')}</SelectItem>
                 <SelectItem value="ko">{t('settings.provider.voiceLangKo')}</SelectItem>

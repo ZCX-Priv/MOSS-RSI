@@ -83,7 +83,7 @@ function extractToolPaths(toolName: string, args: unknown): string[] {
 /** ask 超时兜底上限（即使配置异常也不会让 Promise 永久悬挂） */
 const ASK_TIMEOUT_CEILING_MS = 24 * 60 * 60 * 1000; // 24h
 
-/** 子代理默认只读工具白名单（模板未显式声明 tools 时生效，防止子代理默认获得写权限） */
+/** 子代理默认工具白名单（模板未显式声明 tools 时生效，防止子代理默认获得写权限） */
 const SUBAGENT_READONLY_TOOLS = [
   'read',
   'glob',
@@ -92,9 +92,13 @@ const SUBAGENT_READONLY_TOOLS = [
   'ask',
   'skill',
   'memory',
+  'context',
+  'web',
+  'browser',
+  'computer',
+  'agent',
   'agent_status',
   'agent_message',
-  'context',
 ];
 
 /** 同一轮并发执行 subagent 工具调用的上限（防止一次性开过多 LLM 流造成资源压力） */
@@ -741,17 +745,41 @@ export class AgentEngineImpl implements AgentEngine {
     const profileTools = (input.toolAllowlist ?? agentProfile?.tools ?? []).filter(
       (name): name is string => typeof name === 'string' && name.trim() !== '',
     );
-    const includeOnly =
-      profileTools.length > 0
-        ? new Set<string>([...profileTools, 'agent_status', 'agent_message'])
-        : input.bus?.kind === 'subagent'
-          ? new Set<string>(SUBAGENT_READONLY_TOOLS)
-          : undefined;
+    // 嵌套深度：主会话 depth=0；子代理由 runner 注入 depth。达到上限后不再暴露 agent 工具。
+    const maxSubagentDepth = Math.min(5, Math.max(1, cfg.maxSubagentDepth ?? 2));
+    const currentDepth = input.bus?.kind === 'subagent' ? input.bus.depth ?? 1 : 0;
+    const allowNestedAgent = currentDepth < maxSubagentDepth;
+    const isCustomAgent = Boolean(agentProfile && agentProfile.builtIn !== true);
+    // 工具白名单语义：
+    // - 显式 tools 非空 → 只用白名单 + 协作工具；
+    // - 内置模板/子代理未声明 tools → 只读默认集；
+    // - 自定义 Agent 未声明 tools → 全部工具（与 templates.ts 的「空=全部」语义一致）。
+    let includeOnly: Set<string> | undefined;
+    if (profileTools.length > 0) {
+      includeOnly = new Set<string>([...profileTools, 'agent_status', 'agent_message']);
+    } else if (input.bus?.kind === 'subagent' && !isCustomAgent) {
+      includeOnly = new Set<string>(SUBAGENT_READONLY_TOOLS);
+    }
+    // 子代理必须能发现/联系同伴；主代理无需额外并集
+    if (includeOnly && input.bus?.kind === 'subagent') {
+      includeOnly.add('agent_status');
+      includeOnly.add('agent_message');
+    }
+    if (!allowNestedAgent) {
+      includeOnly?.delete('agent');
+    }
+    const exclude = new Set<string>();
+    if (!codeMode.enabled) exclude.add('run_code');
+    if (input.bus?.kind === 'subagent') {
+      // 子代理不允许运行时创建持久 Agent；达到深度上限时不允许继续嵌套
+      exclude.add('agent_manage');
+      if (!allowNestedAgent) exclude.add('agent');
+    }
     const wireOptions: {
       includeOnly?: ReadonlySet<string>;
       exclude?: ReadonlySet<string>;
     } = {
-      ...(codeMode.enabled ? {} : { exclude: new Set<string>(['run_code']) }),
+      ...(exclude.size > 0 ? { exclude } : {}),
       ...(includeOnly ? { includeOnly } : {}),
     };
     const tools = buildTools(toolRegistry, mcpTools, wireOptions);
@@ -767,6 +795,30 @@ export class AgentEngineImpl implements AgentEngine {
           `# 子代理角色（${agentProfile.name}）\n\n${agentProfile.systemPrompt.trim()}\n\n---\n` +
           '你在本次运行中扮演上述角色；MOSS 主提示词的通用纪律仍然适用。',
       });
+    }
+    // 主代理：动态列出注册表中可派发的子代理（含用户自定义 Agent），
+    // 让模型无需猜测 id，也避免新增自定义 Agent 后工具描述过期。
+    if (input.bus?.kind !== 'subagent' && agentRegistry?.list) {
+      try {
+        const available = agentRegistry
+          .list()
+          .filter((item) => !item.default && item.id !== 'agent');
+        if (available.length > 0) {
+          const lines = available.map(
+            (item) =>
+              `- ${item.id}：${item.name}${item.description ? ` — ${item.description}` : ''}${item.builtIn ? '（内置）' : '（自定义）'}`,
+          );
+          promptExtras.push({
+            id: 'available-agents',
+            title: '可用子代理',
+            content:
+              `# 可用子代理（agent 工具 template 参数）\n${lines.join('\n')}\n` +
+              `嵌套受设置中的最大层级限制（当前 ${maxSubagentDepth} 层）；自定义 Agent 可通过 agent_manage 创建/修改。`,
+          });
+        }
+      } catch {
+        // 注册表不可用：跳过该提示段，不影响主流程
+      }
     }
     if (codeMode.enabled) {
       const sdkTools = [

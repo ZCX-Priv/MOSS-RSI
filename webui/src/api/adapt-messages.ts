@@ -82,6 +82,8 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
       m.name === 'day-rollover' ||
       m.name === 'active-rules' ||
       m.name === 'memory-l1' ||
+      m.name === 'memory-recall' ||
+      m.name === 'memory-context' ||
       m.name === 'project-context' ||
       // 多智能体总线注入的 [智能体消息]：模型可见，但不作为用户气泡展示（面板有完整通信记录）
       m.name === 'agent-message'

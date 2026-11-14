@@ -8,6 +8,7 @@
 // 默认折叠；底部居中箭头可收起。
 
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { usePersistentState } from '../../lib/ui-state';
 import { useTranslation } from 'react-i18next';
 import {
   Check,
@@ -81,6 +82,8 @@ interface ToolCallDetailsProps {
   onExpandedChange?: (expanded: boolean) => void;
   /** 非受控默认展开态 */
   defaultExpanded?: boolean;
+  /** 跨挂载持久化的展开状态 key（虚拟列表卸载/重挂后仍保持展开） */
+  stateKey?: string;
 }
 
 type CardMode = 'preview' | 'source';
@@ -584,12 +587,19 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   expanded,
   onExpandedChange,
   defaultExpanded,
+  stateKey,
 }: ToolCallDetailsProps) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
   /** 结果所属会话：子代理卡片必须传自己的 session，否则懒加载会去主会话找 tool-result */
   const resultSessionId = sessionId ?? activeSessionId;
-  const [internalExpanded, setInternalExpanded] = useState(defaultExpanded === true);
+  const [localExpanded, setLocalExpanded] = useState(defaultExpanded === true);
+  const [persistedExpanded, setPersistedExpanded] = usePersistentState(
+    stateKey ?? '',
+    defaultExpanded === true,
+  );
+  const internalExpanded = stateKey ? persistedExpanded : localExpanded;
+  const setInternalExpanded = stateKey ? setPersistedExpanded : setLocalExpanded;
   const isOpen = expanded ?? internalExpanded;
   const [mode, setMode] = useState<CardMode>('preview');
   const [copied, setCopied] = useState(false);

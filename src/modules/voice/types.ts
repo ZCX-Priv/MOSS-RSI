@@ -91,6 +91,8 @@ export interface VoiceResult {
   text: string;
   /** true = 该段已确定（endpoint / 整段解码完成）；false = 中间态（可被覆盖） */
   isFinal: boolean;
+  /** 该段解析后的语言（auto 模式；可能缺省） */
+  language?: string;
 }
 
 /** 会话句柄：由 service 创建，供 WS 层驱动 */

@@ -49,6 +49,8 @@ export function defaultAppConfig(): AppConfig {
       defaultModel: '',
       maxTokens: 8192,
       maxTurns: 0,
+      maxConcurrentSubagents: 4,
+      maxSubagentDepth: 2,
       llmStreamIdleTimeoutMs: 900_000,
       workingDirectory: '',
       codeMode: {
@@ -98,7 +100,7 @@ export function defaultAppConfig(): AppConfig {
         maxIntentChars: 4000,
       },
     },
-    voice: { enabled: false, localModel: '', language: 'zh' },
+    voice: { enabled: false, localModel: '', language: 'auto', languageExplicit: false },
     appearance: { accentColor: '#2563EB' },
   };
 }

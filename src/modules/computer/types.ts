@@ -227,6 +227,16 @@ export interface ComputerService {
 
   getStatus(): ComputerStatus;
 
+  /** 距最近一次物理鼠标/键盘输入的毫秒数（不可用返回 null） */
+  getUserIdleMs?(): number | null;
+
+  /** 等待用户空闲（用户优先守卫）；不可用/已空闲返回 true，超时仍活跃返回 false */
+  waitForUserIdle?(opts?: {
+    graceMs?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<boolean>;
+
   /** 确保已连接；未安装或连接失败时抛错 */
   ensureConnected(): Promise<void>;
   /** 断开后重连 */

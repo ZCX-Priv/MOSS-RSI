@@ -395,9 +395,12 @@ export class BuiltinChromeManager {
     await this.cdp?.detach(sessionId);
   }
 
-  async createPageTarget(url: string): Promise<string> {
+  async createPageTarget(url: string, options: { background?: boolean } = {}): Promise<string> {
     if (!this.cdp) throw new Error('内置 Chrome 未运行');
-    const result = await this.cdp.send<{ targetId?: string }>('Target.createTarget', { url });
+    const result = await this.cdp.send<{ targetId?: string }>('Target.createTarget', {
+      url,
+      ...(options.background ? { background: true } : {}),
+    });
     if (!result.targetId) throw new Error('创建标签页失败');
     return result.targetId;
   }

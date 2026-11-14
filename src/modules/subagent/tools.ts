@@ -9,10 +9,10 @@ import { ServiceNames } from '../../core/types';
 import type { ServiceRegistry, Logger, Environment } from '../../core/types';
 import type { Tool, ToolResult, ToolContext } from '../tools/types';
 import { textResult, errorResult } from '../tools/types';
-import type { ToolRegistry } from '../contracts';
+import type { AgentEngine, ToolRegistry } from '../contracts';
 import { loadPromptFileOrNull } from '../context/prompt-loader';
 import type { AgentBus, AgentBusMember } from '../agent-bus/types';
-import type { AgentRegistry } from './types';
+import type { AgentDetail, AgentRegistry } from './types';
 import type { SubagentRunner } from './runner';
 
 /** 子代理默认/最低工具调用轮数（不填按 200；低于 200 提升为 200） */
@@ -31,6 +31,8 @@ interface AgentToolParams {
   tools?: string[];
   /** 工具调用轮数：不填=200；最低 200；'infinite'=不限制 */
   maxTurns?: number | string;
+  /** 是否附带父会话最近一条用户请求作为背景（默认 true；仅帮助理解目标，不扩大任务范围） */
+  inherit_context?: boolean;
 }
 
 /** 归一化工具白名单：去空/去重；空数组视为未填写（返回 undefined，走模板默认） */
@@ -76,6 +78,38 @@ function resolveBus(services: ServiceRegistry): AgentBus | null {
   return services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
 }
 
+/** 父会话最近一条用户请求（截断；失败返回 undefined，不阻断派发） */
+function resolveParentGoal(ctx: ToolContext): string | undefined {
+  try {
+    const engine = ctx.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
+    const session = engine?.getSessionForContext?.(ctx.sessionId);
+    if (!session) return undefined;
+    const last = [...session.messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === 'user' &&
+          !m.name &&
+          !m.deletedAt &&
+          !m.compacted &&
+          m.content.trim().length > 0,
+      );
+    return last ? last.content.slice(0, 2000) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 当前可派发的 Agent 目录文案（内置模板 + 自定义） */
+function agentCatalogText(registry: AgentRegistry | null): string {
+  const items = registry?.list() ?? [];
+  const available = items.filter((item) => !item.default && item.id !== 'agent');
+  if (available.length === 0) return '当前注册表中只有主 Agent。';
+  return `当前可用：${available
+    .map((item) => `${item.id}（${item.name}${item.builtIn ? '，内置' : '，自定义'}）`)
+    .join('、')}。`;
+}
+
 /** 成员树文本化（缩进按 depth，模型可直接读） */
 function formatMembers(members: AgentBusMember[]): string {
   if (members.length === 0) return '（当前没有智能体）';
@@ -100,13 +134,17 @@ function findMember(bus: AgentBus, rootSessionId: string, id: string): AgentBusM
   return bus.list(rootSessionId).find((m) => m.agentId === id) ?? null;
 }
 
-function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
+function createAgentTool(
+  runner: SubagentRunner,
+  env: Environment,
+  registry: AgentRegistry | null,
+): Tool {
   // 用法文案从 agent/subagent/usage.md 加载；缺失时为空串降级
   const usage = loadPromptFileOrNull(env, 'subagent/usage.md') ?? '';
   return {
     name: 'agent',
     icon: 'bot',
-    description: `把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns）。多个相互独立的任务应在同一轮发起多个 async 调用并行执行；子代理在自己的隐藏会话中运行并返回最终报告，mode=async 时后台运行、用 agent_status 查询。${usage}`,
+    description: `把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns）。多个相互独立的任务应在同一轮发起多个 async 调用并行执行；子代理在自己的隐藏会话中运行并返回最终报告，mode=async 时后台运行、用 agent_status 查询。${agentCatalogText(registry)}嵌套层级受设置中的 maxSubagentDepth 限制。${usage}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -154,6 +192,12 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
           description_en:
             'Subagent tool-call turns: omitted=200; values below 200 are raised to 200; infinite=unlimited',
         },
+        inherit_context: {
+          type: 'boolean',
+          description: '是否附带父会话最近一条用户请求作为背景（默认 true；仅帮助理解目标，不扩大任务范围）',
+          description_en:
+            'Attach the parent session last user request as background (default true; context only, does not expand scope)',
+        },
       },
       required: ['template', 'task'],
     },
@@ -173,6 +217,8 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
         const maxTurnsResult = normalizeMaxTurns(p.maxTurns);
         if (maxTurnsResult.error) return errorResult(maxTurnsResult.error);
         const maxTurns = maxTurnsResult.value as number;
+        const parentGoal =
+          p.inherit_context === false ? undefined : resolveParentGoal(ctx);
         const configSummary =
           `tools=${toolAllowlist?.join(',') ?? '模板默认'} ` +
           `maxTurns=${maxTurns === 0 ? 'infinite' : maxTurns}`;
@@ -188,6 +234,7 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
             mode: 'async',
             toolAllowlist,
             maxTurns,
+            ...(parentGoal ? { parentGoal } : {}),
             parentToolCallId: ctx.toolCallId,
             parentSessionId: ctx.sessionId,
             // 父 run 正常完成不会 abort；用户停止/打断发送会 abort → 级联中止后台子代理
@@ -208,6 +255,7 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
                 agentId: started.agentId,
                 sessionId: started.sessionId,
                 template: started.template,
+                name: started.name,
                 status: 'running',
               },
             },
@@ -220,14 +268,24 @@ function createAgentTool(runner: SubagentRunner, env: Environment): Tool {
           mode: 'sync',
           toolAllowlist,
           maxTurns,
+          ...(parentGoal ? { parentGoal } : {}),
           parentToolCallId: ctx.toolCallId,
           parentSessionId: ctx.sessionId,
           signal: ctx.signal,
         });
-        return textResult(
+        const result = textResult(
           `子代理已完成 (finishReason=${output.finishReason}, session=${output.sessionId}, ${configSummary}):\n\n${output.result}`,
           output.finishReason === 'error',
         );
+        result.metadata = {
+          agentRun: {
+            sessionId: output.sessionId,
+            template,
+            name: output.name,
+            status: output.finishReason === 'error' ? 'failed' : 'completed',
+          },
+        };
+        return result;
       } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
       }
@@ -363,6 +421,137 @@ function createAgentMessageTool(): Tool {
   };
 }
 
+function createAgentManageTool(): Tool {
+  return {
+    name: 'agent_manage',
+    icon: 'bot',
+    description:
+      '管理注册表中的 Agent（内置模板 + 自定义）：list 列出全部、get 查看详情、create 创建自定义 Agent、update 修改自定义 Agent、delete 删除自定义 Agent、tools 列出可用于 tools 白名单的工具名。内置模板只读不可修改/删除。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get', 'create', 'update', 'delete', 'tools'],
+          description: 'list（默认）| get | create | update | delete | tools',
+        },
+        id: { type: 'string', description: 'Agent id（get/update/delete 必填）' },
+        name: { type: 'string', description: '显示名称（create 必填）' },
+        description: { type: 'string', description: '一句话描述' },
+        systemPrompt: { type: 'string', description: '角色系统提示词（叠加到主提示词之后）' },
+        model: { type: 'string', description: '模型 id；不填继承全局默认' },
+        tools: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '工具白名单；不填 = 全部工具（内置模板除外）',
+        },
+        maxTurns: { type: 'integer', minimum: 1, description: '最大工具调用轮数' },
+        maxTokens: { type: 'integer', minimum: 1, description: '单次回复最大 token' },
+        icon: { type: 'string', description: '图标名（可选）' },
+      },
+    },
+    annotations: { readOnlyHint: false },
+    async execute(params, ctx: ToolContext): Promise<ToolResult> {
+      const p = params as {
+        action?: string;
+        id?: string;
+        name?: string;
+        description?: string;
+        systemPrompt?: string;
+        model?: string;
+        tools?: string[];
+        maxTurns?: number;
+        maxTokens?: number;
+        icon?: string;
+      };
+      try {
+        const registry = resolveRegistry(ctx.services);
+        if (!registry) return errorResult('Agent 注册表不可用');
+        const action = p.action ?? 'list';
+        const id = (p.id ?? '').trim();
+
+        if (action === 'list') {
+          const items = registry.list();
+          const lines = items.map((item) => {
+            const flags = [
+              item.builtIn ? 'builtin' : 'custom',
+              item.default ? 'default' : '',
+            ].filter(Boolean).join(',');
+            return `- ${item.id}｜${item.name}｜${flags}${item.description ? `｜${item.description}` : ''}`;
+          });
+          return textResult(`Agent 列表（${items.length}）：\n${lines.join('\n')}`);
+        }
+
+        if (action === 'tools') {
+          const toolRegistry = ctx.services.tryResolve<ToolRegistry>(ServiceNames.TOOL_REGISTRY);
+          if (!toolRegistry) return errorResult('工具注册表不可用');
+          const names = toolRegistry.listSchemas().map((tool) => tool.name).sort();
+          return textResult(`可用工具（${names.length}）：\n${names.join(', ')}`);
+        }
+
+        if (action === 'get') {
+          if (!id) return errorResult('get 需要 id');
+          const detail = registry.get(id);
+          if (!detail) return errorResult(`未找到 Agent "${id}"`);
+          return textResult(JSON.stringify(detail, null, 2));
+        }
+
+        if (action === 'create') {
+          const name = (p.name ?? '').trim();
+          if (!name) return errorResult('create 需要 name');
+          const created = registry.create({
+            name,
+            ...(p.description ? { description: p.description } : {}),
+            ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
+            ...(p.model ? { model: p.model } : {}),
+            ...(Array.isArray(p.tools) && p.tools.length > 0 ? { tools: p.tools } : {}),
+            ...(p.icon ? { icon: p.icon } : {}),
+            ...(typeof p.maxTurns === 'number' ? { maxTurns: p.maxTurns } : {}),
+            ...(typeof p.maxTokens === 'number' ? { maxTokens: p.maxTokens } : {}),
+          });
+          return textResult(
+            `已创建自定义 Agent：${created.id}（${created.name}）。用 agent(template="${created.id}", task=...) 派发。`,
+          );
+        }
+
+        if (action === 'update') {
+          if (!id) return errorResult('update 需要 id');
+          const target = registry.get(id);
+          if (!target) return errorResult(`未找到 Agent "${id}"`);
+          if (target.builtIn) return errorResult('内置模板只读，不能修改');
+          const patch: Partial<AgentDetail> = {};
+          if (p.name !== undefined) patch.name = p.name;
+          if (p.description !== undefined) patch.description = p.description;
+          if (p.systemPrompt !== undefined) patch.systemPrompt = p.systemPrompt;
+          if (p.model !== undefined) patch.model = p.model;
+          if (p.tools !== undefined) patch.tools = p.tools;
+          if (p.icon !== undefined) patch.icon = p.icon;
+          if (typeof p.maxTurns === 'number') patch.maxTurns = p.maxTurns;
+          if (typeof p.maxTokens === 'number') patch.maxTokens = p.maxTokens;
+          const updated = registry.update(id, patch);
+          if (!updated) return errorResult(`更新 Agent "${id}" 失败`);
+          return textResult(`已更新 Agent ${updated.id}（${updated.name}）`);
+        }
+
+        if (action === 'delete') {
+          if (!id) return errorResult('delete 需要 id');
+          const target = registry.get(id);
+          if (!target) return errorResult(`未找到 Agent "${id}"`);
+          if (target.builtIn) return errorResult('内置模板不可删除');
+          if (target.default) return errorResult('默认 Agent 不可删除');
+          return registry.remove(id)
+            ? textResult(`已删除 Agent "${id}"`)
+            : errorResult(`删除 Agent "${id}" 失败`);
+        }
+
+        return errorResult(`未知 action "${String(action)}"`);
+      } catch (err) {
+        return errorResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  };
+}
+
 /** 注册多智能体工具到 ToolRegistry（由 subagent 模块 initialize 调用）。 */
 export function registerAgentTools(
   services: ServiceRegistry,
@@ -375,10 +564,12 @@ export function registerAgentTools(
     logger.warn('subagent: tool registry unavailable, agent tools not registered');
     return;
   }
+  const agentRegistry = services.tryResolve<AgentRegistry>(ServiceNames.AGENT_REGISTRY);
   const tools: Tool[] = [
-    createAgentTool(runner, env),
+    createAgentTool(runner, env, agentRegistry),
     createAgentStatusTool(runner),
     createAgentMessageTool(),
+    createAgentManageTool(),
   ];
   for (const tool of tools) {
     try {

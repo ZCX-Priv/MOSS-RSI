@@ -22,7 +22,7 @@ import type {
 import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSessionImagePaths } from '../compiler';
 import type { OptimizedImage, ImageOptimizer } from '../compiler';
 import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
-import { MEMORY_L1_MSG_NAME, MEMORY_RECALL_MSG_NAME } from '../compiler/view-builder';
+import { MEMORY_CONTEXT_MSG_NAME } from '../compiler/view-builder';
 import { compactSession, resolveSummaryModel } from '../compressor';
 import { planCompaction } from '../compressor/planner';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
@@ -194,44 +194,44 @@ export async function prepareRequest(
   let ephemeralMessages: Array<import('../types').ContextMessage> | undefined;
   if (memoryEngine && config.memory.enabled) {
     try {
-      // L1 关键事实锚定（每会话一次；跨 run 持久）
-      const memoryState = session.memoryState;
-      if (!memoryState?.l1InjectedAt) {
-        const l1Text = memoryEngine.buildL1Section(cwd);
-        if (l1Text) {
-          session.messages.push({
-            role: 'user',
-            name: MEMORY_L1_MSG_NAME,
-            content: l1Text,
-            timestamp: new Date().toISOString(),
-          });
-        }
-        session.memoryState = {
-          ...(memoryState ?? { excludeFromRecall: [], currentRecalled: [], lastDistilledIndex: 0 }),
-          l1InjectedAt: new Date().toISOString(),
-        };
-        deps.persistSession(session);
-      }
+      const memoryParts: string[] = [];
 
-      // L2 主题召回（ephemeral 尾部消息；query = 最近一条 user 消息）。
-      // 去重语义（按消息切换）：同消息多轮间注入稳定；新消息排除上一条的召回。
-      const lastUser = [...session.messages].reverse().find(m => m.role === 'user' && !m.deletedAt && !m.compacted && !m.name);
+      // L1 关键事实：每轮作为背景块注入（不持久化）。
+      // 旧实现把它 push 成 user 消息并落在用户请求之后，模型会把它当成最后一条用户指令，
+      // 表现为反复回复「收到/明白」而不执行任务。
+      const l1Text = memoryEngine.buildL1Section(cwd);
+      if (l1Text) memoryParts.push(l1Text);
+
+      // L2 主题召回：query = 最近两条真实用户消息（短消息如「继续」也能召回正确主题）。
+      // 同一用户消息的多轮工具循环 query 不变，注入稳定；新消息重新召回，
+      // 不再把上一条的召回强制排除（否则记忆会在下一轮突然消失）。
+      const userMessages = [...session.messages]
+        .reverse()
+        .filter(m => m.role === 'user' && !m.deletedAt && !m.compacted && !m.name)
+        .slice(0, 2)
+        .reverse();
+      const lastUser = userMessages[userMessages.length - 1];
       if (lastUser) {
-        const recall = memoryEngine.buildRecallSection(session, lastUser.content, cwd);
+        const query = userMessages.map(m => m.content).join('\n').slice(0, 2000);
+        const recall = memoryEngine.buildRecallSection(session, query, cwd);
         // 消息切换（新用户输入）：持久化召回状态（每条消息仅一次，避免轮次级 IO）
         if (recall.queryChanged) {
           deps.persistSession(session);
         }
         if (recall.text && recall.count > 0) {
-          ephemeralMessages = [
-            {
-              role: 'user',
-              name: MEMORY_RECALL_MSG_NAME,
-              content: recall.text,
-              timestamp: new Date().toISOString(),
-            },
-          ];
+          memoryParts.push(recall.text);
         }
+      }
+
+      if (memoryParts.length > 0) {
+        ephemeralMessages = [
+          {
+            role: 'user',
+            name: MEMORY_CONTEXT_MSG_NAME,
+            content: memoryParts.join('\n\n'),
+            timestamp: new Date().toISOString(),
+          },
+        ];
       }
     } catch (err) {
       deps.logger.warn('context: memory injection failed', {

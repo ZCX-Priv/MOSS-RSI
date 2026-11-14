@@ -30,12 +30,14 @@ import {
   keyDown as dispatchKeyDown,
   keyUp as dispatchKeyUp,
   navigatePage,
+  normalizeUrl,
   pressKey,
   scrollPage,
   selectOption,
   typeInto,
   waitChange as waitFrameChange,
   waitCondition,
+  waitForReady,
   waitStable as waitFrameStable,
   type CdpSession,
   type FrameSignature,
@@ -116,7 +118,6 @@ const DEFAULT_CONFIG: BrowserToolConfig = {
   autoDownloadChromeForTesting: false,
   autoInstallExtensions: false,
   allowEvaluate: true,
-  autoFocus: true,
 };
 
 /** 旧版标签组名：用于接管历史分组 */
@@ -205,10 +206,15 @@ interface TabRecord {
   browserVersion: string;
   nativeTabId: number;
   windowId?: number;
+  /** 所属 MOSS 会话（会话独立标签组/窗口；区别于下方 CDP sessionId） */
+  ownerSessionId?: string;
+  /** 会话标签组名（MOSS、MOSS-0…） */
+  groupTitle?: string;
   /** 打开该标签页的源标签页（弹窗/新标签页聚焦回退用） */
   openerTabId?: number;
   groupId: number | null;
   targetId?: string;
+  /** CDP session id（调试会话，非 MOSS 会话） */
   sessionId?: string;
   session: CdpSession | null;
   sessionPromise: Promise<CdpSession> | null;
@@ -249,6 +255,9 @@ interface RetiredTab {
   nativeTabId: number;
   url: string;
   title: string;
+  /** 保留会话归属，复活后仍绑定原会话 */
+  ownerSessionId?: string;
+  groupTitle?: string;
   at: number;
 }
 
@@ -485,6 +494,18 @@ export class BrowserServiceImpl implements BrowserService {
   /** 已失效标签页的 URL 快照：用于按 URL 恢复同一个 tN key */
   private readonly retiredTabs = new Map<string, RetiredTab>();
   private tabSeq = 0;
+  /** 会话 → 当前 AI 标签页 key（每个会话独立，互不抢标签） */
+  private readonly sessionCurrentTab = new Map<string, string>();
+  /** 会话 → 标签组名（MOSS、MOSS-0…） */
+  private readonly sessionGroupTitle = new Map<string, string>();
+  /** 会话 → 分配该组名的浏览器实例（组名回收按实例隔离） */
+  private readonly sessionGroupInstance = new Map<string, string>();
+  /** 已分配但标签尚未落库的组名（title → 过期时间），只用于并发分配的短期占用 */
+  private readonly pendingGroupTitles = new Map<string, number>();
+  /** 会话 → 标签组所在窗口 id */
+  private readonly sessionWindowId = new Map<string, number>();
+  /** 组名分配串行化：避免并发 open 抢到同一个空位 */
+  private groupAllocChain: Promise<void> = Promise.resolve();
   private currentTabKey: string | null = null;
   private lastTargetKey: string | null = null;
   private builtinInstanceId: string | null = null;
@@ -614,7 +635,6 @@ export class BrowserServiceImpl implements BrowserService {
           DEFAULT_CONFIG.autoInstallExtensions,
         ),
         allowEvaluate: booleanValue(raw.allowEvaluate, DEFAULT_CONFIG.allowEvaluate),
-        autoFocus: booleanValue(raw.autoFocus, DEFAULT_CONFIG.autoFocus),
       };
     } catch {
       return { ...DEFAULT_CONFIG };
@@ -1035,14 +1055,22 @@ export class BrowserServiceImpl implements BrowserService {
       return;
     }
     let shouldAdopt = false;
-    if (typeof tab.openerTabId === 'number') {
-      shouldAdopt = this.findTabByNative(instanceId, tab.openerTabId) !== null;
+    const openerRecord =
+      typeof tab.openerTabId === 'number'
+        ? this.findTabByNative(instanceId, tab.openerTabId)
+        : null;
+    if (openerRecord) {
+      shouldAdopt = true;
     }
     const deadline = this.pendingNewTabUntil.get(instanceId) ?? 0;
     if (!shouldAdopt && deadline > Date.now()) shouldAdopt = true;
     if (!shouldAdopt) return;
 
     const cfg = this.getToolConfig();
+    const ownerSessionId = openerRecord?.ownerSessionId ?? 'shared';
+    const groupTitle =
+      openerRecord?.groupTitle ??
+      (await this.allocateGroupTitle(ownerSessionId, instanceId, cfg.tabGroupTitle));
     let groupId: number | null = null;
     try {
       const group = await this.bridge.send(
@@ -1050,9 +1078,9 @@ export class BrowserServiceImpl implements BrowserService {
         'groups.ensure',
         {
           tabId: tab.tabId,
-          title: cfg.tabGroupTitle,
+          title: groupTitle,
           color: cfg.tabGroupColor,
-          legacyTitles: LEGACY_GROUP_TITLES,
+          legacyTitles: groupTitle === cfg.tabGroupTitle ? LEGACY_GROUP_TITLES : [],
         },
         10_000,
       );
@@ -1073,6 +1101,8 @@ export class BrowserServiceImpl implements BrowserService {
       browserVersion: info?.browserVersion ?? '',
       nativeTabId: tab.tabId,
       ...(tab.windowId >= 0 ? { windowId: tab.windowId } : {}),
+      ownerSessionId,
+      groupTitle,
       ...(typeof tab.openerTabId === 'number' ? { openerTabId: tab.openerTabId } : {}),
       groupId,
       session: null,
@@ -1091,7 +1121,10 @@ export class BrowserServiceImpl implements BrowserService {
       createdAt: Date.now(),
     };
     this.tabs.set(key, record);
+    this.pendingGroupTitles.delete(groupTitle);
     this.currentTabKey = key;
+    this.sessionCurrentTab.set(ownerSessionId, key);
+    if (tab.windowId >= 0) this.sessionWindowId.set(ownerSessionId, tab.windowId);
     this.lastTargetKey = instanceId;
     this.lastAdoptedTab = { instanceId, tab: key, at: Date.now() };
     this.pendingNewTabUntil.delete(instanceId);
@@ -1108,6 +1141,7 @@ export class BrowserServiceImpl implements BrowserService {
     record.listeners.clear();
     record.frames.clear();
     this.tabs.delete(record.key);
+    this.releaseSessionGroup(record);
     if (this.currentTabKey === record.key) {
       const remaining = Array.from(this.tabs.values()).sort((a, b) => b.createdAt - a.createdAt)[0];
       this.currentTabKey = remaining?.key ?? null;
@@ -1120,55 +1154,102 @@ export class BrowserServiceImpl implements BrowserService {
     if (tab.url) record.url = tab.url;
     if (tab.title) record.title = tab.title;
     record.active = tab.active;
-    if (tab.groupId >= 0) record.groupId = tab.groupId;
+    if (tab.groupId >= 0) {
+      // 用户把标签拖出本会话分组后不再视为分组成员：释放组名，也不再参与自动聚焦
+      if (record.groupId !== null && record.groupId !== tab.groupId) record.groupTitle = undefined;
+      record.groupId = tab.groupId;
+    } else {
+      record.groupId = null;
+      record.groupTitle = undefined;
+    }
   }
 
-  /** 扩展（重）连后恢复该实例此前创建的 AI 分组标签页 */
+  /** 会话在某组已无存活标签时释放组名映射，名称可被后续会话回收复用 */
+  private releaseSessionGroup(record: TabRecord): void {
+    const sessionId = record.ownerSessionId;
+    const title = record.groupTitle;
+    if (!sessionId || !title) return;
+    const stillUsed = Array.from(this.tabs.values()).some(
+      (item) =>
+        item.instanceId === record.instanceId &&
+        item.ownerSessionId === sessionId &&
+        item.groupTitle === title,
+    );
+    if (stillUsed) return;
+    this.pendingGroupTitles.delete(title);
+    if (this.sessionGroupTitle.get(sessionId) === title) {
+      this.sessionGroupTitle.delete(sessionId);
+      this.sessionGroupInstance.delete(sessionId);
+    }
+  }
+
+  /** 扩展（重）连后恢复该实例此前创建的 AI 分组标签页（MOSS / MOSS-0 / MOSS-1…） */
   private async adoptExistingTabs(instanceId: string): Promise<void> {
     const cfg = this.getToolConfig();
     let groups: unknown;
     let tabs: unknown;
     try {
-      groups = await this.bridge.send(instanceId, 'groups.query', { title: cfg.tabGroupTitle }, 5000);
+      groups = await this.bridge.send(instanceId, 'groups.query', {}, 5000);
       tabs = await this.bridge.send(instanceId, 'tabs.list', {}, 5000);
     } catch {
       return;
     }
-    if (!Array.isArray(groups)) return;
-    const groupIds = new Set<number>();
+    if (!Array.isArray(groups) || !Array.isArray(tabs)) return;
+
+    const base = cfg.tabGroupTitle || 'MOSS';
+    const titleToGroupId = new Map<string, number>();
+    const groupTitleById = new Map<number, string>();
+    const groupWindowById = new Map<number, number>();
+
     for (const group of groups) {
-      if (isRecord(group) && typeof group.id === 'number') groupIds.add(group.id);
-    }
-    // 兼容旧「MOSS AI」分组：改名为新标题后接管
-    if (groupIds.size === 0) {
-      for (const legacyTitle of LEGACY_GROUP_TITLES) {
-        if (legacyTitle === cfg.tabGroupTitle) continue;
-        try {
-          const legacy = await this.bridge.send(instanceId, 'groups.query', { title: legacyTitle }, 5000);
-          if (!Array.isArray(legacy) || legacy.length === 0) continue;
-          for (const group of legacy) {
-            if (!isRecord(group) || typeof group.id !== 'number') continue;
-            groupIds.add(group.id);
-            await this.bridge
-              .send(instanceId, 'groups.update', { groupId: group.id, title: cfg.tabGroupTitle }, 5000)
-              .catch(() => undefined);
-          }
-          if (groupIds.size > 0) break;
-        } catch {
-          // 旧标题查询失败不影响新标题接管
-        }
+      if (!isRecord(group) || typeof group.id !== 'number') continue;
+      const rawTitle = typeof group.title === 'string' ? group.title : '';
+      if (!rawTitle) continue;
+      const isLegacy = LEGACY_GROUP_TITLES.includes(rawTitle);
+      if (!this.isSessionGroupTitle(rawTitle, base) && !isLegacy) continue;
+
+      let title = rawTitle;
+      if (isLegacy) {
+        // 旧「MOSS AI」只迁移为基础 MOSS 组
+        title = base;
+        await this.bridge
+          .send(instanceId, 'groups.update', { groupId: group.id, title }, 5000)
+          .catch(() => undefined);
       }
+      titleToGroupId.set(title, group.id);
+      groupTitleById.set(group.id, title);
+      if (typeof group.windowId === 'number') groupWindowById.set(group.id, group.windowId);
     }
-    if (!Array.isArray(tabs)) return;
-    if (groupIds.size === 0) return;
+
+    // 清理该实例上已失效的组名映射（分组被关闭/浏览器重启），让名称可被后续会话回收
+    for (const [sessionId, title] of Array.from(this.sessionGroupTitle)) {
+      if (this.sessionGroupInstance.get(sessionId) !== instanceId) continue;
+      if (titleToGroupId.has(title)) continue;
+      if (this.hasSessionGroupTabs(sessionId, instanceId, title)) continue;
+      this.sessionGroupTitle.delete(sessionId);
+      this.sessionGroupInstance.delete(sessionId);
+    }
+
+    // 已有会话映射：把窗口 id 补回对应会话
+    const sessionByTitle = new Map<string, string>();
+    for (const [sessionId, title] of this.sessionGroupTitle) {
+      sessionByTitle.set(title, sessionId);
+      const groupId = titleToGroupId.get(title);
+      const windowId = groupId !== undefined ? groupWindowById.get(groupId) : undefined;
+      if (windowId !== undefined) this.sessionWindowId.set(sessionId, windowId);
+    }
+
+    if (groupTitleById.size === 0) return;
     const info = this.bridge.getInstance(instanceId);
     const kind: BrowserInstanceKind = info?.kind === 'builtin' ? 'builtin' : 'external';
     for (const raw of tabs) {
       if (!isRecord(raw)) continue;
       const tabId = typeof raw.tabId === 'number' ? raw.tabId : -1;
       const groupId = typeof raw.groupId === 'number' ? raw.groupId : -1;
-      if (tabId < 0 || !groupIds.has(groupId)) continue;
+      if (tabId < 0 || !groupTitleById.has(groupId)) continue;
       if (this.findTabByNative(instanceId, tabId)) continue;
+      const groupTitle = groupTitleById.get(groupId) ?? base;
+      const ownerSessionId = sessionByTitle.get(groupTitle);
       const key = `t${++this.tabSeq}`;
       const record: TabRecord = {
         key,
@@ -1178,6 +1259,8 @@ export class BrowserServiceImpl implements BrowserService {
         browserVersion: info?.browserVersion ?? '',
         nativeTabId: tabId,
         windowId: typeof raw.windowId === 'number' ? raw.windowId : undefined,
+        ...(ownerSessionId ? { ownerSessionId } : {}),
+        groupTitle,
         groupId,
         session: null,
         sessionPromise: null,
@@ -1195,7 +1278,20 @@ export class BrowserServiceImpl implements BrowserService {
         createdAt: Date.now(),
       };
       this.tabs.set(key, record);
-      if (!this.currentTabKey) this.currentTabKey = key;
+      if (!this.currentTabKey) {
+        this.currentTabKey = key;
+      } else if (record.active) {
+        const current = this.tabs.get(this.currentTabKey);
+        if (current && !current.active) this.currentTabKey = key;
+      }
+      if (ownerSessionId) {
+        const current = this.sessionCurrentTab.get(ownerSessionId);
+        const currentRecord = current ? this.tabs.get(current) : undefined;
+        // 优先保留窗口内活动标签；否则用最近创建的标签
+        if (!currentRecord || (record.active && !currentRecord.active)) {
+          this.sessionCurrentTab.set(ownerSessionId, key);
+        }
+      }
       this.lastTargetKey = instanceId;
     }
   }
@@ -1218,6 +1314,8 @@ export class BrowserServiceImpl implements BrowserService {
       record.listeners.clear();
       record.frames.clear();
       this.tabs.delete(key);
+      this.releaseSessionGroup(record);
+      this.fallbackSessionCurrent(record);
       if (this.currentTabKey === key) this.currentTabKey = keep.key;
     }
   }
@@ -1234,6 +1332,7 @@ export class BrowserServiceImpl implements BrowserService {
       // 不 detach debugger：桥接断开不等于标签关闭。主动 detach 会让扩展的调试提示条
       // 反复消失/出现（页面闪白 + 失焦），由 Chrome 在标签真正关闭时自动回收。
       this.tabs.delete(key);
+      this.fallbackSessionCurrent(record);
       if (this.currentTabKey === key) this.currentTabKey = null;
     }
     if (this.lastTargetKey === instanceId) this.lastTargetKey = null;
@@ -1263,6 +1362,8 @@ export class BrowserServiceImpl implements BrowserService {
       nativeTabId: record.nativeTabId,
       ...(record.windowId !== undefined ? { windowId: record.windowId } : {}),
       groupId: record.groupId,
+      ...(record.ownerSessionId ? { sessionId: record.ownerSessionId } : {}),
+      ...(record.groupTitle ? { groupTitle: record.groupTitle } : {}),
       url: record.url,
       title: record.title,
       active: record.active,
@@ -1327,17 +1428,188 @@ export class BrowserServiceImpl implements BrowserService {
     }));
   }
 
+  /** 会话 id 归一化（无会话调用归入 shared，保持旧行为） */
+  private normalizeSessionId(sessionId?: string): string {
+    return sessionId?.trim() || 'shared';
+  }
+
+  /** 指定会话当前的 AI 标签页 key（会话独立，互不抢标签） */
+  getSessionTab(sessionId: string): string | null {
+    const key = this.sessionCurrentTab.get(this.normalizeSessionId(sessionId));
+    if (key && this.tabs.has(key)) return key;
+    // 本会话没有标签时，只回退到「无归属」的接管标签；绝不操作其它会话的标签
+    const unowned = Array.from(this.tabs.values())
+      .filter((record) => !record.ownerSessionId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    return unowned?.key ?? null;
+  }
+
+  /** 记录标签为所属会话的当前标签（同时维护全局兜底） */
+  private markSessionCurrent(record: TabRecord): void {
+    if (record.ownerSessionId) {
+      this.sessionCurrentTab.set(record.ownerSessionId, record.key);
+    }
+    this.currentTabKey = record.key;
+  }
+
+  /** 标签移除后回退到该会话最近创建的标签 */
+  private fallbackSessionCurrent(record: TabRecord): void {
+    const sessionId = record.ownerSessionId;
+    if (!sessionId) return;
+    if (this.sessionCurrentTab.get(sessionId) !== record.key) return;
+    const remaining = Array.from(this.tabs.values())
+      .filter((item) => item.ownerSessionId === sessionId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (remaining) this.sessionCurrentTab.set(sessionId, remaining.key);
+    else this.sessionCurrentTab.delete(sessionId);
+  }
+
+  /** base 或 base-<数字> 视为某个 MOSS 会话分组标题 */
+  private isSessionGroupTitle(title: string, base: string): boolean {
+    if (!title || !base) return false;
+    if (title === base) return true;
+    return title.startsWith(`${base}-`) && /^\d+$/.test(title.slice(base.length + 1));
+  }
+
+  /** 浏览器当前真实存在的 MOSS 分组标题；查询失败返回 null（调用方退回内存占用集合） */
+  private async collectLiveGroupTitles(
+    instanceId: string,
+    base: string,
+  ): Promise<Set<string> | null> {
+    let groups: unknown;
+    try {
+      groups = await this.bridge.send(instanceId, 'groups.query', {}, 5000);
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(groups)) return null;
+    const titles = new Set<string>();
+    for (const group of groups) {
+      if (!isRecord(group) || typeof group.title !== 'string') continue;
+      // 旧「MOSS AI」分组接管后会改名为基础名，分配时按基础名占位
+      if (LEGACY_GROUP_TITLES.includes(group.title)) {
+        titles.add(base);
+        continue;
+      }
+      if (this.isSessionGroupTitle(group.title, base)) titles.add(group.title);
+    }
+    return titles;
+  }
+
+  /** 该会话在该实例的指定分组里是否还有标签记录 */
+  private hasSessionGroupTabs(sessionId: string, instanceId: string, title: string): boolean {
+    for (const record of this.tabs.values()) {
+      if (
+        record.instanceId === instanceId &&
+        record.ownerSessionId === sessionId &&
+        record.groupTitle === title
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 标题是否已被「其它会话的存活标签」占用 */
+  private isTitleOwnedByOther(sessionId: string, instanceId: string, title: string): boolean {
+    for (const record of this.tabs.values()) {
+      if (record.instanceId !== instanceId || record.groupTitle !== title) continue;
+      if (record.ownerSessionId && record.ownerSessionId !== sessionId) return true;
+    }
+    return false;
+  }
+
+  /** 串行化组名分配，避免并发会话抢到同一个空位 */
+  private async withGroupAllocLock<T>(task: () => Promise<T>): Promise<T> {
+    const previous = this.groupAllocChain;
+    let release!: () => void;
+    this.groupAllocChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * 为会话分配标签组名：MOSS、MOSS-0、MOSS-1…
+   * 以浏览器真实分组为准取最小空位，组被关闭后名称立即回收复用。
+   */
+  private async allocateGroupTitle(
+    sessionId: string,
+    instanceId: string,
+    base: string,
+  ): Promise<string> {
+    return this.withGroupAllocLock(async () => {
+      const live = await this.collectLiveGroupTitles(instanceId, base);
+      const existing = this.sessionGroupTitle.get(sessionId);
+      if (existing) {
+        const ownedByOther = this.isTitleOwnedByOther(sessionId, instanceId, existing);
+        // 同一实例上的旧映射直接复用（含「已分配但标签还没落库」的并发窗口）
+        if (!ownedByOther && this.sessionGroupInstance.get(sessionId) === instanceId) {
+          return existing;
+        }
+      }
+      const used = new Set<string>(live ?? []);
+      for (const record of this.tabs.values()) {
+        if (record.instanceId === instanceId && record.groupTitle) used.add(record.groupTitle);
+      }
+      // 短期占用：覆盖「已分配但标签还没落库」的并发窗口，过期后自动放行
+      const now = Date.now();
+      for (const [title, expiresAt] of Array.from(this.pendingGroupTitles)) {
+        if (expiresAt <= now) this.pendingGroupTitles.delete(title);
+        else used.add(title);
+      }
+      for (let index = 0; ; index += 1) {
+        const title = index === 0 ? base : `${base}-${index - 1}`;
+        if (used.has(title)) continue;
+        this.sessionGroupTitle.set(sessionId, title);
+        this.sessionGroupInstance.set(sessionId, instanceId);
+        this.pendingGroupTitles.set(title, now + 60_000);
+        return title;
+      }
+    });
+  }
+
+  /** 会话标签组信息（已分配则复用） */
+  private async ensureSessionGroup(
+    sessionId: string,
+    instanceId: string,
+  ): Promise<{ title: string; windowId?: number }> {
+    const title = await this.allocateGroupTitle(
+      sessionId,
+      instanceId,
+      this.getToolConfig().tabGroupTitle || 'MOSS',
+    );
+    const windowId = this.sessionWindowId.get(sessionId);
+    return {
+      title,
+      ...(windowId !== undefined ? { windowId } : {}),
+    };
+  }
+
   async openTab(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
     const cfg = this.getToolConfig();
-    const focus = options.focus ?? cfg.autoFocus;
+    const sessionId = this.normalizeSessionId(options.sessionId);
+    // 建页永不激活：只有显式 focus=true 才在页面就绪后切换活动标签；绝不把窗口抬到前台。
+    const active = options.focus === true;
     const cdpEndpoint = options.cdpEndpoint?.trim();
     if (cdpEndpoint) await this.ensureCdp(cdpEndpoint);
     const resolved = await this.resolveTarget(cdpEndpoint ? 'cdp' : options.target);
+    // 先解析目标实例再分配组名：打开失败不再白白占用编号，名称以该浏览器真实分组为准
+    const group = await this.ensureSessionGroup(sessionId, resolved.key);
     const timeout = Math.max(options.timeoutMs ?? cfg.timeoutMs, 30_000);
     const bridgePort = this.bridge.port;
     const marker = bridgePort
       ? `http://127.0.0.1:${bridgePort}/blank#moss-${randomUUID()}`
       : `about:blank#moss-${randomUUID()}`;
+    // 目标 URL 参与建页：新 MOSS 窗口的首个标签页直接加载目标页，不再短暂显示 marker。
+    // 已有窗口中的标签页仍以 marker 后台创建，导航完成前不会被激活。
+    const targetUrl = options.url ? normalizeUrl(options.url) : undefined;
+    let usedInitialUrl = false;
     let nativeTabId = -1;
     let windowId: number | undefined;
     let groupId: number | null = null;
@@ -1348,12 +1620,58 @@ export class BrowserServiceImpl implements BrowserService {
       if (resolved.kind === 'builtin') {
         existingTargetIds = (await this.builtin.listPageTargets()).map((item) => item.targetId);
       }
-      // 外部浏览器：首次建页时新开后台 MOSS 窗口（focused:false），后续复用该窗口
-      const created =
-        resolved.kind === 'external'
-          ? await this.ensureExternalMossTab(resolved.bridgeId, cfg, marker, timeout, focus)
-          : null;
-      const tab = created ?? (await this.createLegacyMossTab(resolved.bridgeId, marker, timeout, cfg, focus));
+      // 外部浏览器：首次建页时新开后台 MOSS 窗口（focused:false），后续复用该窗口。
+      // 记录里的 windowId 可能已被用户关闭：失败时清掉并退回「按分组标题定位/新建窗口」。
+      const createExternal = async (
+        targetWindowId: number | undefined,
+      ): Promise<Awaited<ReturnType<BrowserServiceImpl['ensureExternalMossTab']>>> =>
+        this.ensureExternalMossTab(
+          resolved.bridgeId!,
+          cfg,
+          marker,
+          timeout,
+          targetUrl,
+          group.title,
+          targetWindowId,
+        );
+      let created: Awaited<ReturnType<typeof createExternal>> = null;
+      if (resolved.kind === 'external') {
+        try {
+          created = await createExternal(group.windowId);
+        } catch (err) {
+          if (group.windowId === undefined) throw err;
+          this.sessionWindowId.delete(sessionId);
+          this.logger.warn(
+            `[browser] 会话窗口已失效，重新按分组定位: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          created = await createExternal(undefined);
+        }
+        if (created?.createdWithUrl === true) usedInitialUrl = true;
+      }
+      let tab: { tabId: number; windowId?: number; groupId: number | null };
+      try {
+        tab =
+          created ??
+          (await this.createLegacyMossTab(
+            resolved.bridgeId,
+            marker,
+            timeout,
+            cfg,
+            group.title,
+            group.windowId,
+          ));
+      } catch (err) {
+        if (group.windowId === undefined) throw err;
+        this.sessionWindowId.delete(sessionId);
+        tab = await this.createLegacyMossTab(
+          resolved.bridgeId,
+          marker,
+          timeout,
+          cfg,
+          group.title,
+          undefined,
+        );
+      }
       nativeTabId = tab.tabId;
       if (tab.windowId !== undefined) windowId = tab.windowId;
       groupId = tab.groupId;
@@ -1369,16 +1687,21 @@ export class BrowserServiceImpl implements BrowserService {
         }
       }
     } else if (resolved.kind === 'cdp') {
-      // 外部 CDP：优先新建标签页；Electron 等不支持 Target.createTarget 时附着已有页面
-      targetId = await this.cdp.createPageTarget(marker).catch(() => undefined);
-      if (!targetId) {
+      // 外部 CDP：优先后台新建标签页；Electron 等不支持 Target.createTarget 时附着已有页面
+      targetId = await this.cdp
+        .createPageTarget(targetUrl ?? marker, { background: true })
+        .catch(() => undefined);
+      if (targetId) {
+        usedInitialUrl = targetUrl !== undefined;
+      } else {
         const pages = await this.cdp.listPageTargets();
         const pick = pages.find((page) => !page.url.startsWith('devtools://')) ?? pages[0];
         if (!pick) throw new Error(t('browser.cdpNoTarget'));
         targetId = pick.targetId;
       }
     } else {
-      targetId = await this.builtin.createPageTarget(marker);
+      targetId = await this.builtin.createPageTarget(targetUrl ?? marker, { background: true });
+      usedInitialUrl = targetUrl !== undefined;
     }
 
     const key = `t${++this.tabSeq}`;
@@ -1390,6 +1713,8 @@ export class BrowserServiceImpl implements BrowserService {
       browserVersion: resolved.browserVersion,
       nativeTabId,
       ...(windowId !== undefined ? { windowId } : {}),
+      ownerSessionId: sessionId,
+      groupTitle: group.title,
       groupId,
       ...(targetId !== undefined ? { targetId } : {}),
       session: null,
@@ -1402,14 +1727,17 @@ export class BrowserServiceImpl implements BrowserService {
       listeners: new Set(),
       sessionCleanup: [],
       frames: new Map(),
-      url: marker,
+      url: targetUrl ?? marker,
       title: '',
-      active: true,
+      active: false,
       createdAt: Date.now(),
     };
     this.tabs.set(key, record);
+    this.pendingGroupTitles.delete(group.title);
     this.removeDuplicateNativeTab(record);
     this.currentTabKey = key;
+    this.sessionCurrentTab.set(sessionId, key);
+    if (windowId !== undefined) this.sessionWindowId.set(sessionId, windowId);
     this.lastTargetKey = resolved.key;
 
     // 先建立页面会话；失败不删除标签页（用户仍可在浏览器中看到它）
@@ -1421,20 +1749,29 @@ export class BrowserServiceImpl implements BrowserService {
 
     if (options.url) {
       try {
-        await this.navigate(key, { url: options.url, timeoutMs: options.timeoutMs });
+        if (usedInitialUrl) {
+          // 建页时已直接加载目标网址：只等待就绪并检查错误页，避免同一地址请求两次。
+          await this.waitOpenedPage(record, timeout);
+        } else {
+          await this.navigate(key, { url: options.url, timeoutMs: options.timeoutMs });
+        }
       } catch (err) {
-        // 导航失败时收掉 marker 占位页：否则它会一直以 http://127.0.0.1:7799/blank#moss-...
+        // 打开失败时收掉占位页/错误页：否则它会一直以 http://127.0.0.1:7799/blank#moss-...
         // 出现在 tabs/导航结果里，模型下一次很容易继续操作这个空页。
         await this.closeTab(key).catch(() => undefined);
         const detail = err instanceof Error ? err.message : String(err);
-        throw new Error(`已创建标签页但导航失败：${detail}`);
+        throw new Error(
+          usedInitialUrl
+            ? `已创建标签页但打开失败：${detail}`
+            : `已创建标签页但导航失败：${detail}`,
+        );
       }
     } else {
       await this.refreshRecordInfo(record);
     }
-    // 打开后聚焦：显式要求聚焦（focus=true）时才抬窗口；后台 open 不抢焦点
-    if (focus) {
-      await this.ensureFocused(key, { force: true, focusWindow: true }).catch(() => undefined);
+    // 打开后聚焦：只有显式 focus=true 才尝试；是否真正切换由扩展按「组内焦点」策略决定
+    if (active) {
+      await this.ensureFocused(key).catch(() => undefined);
     }
     return this.toTabInfo(record);
   }
@@ -1448,8 +1785,16 @@ export class BrowserServiceImpl implements BrowserService {
     cfg: BrowserToolConfig,
     marker: string,
     timeout: number,
-    focus: boolean,
-  ): Promise<{ tabId: number; windowId?: number; groupId: number | null; createdWindow: boolean } | null> {
+    initialUrl: string | undefined,
+    groupTitle: string,
+    windowId?: number,
+  ): Promise<{
+    tabId: number;
+    windowId?: number;
+    groupId: number | null;
+    createdWindow: boolean;
+    createdWithUrl: boolean;
+  } | null> {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -1458,11 +1803,19 @@ export class BrowserServiceImpl implements BrowserService {
           'windows.ensureMoss',
           {
             url: marker,
-            active: focus,
-            focus,
-            title: cfg.tabGroupTitle,
+            // 新窗口直接用目标网址加载；已有窗口仍用 marker 后台建页。
+            ...(initialUrl ? { initialUrl } : {}),
+            // 窗口归属按分组基名判定（MOSS / MOSS-N 同属一个 MOSS 窗口）
+            baseTitle: cfg.tabGroupTitle,
+            // 建页永不激活：加载完成前不切换标签/地址栏，页面就绪后由 openTab 显式激活。
+            active: false,
+            focus: false,
+            title: groupTitle,
             color: cfg.tabGroupColor,
-            legacyTitles: LEGACY_GROUP_TITLES,
+            // 旧标题只迁移基础 MOSS 组，避免把 MOSS-0 误并到 MOSS
+            legacyTitles: groupTitle === cfg.tabGroupTitle ? LEGACY_GROUP_TITLES : [],
+            isolateWindow: true,
+            ...(windowId !== undefined ? { windowId } : {}),
           },
           timeout,
         );
@@ -1474,6 +1827,7 @@ export class BrowserServiceImpl implements BrowserService {
           ...(typeof raw.windowId === 'number' ? { windowId: raw.windowId } : {}),
           groupId: typeof raw.groupId === 'number' ? raw.groupId : null,
           createdWindow: raw.createdWindow === true,
+          createdWithUrl: raw.createdWithUrl === true,
         };
       } catch (err) {
         lastError = err;
@@ -1494,12 +1848,19 @@ export class BrowserServiceImpl implements BrowserService {
     marker: string,
     timeout: number,
     cfg: BrowserToolConfig,
-    focus: boolean,
+    groupTitle: string,
+    windowId?: number,
   ): Promise<{ tabId: number; windowId?: number; groupId: number | null }> {
     const created = await this.bridge.send(
       bridgeId,
       'tabs.create',
-      { url: marker, active: focus, focus },
+      {
+        url: marker,
+        // 旧流程无法保证窗口归属：建页只放后台，绝不抢活动标签。
+        active: false,
+        focus: false,
+        ...(windowId !== undefined ? { windowId } : {}),
+      },
       timeout,
     );
     if (!isRecord(created) || typeof created.tabId !== 'number') {
@@ -1516,9 +1877,9 @@ export class BrowserServiceImpl implements BrowserService {
         'groups.ensure',
         {
           tabId: result.tabId,
-          title: cfg.tabGroupTitle,
+          title: groupTitle,
           color: cfg.tabGroupColor,
-          legacyTitles: LEGACY_GROUP_TITLES,
+          legacyTitles: groupTitle === cfg.tabGroupTitle ? LEGACY_GROUP_TITLES : [],
         },
         timeout,
       );
@@ -1531,94 +1892,49 @@ export class BrowserServiceImpl implements BrowserService {
     return result;
   }
 
-  async focusTab(tab?: string): Promise<BrowserTabInfo> {
-    const result = await this.ensureFocused(tab, { force: true, focusWindow: true });
-    return this.toTabInfo(await this.requireTab(result.tab));
+  async focusTab(tab?: string): Promise<BrowserFocusResult> {
+    return this.ensureFocused(tab);
   }
 
   /**
-   * 聚焦目标标签页。
-   * - 例行操作：focusWindow=false（默认）只把标签设为活动标签，不抬操作系统窗口，
-   *   避免用户切回其他窗口后每次操作都把整个浏览器窗口闪到前台。
-   * - 显式 focus/open：focusWindow=true 才调用 windows.update(focused:true)。
-   * - 失败时回退到 opener 标签页 → 当前标签页（上一级窗口）。
+   * 组内聚焦：只有目标标签与当前活动标签属于同一个「本会话 MOSS 分组」时才切换活动标签。
+   * - 绝不回退到 opener / 同会话其它标签 / 全局当前标签；
+   * - 绝不调用 Target.activateTarget 抬窗口；
+   * - 未分组、被拖到其它分组、当前活动标签不在同组，一律 skipped。
    */
-  async ensureFocused(
-    tab?: string,
-    options: { force?: boolean; focusWindow?: boolean } = {},
-  ): Promise<BrowserFocusResult> {
-    const focusWindow = options.focusWindow === true;
+  async ensureFocused(tab?: string): Promise<BrowserFocusResult> {
     const record = await this.requireTab(tab);
-    const focusOne = async (target: TabRecord): Promise<boolean> => {
-      if (target.kind === 'cdp') {
-        if (!target.targetId) return false;
-        // Target.activateTarget 会抬窗口：只有显式聚焦时才调用
-        if (focusWindow) await this.cdp.activate(target.targetId);
-        return true;
-      }
-      if (target.instanceId !== 'builtin' && target.nativeTabId >= 0) {
-        try {
-          await this.bridge.send(
-            target.instanceId,
-            'tabs.activate',
-            { tabId: target.nativeTabId, focusWindow },
-            10_000,
-          );
-          return true;
-        } catch {
-          // 扩展不可用：继续尝试内置 CDP
-        }
-      }
-      if (target.targetId) {
-        const cdp = this.builtin.getCdp();
-        if (!cdp) return false;
-        if (focusWindow) {
-          await cdp.send('Target.activateTarget', { targetId: target.targetId });
-        }
-        return true;
-      }
-      return false;
-    };
-
-    let reason = '';
+    const skipped = (reason: string): BrowserFocusResult => ({
+      tab: record.key,
+      focused: false,
+      reason,
+    });
+    if (record.kind === 'cdp' || record.instanceId === 'builtin') {
+      return skipped('当前浏览器模式没有分组语义，不会自动切换标签');
+    }
+    if (!record.groupTitle) {
+      return skipped('目标标签页没有可用的 MOSS 分组，已保持当前焦点');
+    }
+    if (record.nativeTabId < 0) return skipped('目标标签页不支持激活');
     try {
-      if (await focusOne(record)) {
-        record.active = true;
-        this.currentTabKey = record.key;
-        this.lastTargetKey = record.instanceId;
-        return { tab: record.key, focused: true, fallback: false };
+      const raw = await this.bridge.send(
+        record.instanceId,
+        'tabs.activate',
+        { tabId: record.nativeTabId, groupTitle: record.groupTitle },
+        10_000,
+      );
+      if (isRecord(raw) && raw.skipped === true) {
+        const reason =
+          typeof raw.reason === 'string' && raw.reason ? raw.reason : '已跳过自动切换';
+        return skipped(reason);
       }
-      reason = '目标标签页不支持激活';
     } catch (err) {
-      reason = err instanceof Error ? err.message : String(err);
+      return skipped(err instanceof Error ? err.message : String(err));
     }
-
-    // 回退：弹窗/新标签页的 opener → 当前标签页（上一级窗口）
-    const opener =
-      record.openerTabId !== undefined
-        ? this.findTabByNative(record.instanceId, record.openerTabId)
-        : null;
-    const current =
-      this.currentTabKey && this.currentTabKey !== record.key
-        ? this.tabs.get(this.currentTabKey) ?? null
-        : null;
-    const fallback = opener ?? current;
-    if (fallback) {
-      try {
-        if (await focusOne(fallback)) {
-          fallback.active = true;
-          this.currentTabKey = fallback.key;
-          this.lastTargetKey = fallback.instanceId;
-          this.logger.warn(
-            `[browser] 标签页 ${record.key} 无法聚焦，已回退到 ${fallback.key}（${reason}）`,
-          );
-          return { tab: record.key, focused: true, fallback: true, reason };
-        }
-      } catch (err) {
-        reason = err instanceof Error ? err.message : String(err);
-      }
-    }
-    return { tab: record.key, focused: false, fallback: false, reason };
+    record.active = true;
+    this.markSessionCurrent(record);
+    this.lastTargetKey = record.instanceId;
+    return { tab: record.key, focused: true };
   }
 
   async closeTab(tab?: string): Promise<void> {
@@ -1641,6 +1957,8 @@ export class BrowserServiceImpl implements BrowserService {
     record.listeners.clear();
     record.frames.clear();
     this.tabs.delete(record.key);
+    this.releaseSessionGroup(record);
+    this.fallbackSessionCurrent(record);
     if (this.currentTabKey === record.key) {
       const remaining = Array.from(this.tabs.values()).sort((a, b) => b.createdAt - a.createdAt)[0];
       this.currentTabKey = remaining?.key ?? null;
@@ -1656,6 +1974,8 @@ export class BrowserServiceImpl implements BrowserService {
       nativeTabId: record.nativeTabId,
       url: record.url,
       title: record.title,
+      ...(record.ownerSessionId ? { ownerSessionId: record.ownerSessionId } : {}),
+      ...(record.groupTitle ? { groupTitle: record.groupTitle } : {}),
       at: Date.now(),
     });
     if (this.retiredTabs.size > 20) {
@@ -1668,8 +1988,12 @@ export class BrowserServiceImpl implements BrowserService {
    * 取标签页记录；key 失效时尝试在仍连接的原生标签页里按 URL 重新接管。
    * 这样扩展重连/标签被移动后，模型仍可继续使用 t1，而不是直接报「标签页不存在」。
    */
-  private async requireTab(tab?: string): Promise<TabRecord> {
-    const key = tab ?? this.currentTabKey;
+  private async requireTab(tab?: string, sessionId?: string): Promise<TabRecord> {
+    const sessionKey = sessionId ? this.normalizeSessionId(sessionId) : undefined;
+    const key =
+      tab ??
+      (sessionKey ? this.sessionCurrentTab.get(sessionKey) : undefined) ??
+      this.currentTabKey;
     if (!key) throw new Error(t('browser.noTab'));
     const existing = this.tabs.get(key);
     if (existing) return existing;
@@ -1711,6 +2035,8 @@ export class BrowserServiceImpl implements BrowserService {
       ...(typeof match.windowId === 'number' && match.windowId >= 0
         ? { windowId: match.windowId }
         : {}),
+      ...(retired.ownerSessionId ? { ownerSessionId: retired.ownerSessionId } : {}),
+      ...(retired.groupTitle ? { groupTitle: retired.groupTitle } : {}),
       groupId: typeof match.groupId === 'number' ? match.groupId : null,
       session: null,
       sessionPromise: null,
@@ -1729,6 +2055,17 @@ export class BrowserServiceImpl implements BrowserService {
     };
     this.tabs.set(key, record);
     this.currentTabKey = key;
+    if (record.ownerSessionId) {
+      this.sessionCurrentTab.set(record.ownerSessionId, key);
+      // 复活后恢复组名映射（除非该组名已被其它会话的存活标签占用）
+      if (
+        record.groupTitle &&
+        !this.isTitleOwnedByOther(record.ownerSessionId, record.instanceId, record.groupTitle)
+      ) {
+        this.sessionGroupTitle.set(record.ownerSessionId, record.groupTitle);
+        this.sessionGroupInstance.set(record.ownerSessionId, record.instanceId);
+      }
+    }
     this.retiredTabs.delete(key);
     return record;
   }
@@ -2382,6 +2719,23 @@ export class BrowserServiceImpl implements BrowserService {
     const root = await this.ensureTabSession(record);
     const session = this.createFrameSession(record, frame, root);
     return { session, refs: new Map([[ref, hit.backendNodeId]]), frame };
+  }
+
+  /**
+   * 建页时已直接加载目标网址：等待页面就绪并识别浏览器错误页。
+   * 不再重复 Page.navigate，避免同一地址加载两次。
+   */
+  private async waitOpenedPage(record: TabRecord, timeoutMs: number): Promise<void> {
+    const session = await this.ensureTabSession(record);
+    await waitForReady(session, timeoutMs);
+    const info = await getPageInfo(session);
+    if (/^chrome-error:\/\//i.test(info.url)) {
+      throw new Error(
+        '导航失败：浏览器返回错误页（DNS 解析失败、连接被拒绝、证书错误或被安全软件/扩展拦截）',
+      );
+    }
+    if (info.url) record.url = info.url;
+    if (info.title) record.title = info.title;
   }
 
   private async refreshRecordInfo(record: TabRecord): Promise<void> {

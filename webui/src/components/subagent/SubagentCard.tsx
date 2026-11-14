@@ -12,11 +12,11 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/http';
 import { useStore } from '../../store';
+import { usePersistentState } from '../../lib/ui-state';
 import { MarkdownRenderer } from '../../render';
 import { getSubagentSession, subscribeSubagentSession } from '../../lib/subagent-sessions';
 import {
   getAgentByParentToolCall,
-  getAgentBusVersion,
   subscribeAgentBus,
 } from '../../lib/agent-bus';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
@@ -33,6 +33,8 @@ const AgentTaskFlow = lazy(() =>
 export interface SubagentCallItem {
   toolCallId: string;
   template: string;
+  /** 模板显示名（工具结果 metadata 携带；运行时新建的自定义 Agent 也能显示名称） */
+  name?: string;
   task: string;
   /** sync / async（历史会话可能缺省） */
   mode?: string;
@@ -63,13 +65,13 @@ function rowStatusOf(call: SubagentCallItem, memberStatus?: string): RowStatus {
   return call.isError ? 'failed' : 'completed';
 }
 
-/** 订阅总线版本，按父工具调用 id 取子代理实时成员 */
+/** 订阅总线：getSnapshot 返回状态字符串，状态不变时不会触发重渲（避免任一 Agent 事件重渲全部卡片） */
 function useAgentBusMember(toolCallId: string) {
-  const version = useSyncExternalStore(subscribeAgentBus, getAgentBusVersion);
-  return useMemo(
-    () => getAgentByParentToolCall(toolCallId),
-    [toolCallId, version],
+  const status = useSyncExternalStore(
+    subscribeAgentBus,
+    () => getAgentByParentToolCall(toolCallId)?.status ?? '',
   );
+  return useMemo(() => getAgentByParentToolCall(toolCallId), [toolCallId, status]);
 }
 
 /** 进度点阵配色（按行状态） */
@@ -128,6 +130,14 @@ const SubagentRow = memo(function SubagentRow({
   const running = status === 'running';
   const boundSessionId = useSubagentSessionBinding(call.toolCallId);
   const [cancelling, setCancelling] = useState(false);
+  /**
+   * 首次展开后保持过程流挂载：折叠只隐藏，不卸载。
+   * 避免每次展开都重新 import AgentTaskFlow、拉会话历史、重建过程列表（卡顿/闪烁来源）。
+   */
+  const [flowMounted, setFlowMounted] = useState(false);
+  useEffect(() => {
+    if (expanded) setFlowMounted(true);
+  }, [expanded]);
   // 轻量历史投影：行展开时才拉取完整报告（折叠态不请求、不解析长文本）
   const lightResult = useMemo<ToolResult | undefined>(() => {
     if (call.resultText === undefined && !call.lazy) return undefined;
@@ -216,8 +226,8 @@ const SubagentRow = memo(function SubagentRow({
         </span>
         <TaskStatusIcon status={status} />
       </div>
-      {expanded && (
-        <div className="mt-2 flex flex-col gap-2">
+      {flowMounted && (
+        <div className={expanded ? 'mt-2 flex flex-col gap-2' : 'hidden'}>
           <Suspense fallback={<div className="text-[11px] text-muted-foreground">…</div>}>
             <AgentTaskFlow sessionId={flowSessionId} running={running} />
           </Suspense>
@@ -230,7 +240,7 @@ const SubagentRow = memo(function SubagentRow({
                 {call.isError ? (
                   <pre className="mono whitespace-pre-wrap break-all text-destructive">{report}</pre>
                 ) : (
-                  <MarkdownRenderer text={report} />
+                  <MarkdownRenderer text={report} defer />
                 )}
               </div>
             </div>
@@ -251,17 +261,20 @@ export const SubagentCard = memo(function SubagentCard({
 }) {
   const { t } = useTranslation();
   const agents = useStore((s) => s.agents);
-  /** 展开的行 key（同一时刻只展开一行，避免卡片过长） */
-  const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  // 总线实时状态参与整体状态计算（async 后台代理完成/失败时即时更新徽章）
-  const busVersion = useSyncExternalStore(subscribeAgentBus, getAgentBusVersion);
+  /** 展开的行 key（跨挂载持久化；同一时刻只展开一行，避免卡片过长） */
+  const expansionKey = `${sessionId ?? 'default'}:subagent:${calls[0]?.toolCallId ?? 'empty'}:expanded`;
+  const [expandedRow, setExpandedRow] = usePersistentState<string | null>(expansionKey, null);
+  // 总线状态签名：只有本卡片内 Agent 的状态变化才重渲，避免全局事件风暴
+  const busSig = useSyncExternalStore(subscribeAgentBus, () =>
+    calls.map((call) => getAgentByParentToolCall(call.toolCallId)?.status ?? '').join('|'),
+  );
 
   const statuses = useMemo(
     () =>
       calls.map((call) =>
         rowStatusOf(call, getAgentByParentToolCall(call.toolCallId)?.status),
       ),
-    [calls, busVersion],
+    [calls, busSig],
   );
   const anyRunning = statuses.some((s) => s === 'running');
   const anyFailed = !anyRunning && statuses.some((s) => s === 'failed');
@@ -312,7 +325,10 @@ export const SubagentCard = memo(function SubagentCard({
       {/* 任务行列表（每行可展开该子代理的执行过程与最终报告） */}
       <div className="flex flex-col gap-1.5">
         {calls.map((call, i) => {
+          // 名称解析优先级：结果 metadata（实时/历史都可靠）→ 总线成员 → agents 注册表 → id
           const displayName =
+            call.name ||
+            getAgentByParentToolCall(call.toolCallId)?.name ||
             agents.find((a) => a.id === call.template)?.name ||
             call.template ||
             t('subagent.card.title');

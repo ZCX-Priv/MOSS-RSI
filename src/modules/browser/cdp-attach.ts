@@ -209,10 +209,13 @@ export class CdpBrowserManager {
     return null;
   }
 
-  async createPageTarget(url: string): Promise<string> {
+  async createPageTarget(url: string, options: { background?: boolean } = {}): Promise<string> {
     const cdp = this.cdp;
     if (!cdp || cdp.isClosed) throw new Error(t('browser.cdpNotConnected'));
-    const result = await cdp.send<{ targetId?: string }>('Target.createTarget', { url });
+    const result = await cdp.send<{ targetId?: string }>('Target.createTarget', {
+      url,
+      ...(options.background ? { background: true } : {}),
+    });
     if (!result.targetId) throw new Error(t('browser.tabCreateFailed'));
     this.targetCount += 1;
     return result.targetId;

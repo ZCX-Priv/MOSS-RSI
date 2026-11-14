@@ -2,12 +2,30 @@
 
 ## 参数
 
-- template：注册表 agent id。内置模板：agent_explorer（代码库探索）、agent_planner（任务规划）、agent_coder（编码实现）、agent_reviewer（对抗性审查）；也可使用用户自定义的 agent id。
+- template：注册表 agent id。内置模板：agent_explorer（代码库探索）、agent_planner（任务规划）、agent_coder（编码实现）、agent_reviewer（对抗性审查）；也可使用用户自定义的 agent id（用 agent_manage action=list 查看当前全部可用 id）。
 - task：完整、自包含的任务描述。子代理只能看到这段内容，不会继承当前对话、上下文或你的推理过程。
 - mode：`sync`（默认，阻塞等待最终报告）或 `async`（后台运行，立即返回 agentId/sessionId）。
 - cwd：可选，默认当前会话工作目录。
 - tools：可选，本次子代理可用的工具白名单（如 `["read","grep","edit"]`）。不填=使用模板默认配置；传入后子代理只能看到白名单内工具（`agent_status` / `agent_message` 始终可用）。
 - maxTurns：可选，工具调用轮数。不填=200；低于 200 按 200 处理；无上限；填 `infinite` 表示不限制轮数。
+- inherit_context：可选，默认 true。会把父会话最近一条用户请求作为背景附在任务前，仅帮助子代理理解目标，不扩大任务范围。
+
+## 嵌套规则
+
+- 子代理可以继续调用 `agent` 派发下一层，层级上限由设置中的 `agent.maxSubagentDepth` 控制（默认 2：主 → 子 → 孙）。
+- 达到上限后 `agent` 工具不再暴露；强行派发会被 runner 拒绝并给出明确错误。
+- 子代理不可使用 `agent_manage`；自定义 Agent 的持久创建/修改由主代理负责。
+
+## 自定义 Agent（agent_manage）
+
+- `agent_manage action=list`：列出内置模板与自定义 Agent。
+- `agent_manage action=get id=<id>`：查看详情。
+- `agent_manage action=create name=... description=... systemPrompt=... tools=[...]`：创建自定义 Agent。
+- `agent_manage action=update id=<id> ...`：修改自定义 Agent（内置模板只读）。
+- `agent_manage action=delete id=<id>`：删除自定义 Agent（默认 Agent 不可删）。
+- `agent_manage action=tools`：列出可填入 `tools` 的工具名。
+
+创建后直接用 `agent(template=<自定义 id>, task=...)` 派发；自定义 Agent 未填写 `tools` 时默认拥有全部工具。
 
 ## 何时必须委派
 

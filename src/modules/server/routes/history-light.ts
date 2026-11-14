@@ -61,9 +61,13 @@ export function lightenHistoryMessage(message: unknown): unknown {
       : content;
   const metadata = isRecord(message.metadata) ? message.metadata : {};
   const codeRun = isRecord(metadata.codeRun) ? metadata.codeRun : null;
+  // agentRun 体积极小（id/名称/状态），历史轻投影必须保留：
+  // SubagentCard 依赖它显示自定义 Agent 名称，而不是回退成模板 id。
+  const agentRun = isRecord(metadata.agentRun) ? metadata.agentRun : null;
   const lightMetadata: Record<string, unknown> = {
     [LAZY_RESULT_FLAG]: true,
     ...(codeRun ? { codeRun: lightenCodeRun(codeRun) } : {}),
+    ...(agentRun ? { agentRun } : {}),
   };
   return {
     ...message,

@@ -358,6 +358,8 @@ export const appConfigSchema = z.object({
     maxConcurrentRuns: z.number().int().min(1).max(16).optional(),
     /** 同轮并发子代理上限（缺省 4） */
     maxConcurrentSubagents: z.number().int().min(1).max(8).default(4),
+    /** 子代理最大嵌套层级（1=只能派发一层；2=主→子→孙；缺省 2） */
+    maxSubagentDepth: z.number().int().min(1).max(5).default(2),
     codeMode: codeModeSchema.default({
       enabled: true,
       uiEnabled: true,
@@ -405,7 +407,8 @@ export const appConfigSchema = z.object({
     .object({
       enabled: z.boolean().default(false),
       localModel: z.string().default(''),
-      language: z.string().default('zh'),
+      language: z.string().default('auto'),
+      languageExplicit: z.boolean().default(false),
     })
     .prefault({}),
   // 外观主题色：WebUI 同步写入，computer 原生光标颜色映射用

@@ -233,6 +233,8 @@ export interface AppConfig {
     maxConcurrentRuns?: number;
     /** 同一轮并发执行 subagent 工具调用的上限（缺省 4） */
     maxConcurrentSubagents?: number;
+    /** 子代理最大嵌套层级（1=只能派发一层；2=主→子→孙；缺省 2） */
+    maxSubagentDepth?: number;
     workingDirectory: string;
     /** 代码模式（PTC + Intelligent UI）：run_code 限额（输出不设字节预算） */
     codeMode: {
@@ -308,6 +310,8 @@ export interface AppConfig {
     localModel: string;
     /** 识别语言提示（'auto' | 'zh' | 'en' 等；仅 SenseVoice / Whisper 生效） */
     language: string;
+    /** 用户是否显式选择过语言（false/缺省时旧配置的 zh 视为自动迁移为 auto） */
+    languageExplicit?: boolean;
   };
   /** 外观主题色（hex；WebUI 同步写入，computer 原生光标颜色使用） */
   appearance?: {

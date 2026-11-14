@@ -108,7 +108,7 @@ import { AskAttachmentStrip } from '../shared/AskAttachmentStrip';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
 import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
 import { SubagentCard, type SubagentCallItem } from '../subagent/SubagentCard';
-import { isAgentCall, parseAgentArgs, buildToolResultIndex, type ToolResultEntry } from '../subagent/agent-calls';
+import { isAgentCall, parseAgentArgs, buildToolResultIndex, toToolResultEntry, type ToolResultEntry } from '../subagent/agent-calls';
 import { MessageErrorBoundary } from '../shared/MessageErrorBoundary';
 import { ControlHub } from '../shared/ControlHub';
 import { StatsBar } from '../shared/StatsBar';
@@ -153,6 +153,7 @@ import { useTask } from '../../hooks/useTask';
 import { api } from '../../api/http';
 import { hydrateAgentBus } from '../../lib/agent-bus';
 import { copyText } from '../../lib/clipboard';
+import { usePersistentState } from '../../lib/ui-state';
 import type { TaskMessage, TodoItem, SidebarTab, CompactPreview, ContextStats, AskQuestion } from '../../types/api';
 
 // 稳定引用的空数组，避免 useStore 选择器每次返回新 [] 触发 useSyncExternalStore 无限循环
@@ -165,9 +166,6 @@ const EMPTY_QUEUE: Array<{
   timestamp: string;
   attachments?: string[];
 }> = [];
-
-// 单条消息正文渲染上限：超长内容（如 base64/大文件摘录）截断渲染，防止一次性布局卡死滚动
-const MAX_RENDER_CHARS = 6000;
 
 // 用户消息附件：优先用后端结构化字段 message.attachments；老会话无该字段时回退
 // lib/attachment-block 的 parseAttachmentBlock（同时覆盖「只发附件不打字 → 块在消息开头」）。
@@ -284,11 +282,45 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
    * 列表项：过滤不可见的空 assistant 占位。
    * 这类条目渲染为 0 高度，但虚拟列表会把「未测量项」按中位数估算，
    * 留在 items 里会让前缀和与实际高度不一致（回复开始瞬间的轻微位移来源）。
+   *
+   * 流式更新通常是「长度不变、仅尾部对象替换」：此时复用旧数组前缀，
+   * 避免每帧 filter + isEmptyAssistantPlaceholder 全量扫描。
    */
-  const listItems = useMemo(
-    () => messages.filter((m) => !isEmptyAssistantPlaceholder(m)),
-    [messages],
-  );
+  const listItemsCacheRef = useRef<{ messages: readonly TaskMessage[]; items: TaskMessage[] }>({
+    messages: EMPTY_MESSAGES,
+    items: [],
+  });
+  const listItems = useMemo(() => {
+    const prev = listItemsCacheRef.current;
+    let prefixSame = messages.length > 0 && messages.length === prev.messages.length;
+    if (prefixSame) {
+      for (let i = 0; i < messages.length - 1; i += 1) {
+        if (messages[i] !== prev.messages[i]) {
+          prefixSame = false;
+          break;
+        }
+      }
+    }
+    if (
+      prefixSame &&
+      messages[messages.length - 1] !== prev.messages[prev.messages.length - 1]
+    ) {
+      const oldTail = prev.messages[prev.messages.length - 1];
+      const newTail = messages[messages.length - 1];
+      const oldEmpty = isEmptyAssistantPlaceholder(oldTail);
+      const newEmpty = isEmptyAssistantPlaceholder(newTail);
+      if (oldEmpty === newEmpty) {
+        if (newEmpty) return prev.items;
+        const next = prev.items.slice();
+        next[next.length - 1] = newTail;
+        listItemsCacheRef.current = { messages, items: next };
+        return next;
+      }
+    }
+    const items = messages.filter((m) => !isEmptyAssistantPlaceholder(m));
+    listItemsCacheRef.current = { messages, items };
+    return items;
+  }, [messages]);
   /**
    * 工具结果全局索引（toolCallId → 结果文本/错误标记）。
    * 长耗时工具（subagent / 建队）的结果消息不保证紧邻其 assistant 消息，
@@ -305,6 +337,41 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   const toolResultIndex = useMemo(() => {
     const cache = toolResultCacheRef.current;
     const prev = cache.messages;
+    // 流式更新最常见形态：长度不变、仅尾部消息对象被替换。
+    // 若被替换的消息没有工具结果，索引完全不变 → 直接复用旧 Map 引用，
+    // 避免所有 MessageBubble 因 toolResults prop 身份变化而全量重渲。
+    if (messages.length === prev.length && messages.length > 0) {
+      let changedIndex = -1;
+      let changedCount = 0;
+      for (let i = 0; i < messages.length; i += 1) {
+        if (messages[i] === prev[i]) continue;
+        changedCount += 1;
+        changedIndex = i;
+        if (changedCount > 1) break;
+      }
+      if (changedCount === 1) {
+        const changed = messages[changedIndex];
+        if (!changed.toolResults || changed.toolResults.length === 0) {
+          cache.messages = messages;
+          return cache.index;
+        }
+        // 同长度但确实带工具结果：只把新增 toolCallId 合并进索引；
+        // 已存在的 id 保持 first-wins（与全量重建一致）。
+        let index: Map<string, ToolResultEntry> | null = null;
+        for (const entry of changed.toolResults) {
+          if (!entry.toolCallId) continue;
+          if (cache.index.has(entry.toolCallId)) continue;
+          if (!index) index = new Map(cache.index);
+          index.set(entry.toolCallId, toToolResultEntry(entry.result));
+        }
+        if (index) {
+          toolResultCacheRef.current = { messages, index };
+          return index;
+        }
+        cache.messages = messages;
+        return cache.index;
+      }
+    }
     if (messages.length > prev.length) {
       let prefixSame = true;
       for (let i = 0; i < prev.length; i++) {
@@ -321,15 +388,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           if (!results) continue;
           for (const entry of results) {
             if (!entry.toolCallId || index.has(entry.toolCallId)) continue;
-            const text = entry.result.content
-              .filter((c) => c.type === 'text')
-              .map((c) => (c.type === 'text' ? c.text : ''))
-              .join('\n');
-            index.set(entry.toolCallId, {
-              text,
-              isError: entry.result.isError === true,
-              ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
-            });
+            index.set(entry.toolCallId, toToolResultEntry(entry.result));
           }
         }
         cache.messages = messages;
@@ -355,15 +414,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           if (!results) continue;
           for (const entry of results) {
             if (!entry.toolCallId) continue;
-            const text = entry.result.content
-              .filter((c) => c.type === 'text')
-              .map((c) => (c.type === 'text' ? c.text : ''))
-              .join('\n');
-            index.set(entry.toolCallId, {
-              text,
-              isError: entry.result.isError === true,
-              ...(entry.result.metadata?.__mossLazy ? { lazy: true } : {}),
-            });
+            index.set(entry.toolCallId, toToolResultEntry(entry.result));
           }
         }
         toolResultCacheRef.current = { messages, index };
@@ -1271,8 +1322,47 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
    * 回复结尾索引（一次性 O(n) 预计算；见 lib/reply-end.ts）：
    * - replyEndIds：所有「一段 AI 回复的结尾」消息 id → 这些消息才挂「复制」按钮
    * - lastReplyEndId：最新的一段回复结尾 → 仅它挂「重新生成 / 诊断(Harness)」
+   *
+   * 流式更新通常只替换尾部消息：若尾部消息的 role / 是否有可操作正文未变，
+   * 直接复用上一次结果，避免每帧全量扫描长会话。
    */
-  const { replyEndIds, lastReplyEndId } = useMemo(() => computeReplyEnds(messages), [messages]);
+  const replyEndsCacheRef = useRef<{
+    messages: readonly TaskMessage[];
+    ends: ReturnType<typeof computeReplyEnds>;
+  }>({ messages: EMPTY_MESSAGES, ends: { replyEndIds: new Set(), lastReplyEndId: null } });
+  const { replyEndIds, lastReplyEndId } = useMemo(() => {
+    const cache = replyEndsCacheRef.current;
+    const prev = cache.messages;
+    if (messages.length > 0 && messages.length === prev.length) {
+      let prefixSame = true;
+      for (let i = 0; i < messages.length - 1; i += 1) {
+        if (messages[i] !== prev[i]) {
+          prefixSame = false;
+          break;
+        }
+      }
+      const oldTail = prev[prev.length - 1];
+      const newTail = messages[messages.length - 1];
+      const hasBody = (m: TaskMessage): boolean =>
+        m.isError ||
+        (m.toolCalls?.length ?? 0) > 0 ||
+        (m.thinking ?? '').trim().length > 0 ||
+        m.content.trim().length > 0;
+      if (
+        prefixSame &&
+        oldTail.id === newTail.id &&
+        oldTail.role === newTail.role &&
+        isSystemCard(oldTail) === isSystemCard(newTail) &&
+        hasBody(oldTail) === hasBody(newTail)
+      ) {
+        cache.messages = messages;
+        return cache.ends;
+      }
+    }
+    const ends = computeReplyEnds(messages);
+    replyEndsCacheRef.current = { messages, ends };
+    return ends;
+  }, [messages]);
 
   /**
    * 对话节点：来自后端全量用户提问（不受分页影响）。
@@ -1368,12 +1458,17 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       // 续接气泡（同一段回复内的中间轮次：assistant 且非回复结尾、非系统卡）→ 收紧底部留白，
       // 使多轮工具调用（每轮一个气泡）读起来像紧凑的工具序列；段结尾/用户/系统卡保留 16px 分隔。
       const isContinuation = msg.role === 'assistant' && !replyEndIds.has(msg.id) && !isSystemCard(msg);
+      const needsTodos =
+        msg.todoSnapshot !== undefined ||
+        (msg.toolCalls?.some((tc) => tc.name === 'todo') ?? false);
       return (
         <div className={cn('min-w-0', isContinuation ? 'px-4 pb-1' : 'px-4 pb-4')}>
-          <MessageErrorBoundary>
+          <MessageErrorBoundary
+            resetKey={`${msg.id}|${msg.content.length}|${msg.streaming ? 1 : 0}|${msg.toolCalls?.length ?? 0}`}
+          >
             <MessageBubble
               message={msg}
-              todos={todos}
+              todos={needsTodos ? todos : undefined}
               toolIconMap={toolIconMap}
               toolResults={toolResultIndex}
               truncateDisabled={isGenerating}
@@ -2436,7 +2531,8 @@ function SystemSectionItem({
 /** 渲染单条消息 */
 interface MessageBubbleProps {
   message: TaskMessage;
-  todos: TodoItem[];
+  /** 仅含 todo 卡片的消息才传（避免 todos 更新导致所有消息重渲） */
+  todos?: TodoItem[];
   toolIconMap: Record<string, string>;
   /** 工具结果全局索引（跨消息匹配；见页面内的 buildToolResultIndex） */
   toolResults: Map<string, ToolResultEntry>;
@@ -2473,12 +2569,9 @@ interface MessageBubbleProps {
 }
 const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
   const { t } = useTranslation();
-  // 超长正文截断渲染（防止单条巨型文本布局卡死）；展开后完整渲染。
-  // 流式生成中超限时显示尾部（正在生成的内容在末尾），结束后恢复头部截断。
-  const [expanded, setExpanded] = useState(false);
   // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
   // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
-  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = usePersistentState(`${message.id}:thinking`, false);
   // 显式思考：流式思考期间每 100ms 刷新一次「当前时刻」，驱动状态行秒数递增（0.1s 分辨率；非思考消息不启动定时器）
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -2510,12 +2603,6 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   // 命令注入块（LLM 可见、UI 不可见）先剥离：气泡/附件解析/正文/复制都在「可见文本」上进行，
   // 刷新后从会话 JSON 重新加载同样走这里 → 不会突然显现模板正文
   const visibleContent = stripInjectBlock(message.content);
-  const overLimit = visibleContent.length > MAX_RENDER_CHARS;
-  const displayContent = overLimit && !expanded
-    ? message.streaming
-      ? '…' + visibleContent.slice(-MAX_RENDER_CHARS)
-      : visibleContent.slice(0, MAX_RENDER_CHARS) + '…'
-    : visibleContent;
   // 用户消息附件：结构化字段优先（新消息，后端持久化），缺失时回退解析正文附件块（老会话）。
   // 正文一律剥离附件块，避免把 "附件：- 路径" 原文渲染进气泡。
   const parsed = message.role === 'user' ? parseAttachmentBlock(visibleContent) : null;
@@ -2524,12 +2611,6 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
   const userBody = structuredPaths
     ? (parsed?.body ?? stripAttachmentBlock(visibleContent))
     : (parsed?.body ?? visibleContent);
-  const userBodyOverLimit = userBody.length > MAX_RENDER_CHARS;
-  const userBodyDisplay = userBodyOverLimit && !expanded
-    ? message.streaming
-      ? '…' + userBody.slice(-MAX_RENDER_CHARS)
-      : userBody.slice(0, MAX_RENDER_CHARS) + '…'
-    : userBody;
   const hasUserBody = userBody.trim().length > 0;
 
   // 系统提示消息：居中气泡（防御性保留；skill 持久模式已废弃，正常流程不再产生）
@@ -2578,19 +2659,9 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
         {/* 只发附件不打字时正文为空：不渲染空气泡，只显示上方附件卡片行 */}
         {hasUserBody && (
         <div className="max-w-[80%] rounded-2xl border border-border bg-primary/10 px-3 py-2 text-sm text-foreground shadow-sm break-words whitespace-pre-wrap dark:bg-primary dark:text-primary-foreground dark:shadow-[0_2px_14px_rgba(0,0,0,0.35)]">
-        <MentionTokenText text={userBodyDisplay} onOpenFile={onOpenAttachment ?? (() => {})} />
+        <MentionTokenText text={userBody} onOpenFile={onOpenAttachment ?? (() => {})} />
       </div>
         )}
-      {userBodyOverLimit && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="max-w-[80%] self-end rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title={t('task.messageTruncated')}
-        >
-          {expanded ? t('task.todoCollapse') : t('task.messageExpand')}
-        </button>
-      )}
         {/* 操作行：复制 + 撤回（hover 显示；触屏常显；生成中撤回禁用） */}
         <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100">
           <button
@@ -2625,7 +2696,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       (tc) => tc.name !== 'todo' && tc.name !== 'ask' && tc.name !== 'run_code' && !isAgentCall(tc),
     ) ?? [];
   // todo 卡片：原生 todo 调用或 run_code 嵌套 todo（快照挂在外层消息上）
-  const todoSnapshot = message.todoSnapshot ?? todos;
+  const todoSnapshot = message.todoSnapshot ?? todos ?? EMPTY_TODOS;
   const showTodoCard =
     todoSnapshot.length > 0 &&
     (message.todoSnapshot !== undefined || (message.toolCalls?.some((tc) => tc.name === 'todo') ?? false));
@@ -2704,22 +2775,12 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
         <div className="text-sm text-foreground">
           {/* 流式 spinner 经 cursor 渲染进文本流末尾，与最后一行文字同行（见 MarkdownRenderer / markdown.css） */}
           <MarkdownRenderer
-            text={displayContent}
+            text={visibleContent}
             streaming={!!message.streaming}
             defer={deferContent && !message.streaming}
             cursor={message.streaming ? <Loader2 className="ml-1 inline size-3 animate-spin" /> : undefined}
           />
         </div>
-      )}
-      {overLimit && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="self-start rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title={t('task.messageTruncated')}
-        >
-          {expanded ? t('task.todoCollapse') : t('task.messageExpand')}
-        </button>
       )}
       {/* agent 工具调用 → 合并为一张 Subagent 大卡片（头部 + 每行一个子代理，行可展开过程/报告）：
           结果统一从全局索引取（长耗时工具的结果消息未必紧邻本消息） */}
@@ -2737,6 +2798,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
               resultText: matched?.text,
               isError: matched?.isError,
               ...(matched?.lazy ? { lazy: true } : {}),
+              ...(matched?.agentName ? { name: matched.agentName } : {}),
             };
           })}
         />
@@ -2903,6 +2965,7 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
                   fallbackText={indexed?.text}
                   fallbackIsError={indexed?.isError}
                   iconMap={toolIconMap}
+                  stateKey={`${message.id}:tool:${tc.id}`}
                 />
               </Suspense>
             );
