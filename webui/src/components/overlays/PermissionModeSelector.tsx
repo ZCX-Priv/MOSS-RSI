@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
+import { wsClient } from '../../api/ws';
 import type { PermissionMode } from '../../types/api';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -76,13 +77,25 @@ export function PermissionModeSelector({ fullLabel = false }: { fullLabel?: bool
   const [skipDialogOpen, setSkipDialogOpen] = useState(false);
   const [skipAcknowledged, setSkipAcknowledged] = useState(false);
 
+  /** 应用模式：本地状态 + 会话级实时下发后端（写 session 并广播 task.updated） */
+  const applyMode = (mode: PermissionMode): void => {
+    setPermissionMode(mode, activeSessionId ?? undefined);
+    if (activeSessionId) {
+      wsClient.sendControl({
+        type: 'permission.set',
+        sessionId: activeSessionId,
+        payload: { permissionMode: mode },
+      });
+    }
+  };
+
   const handleSelectMode = (mode: PermissionMode): void => {
     if (mode === 'skip' && permissionMode !== 'skip') {
       setSkipAcknowledged(false);
       setSkipDialogOpen(true);
       return;
     }
-    setPermissionMode(mode, activeSessionId ?? undefined);
+    applyMode(mode);
   };
 
   const currentConfig =
@@ -173,7 +186,7 @@ export function PermissionModeSelector({ fullLabel = false }: { fullLabel?: bool
         requireAcknowledge={t('permissionMode.skipWarning.ack')}
         acknowledgeChecked={skipAcknowledged}
         onAcknowledgeChange={setSkipAcknowledged}
-        onConfirm={() => setPermissionMode('skip', activeSessionId ?? undefined)}
+        onConfirm={() => applyMode('skip')}
       />
     </>
   );

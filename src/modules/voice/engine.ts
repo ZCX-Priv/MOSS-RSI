@@ -231,17 +231,32 @@ class SerialQueue {
 
 /** 流式会话（zipformer transducer）：真流式 partial + endpoint final */
 class StreamingSession implements VoiceSession {
+  private stream: OnlineStream;
   private last = '';
   private closed = false;
 
-  constructor(
-    private readonly recognizer: OnlineRecognizerT,
-    private readonly stream: OnlineStream,
-  ) {}
+  constructor(private readonly recognizer: OnlineRecognizerT) {
+    this.stream = recognizer.createStream();
+  }
+
+  /**
+   * 端点/异常后重建流：等价于 reset，但不会残留任何解码状态。
+   * 旧流不再持有强引用，交给 GC 释放原生句柄。
+   */
+  private rotateStream(): void {
+    this.stream = this.recognizer.createStream();
+    this.last = '';
+  }
 
   acceptSamples(samples: Float32Array): void {
     if (this.closed) return;
-    this.stream.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
+    try {
+      this.stream.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
+    } catch (err) {
+      // 原生层异常：重建流，保证后续音频还能继续识别
+      console.warn('[voice] streaming acceptWaveform failed, recreating stream', err);
+      this.rotateStream();
+    }
   }
 
   poll(): VoiceResult | null {
@@ -251,8 +266,8 @@ class StreamingSession implements VoiceSession {
       this.recognizer.decode(this.stream);
       const text = (this.recognizer.getResult(this.stream).text ?? '').trim();
       if (this.recognizer.isEndpoint(this.stream)) {
-        this.recognizer.reset(this.stream);
-        this.last = '';
+        // 端点后直接换新流：避免 reset 失败时永久停在 endpoint 状态（后续句子不出字）
+        this.rotateStream();
         return text ? { text, isFinal: true } : null;
       }
       if (text && text !== this.last) {
@@ -260,8 +275,10 @@ class StreamingSession implements VoiceSession {
         return { text, isFinal: false };
       }
       return null;
-    } catch {
-      // 瞬时解码失败忽略（下一 tick 继续），避免整轮录音因一次异常中断
+    } catch (err) {
+      // 瞬时解码失败：重建流后下一 tick 继续，避免整轮录音因一次异常永久卡死
+      console.warn('[voice] streaming decode failed, recreating stream', err);
+      this.rotateStream();
       return null;
     }
   }
@@ -274,7 +291,9 @@ class StreamingSession implements VoiceSession {
       const text = (this.recognizer.getResult(this.stream).text ?? '').trim();
       this.last = '';
       return text ? { text, isFinal: true } : null;
-    } catch {
+    } catch (err) {
+      console.warn('[voice] streaming finish failed', err);
+      this.last = '';
       return null;
     }
   }
@@ -650,7 +669,7 @@ export async function createLocalSessionInProcess(
 
   if (init.mode === 'streaming') {
     if (!entry.online) throw new Error('语音识别器未初始化（流式引擎）');
-    return new StreamingSession(entry.online, entry.online.createStream());
+    return new StreamingSession(entry.online);
   }
 
   if (!entry.offline) throw new Error('语音识别器未初始化（离线引擎）');

@@ -309,6 +309,10 @@ export interface AppConfig {
     /** 识别语言提示（'auto' | 'zh' | 'en' 等；仅 SenseVoice / Whisper 生效） */
     language: string;
   };
+  /** 外观主题色（hex；WebUI 同步写入，computer 原生光标颜色使用） */
+  appearance?: {
+    accentColor: string;
+  };
 }
 
 export type ApiConfig = {

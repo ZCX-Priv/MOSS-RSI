@@ -212,8 +212,8 @@ export interface AgentEngine {
   /** 会话级权限模式（子代理继承父会话模式 / 刷新恢复徽章用） */
   getPermissionMode?(sessionId: string): PermissionMode | undefined;
 
-  /** 切换会话权限模式（set 工具 kind=mode 调用；需用户确认的提权由 safety 管线拦截） */
-  setPermissionMode?(sessionId: string, mode: PermissionMode): boolean;
+  /** 切换会话权限模式（set 工具 kind=mode / WS permission.set 调用；需用户确认的提权由 safety 管线拦截） */
+  setSessionPermissionMode?(sessionId: string, mode: PermissionMode): boolean;
 
   /**
    * 标记会话为 headless（子代理/团队成员等无人交互的会话）。

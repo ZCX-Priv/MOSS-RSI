@@ -2283,6 +2283,7 @@ export class AgentEngineImpl implements AgentEngine {
       cwd: ctx.cwd,
       risk,
       userIntent,
+      contextDigest: this.buildReviewDigest(sessionId),
       model: ctx.model,
       signal,
     });
@@ -2294,6 +2295,48 @@ export class AgentEngineImpl implements AgentEngine {
       riskLevel: result.riskLevel,
     });
     return result;
+  }
+
+  /**
+   * 审查用「精华上下文」（非全量）：
+   * 任务目标 + 最新压缩摘要 + 上一条助手回复 + 最近 5 条工具调用。
+   * 预算 4000 字符；不发送工具结果全文，避免把审查请求撑爆或引入不可信内容。
+   */
+  private buildReviewDigest(sessionId: string): string {
+    const session = this.sessions.get(sessionId);
+    if (!session) return '';
+    const MAX_CHARS = 4000;
+    const clip = (text: string, limit: number): string =>
+      text.length > limit ? `${text.slice(0, limit)}…` : text;
+    const parts: string[] = [];
+
+    const task = this.tasks.getTask(sessionId);
+    if (task?.title?.trim()) parts.push(`任务目标：${clip(task.title.trim(), 200)}`);
+
+    const summary = session.compactions?.at(-1)?.summary?.trim();
+    if (summary) parts.push(`历史摘要：${clip(summary, 1600)}`);
+
+    const messages = session.messages.filter((m) => !m.deletedAt && !m.compacted && !m.name);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant' && m.content.trim()) {
+        parts.push(`上一条回复：${clip(m.content.trim(), 800)}`);
+        break;
+      }
+    }
+
+    const actions: string[] = [];
+    for (let i = messages.length - 1; i >= 0 && actions.length < 5; i--) {
+      const m = messages[i];
+      if (m.role !== 'assistant' || !m.toolCalls?.length) continue;
+      for (let j = m.toolCalls.length - 1; j >= 0 && actions.length < 5; j--) {
+        const tc = m.toolCalls[j];
+        actions.unshift(`${tc.name}(${clip(tc.arguments ?? '', 160)})`);
+      }
+    }
+    if (actions.length > 0) parts.push(`最近工具调用：\n${actions.join('\n')}`);
+
+    return clip(parts.join('\n\n'), MAX_CHARS);
   }
 
   /**

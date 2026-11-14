@@ -134,12 +134,13 @@ import { useCommands } from './hooks/useCommands';
 import { useTheme } from './contexts/ThemeContext';
 import { useStore } from './store';
 import { applyAppearanceToDom } from './lib/appearance';
+import { resolveAccentHex } from './lib/theme-palette';
 
 export default function App() {
   // 阶段1.6：WS 连接初始化 + 事件分发（单例，全应用只调用一次）
   useWebSocket();
-  // 阶段2.1：全局加载 appConfig + apiConfig
-  useConfig();
+  // 阶段2.1：全局加载 appConfig + apiConfig（含外观主题色同步到后端，供 computer 原生光标取色）
+  const { appConfig, updateAppConfig } = useConfig();
   // 拉取工具图标映射（toolName → icon 字符串），供工具调用卡片渲染
   useTools();
   // 动画开关 → <html> class 桥接（含 prefers-reduced-motion 实时监听）
@@ -202,6 +203,16 @@ export default function App() {
   useEffect(() => {
     applyAppearanceToDom({ accentColor, fontSize, uiDensity, cornerRadius }, resolvedTheme);
   }, [accentColor, fontSize, uiDensity, cornerRadius, resolvedTheme]);
+
+  // 主题色同步到后端（computer 原生鼠标颜色按最近调色板色跟随主题）
+  useEffect(() => {
+    if (!appConfig) return;
+    const hex = resolveAccentHex(accentColor);
+    if ((appConfig.appearance?.accentColor ?? '').toUpperCase() === hex) return;
+    void updateAppConfig({ appearance: { accentColor: hex } }).catch(() => {
+      // 后端未就绪：静默，下一次配置加载/主题切换会重试
+    });
+  }, [accentColor, appConfig, updateAppConfig]);
 
   return (
     <TooltipProvider>

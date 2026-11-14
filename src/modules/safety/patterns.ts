@@ -1,5 +1,5 @@
 // src/modules/safety/patterns.ts
-// 危险命令智能拦截（Windows 务实沙箱）+ 保护路径检测。
+// 危险命令智能拦截（Windows 务实方案）+ 保护路径检测。
 // 覆盖 Windows/POSIX 双平台。
 // 匹配策略：命令小写化 → 复合拆段（&& ; | 换行）→ 逐段正则匹配；误报从严（fail-closed）。
 

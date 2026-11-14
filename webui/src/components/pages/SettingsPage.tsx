@@ -50,6 +50,7 @@ import { useI18n } from '../../contexts/I18nContext';
 import type { Locale } from '../../i18n';
 import { cn } from '@/lib/utils';
 import { ACCENT_PRESETS, DEFAULT_ACCENT_HEX } from '@/lib/theme-palette';
+import { DEFAULT_LEVELS } from '../../lib/model-utils';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -493,6 +494,7 @@ const SAFETY_FALLBACK: SafetyConfig = {
     enabled: true,
     model: '',
     reasoningEffort: 'off',
+    sensitivity: 'medium',
     timeoutMs: 30000,
     onReviewFailure: 'ask',
     cacheTtlMs: 60000,
@@ -598,6 +600,16 @@ export function SafetySettings() {
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectError, setProjectError] = useState('');
   const models = apiConfig?.providers.flatMap((p) => p.models) ?? [];
+  // 审查推理挡位：优先取所选审查模型的等级库；继承主模型时回退默认模型的等级库
+  const reviewModel =
+    models.find((m) => m.id === safety.review.model) ??
+    models.find((m) => m.id === appConfig?.agent.defaultModel);
+  const reviewLevels =
+    reviewModel?.thinkingLevels && reviewModel.thinkingLevels.length > 0
+      ? reviewModel.thinkingLevels
+      : DEFAULT_LEVELS;
+  const storedEffort = safety.review.reasoningEffort;
+  const storedEffortInLevels = reviewLevels.some((level) => level.effort === storedEffort);
 
   const patchSafety = async (patch: Partial<typeof SAFETY_FALLBACK>) => {
     try {
@@ -769,9 +781,36 @@ export function SafetySettings() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
-                <SelectItem value="off">{t('settings.safety.reviewEffortOff')}</SelectItem>
-                <SelectItem value="low">{t('settings.safety.reviewEffortLow')}</SelectItem>
-                <SelectItem value="max">{t('settings.safety.reviewEffortMax')}</SelectItem>
+                {!storedEffortInLevels && storedEffort && (
+                  <SelectItem value={storedEffort}>{`当前：${storedEffort}`}</SelectItem>
+                )}
+                {reviewLevels.map((level) => (
+                  <SelectItem key={level.id} value={level.effort}>
+                    {level.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.safety.reviewSensitivity')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.safety.reviewSensitivityDesc')}</span>
+            </div>
+            <Select
+              value={safety.review.sensitivity}
+              onValueChange={(v) =>
+                patchReview({ sensitivity: v as typeof safety.review.sensitivity })
+              }
+              disabled={!safety.review.enabled}
+            >
+              <SelectTrigger className="h-8 w-52 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="low">{t('settings.safety.reviewSensitivityLow')}</SelectItem>
+                <SelectItem value="medium">{t('settings.safety.reviewSensitivityMedium')}</SelectItem>
+                <SelectItem value="high">{t('settings.safety.reviewSensitivityHigh')}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -837,7 +876,7 @@ export function SafetySettings() {
         </div>
       </div>
 
-      {/* 沙箱（智能拦截） */}
+      {/* 智能拦截 */}
       <div className="flex flex-col gap-3">
         <div className="text-sm font-medium text-foreground">{t('settings.safety.sandboxTitle')}</div>
         <p className="text-xs text-muted-foreground">{t('settings.safety.sandboxDesc')}</p>

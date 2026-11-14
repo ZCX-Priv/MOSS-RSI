@@ -87,6 +87,78 @@ interface McpInputSchemaLike {
 /** 面板截图的默认会话标签（与 Agent 会话隔离，避免替换其快照） */
 const PANEL_SESSION = 'moss_panel';
 
+/**
+ * cua-driver 0.37.0 内置光标会话调色板（src/theme.rs SESSION_CURSOR_FILLS）。
+ * 默认主题的颜色由会话标签最后一段决定：纯数字 n>0 → (n-1) % 9；
+ * 因此把「最近主题色的索引 + 1」放在标签末段即可稳定控制颜色。
+ */
+const CUA_CURSOR_FILLS: ReadonlyArray<readonly [number, number, number]> = [
+  [178, 132, 255],
+  [247, 132, 170],
+  [96, 218, 174],
+  [244, 178, 66],
+  [76, 204, 224],
+  [221, 113, 236],
+  [232, 82, 98],
+  [184, 220, 54],
+  [80, 126, 236],
+];
+
+/** 蓝色索引（默认主题色 #2563EB 的最近色；配置缺失/非法时回退） */
+const DEFAULT_CURSOR_COLOR_INDEX = 8;
+
+/** #RGB / #RRGGBB → [r,g,b]；非法返回 null */
+function parseHexColor(value: string): [number, number, number] | null {
+  const hex = value.trim().replace(/^#/, '');
+  const expanded =
+    hex.length === 3
+      ? hex
+          .split('')
+          .map((c) => `${c}${c}`)
+          .join('')
+      : hex;
+  if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return null;
+  return [
+    Number.parseInt(expanded.slice(0, 2), 16),
+    Number.parseInt(expanded.slice(2, 4), 16),
+    Number.parseInt(expanded.slice(4, 6), 16),
+  ];
+}
+
+/** RGB → HSL（h: 0~360，s/l: 0~1）；用于按色相而非纯 RGB 距离匹配主题色 */
+function rgbToHsl([r, g, b]: readonly [number, number, number]): {
+  h: number;
+  s: number;
+  l: number;
+} {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const l = (max + min) / 2;
+  const delta = max - min;
+  if (delta === 0) return { h: 0, s: 0, l };
+  const s = l > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let h: number;
+  if (max === rn) h = (gn - bn) / delta + (gn < bn ? 6 : 0);
+  else if (max === gn) h = (bn - rn) / delta + 2;
+  else h = (rn - gn) / delta + 4;
+  return { h: h * 60, s, l };
+}
+
+/** 主题色 → 调色板距离（色相为主，饱和度/亮度辅助） */
+function cursorColorDistance(
+  target: readonly [number, number, number],
+  fill: readonly [number, number, number],
+): number {
+  const t = rgbToHsl(target);
+  const c = rgbToHsl(fill);
+  const raw = Math.abs(t.h - c.h);
+  const hueDiff = Math.min(raw, 360 - raw);
+  return hueDiff * 2 + Math.abs(t.s - c.s) * 100 + Math.abs(t.l - c.l) * 40;
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -270,6 +342,8 @@ export class ComputerServiceImpl implements ComputerService {
    * 否则面板截图会永久失败（session 'moss_panel' has ended）。
    */
   private readonly sessionLabels = new Map<string, string>();
+  /** 当前主题色对应的 cua 调色板索引（null = 尚未初始化） */
+  private cursorColorIndexCache: number | null = null;
   /** 会话恢复单飞：并发截图同时命中 ended 错误时只执行一次复活/轮换/重连 */
   private readonly sessionRecovering = new Map<string, Promise<void>>();
   /** 恢复失败时轮换标签的序号 */
@@ -1413,11 +1487,60 @@ export class ComputerServiceImpl implements ComputerService {
     return !!schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, 'session');
   }
 
-  /** MOSS 会话 id → 稳定 cua 会话标签 */
+  /** MOSS 会话 id → 稳定 cua 会话标签（末段为调色板序号，保证颜色跟随主题色） */
   private sessionLabel(sessionId?: string): string {
-    if (!sessionId) return 'moss_shared';
+    const index = this.cursorColorIndex() + 1;
+    if (!sessionId) return `moss_shared_${index}`;
     const hash = createHash('sha1').update(sessionId).digest('hex').slice(0, 10);
-    return `moss_${hash}`;
+    return `moss_${hash}_${index}`;
+  }
+
+  /** 主题色 → cua 内置调色板最近色索引（色相为主 + 饱和度/亮度辅助） */
+  private cursorColorIndex(): number {
+    try {
+      const hex = this.config.getAppConfig().appearance?.accentColor ?? '';
+      const rgb = parseHexColor(hex);
+      if (!rgb) return DEFAULT_CURSOR_COLOR_INDEX;
+      // 灰度主题色没有可用色相：回退默认蓝色，避免随机落到某个彩色档
+      if (rgbToHsl(rgb).s < 0.12) return DEFAULT_CURSOR_COLOR_INDEX;
+      let best = DEFAULT_CURSOR_COLOR_INDEX;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      CUA_CURSOR_FILLS.forEach((fill, index) => {
+        const distance = cursorColorDistance(rgb, fill);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = index;
+        }
+      });
+      return best;
+    } catch {
+      return DEFAULT_CURSOR_COLOR_INDEX;
+    }
+  }
+
+  /**
+   * 主题色变化时轮换会话标签：旧标签 best-effort 结束，下一次调用使用新颜色。
+   * 首帧只记录当前索引，避免启动时清空预热的面板会话。
+   */
+  private refreshCursorColor(): void {
+    const index = this.cursorColorIndex();
+    if (this.cursorColorIndexCache === null) {
+      this.cursorColorIndexCache = index;
+      return;
+    }
+    if (this.cursorColorIndexCache === index) return;
+    this.cursorColorIndexCache = index;
+    const oldLabels = [...new Set(this.sessionLabels.values())].filter(
+      (label) => label !== PANEL_SESSION,
+    );
+    this.sessionLabels.clear();
+    const client = this.client;
+    if (!client || !this.toolMap.has('end_session')) return;
+    for (const label of oldLabels) {
+      void client.callTool('end_session', { session: label }, { timeoutMs: 2_000 }).catch(() => {
+        // 旧会话可能已结束：忽略
+      });
+    }
   }
 
   /** 逻辑会话键：面板独立一路，Agent 按 MOSS 会话隔离 */
@@ -1428,6 +1551,8 @@ export class ComputerServiceImpl implements ComputerService {
 
   /** 取（或初始化）逻辑会话当前可用的 cua 标签 */
   private labelFor(key: string, opts: ComputerCallOptions): string {
+    // 主题色变化 → 清空旧标签（下一次调用用新颜色重建会话）
+    this.refreshCursorColor();
     const existing = this.sessionLabels.get(key);
     if (existing) return existing;
     const label = opts.sessionLabel ?? this.sessionLabel(opts.sessionId);
@@ -1454,6 +1579,14 @@ export class ComputerServiceImpl implements ComputerService {
 
   /** 生成新的会话标签（cua 明确允许「or use a new session label」） */
   private nextSessionLabel(base: string): string {
+    // 末段是主题色调色板序号时必须保持在最后，否则 cua 会退回哈希取色 → 颜色漂移
+    const cut = base.lastIndexOf('_');
+    if (cut > 0) {
+      const suffix = base.slice(cut + 1);
+      if (/^\d+$/.test(suffix)) {
+        return `${base.slice(0, cut)}_r${++this.sessionSeq}_${suffix}`;
+      }
+    }
     return `${base}_r${++this.sessionSeq}`;
   }
 

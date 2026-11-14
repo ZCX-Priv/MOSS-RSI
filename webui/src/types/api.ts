@@ -524,6 +524,8 @@ export interface AppConfig {
   safety?: SafetyConfig;
   /** 上下文引擎配置（context 模块；可选，旧 config 无此段时用默认值） */
   context?: ContextEngineConfig;
+  /** 外观主题色（WebUI 同步写入，computer 原生光标颜色使用） */
+  appearance?: { accentColor: string };
 }
 
 /** 日志级别（与后端 LogLevel 对齐） */
@@ -562,8 +564,10 @@ export interface SafetyReviewConfig {
   enabled: boolean;
   /** 审查模型 id；空串 = 继承当前会话主模型 */
   model: string;
-  /** 推理挡位：off=不思考 / low=低思考 / max=高强度思考 */
-  reasoningEffort: 'off' | 'low' | 'max';
+  /** 推理挡位：off/none 关闭思考，其余为所选模型 thinkingLevels 的 effort 值 */
+  reasoningEffort: string;
+  /** 审查灵敏度：低=宽松 / 中=平衡 / 高=严格 */
+  sensitivity: 'low' | 'medium' | 'high';
   /** 单次审查超时（毫秒） */
   timeoutMs: number;
   /** 审查 deny / 不确定 / 失败时：ask=转人工确认 / deny=直接拒绝 */

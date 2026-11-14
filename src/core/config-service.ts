@@ -91,6 +91,7 @@ export function defaultAppConfig(): AppConfig {
         enabled: true,
         model: '',
         reasoningEffort: 'off',
+        sensitivity: 'medium',
         timeoutMs: 30000,
         onReviewFailure: 'ask',
         cacheTtlMs: 60000,
@@ -98,6 +99,7 @@ export function defaultAppConfig(): AppConfig {
       },
     },
     voice: { enabled: false, localModel: '', language: 'zh' },
+    appearance: { accentColor: '#2563EB' },
   };
 }
 

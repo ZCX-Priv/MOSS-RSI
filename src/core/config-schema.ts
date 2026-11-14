@@ -206,7 +206,8 @@ const safetySchema = z.object({
     .object({
       enabled: z.boolean().default(true),
       model: z.string().default(''),
-      reasoningEffort: z.enum(['off', 'low', 'max']).default('off'),
+      reasoningEffort: z.string().default('off'),
+      sensitivity: z.enum(['low', 'medium', 'high']).default('medium'),
       timeoutMs: z.number().int().min(1000).max(300000).default(30000),
       onReviewFailure: z.enum(['ask', 'deny']).default('ask'),
       cacheTtlMs: z.number().int().min(0).max(3600000).default(60000),
@@ -405,6 +406,12 @@ export const appConfigSchema = z.object({
       enabled: z.boolean().default(false),
       localModel: z.string().default(''),
       language: z.string().default('zh'),
+    })
+    .prefault({}),
+  // 外观主题色：WebUI 同步写入，computer 原生光标颜色映射用
+  appearance: z
+    .object({
+      accentColor: z.string().default('#2563EB'),
     })
     .prefault({}),
 });

@@ -155,6 +155,83 @@ describe('SafetyReviewer', () => {
     expect(captured[0]?.thinking).toEqual({ enabled: true, effort: 'high' });
   });
 
+  it('动态挡位（medium）原样透传给 thinking', async () => {
+    const captured: UnifiedRequest[] = [];
+    const reviewer = new SafetyReviewer({
+      config: configWith({ reasoningEffort: 'medium', cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith(['{"outcome":"allow","rationale":"ok"}'], captured),
+    });
+    await reviewer.review(BASE_INPUT);
+    expect(captured[0]?.thinking).toEqual({ enabled: true, effort: 'medium' });
+  });
+
+  it('默认中灵敏度：危险系数达到阈值时 allow 降级为 deny', async () => {
+    const reviewer = new SafetyReviewer({
+      config: configWith({ cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith([
+        '{"outcome":"allow","risk_level":"medium","danger_score":60,"user_authorization":"high","rationale":"可逆但越界"}',
+      ]),
+    });
+    const result = await reviewer.review(BASE_INPUT);
+    expect(result.decision).toBe('deny');
+    expect(result.dangerScore).toBe(60);
+    expect(result.reason).toContain('阈值 55');
+  });
+
+  it('低灵敏度更宽松：危险系数 60 仍放行', async () => {
+    const reviewer = new SafetyReviewer({
+      config: configWith({ sensitivity: 'low', cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith([
+        '{"outcome":"allow","risk_level":"medium","danger_score":60,"user_authorization":"high","rationale":"可逆"}',
+      ]),
+    });
+    const result = await reviewer.review(BASE_INPUT);
+    expect(result.decision).toBe('allow');
+    expect(result.dangerScore).toBe(60);
+  });
+
+  it('高灵敏度更严格：危险系数 35 即拒绝', async () => {
+    const reviewer = new SafetyReviewer({
+      config: configWith({ sensitivity: 'high', cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith([
+        '{"outcome":"allow","risk_level":"low","danger_score":35,"user_authorization":"high","rationale":"轻微"}',
+      ]),
+    });
+    const result = await reviewer.review(BASE_INPUT);
+    expect(result.decision).toBe('deny');
+    expect(result.reason).toContain('阈值 30');
+  });
+
+  it('缺少 danger_score 时按 risk_level 映射', async () => {
+    const reviewer = new SafetyReviewer({
+      config: configWith({ sensitivity: 'medium', cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith([
+        '{"outcome":"allow","risk_level":"high","user_authorization":"high","rationale":"高风险但已授权"}',
+      ]),
+    });
+    const result = await reviewer.review(BASE_INPUT);
+    expect(result.decision).toBe('deny');
+    expect(result.dangerScore).toBe(80);
+  });
+
+  it('审查请求附带 context_digest（精华上下文）', async () => {
+    const captured: UnifiedRequest[] = [];
+    const reviewer = new SafetyReviewer({
+      config: configWith({ cacheTtlMs: 0 }),
+      logger,
+      llm: routerWith(['{"outcome":"deny","rationale":"ok"}'], captured),
+    });
+    await reviewer.review({ ...BASE_INPUT, contextDigest: '任务目标：安装依赖' });
+    const userMessage = captured[0]?.messages.find((m) => m.role === 'user');
+    expect(userMessage?.content).toContain('context_digest');
+    expect(userMessage?.content).toContain('安装依赖');
+  });
+
   it('off 挡位不启用思考', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({

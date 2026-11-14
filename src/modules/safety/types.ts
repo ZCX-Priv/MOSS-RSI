@@ -53,14 +53,19 @@ export interface SafetyRules {
   ask: string[];
 }
 
+/** 自动审查灵敏度（越高越严格：危险系数达到阈值即拒绝） */
+export type SafetySensitivity = 'low' | 'medium' | 'high';
+
 /** 自动审查配置（auto 档的第二模型审查） */
 export interface SafetyReviewConfig {
   /** 审查总开关（默认开启；关闭后 auto 退化为人工确认） */
   enabled: boolean;
   /** 审查模型（ModelConfig.id；空串 = 继承当前会话主模型） */
   model: string;
-  /** 审查推理挡位：off=不思考 / low=低思考 / max=高强度思考（只影响思考成本，不影响是否审查） */
-  reasoningEffort: 'off' | 'low' | 'max';
+  /** 审查推理挡位：'off'/'none' 关闭思考，其余为所选模型 thinkingLevels 的 effort 值（原样透传） */
+  reasoningEffort: string;
+  /** 审查灵敏度：低=宽松 / 中=平衡 / 高=严格 */
+  sensitivity: SafetySensitivity;
   /** 单次审查超时（毫秒） */
   timeoutMs: number;
   /** 审查 deny / 不确定 / 失败时：ask=转人工确认（默认）/ deny=直接拒绝 */

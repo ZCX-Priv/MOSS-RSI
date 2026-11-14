@@ -6,7 +6,7 @@
 //   1.5 终端命令 .moss 越界   → DENY  {mossAccess}（全局硬规则，skip 也拦）
 //   2. deny 规则命中(会话>项目>全局) → DENY {rule}（所有模式，含 skip）
 //   3. ask 规则命中(会话>项目>全局)  → ASK  {rule}（所有模式，含 skip）
-//   4. 沙箱检测（终端）：
+//   4. 智能拦截（终端）：
 //      a. BLOCK 级危险命令 → DENY {dangerousCommand}（所有模式，含 skip）
 //      b. CAUTION 级       → skip 放行 / 配 deny 直接拒绝 / 其余 ASK
 //   5. 写类工具保护路径：~/.moss/config 硬保护 → DENY（所有模式）；

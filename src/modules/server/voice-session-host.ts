@@ -39,6 +39,8 @@ interface VoiceEntry extends AudioStats {
   send: (msg: unknown) => void;
   frames: number;
   samples: number;
+  /** 会话代际：前端据此丢弃上一轮会话的迟到事件 */
+  gen: number;
   /** 本轮是否已经产出过任何文本（partial/final）：避免「已识别却误报无语音」 */
   hasText: boolean;
 }
@@ -47,6 +49,7 @@ interface VoiceEntry extends AudioStats {
 interface PendingStart extends AudioStats {
   stopRequested: boolean;
   disposed: boolean;
+  gen: number;
   /** 就绪前缓冲的音频（int16 → float32），就绪后按序回放 */
   buffer: Float32Array[];
   bufferSamples: number;
@@ -73,6 +76,8 @@ export class VoiceSessionHost {
   private readonly starting = new Map<string, PendingStart>();
   /** 会话开始前的音频缓冲（兜底：即使 voice.start 被延迟，音频也不丢） */
   private readonly preBuffers = new Map<string, PendingStart>();
+  /** 每条连接当前的会话代际（每次 voice.start 递增） */
+  private readonly generations = new Map<string, number>();
 
   constructor(
     private readonly services: ServiceRegistry,
@@ -85,6 +90,7 @@ export class VoiceSessionHost {
     this.preBuffers.set(connId, {
       stopRequested: false,
       disposed: false,
+      gen: 0,
       buffer: [],
       bufferSamples: 0,
       peak: 0,
@@ -96,6 +102,9 @@ export class VoiceSessionHost {
   /** 开始会话（幂等：重复 start 先结束旧会话） */
   async start(connId: string, send: (msg: unknown) => void, modelId?: string): Promise<void> {
     const startedAt = Date.now();
+    // 新会话代际：旧 stop()/finish 的迟到结果不得再落到新会话
+    const gen = (this.generations.get(connId) ?? 0) + 1;
+    this.generations.set(connId, gen);
     // 旧会话先摘除（音频从此刻起进入 pending 缓冲，不会丢）
     const old = this.entries.get(connId);
     if (old) {
@@ -107,6 +116,7 @@ export class VoiceSessionHost {
     const pending: PendingStart = {
       stopRequested: false,
       disposed: false,
+      gen,
       buffer: [],
       bufferSamples: 0,
       peak: 0,
@@ -125,11 +135,11 @@ export class VoiceSessionHost {
     }
     this.starting.set(connId, pending);
 
-    // 旧会话冲刷（其 send 仍指向原连接）
+    // 旧会话冲刷（其 send 仍指向原连接；代际已变化，前端会忽略旧事件）
     if (old) {
       try {
         const final = await old.session.finish();
-        if (final) old.send({ type: 'voice.final', payload: { text: final.text } });
+        if (final) old.send({ type: 'voice.final', payload: { text: final.text, gen: old.gen } });
       } catch {
         // 忽略
       }
@@ -139,12 +149,12 @@ export class VoiceSessionHost {
     const service = this.services.tryResolve<VoiceService>(ServiceNames.VOICE_SERVICE);
     if (!service) {
       this.starting.delete(connId);
-      send({ type: 'voice.error', payload: { error: 'VOICE_UNAVAILABLE' } });
+      send({ type: 'voice.error', payload: { error: 'VOICE_UNAVAILABLE', gen } });
       return;
     }
     if (!service.getStatus().enabled) {
       this.starting.delete(connId);
-      send({ type: 'voice.error', payload: { error: 'VOICE_DISABLED' } });
+      send({ type: 'voice.error', payload: { error: 'VOICE_DISABLED', gen } });
       return;
     }
 
@@ -152,6 +162,11 @@ export class VoiceSessionHost {
       const session = await service.createSession(modelId);
       // 创建期间连接已断开：直接释放，避免会话泄漏
       if (pending.disposed) {
+        session.close();
+        return;
+      }
+      // 创建期间又收到新的 voice.start：旧代际直接丢弃，避免覆盖新会话
+      if (this.generations.get(connId) !== gen || this.starting.get(connId) !== pending) {
         session.close();
         return;
       }
@@ -164,14 +179,16 @@ export class VoiceSessionHost {
       if (pending.stopRequested) {
         try {
           const final = await session.finish();
-          // finish 前 Worker 已推送、但尚未被 tick 取走的结果也要回推
-          this.drainResults(session, send);
-          if (final) send({ type: 'voice.final', payload: { text: final.text } });
+          // 只回推 final：partial 已被 finish 的收尾结果取代，发出去会造成重复上屏
+          for (const text of this.drainFinalResults(session)) {
+            send({ type: 'voice.final', payload: { text, gen } });
+          }
+          if (final) send({ type: 'voice.final', payload: { text: final.text, gen } });
         } catch {
           // 忽略
         }
         session.close();
-        send({ type: 'voice.stopped' });
+        send({ type: 'voice.stopped', payload: { gen } });
         return;
       }
 
@@ -185,6 +202,7 @@ export class VoiceSessionHost {
         peak: pending.peak,
         rmsSum: pending.rmsSum,
         rmsCount: pending.rmsCount,
+        gen,
         hasText: false,
       });
       this.logger.info('[voice-diag] session ready', {
@@ -193,11 +211,11 @@ export class VoiceSessionHost {
         bufferedSamples: pending.bufferSamples,
         elapsedMs: Date.now() - startedAt,
       });
-      send({ type: 'voice.ready' });
+      send({ type: 'voice.ready', payload: { gen } });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn('voice session start failed', { error: message });
-      if (!pending.disposed) send({ type: 'voice.error', payload: { error: message } });
+      if (!pending.disposed) send({ type: 'voice.error', payload: { error: message, gen } });
     } finally {
       if (this.starting.get(connId) === pending) this.starting.delete(connId);
     }
@@ -266,9 +284,13 @@ export class VoiceSessionHost {
     let final: Awaited<ReturnType<VoiceSession['finish']>> = null;
     try {
       final = await entry.session.finish();
-      // 先回推 finish 前已产出、但尚未被 tick 取走的尾部结果（避免末尾文字丢失）
-      const drained = this.drainResults(entry.session, entry.send);
-      if (drained) entry.hasText = true;
+      // 顺序关键：先发送队列中的 final（较早的句子），再发送 finish 的收尾 final。
+      // queued partial 一律丢弃——它们已被 final 取代，若在 final 之后发送，
+      // 前端 commitVoice() 重置锚点后会把它再插入一次，造成「同一句出现两遍」。
+      for (const text of this.drainFinalResults(entry.session)) {
+        entry.hasText = true;
+        entry.send({ type: 'voice.final', payload: { text, gen: entry.gen } });
+      }
       this.logger.info('[voice-diag] finish returned', {
         connId,
         elapsedMs: Date.now() - finishStartedAt,
@@ -277,7 +299,7 @@ export class VoiceSessionHost {
         peak: Number(entry.peak.toFixed(4)),
         hasText: entry.hasText,
       });
-      if (final) entry.send({ type: 'voice.final', payload: { text: final.text } });
+      if (final) entry.send({ type: 'voice.final', payload: { text: final.text, gen: entry.gen } });
     } catch (err) {
       this.logger.warn('voice session finish failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -287,14 +309,14 @@ export class VoiceSessionHost {
     // 避免已经识别并上屏、只是尾段为空时误报「没有识别出文字」。
     if (!final && !entry.hasText) {
       if (entry.peak < 0.01) {
-        entry.send({ type: 'voice.error', payload: { error: 'VOICE_SILENT_INPUT' } });
+        entry.send({ type: 'voice.error', payload: { error: 'VOICE_SILENT_INPUT', gen: entry.gen } });
       } else {
-        entry.send({ type: 'voice.error', payload: { error: 'VOICE_NO_SPEECH' } });
+        entry.send({ type: 'voice.error', payload: { error: 'VOICE_NO_SPEECH', gen: entry.gen } });
       }
     }
     entry.session.close();
     this.logger.info('[voice-diag] session closed', { connId });
-    entry.send({ type: 'voice.stopped' });
+    entry.send({ type: 'voice.stopped', payload: { gen: entry.gen } });
   }
 
   /** 连接断开：静默清理（不发消息） */
@@ -302,6 +324,7 @@ export class VoiceSessionHost {
     const pending = this.starting.get(connId);
     if (pending) pending.disposed = true;
     this.preBuffers.delete(connId);
+    this.generations.delete(connId);
     const entry = this.entries.get(connId);
     if (!entry) return;
     this.entries.delete(connId);
@@ -319,23 +342,19 @@ export class VoiceSessionHost {
       if (result.text) entry.hasText = true;
       entry.send({
         type: result.isFinal ? 'voice.final' : 'voice.partial',
-        payload: { text: result.text },
+        payload: { text: result.text, gen: entry.gen },
       });
     }
   }
 
-  /** 取出会话中尚未回推的结果（stop 前冲刷，避免末尾文字丢失）；返回是否包含文本 */
-  private drainResults(session: VoiceSession, send: (msg: unknown) => void): boolean {
-    let hasText = false;
+  /** 取出会话中尚未回推的 final（stop/收尾用）；partial 直接丢弃 */
+  private drainFinalResults(session: VoiceSession): string[] {
+    const texts: string[] = [];
     for (;;) {
       const result = session.poll();
       if (!result) break;
-      if (result.text) hasText = true;
-      send({
-        type: result.isFinal ? 'voice.final' : 'voice.partial',
-        payload: { text: result.text },
-      });
+      if (result.isFinal && result.text) texts.push(result.text);
     }
-    return hasText;
+    return texts;
   }
 }

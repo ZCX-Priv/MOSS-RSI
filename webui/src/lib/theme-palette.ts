@@ -105,6 +105,12 @@ const ACCENT_RAMPS: Record<AccentId, string[]> = {
   teal: ['#CCFBF1', '#99F6E4', '#5EEAD4', '#2DD4BF', '#14B8A6', '#0D9488', '#0F766E', '#115E59'],
 };
 
+/** 主题色（preset id 或自定义 hex）→ 实际使用的 hex（供后端 computer 光标取最近调色板色） */
+export function resolveAccentHex(value: string): string {
+  if (value.startsWith('#')) return value.toUpperCase();
+  return (ACCENT_RAMPS[value as AccentId]?.[5] ?? DEFAULT_ACCENT_HEX).toUpperCase();
+}
+
 /** 状态色（语义稳定，不随主题色变化；亮暗各一套） */
 const STATUS_COLORS: Record<ThemeMode, {
   success: string;

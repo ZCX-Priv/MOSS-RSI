@@ -29,11 +29,16 @@ function strArr(v: unknown): string[] {
 /** 自动审查配置兜底（reviewer 与本服务共用） */
 export function normalizeReviewConfig(raw: unknown): SafetyReviewConfig {
   const cfg = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const effort = cfg.reasoningEffort;
+  const rawEffort = typeof cfg.reasoningEffort === 'string' ? cfg.reasoningEffort.trim() : '';
+  // 旧版固定挡位 max → high（新值原样保留，交给所选模型的 thinkingLevels）
+  const reasoningEffort = rawEffort === 'max' ? 'high' : rawEffort.slice(0, 32) || 'off';
+  const rawSensitivity = cfg.sensitivity;
   return {
     enabled: cfg.enabled !== false,
     model: typeof cfg.model === 'string' ? cfg.model : '',
-    reasoningEffort: effort === 'low' || effort === 'max' ? effort : 'off',
+    reasoningEffort,
+    sensitivity:
+      rawSensitivity === 'low' || rawSensitivity === 'high' ? rawSensitivity : 'medium',
     timeoutMs:
       typeof cfg.timeoutMs === 'number' && cfg.timeoutMs >= 1000
         ? Math.min(cfg.timeoutMs, 300000)

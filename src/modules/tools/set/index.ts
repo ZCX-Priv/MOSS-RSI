@@ -738,10 +738,10 @@ function setSessionMode(p: SetParams, ctx: ToolContext): ToolResult {
     throw new SetError(t('tools.setModeInvalid'));
   }
   const engine = ctx.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
-  if (!engine?.setPermissionMode) {
+  if (!engine?.setSessionPermissionMode) {
     throw new SetError(t('tools.setModeUnavailable'));
   }
-  const ok = engine.setPermissionMode(ctx.sessionId, mode);
+  const ok = engine.setSessionPermissionMode(ctx.sessionId, mode);
   if (!ok) throw new SetError(t('tools.setModeUnavailable'));
   return textResult(t('tools.setModeApplied', { mode }), {
     kind: 'mode',

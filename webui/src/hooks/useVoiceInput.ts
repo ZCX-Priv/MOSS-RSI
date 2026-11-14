@@ -149,6 +149,10 @@ const NO_RESULT_NOTICE_MS = 10_000;
 /** 取消哨兵：teardown 打断挂起的 start() 时使用（不产生用户可见错误） */
 const CANCEL_ERROR = new Error('voice-start-cancelled');
 
+/** 采集健康检查间隔 / 判定无帧的阈值（毫秒）：切后台/休眠后 AudioContext 会挂起 */
+const CAPTURE_HEALTH_INTERVAL_MS = 3_000;
+const CAPTURE_STALL_MS = 3_000;
+
 /** 语音采集错误码（上层据此做多语言提示；非本枚举值则视为原始错误文本原样展示） */
 export type VoiceErrorCode =
   | 'INSECURE_CONTEXT'
@@ -341,9 +345,27 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const silentNoticeRef = useRef(false);
   /** 采集开始时间（用于延迟判定静音） */
   const captureStartedAtRef = useRef(0);
+  /** 最近一次收到 worklet 音频帧的时间（采集健康检查） */
+  const lastFrameAtRef = useRef(0);
+  /** 采集自愈防重入 */
+  const recoveringRef = useRef(false);
+  /** 上次重建采集链路的时间（避免设备持续异常时每 3s 反复重建） */
+  const lastRecoverAtRef = useRef(0);
+  /** 采集健康检查定时器 */
+  const healthTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 当前服务端会话代际（voice.ready 下发；用于丢弃旧会话迟到事件） */
+  const activeGenRef = useRef<number | null>(null);
+  /** 已发送 voice.start、尚未收到 voice.ready（期间忽略旧会话迟到的文字） */
+  const awaitingReadyRef = useRef(false);
+  /** 采集自愈函数引用（beginCapture 的健康定时器调用，避免 useCallback 循环依赖） */
+  const recoverRef = useRef<() => void>(() => {});
 
   /** 释放采集资源（幂等） */
   const releaseCapture = useCallback(() => {
+    if (healthTimerRef.current !== null) {
+      clearInterval(healthTimerRef.current);
+      healthTimerRef.current = null;
+    }
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -384,6 +406,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     sessionStartedRef.current = false;
     hasResultRef.current = false;
     sessionLostRef.current = false;
+    activeGenRef.current = null;
+    awaitingReadyRef.current = false;
     levelPeakRef.current = 0;
     silentNoticeRef.current = false;
     captureStartedAtRef.current = 0;
@@ -394,7 +418,16 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     const off = wsClient.onMessage((msg) => {
       const type = (msg as { type?: string }).type;
       if (!type || !type.startsWith('voice.')) return;
-      const payload = (msg as { payload?: { text?: string; error?: string } }).payload;
+      const payload = (msg as { payload?: { text?: string; error?: string; gen?: number } }).payload;
+      const isStaleGen =
+        (type === 'voice.partial' || type === 'voice.final' || type === 'voice.error') &&
+        payload?.gen !== undefined &&
+        activeGenRef.current !== null &&
+        payload.gen !== activeGenRef.current;
+      // 新会话尚未 ready：旧会话的 final 不得落到新录音的锚点上
+      const isBeforeReady =
+        awaitingReadyRef.current && (type === 'voice.partial' || type === 'voice.final');
+      if (isStaleGen || isBeforeReady) return;
       switch (type) {
         case 'voice.partial':
           if (payload?.text) {
@@ -415,12 +448,17 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
             clearTimeout(readyTimerRef.current);
             readyTimerRef.current = null;
           }
+          activeGenRef.current = payload?.gen ?? null;
+          awaitingReadyRef.current = false;
           const waiter = readyWaiterRef.current;
           readyWaiterRef.current = null;
           waiter?.resolve();
           break;
         }
         case 'voice.error': {
+          if (payload?.gen !== undefined && activeGenRef.current !== null && payload.gen !== activeGenRef.current) {
+            break;
+          }
           const waiter = readyWaiterRef.current;
           readyWaiterRef.current = null;
           if (waiter) {
@@ -515,13 +553,18 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   useEffect(() => {
     const off = wsClient.onStatus((info) => {
       if (!sessionStartedRef.current || !recordingRef.current) return;
-      if (info.status === 'open' && info.restored) {
+      if (info.status === 'open') {
+        // 语音会话绑定在连接上：任何新连接都必须重新 voice.start，
+        // 否则后端新连接没有会话，后续音频会被直接丢弃（旧实现仅在 restored=true 时重开）。
         sessionLostRef.current = false;
         hasResultRef.current = false;
+        activeGenRef.current = null;
+        awaitingReadyRef.current = true;
         armNoResultWatchdog();
         wsClient.send({ type: 'voice.start' });
+        void recoverRef.current();
         console.info('[voice-diag] ws reconnected, voice session restarted');
-        onNoticeRef.current?.('taskInput.voiceReconnecting');
+        if (info.restored) onNoticeRef.current?.('taskInput.voiceReconnecting');
         return;
       }
       if (info.status === 'closed' || info.status === 'error') {
@@ -543,6 +586,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       levelLogAtRef.current = 0;
       silentNoticeRef.current = false;
       captureStartedAtRef.current = performance.now();
+      lastFrameAtRef.current = performance.now();
       console.info('[voice-diag] device', {
         label: track?.label,
         settings: track?.getSettings?.(),
@@ -600,6 +644,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         const samples = event.data;
         if (!samples || samples.length === 0) return;
+        lastFrameAtRef.current = performance.now();
         let sum = 0;
         let peak = 0;
         const i16 = new Int16Array(samples.length);
@@ -664,9 +709,82 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
       setRecording(true);
       armNoResultWatchdog();
+
+      // 采集健康检查：切后台/休眠后 AudioContext 可能被挂起或音轨失效，
+      // 连续 3s 没有音频帧就尝试恢复（resume / 重建采集链路），避免「下一句不出字」。
+      if (healthTimerRef.current !== null) clearInterval(healthTimerRef.current);
+      healthTimerRef.current = setInterval(() => {
+        if (!recordingRef.current) return;
+        if (performance.now() - lastFrameAtRef.current > CAPTURE_STALL_MS) {
+          recoverRef.current();
+        }
+      }, CAPTURE_HEALTH_INTERVAL_MS);
     },
     [armNoResultWatchdog],
   );
+
+  /**
+   * 采集自愈：切后台/休眠/系统挂起后 AudioContext 可能 suspended、音轨可能失效。
+   * 先尝试 resume；仍无音频帧或音轨已结束则重建采集链路（不重开会话）。
+   */
+  const recoverCapture = useCallback(async () => {
+    if (!recordingRef.current || startingRef.current || recoveringRef.current) return;
+    if (Date.now() - lastRecoverAtRef.current < 10_000) return;
+    recoveringRef.current = true;
+    try {
+      const ctx = ctxRef.current;
+      const state = ctx?.state as string | undefined;
+      if (ctx && (state === 'suspended' || state === 'interrupted')) {
+        try {
+          await ctx.resume();
+        } catch {
+          // 恢复失败 → 走重建
+        }
+      }
+      const track = streamRef.current?.getAudioTracks()[0];
+      const stale = performance.now() - lastFrameAtRef.current > CAPTURE_STALL_MS;
+      const dead =
+        !ctx ||
+        ctx.state === 'closed' ||
+        !track ||
+        track.readyState !== 'live' ||
+        stale;
+      if (!dead) return;
+
+      lastRecoverAtRef.current = Date.now();
+      releaseCapture();
+      const stream = await acquireStream();
+      if (!recordingRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      await beginCapture(stream);
+      console.info('[voice-diag] capture recovered');
+    } catch {
+      // 恢复失败：等待下一轮健康检查 / 可见性事件再试
+    } finally {
+      recoveringRef.current = false;
+    }
+  }, [acquireStream, beginCapture, releaseCapture]);
+  recoverRef.current = recoverCapture;
+
+  /** 切后台 / 休眠唤醒 / 页面恢复：主动检查采集链路 */
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState !== 'visible') return;
+      setTimeout(() => {
+        if (recordingRef.current) void recoverRef.current();
+      }, 200);
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', onResume);
+    window.addEventListener('focus', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('pageshow', onResume);
+      window.removeEventListener('focus', onResume);
+    };
+  }, []);
 
   const start = useCallback(async () => {
     if (startingRef.current || recording) return;
@@ -695,6 +813,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       });
       serverSession = true;
       sessionStartedRef.current = true;
+      activeGenRef.current = null;
+      awaitingReadyRef.current = true;
       wsClient.send({ type: 'voice.start' });
       readyTimerRef.current = setTimeout(() => {
         readyTimerRef.current = null;

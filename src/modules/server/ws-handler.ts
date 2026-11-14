@@ -320,6 +320,8 @@ export class WsHandler {
         return this.handleTaskCreate(state, msg);
       case 'task.switch':
         return this.handleTaskSwitch(state, msg);
+      case 'permission.set':
+        return this.handlePermissionSet(state, msg);
       case 'automation.run':
         return this.handleAutomationRun(state, msg);
       case 'terminal.list':
@@ -1079,6 +1081,26 @@ export class WsHandler {
       payload: this.sessionSnapshot(taskId),
     });
     this.logger.debug(t('server.wsTaskSwitched', { id: taskId }));
+  }
+
+  /**
+   * 前端顶部权限选择器实时切换会话权限模式。
+   * 会话尚未创建（例如新任务还没发消息）时 ok=false，不报错：
+   * 本地模式仍会在下一次 task.stream 中携带。
+   */
+  private handlePermissionSet(state: ConnectionState, msg: WSMessage): void {
+    const payload = (msg.payload ?? {}) as { permissionMode?: unknown };
+    const mode = payload.permissionMode;
+    if (mode !== 'ask' && mode !== 'auto' && mode !== 'skip') return;
+    const sessionId = msg.sessionId ?? state.sessionId;
+    if (!sessionId) return;
+    const engine = this.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
+    const ok = engine?.setSessionPermissionMode?.(sessionId, mode) ?? false;
+    state.conn.send({
+      type: 'permission.updated',
+      sessionId,
+      payload: { permissionMode: mode, ok },
+    });
   }
 
   /**
