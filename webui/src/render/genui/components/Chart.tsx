@@ -15,7 +15,7 @@ export interface GenUIChartDatum {
 }
 
 export interface GenUIChartProps {
-  kind: 'bar' | 'line' | 'pie';
+  kind: 'bar' | 'line' | 'area' | 'pie';
   data: GenUIChartDatum[];
   height?: number;
   tone?: string;
@@ -122,7 +122,7 @@ export default function GenUIChart({ kind, data, height = 260, tone = 'default',
               smooth: true,
               symbolSize: 6,
               lineStyle: { width: 2 },
-              areaStyle: { opacity: 0.12 },
+              ...(kind === 'area' ? { areaStyle: { opacity: 0.18 } } : {}),
             },
       ],
     };

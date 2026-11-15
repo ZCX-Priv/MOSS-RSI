@@ -23,6 +23,7 @@ import { copyText } from '@/lib/clipboard';
 import { COMPONENTS } from './catalog';
 import type { GenUIRenderContext } from './context';
 import { compileExpr, evaluateCompiled, type CompiledExpr } from './expr';
+import '../styles/genui.css';
 import {
   asGenUIBinding,
   GENUI_LIMITS,
@@ -253,16 +254,31 @@ export function GenUIRenderer({ spec, className }: GenUIRendererProps) {
     );
   }
 
+  const framed = spec.framed !== false;
+
   return (
-    <div className={cn('flex w-full min-w-0 flex-col gap-3', className)}>
+    <div
+      className={cn(
+        'flex w-full min-w-0 flex-col gap-3',
+        framed && 'rounded-xl border border-border/70 bg-card/40 p-3 shadow-sm',
+        className,
+      )}
+    >
       {spec.title ? (
-        <h3 className="text-base font-semibold leading-snug text-foreground">{spec.title}</h3>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="size-1.5 shrink-0 rounded-full bg-primary" />
+          <h3 className="min-w-0 truncate text-[13px] font-semibold leading-snug text-foreground">
+            {spec.title}
+          </h3>
+        </div>
       ) : null}
-      <Suspense fallback={<div className="text-xs text-muted-foreground">{t('task.runCode.loadingUi')}</div>}>
-        <GenUINodeBoundary fallback={<NodeRenderError />}>
-          <GenUINodeView node={spec.root} ctx={ctx} renderChildren={renderChildren} />
-        </GenUINodeBoundary>
-      </Suspense>
+      <div className="genui-appear flex min-w-0 flex-col gap-3">
+        <Suspense fallback={<div className="text-xs text-muted-foreground">{t('task.runCode.loadingUi')}</div>}>
+          <GenUINodeBoundary fallback={<NodeRenderError />}>
+            <GenUINodeView node={spec.root} ctx={ctx} renderChildren={renderChildren} />
+          </GenUINodeBoundary>
+        </Suspense>
+      </div>
     </div>
   );
 }

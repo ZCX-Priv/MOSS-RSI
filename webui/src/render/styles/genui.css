@@ -1,0 +1,63 @@
+/* webui/src/render/styles/genui.css
+   Intelligent UI 入场动画：元素错峰淡入（规格界面无法真流式，这里做视觉兜底）。
+   只作用于两层直接子节点，避免深层节点被反复动画。 */
+
+@keyframes genui-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.genui-appear > *,
+.genui-appear > * > * {
+  animation: genui-rise 240ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+.genui-appear > *:nth-child(1),
+.genui-appear > * > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.genui-appear > *:nth-child(2),
+.genui-appear > * > *:nth-child(2) {
+  animation-delay: 40ms;
+}
+.genui-appear > *:nth-child(3),
+.genui-appear > * > *:nth-child(3) {
+  animation-delay: 80ms;
+}
+.genui-appear > *:nth-child(4),
+.genui-appear > * > *:nth-child(4) {
+  animation-delay: 120ms;
+}
+.genui-appear > *:nth-child(5),
+.genui-appear > * > *:nth-child(5) {
+  animation-delay: 160ms;
+}
+.genui-appear > *:nth-child(6),
+.genui-appear > * > *:nth-child(6) {
+  animation-delay: 200ms;
+}
+.genui-appear > *:nth-child(7),
+.genui-appear > * > *:nth-child(7) {
+  animation-delay: 240ms;
+}
+.genui-appear > *:nth-child(8),
+.genui-appear > * > *:nth-child(8) {
+  animation-delay: 280ms;
+}
+.genui-appear > *:nth-child(n + 9),
+.genui-appear > * > *:nth-child(n + 9) {
+  animation-delay: 320ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .genui-appear > *,
+  .genui-appear > * > * {
+    animation: none;
+  }
+}

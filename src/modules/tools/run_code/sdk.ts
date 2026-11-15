@@ -66,6 +66,24 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
   } else {
     parts.push('程序内的 `tools` 镜像当前原生工具（当前没有可用工具）。');
   }
+  if (input.uiEnabled) {
+    parts.push(
+      '',
+      '### 内嵌页面（page 参数）',
+      '需要任意 CSS/动画/像素级视觉（游戏、海报式看板、复杂网页）时，给 run_code 的 `page` 参数传一个自包含页面；此时 `code` 可以省略（纯页面不启动子进程）。',
+      '- `page.mode = "html"`（推荐）：`page.source` 是完整 HTML 文档（从 `<!doctype html>` 开始），样式放 `<style>`、脚本放 `<script>`；生成过程中前端会边生成边渲染，元素逐步出现。',
+      '- `page.mode = "tsx"`：`page.source` 是单文件 TSX，必须 `export default function App()`；只允许 `import ... from "react"`，样式写 `<style>{`…`}</style>`（不要 import CSS）；生成完成后编译渲染，非流式。',
+      '- 不引用外部 CSS/JS/CDN；图片可用 http(s) 绝对地址；页面默认高度 560，可用 `page.height`（240-1200）调整。',
+      '- 简单指标/表单/筛选优先 `ui.*`（可读 state、体积小）；不要为了用页面而用页面。',
+    );
+  }
+  parts.push(
+    '',
+    '### 回复末尾的产物入口',
+    '- 任务产出文件或修改了代码时，在最终总结末尾用独立行列出关键产物路径；前端会把真实存在的文件路径渲染为可点击卡片（本轮 diff 汇总卡会自动出现）。',
+    '- 需要用户点开的网页链接独占一行（`[标题](https://…)` 或裸 URL），前端会渲染为 Globe 卡片；不要埋在句子中间。',
+    '- 是否挂载这些入口由你决定；只在确实有产物/来源时列出，不要为了凑卡片编造路径或链接。',
+  );
   parts.push(
     `硬限制：程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}（\`tools.ask\` / \`tools.agent\` / \`tools.agent_status\` / \`tools.agent_message\` / \`tools.todo\` 不存在）。需要提问、派发/查询/对话子代理或维护待办时，直接调用原生 \`ask\` / \`agent\` / \`agent_status\` / \`agent_message\` / \`todo\`，不要写进 run_code 程序。`,
   );
@@ -94,7 +112,9 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
   parts.push(
     '',
     '### 常见失误（调用前自检）',
-    '- 漏必填参数或参数名拼错：按上面的签名逐字核对；宿主会拒绝并回传「期望签名 + 实际入参」。',
+    '- 漏必填参数或参数名拼错：按上面的签名逐字核对；宿主会拒绝并回传「期望签名 + 修复示例 + 实际入参」。',
+    '- 参数名逐字照签名复制（snake_case 不要改 camelCase）；数字/布尔不要加引号；枚举值照抄。宿主会自动纠正一次，但不要依赖。',
+    '- 同一调用失败后不要原样重试：读错误里的「期望签名 + 修复示例」，改参数后重试一次；仍失败就换策略并在正文说明。',
     '- 忘记 `await`：`tools.*` 返回 Promise，不 `await` 会拿到 `{}` 或触发未处理拒绝。',
     '- 把对象写成 JSON 字符串：宿主会自动解析一次，但不要依赖；直接传对象。',
     '- 返回超大对象：只返回必要字段，先在程序内聚合/裁剪。',
@@ -146,7 +166,7 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
       '界面会直接渲染在「代码」步骤下方；最终正文用一两句话说明即可，不要复述界面里的内容。',
     );
   } else {
-    parts.push('', '### ui 构建器', '本次会话关闭了 Intelligent UI（`ui` 命名空间不可用）。');
+    parts.push('', '### 智能界面', '本次会话关闭了智能界面（`ui` 命名空间与 `page` 参数不可用）。');
   }
 
   return {

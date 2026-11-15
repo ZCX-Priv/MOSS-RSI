@@ -96,7 +96,20 @@ export function validateUISpec(input: unknown): UIValidationResult {
     title = input.title.slice(0, 200);
   }
 
-  const spec: UISpec | undefined = root && !fatal ? { version: 1, ...(title ? { title } : {}), root, state } : undefined;
+  // ---- framed ----
+  let framed: boolean | undefined;
+  if (typeof input.framed === 'boolean') framed = input.framed;
+
+  const spec: UISpec | undefined =
+    root && !fatal
+      ? {
+          version: 1,
+          ...(title ? { title } : {}),
+          ...(framed === undefined ? {} : { framed }),
+          root,
+          state,
+        }
+      : undefined;
   if (spec) {
     const bytes = Buffer.byteLength(JSON.stringify(spec), 'utf8');
     if (bytes > UI_LIMITS.maxSpecBytes) {
@@ -333,6 +346,12 @@ function sanitizeProp(
       return sanitizeChartData(value, path, ctx);
     case 'keyValueItems':
       return sanitizeKeyValue(value, path, ctx, state);
+    case 'listItems':
+      return sanitizeListItems(value, path, ctx, state);
+    case 'timelineItems':
+      return sanitizeTimelineItems(value, path, ctx, state);
+    case 'numbers':
+      return sanitizeNumbers(value, path, ctx);
     case 'options':
       return sanitizeOptions(value, path, ctx);
     case 'tabItems':
@@ -524,6 +543,97 @@ function sanitizeKeyValue(
       cleanValue = rawValue;
     }
     out.push({ label: item.label.slice(0, 500), value: cleanValue });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** 列表/时间线条目里的标量值：允许字面量或 $state/$expr 绑定 */
+function sanitizeItemValue(
+  raw: unknown,
+  path: string,
+  ctx: WalkCtx,
+  state: Record<string, UIStateValue>,
+): UIPropValue {
+  const binding = asBinding(raw);
+  if (binding) {
+    if ('$action' in binding) {
+      diag(ctx, 'invalid_binding', path, 'warning');
+      return null;
+    }
+    return sanitizeBinding(binding, { kind: 'bindingOrValue' }, path, ctx, state) ?? null;
+  }
+  return isPrimitive(raw) ? raw : null;
+}
+
+function sanitizeListItems(
+  value: unknown,
+  path: string,
+  ctx: WalkCtx,
+  state: Record<string, UIStateValue>,
+): UIPropValue | undefined {
+  if (!Array.isArray(value)) {
+    diag(ctx, 'invalid_literal', path, 'warning', 'expected items array');
+    return undefined;
+  }
+  const out: UIPropValue[] = [];
+  for (let i = 0; i < Math.min(value.length, UI_LIMITS.maxListItems); i++) {
+    const item = value[i];
+    if (!isPlainObject(item) || typeof item.label !== 'string') {
+      diag(ctx, 'invalid_literal', `${path}[${i}]`, 'warning', 'item needs label:string');
+      continue;
+    }
+    out.push({
+      label: item.label.slice(0, 500),
+      ...(typeof item.description === 'string' ? { description: item.description.slice(0, 2000) } : {}),
+      value: sanitizeItemValue(item.value, `${path}[${i}].value`, ctx, state),
+      ...(typeof item.icon === 'string' ? { icon: item.icon.slice(0, 80) } : {}),
+      ...(typeof item.tone === 'string' ? { tone: item.tone.slice(0, 40) } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function sanitizeTimelineItems(
+  value: unknown,
+  path: string,
+  ctx: WalkCtx,
+  state: Record<string, UIStateValue>,
+): UIPropValue | undefined {
+  if (!Array.isArray(value)) {
+    diag(ctx, 'invalid_literal', path, 'warning', 'expected items array');
+    return undefined;
+  }
+  const out: UIPropValue[] = [];
+  for (let i = 0; i < Math.min(value.length, UI_LIMITS.maxListItems); i++) {
+    const item = value[i];
+    if (!isPlainObject(item) || typeof item.label !== 'string') {
+      diag(ctx, 'invalid_literal', `${path}[${i}]`, 'warning', 'item needs label:string');
+      continue;
+    }
+    out.push({
+      label: item.label.slice(0, 500),
+      ...(typeof item.description === 'string' ? { description: item.description.slice(0, 2000) } : {}),
+      ...(typeof item.time === 'string' ? { time: item.time.slice(0, 200) } : {}),
+      ...(typeof item.icon === 'string' ? { icon: item.icon.slice(0, 80) } : {}),
+      ...(typeof item.tone === 'string' ? { tone: item.tone.slice(0, 40) } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function sanitizeNumbers(value: unknown, path: string, ctx: WalkCtx): UIPropValue | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    diag(ctx, 'invalid_literal', path, 'warning', 'expected non-empty number array');
+    return undefined;
+  }
+  const out: UIPropValue[] = [];
+  for (let i = 0; i < Math.min(value.length, UI_LIMITS.maxNumbers); i++) {
+    const item = value[i];
+    if (typeof item !== 'number' || !Number.isFinite(item)) {
+      diag(ctx, 'invalid_literal', `${path}[${i}]`, 'warning', 'expected finite number');
+      continue;
+    }
+    out.push(item);
   }
   return out.length > 0 ? out : undefined;
 }

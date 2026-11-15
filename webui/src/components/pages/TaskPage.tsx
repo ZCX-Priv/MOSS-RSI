@@ -95,6 +95,7 @@ import { stripMentionTokens } from '../shared/mention-data';
 import { MessageAttachmentCards } from '../shared/AttachmentCards';
 import { FileTypeIcon } from '../shared/FileTypeIcon';
 import { ScrollToBottomButton } from '../shared/ScrollToBottomButton';
+import { SessionArtifacts } from '../shared/SessionArtifacts';
 import { ThinkingPreview } from '../shared/ThinkingPreview';
 import { ConversationNodeRail, type ConversationNodeItem } from '../shared/ConversationNodeRail';
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
@@ -278,6 +279,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   };
 
   const messages = useStore((s) => s.messagesBySession[taskId] ?? EMPTY_MESSAGES);
+  // 会话末尾产物入口的统计起点：最后一条用户消息时刻（没有用户消息则不渲染）
+  const lastUserTs = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].timestamp;
+    }
+    return undefined;
+  }, [messages]);
   /**
    * 列表项：过滤不可见的空 assistant 占位。
    * 这类条目渲染为 0 高度，但虚拟列表会把「未测量项」按中位数估算，
@@ -1626,14 +1634,28 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
               renderItem={renderItem}
               header={null}
               footer={
-                showTailThinking ? (
-                  <div className="flex items-center gap-2 px-4 pb-4 text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin" />
-                    <span className="text-sm">{t('task.thinking')}</span>
-                  </div>
-                ) : (
-                  <div className="h-2" />
-                )
+                <div className="px-4 pb-2">
+                  {!isGenerating && lastUserTs && taskId ? (
+                    <SessionArtifacts
+                      sessionId={taskId}
+                      sinceIso={lastUserTs}
+                      onOpenChanges={() => {
+                        // 只切换标签不会展开右栏：面板关闭时点击必须先把面板打开
+                        setRightPanelOpen(taskId, true);
+                        openTabType('changes', 'task.fileChanges');
+                      }}
+                      onOpenFile={openAttachment}
+                    />
+                  ) : null}
+                  {showTailThinking ? (
+                    <div className="flex items-center gap-2 pb-2 text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      <span className="text-sm">{t('task.thinking')}</span>
+                    </div>
+                  ) : (
+                    <div className="h-2" />
+                  )}
+                </div>
               }
             />
           ) : taskId === '' || historyLoaded ? (

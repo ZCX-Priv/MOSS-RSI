@@ -7,10 +7,12 @@
 // - 执行中通过 toolCall.live 展示实时嵌套调用/日志与 ms/s/min 计时。
 // - 程序源码/大 JSON 只在展开时解析；轻量历史结果展开时按 toolCallId 拉取完整 metadata。
 
-import { lazy, memo, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, memo, startTransition, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, CircleAlert, Loader2, X } from 'lucide-react';
 import { CodeBlock } from '../../render';
+import { PageFrame } from '../../render/genui/page/PageFrame';
+import { useDarkMode } from '../../render/core/use-dark-mode';
 import { ToolCallDetails } from './ToolCallDetails';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { useStore } from '../../store';
@@ -32,8 +34,21 @@ interface RunCodeCardProps {
   sessionId?: string;
 }
 
+/** 流式页面解析间隔：兼顾「元素逐步出现」与主线程负担（每次都会重载 iframe 文档） */
+const PAGE_PARSE_INTERVAL_MS = 400;
+/** 工具行「源码」页签里页面源码的最大展示字符数（完整源码通过复制获取） */
+const PAGE_SOURCE_PREVIEW_CHARS = 12_000;
+
+interface ParsedPage {
+  mode?: 'html' | 'tsx';
+  source?: string;
+  title?: string;
+  height?: number;
+}
+
 interface ParsedArgs {
   code?: string;
+  page?: ParsedPage;
   partial: boolean;
 }
 
@@ -55,22 +70,61 @@ export const RunCodeCard = memo(function RunCodeCard({
   const hasUiFromResult =
     result?.metadata?.codeRun?.hasUi === true ||
     result?.metadata?.codeRun?.uiSpec !== undefined;
+  // 内嵌页面（轻量历史投影只带 hasPage）：需要补拉完整结果才能拿到 tsx 编译产物
+  const hasPageFromResult = result?.metadata?.codeRun?.hasPage === true;
   // 程序卡片或任一嵌套调用展开时，才按需拉取完整的 codeRun metadata（含 uiSpec/日志）
   const hydratedResult = useLazyToolResult(
     resultSessionId,
     toolCall.id,
     result,
-    open || nestedOpenIds.size > 0 || hasUiFromResult,
+    open || nestedOpenIds.size > 0 || hasUiFromResult || hasPageFromResult,
   );
   // 大 JSON 源码只在展开时解析；折叠态不解析 20KB~ 的程序参数
   const parsed: ParsedArgs = useMemo(
     () => (open ? parseRunCodeArgs(toolCall.arguments) : { partial: true }),
     [open, toolCall.arguments],
   );
+  // 内嵌页面：生成期从流式参数容错提取（尾随节流，保证最后一次分片也会渲染）
+  const [streamPage, setStreamPage] = useState<ParsedPage | undefined>(undefined);
+  const lastPageParseRef = useRef(0);
+  const pageParseTimerRef = useRef<number | null>(null);
+  const dark = useDarkMode();
+  useEffect(() => {
+    if (toolCall.status !== 'generating') {
+      if (pageParseTimerRef.current !== null) {
+        window.clearTimeout(pageParseTimerRef.current);
+        pageParseTimerRef.current = null;
+      }
+      return;
+    }
+    const elapsed = Date.now() - lastPageParseRef.current;
+    const delay = elapsed >= PAGE_PARSE_INTERVAL_MS ? 0 : PAGE_PARSE_INTERVAL_MS - elapsed;
+    if (pageParseTimerRef.current !== null) window.clearTimeout(pageParseTimerRef.current);
+    pageParseTimerRef.current = window.setTimeout(() => {
+      pageParseTimerRef.current = null;
+      lastPageParseRef.current = Date.now();
+      startTransition(() => setStreamPage(extractPartialPage(toolCall.arguments)));
+    }, delay);
+    return () => {
+      if (pageParseTimerRef.current !== null) {
+        window.clearTimeout(pageParseTimerRef.current);
+        pageParseTimerRef.current = null;
+      }
+    };
+  }, [toolCall.arguments, toolCall.status]);
   const meta = hydratedResult?.metadata?.codeRun;
   const status = toolCall.status ?? 'done';
   const isError =
     hydratedResult?.isError === true || (status === 'done' && fallbackIsError === true);
+  const pageInfo = useMemo<ParsedPage | undefined>(() => {
+    if (toolCall.status === 'generating') return streamPage;
+    if (!toolCall.arguments.includes('"page"')) return undefined;
+    return parseRunCodeArgs(toolCall.arguments).page;
+  }, [toolCall.status, streamPage, toolCall.arguments]);
+  // 纯页面调用也保留标准 run_code 工具行（与 ui.* 规格界面同构）。
+  // 生成期 mode 可能尚未到达：此时不渲染页面（避免把 TSX 源码当 HTML 显示）。
+  const hasPageToRender = Boolean(pageInfo?.source && pageInfo?.mode);
+  const pageSource = pageInfo?.source;
   const bodyText = open ? resultText(hydratedResult, fallbackText) : '';
   // 结果即完成：已拿到最终结果时，残留的 executing 不得继续显示「正在运行」
   const hasResult = hydratedResult !== undefined || fallbackText !== undefined;
@@ -107,11 +161,32 @@ export const RunCodeCard = memo(function RunCodeCard({
       : undefined);
   const preview =
     open && displayMeta ? (
-      <RunCodeResultPreview meta={displayMeta} isError={isError} running={running} bodyText={bodyText} />
+      <RunCodeResultPreview
+        meta={displayMeta}
+        isError={isError}
+        running={running}
+        bodyText={bodyText}
+        hasPage={displayMeta.hasPage === true || Boolean(pageSource)}
+      />
     ) : undefined;
-  const source = open && hasCode ? (
-    <CodeBlock code={parsed.code ?? ''} lang="ts" closed={!parsed.partial} variant="inline" />
-  ) : undefined;
+  const source =
+    open && hasCode ? (
+      <CodeBlock code={parsed.code ?? ''} lang="ts" closed={!parsed.partial} variant="inline" />
+    ) : open && !hasCode && pageSource ? (
+      <div className="flex min-w-0 flex-col gap-1">
+        <CodeBlock
+          code={pageSource.slice(0, PAGE_SOURCE_PREVIEW_CHARS)}
+          lang={pageInfo?.mode === 'tsx' ? 'tsx' : 'html'}
+          closed
+          variant="inline"
+        />
+        {pageSource.length > PAGE_SOURCE_PREVIEW_CHARS && (
+          <div className="px-2.5 pb-1.5 text-[11px] text-muted-foreground">
+            {t('task.runCode.page.sourceTruncated', { total: pageSource.length })}
+          </div>
+        )}
+      </div>
+    ) : undefined;
 
   const setNestedOpen = (id: string, expanded: boolean): void => {
     setNestedOpenIds((prev) => {
@@ -124,7 +199,7 @@ export const RunCodeCard = memo(function RunCodeCard({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* 程序卡片：预览 = 文本结果，源码 = 程序代码；默认折叠，与普通工具一致 */}
+      {/* 程序卡片：预览 = 文本结果，源码 = 程序代码；页面调用同样保留这行标准工具行。 */}
       <ToolCallDetails
         toolCall={toolCall}
         result={hydratedResult}
@@ -143,13 +218,28 @@ export const RunCodeCard = memo(function RunCodeCard({
             durationMs={meta?.durationMs}
             startedAtMs={running ? startedAtMs : undefined}
             truncated={meta?.truncated === true}
-            hasUi={hasUi}
+            hasUi={hasUi || !!pageInfo?.source}
           />
         }
         previewOverride={preview}
         sourceOverride={source}
-        copyTextOverride={open && hasCode ? parsed.code : undefined}
+        copyTextOverride={open ? (hasCode ? parsed.code : pageSource) : undefined}
       />
+
+      {/* 内嵌页面（page 参数）：html 生成期渐进渲染；tsx 完成后编译渲染 */}
+      {hasPageToRender && pageInfo?.source && !isError && (
+        <div className="mt-0.5 min-w-0">
+          <PageFrame
+            mode={pageInfo.mode === 'tsx' ? 'tsx' : 'html'}
+            source={pageInfo.source}
+            title={pageInfo.title}
+            height={pageInfo.height}
+            streaming={status === 'generating'}
+            dark={dark}
+            compiledJs={meta?.pageScript}
+          />
+        </div>
+      )}
 
       {/* 工具调用：直接复用普通工具调用卡片，与原生 tool 行完全同源同构 */}
       {calls.length > 0 && (
@@ -252,11 +342,13 @@ function RunCodeResultPreview({
   isError,
   running,
   bodyText,
+  hasPage,
 }: {
   meta: CodeRunMetadata;
   isError: boolean;
   running: boolean;
   bodyText: string;
+  hasPage: boolean;
 }) {
   const { t } = useTranslation();
   const uiSpec = meta.uiSpec;
@@ -315,7 +407,9 @@ function RunCodeResultPreview({
             ? t('task.toolCard.pending')
             : uiSpec
               ? t('task.runCode.uiBelow')
-              : t('task.toolCard.emptyResult')}
+              : hasPage
+                ? t('task.runCode.page.below')
+                : t('task.toolCard.emptyResult')}
         </div>
       )}
     </div>
@@ -425,6 +519,7 @@ function parseRunCodeArgs(raw: string): ParsedArgs {
       const obj = parsed as Record<string, unknown>;
       return {
         code: typeof obj.code === 'string' ? obj.code : undefined,
+        page: normalizeParsedPage(obj.page),
         partial: false,
       };
     }
@@ -433,8 +528,136 @@ function parseRunCodeArgs(raw: string): ParsedArgs {
   }
   return {
     code: extractJsonStringField(raw, 'code'),
+    page: extractPartialPage(raw),
     partial: true,
   };
+}
+
+function normalizeParsedPage(value: unknown): ParsedPage | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  const mode = obj.mode === 'tsx' ? 'tsx' : obj.mode === 'html' ? 'html' : undefined;
+  const source = typeof obj.source === 'string' ? obj.source : undefined;
+  const title = typeof obj.title === 'string' ? obj.title : undefined;
+  const height = typeof obj.height === 'number' && Number.isFinite(obj.height) ? obj.height : undefined;
+  if (!mode && !source) return undefined;
+  return { ...(mode ? { mode } : {}), ...(source ? { source } : {}), ...(title ? { title } : {}), ...(height ? { height } : {}) };
+}
+
+/**
+ * 从（可能未闭合的）JSON 里提取顶层 page 对象。
+ * 生成阶段每 250ms 调用一次，必须容忍半截字符串与缺失字段。
+ */
+function extractPartialPage(raw: string): ParsedPage | undefined {
+  const keyAt = findTopLevelPageKey(raw);
+  if (keyAt < 0) return undefined;
+  const colon = raw.indexOf(':', keyAt);
+  if (colon < 0) return undefined;
+  let i = colon + 1;
+  while (i < raw.length && /\s/.test(raw[i])) i += 1;
+  if (raw[i] !== '{') return undefined;
+  i += 1;
+
+  const page: ParsedPage = {};
+  while (i < raw.length) {
+    while (i < raw.length && /[\s,]/.test(raw[i])) i += 1;
+    if (i >= raw.length || raw[i] === '}') break;
+    if (raw[i] !== '"') break;
+
+    // 读字段名
+    i += 1;
+    let field = '';
+    while (i < raw.length) {
+      if (raw[i] === '\\') {
+        i += 2;
+        continue;
+      }
+      if (raw[i] === '"') break;
+      field += raw[i];
+      i += 1;
+    }
+    if (i >= raw.length) break;
+    i += 1; // 关闭引号
+    while (i < raw.length && /\s/.test(raw[i])) i += 1;
+    if (raw[i] !== ':') break;
+    i += 1;
+    while (i < raw.length && /\s/.test(raw[i])) i += 1;
+
+    if (raw[i] === '"') {
+      i += 1;
+      let out = '';
+      while (i < raw.length) {
+        const ch = raw[i];
+        if (ch === '\\') {
+          const next = raw[i + 1];
+          if (next === undefined) break;
+          out += unescapeJsonChar(raw, i);
+          i += unescapeLength(raw, i);
+          continue;
+        }
+        if (ch === '"') {
+          i += 1;
+          break;
+        }
+        out += ch;
+        i += 1;
+      }
+      if (field === 'source') page.source = out;
+      else if (field === 'title') page.title = out;
+      else if (field === 'mode') page.mode = out === 'tsx' ? 'tsx' : out === 'html' ? 'html' : undefined;
+      continue;
+    }
+
+    if (raw[i] !== undefined && /[-0-9]/.test(raw[i])) {
+      const start = i;
+      while (i < raw.length && /[-0-9.eE+]/.test(raw[i])) i += 1;
+      if (field === 'height') {
+        const n = Number(raw.slice(start, i));
+        if (Number.isFinite(n)) page.height = n;
+      }
+      continue;
+    }
+
+    // 其它字面量（true/false/null）：跳过
+    while (i < raw.length && !/[,}]/.test(raw[i])) i += 1;
+  }
+  return page.source !== undefined || page.mode !== undefined ? page : undefined;
+}
+
+/**
+ * 找到顶层对象里的 "page" 键（返回左引号后的位置）。
+ * 跳过字符串内容与嵌套层级，避免 code 字符串里的 "page" 误命中。
+ */
+function findTopLevelPageKey(raw: string): number {
+  let i = 0;
+  let depth = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '"') {
+      const start = i + 1;
+      i += 1;
+      while (i < raw.length) {
+        if (raw[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (raw[i] === '"') break;
+        i += 1;
+      }
+      const word = raw.slice(start, i);
+      if (depth === 1 && word === 'page') {
+        let j = i + 1;
+        while (j < raw.length && /\s/.test(raw[j])) j += 1;
+        if (raw[j] === ':') return i + 1;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === '{' || ch === '[') depth += 1;
+    else if (ch === '}' || ch === ']') depth -= 1;
+    i += 1;
+  }
+  return -1;
 }
 
 /** 从（可能未闭合的）JSON 字符串里提取一个字符串字段的值 */

@@ -280,6 +280,47 @@ md.core.ruler.push('inline_specials', (state) => {
 });
 
 // ============================================================================
+// ruler 后处理：独占一行的 http(s) 链接 → link_card（Globe 卡片）
+// 只处理顶层段落，避免把列表项/引用里的链接也卡片化。
+// ============================================================================
+
+md.core.ruler.push('link_card', (state) => {
+  const tokens = state.tokens;
+  for (let i = 0; i + 2 < tokens.length; i++) {
+    const open = tokens[i];
+    if (open.type !== 'paragraph_open' || open.level !== 0) continue;
+    const inline = tokens[i + 1];
+    if (inline.type !== 'inline' || !inline.children) continue;
+    if (tokens[i + 2].type !== 'paragraph_close') continue;
+
+    const children = inline.children;
+    let start = 0;
+    let end = children.length - 1;
+    while (start <= end && children[start].type === 'text' && children[start].content.trim() === '') start += 1;
+    while (end >= start && children[end].type === 'text' && children[end].content.trim() === '') end -= 1;
+    if (end - start !== 2) continue;
+
+    const linkOpen = children[start];
+    const text = children[start + 1];
+    const linkClose = children[start + 2];
+    if (linkOpen.type !== 'link_open' || text.type !== 'text' || linkClose.type !== 'link_close') continue;
+
+    const hrefAttr = linkOpen.attrGet('href');
+    const href = typeof hrefAttr === 'string' ? hrefAttr : '';
+    const label = text.content.trim();
+    if (!/^https?:\/\//i.test(href) || href.length > 2000 || label.length > 200) continue;
+
+    const card = new state.Token('link_card', 'a', 0);
+    card.content = href;
+    card.meta = { label };
+    card.map = open.map;
+    card.block = true;
+    tokens.splice(i, 3, card);
+    i += 1;
+  }
+});
+
+// ============================================================================
 // 链接目标空白转义：markdown-it 的目标解析不允许裸空白 →
 // [名](file:///a b.ts) 会退化为源文本。此处保守地把「文件类」目标内的空白转义为百分号编码。
 // ============================================================================

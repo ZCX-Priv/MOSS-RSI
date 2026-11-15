@@ -48,6 +48,8 @@ function lightenCodeRun(codeRun: Record<string, unknown>): Record<string, unknow
     ...(codeRun.truncated ? { truncated: true } : {}),
     // 折叠态只显示「含交互界面」徽标；真正 spec 在展开后拉取
     hasUi: codeRun.uiSpec !== undefined,
+    // 内嵌页面：源码在 toolCall.arguments 里，这里只标记存在性
+    ...(codeRun.hasPage === true || codeRun.page !== undefined ? { hasPage: true } : {}),
   };
 }
 

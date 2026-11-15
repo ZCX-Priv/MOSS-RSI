@@ -34,7 +34,7 @@ export interface UiCore {
   seq(...actions: UIBinding[]): UIBinding;
   copy(text: string | UIBinding): UIBinding;
   open(href: string | UIBinding): UIBinding;
-  render(root: UINode, options?: { title?: string }): void;
+  render(root: UINode, options?: { title?: string; framed?: boolean }): void;
   markdown(text: string): UINode;
 }
 
@@ -42,12 +42,17 @@ export interface UiNamespace extends UiCore {
   box: UiComponentFactory;
   grid: UiComponentFactory;
   card: UiComponentFactory;
+  section: UiComponentFactory;
   divider: UiComponentFactory;
   title: UiComponentFactory;
   text: UiComponentFactory;
   badge: UiComponentFactory;
+  stat: UiComponentFactory;
+  list: UiComponentFactory;
+  timeline: UiComponentFactory;
   table: UiComponentFactory;
   chart: UiComponentFactory;
+  sparkline: UiComponentFactory;
   keyValue: UiComponentFactory;
   progress: UiComponentFactory;
   slider: UiComponentFactory;
@@ -55,7 +60,13 @@ export interface UiNamespace extends UiCore {
   textInput: UiComponentFactory;
   select: UiComponentFactory;
   switch: UiComponentFactory;
+  checkbox: UiComponentFactory;
+  radioGroup: UiComponentFactory;
+  segmentedControl: UiComponentFactory;
   button: UiComponentFactory;
+  icon: UiComponentFactory;
+  avatar: UiComponentFactory;
+  code: UiComponentFactory;
   tabs: UiComponentFactory;
   image: UiComponentFactory;
   callout: UiComponentFactory;
@@ -67,6 +78,7 @@ export interface UiBuildResult {
   root?: UINode;
   state: Record<string, UIStateValue>;
   title?: string;
+  framed?: boolean;
   diagnostics: UIDiagnostic[];
 }
 
@@ -82,6 +94,7 @@ export function createUiBuilder(): UiBuilder {
   const diagnostics: UIDiagnostic[] = [];
   let root: UINode | undefined;
   let specTitle: string | undefined;
+  let specFramed: boolean | undefined;
   let rendered = false;
 
   const record = (
@@ -273,7 +286,7 @@ export function createUiBuilder(): UiBuilder {
       return { $action: { kind: 'open', href } };
     },
 
-    render(node: UINode, options?: { title?: string }): void {
+    render(node: UINode, options?: { title?: string; framed?: boolean }): void {
       if (!isNode(node)) {
         record('invalid_root', 'root', 'error');
         return;
@@ -283,6 +296,9 @@ export function createUiBuilder(): UiBuilder {
       root = node;
       if (options && typeof options.title === 'string') {
         specTitle = options.title.slice(0, 200);
+      }
+      if (options && typeof options.framed === 'boolean') {
+        specFramed = options.framed;
       }
     },
 
@@ -296,12 +312,17 @@ export function createUiBuilder(): UiBuilder {
     box: factory('Box'),
     grid: factory('Grid'),
     card: factory('Card'),
+    section: factory('Section'),
     divider: factory('Divider'),
     title: factory('Title'),
     text: factory('Text'),
     badge: factory('Badge'),
+    stat: factory('Stat'),
+    list: factory('List'),
+    timeline: factory('Timeline'),
     table: factory('Table'),
     chart: factory('Chart'),
+    sparkline: factory('Sparkline'),
     keyValue: factory('KeyValue'),
     progress: factory('Progress'),
     slider: factory('Slider'),
@@ -309,7 +330,13 @@ export function createUiBuilder(): UiBuilder {
     textInput: factory('TextInput'),
     select: factory('Select'),
     switch: factory('Switch'),
+    checkbox: factory('Checkbox'),
+    radioGroup: factory('RadioGroup'),
+    segmentedControl: factory('SegmentedControl'),
     button: factory('Button'),
+    icon: factory('Icon'),
+    avatar: factory('Avatar'),
+    code: factory('Code'),
     tabs: factory('Tabs'),
     image: factory('Image'),
     callout: factory('Callout'),
@@ -328,6 +355,7 @@ export function createUiBuilder(): UiBuilder {
         ...(root ? { root } : {}),
         state: stateStore,
         ...(specTitle ? { title: specTitle } : {}),
+        ...(specFramed === undefined ? {} : { framed: specFramed }),
         diagnostics,
       };
     },

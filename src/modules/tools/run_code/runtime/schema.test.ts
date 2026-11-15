@@ -27,16 +27,17 @@ describe('buildToolSignature', () => {
 });
 
 describe('validateToolArguments', () => {
-  test('缺少必填参数：返回签名与实际入参', () => {
-    const result = validateToolArguments('read', { pth: 'a.txt' }, readSchema);
+  test('缺少必填参数：返回签名、可用参数与修复示例', () => {
+    const result = validateToolArguments('read', { foo: 'a.txt' }, readSchema);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.message).toContain('read.path 为必填参数');
     expect(result.message).toContain('read(path: string, offset?: integer, limit?: integer)');
-    expect(result.message).toContain('pth');
+    expect(result.message).toContain('修复示例：');
+    expect(result.message).toContain('foo');
   });
 
-  test('类型不匹配', () => {
+  test('类型不匹配（不做数字→字符串的隐式转换）', () => {
     const result = validateToolArguments('read', { path: 123 }, readSchema);
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -108,5 +109,55 @@ describe('validateToolArguments', () => {
   test('schema 缺失时放行', () => {
     const result = validateToolArguments('unknown', { any: true }, undefined);
     expect(result.ok).toBe(true);
+  });
+
+  test('键名别名与近匹配自动纠正', () => {
+    const schema = {
+      type: 'object',
+      properties: { timeoutMs: { type: 'integer' }, path: { type: 'string' } },
+      required: ['path'],
+    };
+    const alias = validateToolArguments('demo', { path: 'a', timeout_ms: '3000' }, schema);
+    expect(alias.ok).toBe(true);
+    if (!alias.ok) return;
+    expect(alias.args).toEqual({ path: 'a', timeoutMs: 3000 });
+    expect(alias.note).toContain('timeout_ms → timeoutMs');
+
+    const near = validateToolArguments('demo', { pth: 'a' }, schema);
+    expect(near.ok).toBe(true);
+    if (!near.ok) return;
+    expect(near.args).toEqual({ path: 'a' });
+  });
+
+  test('布尔/数组/枚举/默认值宽松修复', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        checked: { type: 'boolean' },
+        tags: { type: 'array', items: { type: 'string' } },
+        mode: { type: 'string', enum: ['search', 'fetch'] },
+        limit: { type: 'integer', default: 20 },
+      },
+    };
+    const result = validateToolArguments(
+      'demo',
+      { checked: 'true', tags: 'a', mode: ' FETCH ' },
+      schema,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.args).toEqual({ checked: true, tags: ['a'], mode: 'fetch', limit: 20 });
+  });
+
+  test('签名包含枚举与默认值', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['search', 'fetch'] },
+        limit: { type: 'integer', default: 20 },
+      },
+      required: ['mode'],
+    };
+    expect(buildToolSignature('web', schema)).toBe('web(mode: "search"|"fetch", limit?: integer = 20)');
   });
 });

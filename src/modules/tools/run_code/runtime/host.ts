@@ -451,6 +451,10 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           rejectCall(frame.id, frame.name, frame.args, validated.message);
           return;
         }
+        // 宽松修复记录：只进日志，便于模型与用户观察自动纠正过程
+        if (validated && validated.ok && validated.note) {
+          appendLog(`[ptc] ${frame.name}: ${validated.note}`);
+        }
         enqueueCall({
           id: frame.id,
           name: frame.name,

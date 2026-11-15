@@ -8,6 +8,7 @@ import { parseBlock, type Token, type InlineToken } from './markdown-it';
 import { CodeBlock } from '../code/CodeBlock';
 import { MathSpan } from '../math/MathSpan';
 import { FilePreviewCard } from '../file/FilePreviewCard';
+import { WebLinkCard } from './WebLinkCard';
 import { useRenderSettings } from './settings';
 import { useStore } from '../../store';
 import { useOpenFilePreview } from '../../hooks/useOpenFilePreview';
@@ -297,6 +298,12 @@ export function renderTokens(tokens: readonly Token[], closed: boolean): ReactNo
       case 'hr':
         pushNode(<hr key={key} className="md-hr" />);
         return;
+      case 'link_card': {
+        const meta = token.meta as { label?: unknown } | null | undefined;
+        const label = typeof meta?.label === 'string' ? meta.label : undefined;
+        pushNode(<WebLinkCard key={key} href={token.content} label={label} />);
+        return;
+      }
       case 'html_block':
         // html:false 防御：原样文本
         pushNode(

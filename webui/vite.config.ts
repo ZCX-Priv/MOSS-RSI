@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA, type ManifestOptions } from 'vite-plugin-pwa'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { mossCompat } from './compat/vite-plugin-compat.ts'
 
@@ -51,6 +52,40 @@ function mossDevManifest(): Plugin {
   };
 }
 
+/**
+ * TSX 内嵌页面运行时（虚拟模块）：把 React / ReactDOM 的 CJS production 源码
+ * 作为原始字符串打包进懒加载 chunk，供沙箱 iframe 内自建极简 CJS 加载器执行。
+ * 这样既不依赖 CDN，也不需要额外的构建步骤；React 包的 exports 不暴露 cjs 子路径，
+ * 因此必须用插件读文件，不能直接 `import 'react/cjs/...?raw'`。
+ */
+function mossReactCjsRaw(): Plugin {
+  const VIRTUAL_ID = 'virtual:react-cjs-raw';
+  const RESOLVED_ID = '\0virtual:react-cjs-raw';
+  const files: Record<'react' | 'react-dom' | 'react-dom-client' | 'scheduler', string> = {
+    react: 'node_modules/react/cjs/react.production.js',
+    'react-dom': 'node_modules/react-dom/cjs/react-dom.production.js',
+    'react-dom-client': 'node_modules/react-dom/cjs/react-dom-client.production.js',
+    scheduler: 'node_modules/scheduler/cjs/scheduler.production.js',
+  };
+  return {
+    name: 'moss-react-cjs-raw',
+    resolveId(id) {
+      if (id === VIRTUAL_ID) return RESOLVED_ID;
+      return null;
+    },
+    load(id) {
+      if (id !== RESOLVED_ID) return null;
+      const sources = Object.fromEntries(
+        Object.entries(files).map(([key, rel]) => [
+          key,
+          readFileSync(path.resolve(import.meta.dirname, rel), 'utf8'),
+        ]),
+      );
+      return `export default ${JSON.stringify(sources)};`;
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     // 浏览器兼容层：index.html 头部内联 polyfills + CSS 降级（dev/build 共用）。
@@ -60,6 +95,7 @@ export default defineConfig({
     }),
     react(),
     tailwindcss(),
+    mossReactCjsRaw(),
     mossDevManifest(),
     // PWA：manifest + service worker（autoUpdate 静默更新）。
     // 预缓存全部静态资源（hashed 文件名长缓存）；/api 与 /ws 永不缓存；

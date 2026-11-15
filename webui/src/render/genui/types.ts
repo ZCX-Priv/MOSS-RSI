@@ -33,6 +33,8 @@ export type GenUIPropValue =
 export interface GenUISpec {
   version: 1;
   title?: string;
+  /** 是否套用卡片外壳（缺省 true） */
+  framed?: boolean;
   root: GenUINode;
   state: Record<string, GenUIStateValue>;
 }

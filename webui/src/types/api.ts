@@ -54,14 +54,18 @@ export interface CodeRunCall {
 /** run_code 结果 metadata（持久化在 tool 消息里，供 RunCodeCard + 历史回放） */
 export interface CodeRunMetadata {
   version: 1;
-  /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
-  kind: 'text' | 'ui' | 'hybrid';
+  /** 输出类型：纯文本 / 纯页面 / 规格界面 / 界面+工具混合 */
+  kind: 'text' | 'page' | 'ui' | 'hybrid';
   description: string;
   /** 轻量历史投影中为 []（完整日志在展开时按需加载） */
   logs: string[];
   calls: CodeRunCall[];
   /** 轻量历史投影：是否含 IntelligentUI（真正 spec 展开后拉取） */
   hasUi?: boolean;
+  /** 内嵌页面：源码以 toolCall.arguments 为渲染真相，metadata 只标记存在性 */
+  hasPage?: boolean;
+  /** tsx 页面的编译产物（CJS 文本；html 模式没有） */
+  pageScript?: string;
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];

@@ -47,6 +47,8 @@ export type UIPropValue =
 export interface UISpec {
   version: 1;
   title?: string;
+  /** 是否套用卡片外壳（默认 true；false 时贴合消息流） */
+  framed?: boolean;
   root: UINode;
   /** 初始状态（刷新后回到这里；不在会话中持久化交互后的值） */
   state: Record<string, UIStateValue>;
@@ -82,9 +84,11 @@ export const UI_LIMITS = {
   maxTableRows: 200,
   /** 图表数据点 */
   maxChartPoints: 100,
-  /** KeyValue / Select / Tabs 条目数 */
+  /** KeyValue / Select / Tabs / List / Timeline 条目数 */
   maxListItems: 50,
   maxTabs: 12,
+  /** Sparkline 数据点 */
+  maxNumbers: 200,
 } as const;
 
 /** 合法的 state key / 表达式标识符 */

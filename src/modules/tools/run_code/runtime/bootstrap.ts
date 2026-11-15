@@ -318,6 +318,7 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
     ? {
         version: 1,
         ...(built.title ? { title: built.title } : {}),
+        ...(built.framed === undefined ? {} : { framed: built.framed }),
         root: built.root as UINode,
         state: built.state as Record<string, UIStateValue>,
       }

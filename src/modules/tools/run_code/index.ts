@@ -24,20 +24,33 @@ import type { UIDiagnostic, UISpec } from './ui/spec';
 
 interface RunCodeParams {
   code?: unknown;
+  page?: unknown;
   description?: unknown;
   timeoutMs?: unknown;
 }
 
+/** 内嵌页面（Intelligent UI）：html 流式渲染；tsx 生成完成后编译渲染 */
+export interface CodeRunPage {
+  mode: 'html' | 'tsx';
+  source: string;
+  title?: string;
+  height?: number;
+}
+
 export interface CodeRunMetadata {
   version: 1;
-  /** 输出类型：纯文本 / 界面 / 界面+工具混合 */
-  kind: 'text' | 'ui' | 'hybrid';
+  /** 输出类型：纯文本 / 纯页面 / 规格界面 / 界面+工具混合 */
+  kind: 'text' | 'page' | 'ui' | 'hybrid';
   description: string;
   logs: string[];
   calls: CodeRunCallRecord[];
   callsTruncated?: boolean;
   uiSpec?: UISpec;
   uiDiagnostics?: UIDiagnostic[];
+  /** 是否含内嵌页面（源码以 toolCall.arguments 为渲染真相，metadata 不重复存储） */
+  hasPage?: boolean;
+  /** tsx 页面的编译产物（CJS 文本；html 模式没有） */
+  pageScript?: string;
   /** 完整返回值文本（供结果区展示，不再按长度裁剪） */
   valuePreview?: string;
   /** 嵌套工具回传的截图路径（最多 2 张） */
@@ -48,6 +61,8 @@ export interface CodeRunMetadata {
 
 /** 单张回传截图上限：超过只保留路径，避免请求体膨胀 */
 const MAX_NESTED_IMAGE_BYTES = 1.5 * 1024 * 1024;
+/** 单页源码上限（字符）：防止生成阶段把会话 JSON 撑爆 */
+const MAX_PAGE_SOURCE_CHARS = 300_000;
 
 export default {
   async execute(params: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -60,14 +75,22 @@ export default {
     }
 
     const code = typeof p.code === 'string' ? p.code : '';
-    if (code.trim() === '') return err('参数 code 必须是非空的 TypeScript 异步函数体');
+    const pageParsed = normalizePage(p.page);
+    if (pageParsed.error) return err(pageParsed.error);
+    const page = pageParsed.page;
+    if (!page && code.trim() === '') return err('参数 code 与 page 至少提供一个');
     if (code.length > codeMode.maxCodeChars) {
       return err(`程序源码长度 ${code.length} 超过上限 ${codeMode.maxCodeChars}（config.agent.codeMode.maxCodeChars）`);
+    }
+    if (page && !codeMode.uiEnabled) {
+      return err('内嵌页面已关闭（config.agent.codeMode.uiEnabled=false）。请在设置 → 工具 → 启用智能界面中开启。');
     }
     const description =
       typeof p.description === 'string' && p.description.trim() !== ''
         ? p.description.trim().slice(0, 200)
-        : '代码程序';
+        : page
+          ? '交互页面'
+          : '代码程序';
 
     // ---- 命名空间预检（advisory：早失败，避免无意义子进程启动） ----
     if (referencesNamespace(code, 'team')) {
@@ -77,7 +100,34 @@ export default {
     }
     const usesUi = referencesNamespace(code, 'ui');
     if (usesUi && !codeMode.uiEnabled) {
-      return err('程序引用了 ui 命名空间，但 Intelligent UI 已关闭（config.agent.codeMode.uiEnabled=false）。');
+      return err('程序引用了 ui 命名空间，但智能界面已关闭（config.agent.codeMode.uiEnabled=false）。');
+    }
+
+    // ---- tsx 页面：服务端编译 ----
+    // 前端只负责渲染编译产物，避免浏览器运行时动态加载编译器导致的 dev 整页刷新。
+    let pageScript: string | undefined;
+    if (page && page.mode === 'tsx') {
+      const compiled = await compileTsxPage(page.source);
+      if (!compiled.ok) return err(`TSX 编译失败：${compiled.error}`);
+      pageScript = compiled.js;
+    }
+
+    // ---- 纯页面调用：页面源码即全部内容，不启动子进程 ----
+    if (code.trim() === '' && page) {
+      const pageMeta: CodeRunMetadata = {
+        version: 1,
+        kind: 'page',
+        description,
+        logs: [],
+        calls: [],
+        hasPage: true,
+        ...(pageScript ? { pageScript } : {}),
+        durationMs: 0,
+      };
+      return {
+        content: [{ type: 'text', text: `已渲染交互页面：${description}` }],
+        metadata: { codeRun: pageMeta },
+      };
     }
 
     // ---- 可见工具与并发安全表 ----
@@ -156,8 +206,17 @@ export default {
     const uiSpec = validation.spec;
 
     const hostFailed = !!hostResult.error;
-    const kind: CodeRunMetadata['kind'] =
-      !hostFailed && uiSpec ? (hostResult.nestedCalls > 0 ? 'hybrid' : 'ui') : 'text';
+    const kind: CodeRunMetadata['kind'] = hostFailed
+      ? 'text'
+      : uiSpec
+        ? hostResult.nestedCalls > 0
+          ? 'hybrid'
+          : 'ui'
+        : page
+          ? hostResult.nestedCalls > 0
+            ? 'hybrid'
+            : 'page'
+          : 'text';
 
     // ---- 文本结果 ----
     const text = formatResultText({
@@ -186,6 +245,8 @@ export default {
       calls: hostResult.calls,
       ...(hostResult.callsTruncated ? { callsTruncated: true } : {}),
       ...(uiSpec ? { uiSpec } : {}),
+      ...(page ? { hasPage: true } : {}),
+      ...(pageScript ? { pageScript } : {}),
       ...(uiDiagnostics.length > 0 ? { uiDiagnostics } : {}),
       ...(valuePreview ? { valuePreview } : {}),
       ...(hostResult.images && hostResult.images.length > 0 ? { images: hostResult.images } : {}),
@@ -227,9 +288,101 @@ function err(message: string): ToolResult {
   return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
 }
 
-/** 轻量命名空间引用扫描：`ui.` / `ui[` / `team.` / `team[`（只做早失败提示） */
-function referencesNamespace(code: string, name: string): boolean {
-  return new RegExp(`\\b${name}\\s*(?:\\.|\\[)`).test(code);
+/**
+ * 轻量命名空间引用扫描：只做「早失败提示」，不是语义分析。
+ * 先剥离注释、字符串与模板字面量，避免文本内容误触发；再用负向断言排除 `obj.ui.x` 这类成员访问。
+ */
+export function referencesNamespace(code: string, name: string): boolean {
+  const cleaned = stripNonCode(code);
+  return new RegExp(`(?<![.\\w$])${name}\\s*(?:\\.|\\[)`).test(cleaned);
+}
+
+/** 剥离注释/字符串/模板字面量（保留换行与空白，便于正则近似匹配） */
+function stripNonCode(code: string): string {
+  let out = '';
+  let i = 0;
+  const n = code.length;
+  while (i < n) {
+    const ch = code[i];
+    const next = code[i + 1];
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < n && code[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i += 1;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      while (i < n) {
+        if (code[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (code[i] === quote) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      out += ' ';
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+/** TSX → CJS（仅 tsx 页面使用；sucrase 动态加载，不影响后端启动） */
+async function compileTsxPage(source: string): Promise<{ ok: true; js: string } | { ok: false; error: string }> {
+  try {
+    const { transform } = await import('sucrase');
+    const result = transform(source, {
+      transforms: ['typescript', 'jsx', 'imports'],
+      jsxRuntime: 'classic',
+      jsxPragma: 'React.createElement',
+      jsxFragmentPragma: 'React.Fragment',
+      production: true,
+    });
+    return { ok: true, js: result.code };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 内嵌页面参数净化：模式/源码/高度/标题 */
+function normalizePage(raw: unknown): { page?: CodeRunPage; error?: string } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { error: '参数 page 必须是对象' };
+  const obj = raw as Record<string, unknown>;
+  const mode = obj.mode;
+  if (mode !== 'html' && mode !== 'tsx') return { error: "page.mode 必须是 'html' 或 'tsx'" };
+  const source = typeof obj.source === 'string' ? obj.source : '';
+  if (source.trim() === '') return { error: 'page.source 不能为空' };
+  if (source.length > MAX_PAGE_SOURCE_CHARS) {
+    return { error: `page.source 长度 ${source.length} 超过上限 ${MAX_PAGE_SOURCE_CHARS}` };
+  }
+  const heightRaw =
+    typeof obj.height === 'number' && Number.isFinite(obj.height) ? Math.round(obj.height) : undefined;
+  const height = heightRaw === undefined ? undefined : Math.max(240, Math.min(1200, heightRaw));
+  const title =
+    typeof obj.title === 'string' && obj.title.trim() !== '' ? obj.title.trim().slice(0, 200) : undefined;
+  return {
+    page: {
+      mode,
+      source,
+      ...(title ? { title } : {}),
+      ...(height !== undefined ? { height } : {}),
+    },
+  };
 }
 
 function normalizeDiagnostics(value: unknown): UIDiagnostic[] {
@@ -296,6 +449,8 @@ function formatResultText(input: FormatInput): string {
   } else {
     if (input.kind === 'ui') {
       parts.push(`已渲染交互界面：${input.description}`);
+    } else if (input.kind === 'page') {
+      parts.push(`已渲染交互页面：${input.description}`);
     } else if (input.kind === 'hybrid') {
       parts.push(`程序完成（${duration}），已渲染交互界面：${input.description}`);
     } else {
