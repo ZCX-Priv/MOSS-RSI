@@ -85,8 +85,8 @@
       },
       "ref": {
         "type": "string",
-        "description": "snapshot 返回的元素引用（如 e3），用于 click/hover/type/select/scroll",
-        "description_en": "Element ref from snapshot (e.g. e3) for click/hover/type/select/scroll."
+        "description": "snapshot 返回的元素引用（如 e3），用于 click/hover/type/select/scroll。需要定位的动作中 ref / selector / (x+y) 必须至少提供一个。",
+        "description_en": "Element ref from snapshot (e.g. e3) for click/hover/type/select/scroll. Target actions require at least one of ref / selector / (x+y)."
       },
       "frame": {
         "type": "string",
@@ -150,8 +150,8 @@
       },
       "selector": {
         "type": "string",
-        "description": "CSS 选择器（ref 的替代定位方式）",
-        "description_en": "CSS selector (alternative to ref)."
+        "description": "CSS 选择器（ref 的替代定位方式；与 ref / x+y 三者至少提供一个）",
+        "description_en": "CSS selector (alternative to ref; provide at least one of ref / selector / x+y)."
       },
       "x": {
         "type": "number",

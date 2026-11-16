@@ -562,6 +562,7 @@ export const zh = {
     setModeInvalid: 'mode 必须为 ask / auto / skip',
     setModeUnavailable: '当前会话不可切换权限模式（引擎不可用或会话不存在）',
     setModeActionOnly: 'kind=mode 仅支持 action=set',
+    setSkillListMoved: 'kind=skill 的列表请使用 skill 工具（action=list）',
     setModeApplied: '已将会话权限模式切换为 {{mode}}（ask=逐项确认 / auto=AI 审查 / skip=全部放行）',
     setNameRequired: 'name 为必填项',
     setResourceNameInvalid: '名称 "{{name}}" 非法：必须匹配 ^[a-z][a-z0-9-]*$',
@@ -732,6 +733,7 @@ export const zh = {
   fs: {
     pathEscapesBase: '路径 "{{path}}" 超出基础目录 "{{base}}"',
     pathOutsideRoots: '路径 "{{path}}" 超出允许的目录范围（工作目录{{roots}}）',
+    driveRootWriteDenied: 'Windows 不允许普通权限进程在盘符根目录 "{{dir}}" 直接创建文件（系统 ACL 仅授予创建子目录）。请改用该盘下的子目录（如 "{{dir}}moss-work"），或以管理员身份运行 MOSS。',
   },
   filesys: {
     moduleInitialized: 'Filesys 模块已初始化（统一文件系统服务）',

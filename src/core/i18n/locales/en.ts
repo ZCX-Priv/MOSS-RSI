@@ -564,6 +564,7 @@ export const en = {
     setModeInvalid: 'mode must be one of ask / auto / skip',
     setModeUnavailable: 'Cannot switch the permission mode for this session (engine unavailable or session missing)',
     setModeActionOnly: 'kind=mode only supports action=set',
+    setSkillListMoved: 'For kind=skill listing, use the skill tool (action=list)',
     setModeApplied: 'Session permission mode switched to {{mode}} (ask = per-action confirmation / auto = AI review / skip = allow all)',
     setNameRequired: 'name is required',
     setResourceNameInvalid: 'Invalid name "{{name}}": must match ^[a-z][a-z0-9-]*$',
@@ -734,6 +735,7 @@ export const en = {
   fs: {
     pathEscapesBase: 'Path "{{path}}" escapes base directory "{{base}}"',
     pathOutsideRoots: 'Path "{{path}}" is outside the allowed directories (working directory{{roots}})',
+    driveRootWriteDenied: 'Windows does not allow a non-elevated process to create files directly in the drive root "{{dir}}" (the system ACL only grants subdirectory creation). Use a subdirectory under this drive (e.g. "{{dir}}moss-work"), or run MOSS as administrator.',
   },
   filesys: {
     moduleInitialized: 'Filesys module initialized (unified filesystem service)',

@@ -150,8 +150,13 @@ export function SkillMarketPage() {
 
   const useSkill = useCallback(
     (item: MarketSkillItem): void => {
-      // 与发送框 / 菜单线格式一致：/<技能名>（/skill:<name> 不会被菜单识别）
-      useStore.getState().injectComposer(`/${item.installName}`);
+      // 直接注入 skill token（富文本 chip），不再依赖名单解析 → 不会退化成 /name 纯文本
+      useStore.getState().injectComposer(
+        `/${item.installName}`,
+        undefined,
+        [{ kind: 'command', source: 'skill', name: item.installName }],
+        '',
+      );
       navigate('/task');
     },
     [navigate],

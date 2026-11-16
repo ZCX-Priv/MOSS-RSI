@@ -39,6 +39,7 @@ import { DEFAULT_RENDER_SETTINGS, isValidRenderSettings, type RenderSettings } f
 import { fileNameOf } from '../render/file/detector';
 import { DEFAULT_ANIMATION_SETTINGS, isValidAnimationSettings, type AnimationSettings } from '../types/animation';
 import { diag } from '../lib/diag';
+import type { ComposerToken } from '../components/shared/mention-data';
 import {
   type ActiveRun,
   appendTerminatedRunId,
@@ -59,6 +60,29 @@ export interface QueuedMessage {
   /** 附件绝对路径（出队发送时透传） */
   attachments?: string[];
 }
+
+/** 发送区草稿附件（只存路径元数据，不存文件内容） */
+export interface ComposerDraftAttachment {
+  path: string;
+  name: string;
+  size: number;
+}
+
+/** 发送区草稿（wire 文本 + 附件元数据；按会话独立持久化） */
+export interface ComposerDraft {
+  text: string;
+  attachments: ComposerDraftAttachment[];
+  updatedAt: number;
+}
+
+/** 单草稿正文上限（字符；超限不落盘，内存仍保留） */
+const COMPOSER_DRAFT_MAX_TEXT = 32_768;
+/** 全部草稿正文总上限（字符；约 400KB UTF-16） */
+const COMPOSER_DRAFT_TOTAL_MAX_TEXT = 204_800;
+/** 最多持久化的会话草稿数 */
+const COMPOSER_DRAFT_MAX_SESSIONS = 50;
+/** 单草稿附件数上限 */
+const COMPOSER_DRAFT_MAX_ATTACHMENTS = 50;
 
 /** 多条排队消息合并时的分隔符（换行 + 分隔线，保证可读且便于区分来源） */
 const QUEUE_MERGE_SEPARATOR = '\n\n---\n\n';
@@ -199,6 +223,12 @@ interface UIState {
   historyMetaBySession: Record<string, HistoryMeta | undefined>;
   /** 是否正在生成（按 sessionId 索引；缺省视为 false）。写入只能来自权威信号（见 setRunning 注释） */
   generatingBySession: Record<string, boolean>;
+  /** 分组级运行会话（groupId → sessionId[]）：折叠分组不加载任务时用于组标题运行转圈 */
+  runningSessionIdsByGroup: Record<string, string[]>;
+  /** 分组级错误会话（groupId → sessionId[]）：折叠分组不加载任务时用于组标题错误图标 */
+  errorSessionIdsByGroup: Record<string, string[]>;
+  /** 每个会话最后一次运行时事件（running/error/终态）的本地时间；用于丢弃过期快照 */
+  lastRuntimeEventAtBySession: Record<string, number>;
   /**
    * 当前活跃 run（sessionId → runId/epoch/startedAt）。
    * 与 generatingBySession 同时维护：生成态表示 UI，activeRun 表示「这一轮的身份」，
@@ -333,7 +363,16 @@ interface UIState {
    * 输入框回填通道（「编辑队列消息」用）：TaskInput 监听 seq 变化把 text 写入编辑框。
    * seq 自增，保证「同一文本二次回填」也能触发一次消费。
    */
-  composerInjection: { text: string; attachments?: string[]; seq: number } | null;
+  composerInjection: {
+    text: string;
+    attachments?: string[];
+    tokens?: ComposerToken[];
+    /** 目标草稿键（会话 id；'' = 空白新建页）。缺省 = 兼容旧行为，任意页面可消费 */
+    targetKey?: string;
+    seq: number;
+  } | null;
+  /** 发送区草稿（sessionId → 草稿；'' 表示空白新建页）。切换路由/刷新后恢复 */
+  composerDraftsBySession: Record<string, ComposerDraft | undefined>;
 
   // --- 外观设置（IndexedDB 持久化） ---
   /** 主题色（预设 ID 或自定义 oklch/hex 字符串） */
@@ -409,6 +448,8 @@ export interface PersistedState {
   animationSettings?: AnimationSettings;
   /** 排队消息队列（sessionId → 待发送消息）：刷新后不丢，按序继续投递 */
   messageQueues?: Record<string, QueuedMessage[]>;
+  /** 发送区草稿（sessionId → wire 文本 + 附件元数据）：刷新/切换页面后恢复 */
+  composerDrafts?: Record<string, ComposerDraft>;
   /** 最近使用目录的自定义显示名（path → alias） */
   recentDirectoryAliases?: Record<string, string>;
 }
@@ -536,6 +577,26 @@ interface UIActions {
   /** 更新分组（本地乐观更新；名称/展开状态均以后端 PATCH 为真相） */
   updateTaskGroup: (id: string, patch: Partial<TaskGroup>) => void;
   removeTaskGroup: (id: string) => void;
+  /** 覆盖某分组的运行会话集合（后端分组快照 / WS 权威事件） */
+  setGroupRunningSessions: (groupId: string, sessionIds: string[]) => void;
+  /** 统一维护分组运行/错误集合（task.updated 的 running/error） */
+  syncGroupRuntimeSession: (
+    groupId: string,
+    sessionId: string,
+    patch: { running?: boolean; error?: boolean },
+  ) => void;
+  /** 单个会话运行态变化 → 增量维护分组运行集合（task.updated） */
+  syncGroupRunningSession: (groupId: string, sessionId: string, running: boolean) => void;
+  /** 从所有分组运行集合中移除某会话（结束事件缺 groupId / 手动停止 / 任务删除） */
+  clearGroupRunningSession: (sessionId: string) => void;
+  /** 从所有分组错误集合中移除某会话（结束事件缺 groupId / 历史变更） */
+  clearGroupErrorSession: (sessionId: string) => void;
+  /** 同时清理运行与错误集合（任务删除 / 撤回恢复等历史变更） */
+  clearGroupRuntimeSession: (sessionId: string) => void;
+  /** 记录某会话最后一次运行时事件时间（用于快照防倒灌） */
+  touchSessionRuntime: (sessionId: string, at?: number) => void;
+  /** 用后端分组快照重建分组与运行/错误集合，并据此收敛已物化任务的衍生状态 */
+  applyGroupRuntimeSnapshot: (groups: TaskGroup[], requestedAt?: number) => void;
   /** 标记当前路由页面已挂载（Splash 进度里程碑） */
   markPageReady: () => void;
   /** 标记某会话首屏历史已就绪（Splash 进度里程碑） */
@@ -663,10 +724,19 @@ interface UIActions {
   takeFromMessageQueue: (sessionId: string, messageId: string) => QueuedMessage | null;
   removeFromMessageQueue: (sessionId: string, messageId: string) => void;
   clearMessageQueue: (sessionId: string) => void;
-  /** 把文本回填到消息发送框（「编辑」队列消息用；seq 自增触发一次消费） */
-  injectComposer: (text: string, attachments?: string[]) => void;
+  /** 把文本回填到消息发送框（「编辑」队列消息 / 撤回回填用；seq 自增触发一次消费） */
+  injectComposer: (
+    text: string,
+    attachments?: string[],
+    tokens?: ComposerToken[],
+    targetKey?: string,
+  ) => void;
   /** 消费后清空回填通道 */
   clearComposerInjection: () => void;
+  /** 写入/更新某会话的发送区草稿；text 与 attachments 均为空时删除 */
+  setComposerDraft: (sessionId: string, draft: ComposerDraft | null) => void;
+  /** 删除某会话草稿（发送成功 / 清空输入后） */
+  clearComposerDraft: (sessionId: string) => void;
 
   // 外观设置
   setAccentColor: (v: string) => void;
@@ -869,6 +939,113 @@ function persistSidebarTabs(map: Record<string, SessionSidebarTabs | undefined>)
 }
 
 // ============================================================================
+// 发送区草稿持久化（结构化 + 体积上限，避免 IndexedDB 膨胀）
+// ============================================================================
+
+/** 合法的草稿附件（仅路径/名称/大小） */
+function sanitizeDraftAttachments(raw: unknown): ComposerDraftAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ComposerDraftAttachment[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const v = item as { path?: unknown; name?: unknown; size?: unknown };
+    if (typeof v.path !== 'string' || !v.path || seen.has(v.path)) continue;
+    seen.add(v.path);
+    out.push({
+      path: v.path,
+      name: typeof v.name === 'string' && v.name ? v.name : v.path.split(/[\\/]/).filter(Boolean).pop() ?? v.path,
+      size: typeof v.size === 'number' && Number.isFinite(v.size) && v.size >= 0 ? v.size : 0,
+    });
+    if (out.length >= COMPOSER_DRAFT_MAX_ATTACHMENTS) break;
+  }
+  return out;
+}
+
+/** 外部数据（IndexedDB / hydrate）→ 合法草稿 map；超长正文直接丢弃（不截断用户内容） */
+export function sanitizeComposerDrafts(raw: unknown): Record<string, ComposerDraft> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, ComposerDraft> = {};
+  for (const [sid, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const v = value as { text?: unknown; attachments?: unknown; updatedAt?: unknown };
+    const text = typeof v.text === 'string' ? v.text : '';
+    const attachments = sanitizeDraftAttachments(v.attachments);
+    if (!text && attachments.length === 0) continue;
+    if (text.length > COMPOSER_DRAFT_MAX_TEXT) continue;
+    out[sid] = {
+      text,
+      attachments,
+      updatedAt: typeof v.updatedAt === 'number' && Number.isFinite(v.updatedAt) ? v.updatedAt : Date.now(),
+    };
+  }
+  return out;
+}
+
+/** 选出可落盘的草稿：按更新时间保留最近 N 个，正文总量不超过上限 */
+function buildPersistableDrafts(
+  map: Record<string, ComposerDraft | undefined>,
+): Record<string, ComposerDraft> {
+  const entries: Array<[string, ComposerDraft]> = [];
+  for (const [sid, draft] of Object.entries(map)) {
+    if (draft && (draft.text || draft.attachments.length > 0)) entries.push([sid, draft]);
+  }
+  entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+  const out: Record<string, ComposerDraft> = {};
+  let totalChars = 0;
+  for (const [sid, draft] of entries) {
+    if (Object.keys(out).length >= COMPOSER_DRAFT_MAX_SESSIONS) break;
+    if (draft.text.length > COMPOSER_DRAFT_MAX_TEXT) continue;
+    if (totalChars + draft.text.length > COMPOSER_DRAFT_TOTAL_MAX_TEXT) continue;
+    out[sid] = {
+      text: draft.text,
+      attachments: draft.attachments.slice(0, COMPOSER_DRAFT_MAX_ATTACHMENTS),
+      updatedAt: draft.updatedAt,
+    };
+    totalChars += draft.text.length;
+  }
+  return out;
+}
+
+let composerDraftTimer: ReturnType<typeof setTimeout> | null = null;
+let composerDraftPending: Record<string, ComposerDraft> | null = null;
+/** 上次已写入 IndexedDB 的序列化结果（内容未变时跳过重复写入） */
+let composerDraftLastJson = '';
+
+/** 防抖持久化草稿（500ms 内多次输入只写一次 IndexedDB） */
+function persistComposerDrafts(map: Record<string, ComposerDraft | undefined>): void {
+  composerDraftPending = buildPersistableDrafts(map);
+  if (composerDraftTimer) return;
+  composerDraftTimer = setTimeout(() => {
+    composerDraftTimer = null;
+    const data = composerDraftPending ?? {};
+    composerDraftPending = null;
+    const json = JSON.stringify(data);
+    if (json === composerDraftLastJson) return;
+    composerDraftLastJson = json;
+    void idbSet('moss-composer-drafts', data);
+  }, 500);
+}
+
+/** 立即冲刷待写入草稿（卸载 / 页面隐藏 / 发送成功后调用，避免防抖窗口内丢失） */
+export function flushComposerDraftPersistence(): void {
+  if (!composerDraftTimer) return;
+  clearTimeout(composerDraftTimer);
+  composerDraftTimer = null;
+  const data = composerDraftPending ?? {};
+  composerDraftPending = null;
+  const json = JSON.stringify(data);
+  if (json === composerDraftLastJson) return;
+  composerDraftLastJson = json;
+  void idbSet('moss-composer-drafts', data);
+}
+
+// 页面刷新/关闭前尽力冲刷（IndexedDB 写入可能在页面销毁前完成）
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => flushComposerDraftPersistence());
+}
+
+// ============================================================================
 // Store 实现
 // ============================================================================
 
@@ -884,6 +1061,7 @@ const LIST_RUNNING_GRACE_MS = 60_000;
 function applyListRunning(
   state: UIState,
   tasks: TaskItem[],
+  graceMs = LIST_RUNNING_GRACE_MS,
 ): { generatingBySession: Record<string, boolean>; changed: boolean } {
   let generating = state.generatingBySession;
   let changed = false;
@@ -898,7 +1076,7 @@ function applyListRunning(
   for (const tk of tasks) {
     const sid = tk.sessionId ?? tk.id;
     const active = state.activeRunBySession[sid];
-    const hasFreshRun = !!active && now - active.startedAt < LIST_RUNNING_GRACE_MS;
+    const hasFreshRun = !!active && now - active.startedAt < graceMs;
     if (tk.running === true) {
       if (!generating[sid]) mut()[sid] = true;
       continue;
@@ -910,6 +1088,63 @@ function applyListRunning(
   return { generatingBySession: generating, changed };
 }
 
+/** 列表/快照里的 error 标志 → errorBySession（与 running 同源、同批应用） */
+function applyListError(
+  state: UIState,
+  tasks: TaskItem[],
+): { errorBySession: Record<string, boolean>; changed: boolean } {
+  // 旧后端/降级数据没有 error 字段：不做权威收敛，避免误清本地错误态
+  if (!tasks.some((tk) => typeof tk.error === 'boolean')) {
+    return { errorBySession: state.errorBySession, changed: false };
+  }
+  let errorMap = state.errorBySession;
+  let changed = false;
+  for (const tk of tasks) {
+    const sid = tk.sessionId ?? tk.id;
+    const next = tk.error === true;
+    if ((errorMap[sid] ?? false) !== next) {
+      if (!changed) {
+        errorMap = { ...errorMap };
+        changed = true;
+      }
+      errorMap[sid] = next;
+    }
+  }
+  return { errorBySession: errorMap, changed };
+}
+
+/** 分组集合增删单个会话（返回新对象；无变化时返回原对象） */
+function withSessionInGroup(
+  map: Record<string, string[]>,
+  groupId: string,
+  sessionId: string,
+  present: boolean,
+): Record<string, string[]> {
+  const current = map[groupId] ?? [];
+  const has = current.includes(sessionId);
+  if (present === has) return map;
+  const nextIds = present ? [...current, sessionId] : current.filter((sid) => sid !== sessionId);
+  const next = { ...map };
+  if (nextIds.length > 0) next[groupId] = nextIds;
+  else delete next[groupId];
+  return next;
+}
+
+/** 从所有分组集合中移除某会话（返回新对象；无变化返回原对象） */
+function withoutSessionFromGroups(
+  map: Record<string, string[]>,
+  sessionId: string,
+): { map: Record<string, string[]>; changed: boolean } {
+  let changed = false;
+  const next: Record<string, string[]> = {};
+  for (const [groupId, ids] of Object.entries(map)) {
+    const filtered = ids.filter((sid) => sid !== sessionId);
+    if (filtered.length !== ids.length) changed = true;
+    if (filtered.length > 0) next[groupId] = filtered;
+  }
+  return changed ? { map: next, changed } : { map, changed };
+}
+
 export const useStore = create<Store>((set, get) => ({
   // --- 会话 / 消息 ---
   activeSessionId: null,
@@ -918,6 +1153,9 @@ export const useStore = create<Store>((set, get) => ({
   historyMetaBySession: {},
   historyCacheBySession: {},
   generatingBySession: {},
+  runningSessionIdsByGroup: {},
+  errorSessionIdsByGroup: {},
+  lastRuntimeEventAtBySession: {},
   activeRunBySession: {},
   terminatedRunIdsBySession: {},
   sendingBySession: {},
@@ -1002,6 +1240,7 @@ export const useStore = create<Store>((set, get) => ({
   preventTabSleep: false,
   messageQueueBySession: {},
   composerInjection: null,
+  composerDraftsBySession: {},
 
   // --- 外观设置 ---
   accentColor: 'blue',
@@ -1583,9 +1822,35 @@ export const useStore = create<Store>((set, get) => ({
       // 列表载荷自带后端权威运行态（running）：running=true 置位；running=false 在
       // 「本地无刚发起的活轮次」时允许熄灭（防止广播丢失后永久转圈，见 applyListRunning）。
       const { generatingBySession, changed } = applyListRunning(state, tasks);
-      return { tasks, ...(changed ? { generatingBySession } : {}) };
+      const err = applyListError(state, tasks);
+      return {
+        tasks,
+        ...(changed ? { generatingBySession } : {}),
+        ...(err.changed ? { errorBySession: err.errorBySession } : {}),
+      };
     }),
-  setTaskGroups: (taskGroups) => set({ taskGroups }),
+  setTaskGroups: (taskGroups) =>
+    set((state) => {
+      // 后端快照携带 running/errorSessionIds：折叠分组不加载任务也能显示组级状态。
+      // 旧后端无该字段时保留本地已有集合（避免 WS 增量被空快照冲掉）。
+      const nextRunning: Record<string, string[]> = {};
+      const nextError: Record<string, string[]> = {};
+      for (const group of taskGroups) {
+        const runIds = Array.isArray(group.runningSessionIds)
+          ? group.runningSessionIds
+          : state.runningSessionIdsByGroup[group.id];
+        if (runIds && runIds.length > 0) nextRunning[group.id] = runIds;
+        const errIds = Array.isArray(group.errorSessionIds)
+          ? group.errorSessionIds
+          : state.errorSessionIdsByGroup[group.id];
+        if (errIds && errIds.length > 0) nextError[group.id] = errIds;
+      }
+      return {
+        taskGroups,
+        runningSessionIdsByGroup: nextRunning,
+        errorSessionIdsByGroup: nextError,
+      };
+    }),
   addTask: (task) => set((state) => ({ tasks: [task, ...state.tasks] })),
   // 活跃置顶（乐观更新）：移到该分组第一个任务之前（tasks 为跨分组扁平数组，Sidebar 按组保序渲染）
   touchTask: (id) =>
@@ -1620,24 +1885,219 @@ export const useStore = create<Store>((set, get) => ({
       return { tasks: [...others, ...groupTasks] };
     }),
   removeTask: (id) =>
-    set((state) => ({
-      tasks: state.tasks.filter((t) => t.id !== id),
-      activeTaskId: state.activeTaskId === id ? null : state.activeTaskId,
-    })),
+    set((state) => {
+      // 任务删除后后端不会再发 running/error=false：本地同步清理运行/错误集合与时间水位
+      const running = withoutSessionFromGroups(state.runningSessionIdsByGroup, id);
+      const error = withoutSessionFromGroups(state.errorSessionIdsByGroup, id);
+      const lastRuntimeEventAtBySession = { ...state.lastRuntimeEventAtBySession };
+      delete lastRuntimeEventAtBySession[id];
+      // 同时清理该会话的衍生运行/错误态，避免删除后残留
+      const { [id]: _gen, ...generatingBySession } = state.generatingBySession;
+      const { [id]: _err, ...errorBySession } = state.errorBySession;
+      return {
+        tasks: state.tasks.filter((t) => t.id !== id),
+        activeTaskId: state.activeTaskId === id ? null : state.activeTaskId,
+        generatingBySession,
+        errorBySession,
+        ...(running.changed ? { runningSessionIdsByGroup: running.map } : {}),
+        ...(error.changed ? { errorSessionIdsByGroup: error.map } : {}),
+        lastRuntimeEventAtBySession,
+      };
+    }),
   setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
-  addTaskGroup: (group) => set((state) => ({ taskGroups: [...state.taskGroups, group] })),
+  addTaskGroup: (group) =>
+    set((state) => ({
+      taskGroups: [...state.taskGroups, group],
+      ...(Array.isArray(group.runningSessionIds)
+        ? {
+            runningSessionIdsByGroup: {
+              ...state.runningSessionIdsByGroup,
+              [group.id]: group.runningSessionIds,
+            },
+          }
+        : {}),
+      ...(Array.isArray(group.errorSessionIds)
+        ? {
+            errorSessionIdsByGroup: {
+              ...state.errorSessionIdsByGroup,
+              [group.id]: group.errorSessionIds,
+            },
+          }
+        : {}),
+    })),
   updateTaskGroup: (id, patch) =>
     set((state) => ({
       taskGroups: state.taskGroups.map((g) => (g.id === id ? { ...g, ...patch } : g)),
+      ...(Array.isArray(patch.runningSessionIds)
+        ? {
+            runningSessionIdsByGroup: {
+              ...state.runningSessionIdsByGroup,
+              [id]: patch.runningSessionIds,
+            },
+          }
+        : {}),
+      ...(Array.isArray(patch.errorSessionIds)
+        ? {
+            errorSessionIdsByGroup: {
+              ...state.errorSessionIdsByGroup,
+              [id]: patch.errorSessionIds,
+            },
+          }
+        : {}),
     })),
+  setGroupRunningSessions: (groupId, sessionIds) =>
+    set((state) => {
+      const next = { ...state.runningSessionIdsByGroup };
+      if (sessionIds.length > 0) next[groupId] = sessionIds;
+      else delete next[groupId];
+      return { runningSessionIdsByGroup: next };
+    }),
+  syncGroupRuntimeSession: (groupId, sessionId, patch) =>
+    set((state) => {
+      let runningMap = state.runningSessionIdsByGroup;
+      let errorMap = state.errorSessionIdsByGroup;
+      if (patch.running !== undefined) {
+        runningMap = withSessionInGroup(runningMap, groupId, sessionId, patch.running);
+      }
+      if (patch.error !== undefined) {
+        errorMap = withSessionInGroup(errorMap, groupId, sessionId, patch.error);
+      }
+      if (
+        runningMap === state.runningSessionIdsByGroup &&
+        errorMap === state.errorSessionIdsByGroup
+      ) {
+        return {};
+      }
+      return {
+        runningSessionIdsByGroup: runningMap,
+        errorSessionIdsByGroup: errorMap,
+      };
+    }),
+  syncGroupRunningSession: (groupId, sessionId, running) => {
+    get().syncGroupRuntimeSession(groupId, sessionId, { running });
+  },
+  clearGroupRunningSession: (sessionId) =>
+    set((state) => {
+      const res = withoutSessionFromGroups(state.runningSessionIdsByGroup, sessionId);
+      return res.changed ? { runningSessionIdsByGroup: res.map } : {};
+    }),
+  clearGroupErrorSession: (sessionId) =>
+    set((state) => {
+      const res = withoutSessionFromGroups(state.errorSessionIdsByGroup, sessionId);
+      return res.changed ? { errorSessionIdsByGroup: res.map } : {};
+    }),
+  clearGroupRuntimeSession: (sessionId) =>
+    set((state) => {
+      const running = withoutSessionFromGroups(state.runningSessionIdsByGroup, sessionId);
+      const error = withoutSessionFromGroups(state.errorSessionIdsByGroup, sessionId);
+      if (!running.changed && !error.changed) return {};
+      return {
+        ...(running.changed ? { runningSessionIdsByGroup: running.map } : {}),
+        ...(error.changed ? { errorSessionIdsByGroup: error.map } : {}),
+      };
+    }),
+  touchSessionRuntime: (sessionId, at) =>
+    set((state) => ({
+      lastRuntimeEventAtBySession: {
+        ...state.lastRuntimeEventAtBySession,
+        [sessionId]: at ?? Date.now(),
+      },
+    })),
+  applyGroupRuntimeSnapshot: (groups, requestedAt) =>
+    set((state) => {
+      // 快照防倒灌：以会话为粒度保护——请求发出后已有更新运行时事件的会话，
+      // 其快照值不可覆盖本地新状态；其余会话仍按快照收敛（分组列表本身始终应用）。
+      const newerSessions = new Set<string>();
+      if (requestedAt !== undefined) {
+        for (const [sid, at] of Object.entries(state.lastRuntimeEventAtBySession)) {
+          if (at > requestedAt) newerSessions.add(sid);
+        }
+      }
+
+      let nextRunning: Record<string, string[]> = {};
+      let nextError: Record<string, string[]> = {};
+      let hasRunningAuthority = false;
+      let hasErrorAuthority = false;
+      for (const group of groups) {
+        if (Array.isArray(group.runningSessionIds)) hasRunningAuthority = true;
+        if (Array.isArray(group.errorSessionIds)) hasErrorAuthority = true;
+        const runIds = Array.isArray(group.runningSessionIds)
+          ? group.runningSessionIds
+          : state.runningSessionIdsByGroup[group.id];
+        if (runIds && runIds.length > 0) nextRunning[group.id] = runIds;
+        const errIds = Array.isArray(group.errorSessionIds)
+          ? group.errorSessionIds
+          : state.errorSessionIdsByGroup[group.id];
+        if (errIds && errIds.length > 0) nextError[group.id] = errIds;
+      }
+
+      // 对“快照在途期间发生了新事件”的会话，用本地现值覆盖快照值
+      for (const sid of newerSessions) {
+        nextRunning = withoutSessionFromGroups(nextRunning, sid).map;
+        nextError = withoutSessionFromGroups(nextError, sid).map;
+        for (const [gid, ids] of Object.entries(state.runningSessionIdsByGroup)) {
+          if (ids.includes(sid)) nextRunning = withSessionInGroup(nextRunning, gid, sid, true);
+        }
+        for (const [gid, ids] of Object.entries(state.errorSessionIdsByGroup)) {
+          if (ids.includes(sid)) nextError = withSessionInGroup(nextError, gid, sid, true);
+        }
+      }
+
+      const runningIds = new Set(Object.values(nextRunning).flat());
+      const errorIds = new Set(Object.values(nextError).flat());
+      // 受保护会话不参与快照收敛，保留其当前生成/错误态
+      const runtimeTasks = newerSessions.size > 0
+        ? state.tasks.filter((task) => !newerSessions.has(task.sessionId ?? task.id))
+        : state.tasks;
+      let generatingBySession = state.generatingBySession;
+      let errorBySession = state.errorBySession;
+      if (hasRunningAuthority) {
+        // 5s 宽限：刚发起的 run 即使快照尚未反映也不会被误熄
+        const applied = applyListRunning(
+          state,
+          runtimeTasks.map((task) => ({
+            ...task,
+            running: runningIds.has(task.sessionId ?? task.id),
+          })),
+          5_000,
+        );
+        if (applied.changed) generatingBySession = applied.generatingBySession;
+      }
+      if (hasErrorAuthority) {
+        const applied = applyListError(
+          state,
+          runtimeTasks.map((task) => ({
+            ...task,
+            error: errorIds.has(task.sessionId ?? task.id),
+          })),
+        );
+        if (applied.changed) errorBySession = applied.errorBySession;
+      }
+
+      return {
+        taskGroups: groups,
+        runningSessionIdsByGroup: nextRunning,
+        errorSessionIdsByGroup: nextError,
+        ...(generatingBySession !== state.generatingBySession ? { generatingBySession } : {}),
+        ...(errorBySession !== state.errorBySession ? { errorBySession } : {}),
+      };
+    }),
   removeTaskGroup: (id) =>
     set((state) => {
       const { [id]: _omitMeta, ...restMeta } = state.groupTasksMeta;
+      const { [id]: _omitRunning, ...restRunning } = state.runningSessionIdsByGroup;
+      const { [id]: _omitError, ...restError } = state.errorSessionIdsByGroup;
+      const removedTaskIds = state.tasks.filter((t) => t.groupId === id).map((t) => t.id);
+      const lastRuntimeEventAtBySession = { ...state.lastRuntimeEventAtBySession };
+      for (const sid of removedTaskIds) delete lastRuntimeEventAtBySession[sid];
       return {
         taskGroups: state.taskGroups.filter((g) => g.id !== id),
         // 顺带清理该分组的加载态与已物化任务；迁往默认分组的任务由 WS tasks.changed / 兜底 reload 重新物化
         tasks: state.tasks.filter((t) => t.groupId !== id),
         groupTasksMeta: restMeta,
+        runningSessionIdsByGroup: restRunning,
+        errorSessionIdsByGroup: restError,
+        lastRuntimeEventAtBySession,
       };
     }),
   // --- 启动里程碑（Splash 真实进度） ---
@@ -1680,6 +2140,7 @@ export const useStore = create<Store>((set, get) => ({
           slice = tasks;
         }
       }
+      const err = applyListError(state, tasks);
       return {
         tasks: [...others, ...slice],
         groupTasksMeta: {
@@ -1689,6 +2150,7 @@ export const useStore = create<Store>((set, get) => ({
             ...meta,
           },
         },
+        ...(err.changed ? { errorBySession: err.errorBySession } : {}),
       };
     }),
   resetGroupTasks: () => set({ tasks: [], groupTasksMeta: {} }),
@@ -1696,7 +2158,7 @@ export const useStore = create<Store>((set, get) => ({
     set((state) => {
       // 与 setTasks 同源的后端权威运行态（置位 + 受宽限期保护的熄灭）
       const { generatingBySession, changed } = applyListRunning(state, tasks);
-      // 全量快照：所有分组均为「已完整加载」（折叠分组由 Radix 卸载内容，不占 DOM）
+      const err = applyListError(state, tasks);
       const groupTasksMeta: Record<string, GroupTasksMeta | undefined> = { ...state.groupTasksMeta };
       for (const g of state.taskGroups) {
         groupTasksMeta[g.id] = {
@@ -1706,7 +2168,12 @@ export const useStore = create<Store>((set, get) => ({
           total: tasks.filter((t) => t.groupId === g.id).length,
         };
       }
-      return { tasks, groupTasksMeta, ...(changed ? { generatingBySession } : {}) };
+      return {
+        tasks,
+        groupTasksMeta,
+        ...(changed ? { generatingBySession } : {}),
+        ...(err.changed ? { errorBySession: err.errorBySession } : {}),
+      };
     }),
 
   // --- Actions: Todo / Context ---
@@ -1972,16 +2439,43 @@ export const useStore = create<Store>((set, get) => ({
       void idbSet('moss-message-queues', rest);
       return { messageQueueBySession: rest };
     }),
-  injectComposer: (text, attachments) =>
+  injectComposer: (text, attachments, tokens, targetKey) =>
     set((state) => ({
       composerInjection: {
         text,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(tokens && tokens.length > 0 ? { tokens } : {}),
+        ...(targetKey !== undefined ? { targetKey } : {}),
         // seq 自增：同文本二次回填也能触发 TaskInput 的一次消费
         seq: (state.composerInjection?.seq ?? 0) + 1,
       },
     })),
   clearComposerInjection: () => set({ composerInjection: null }),
+  setComposerDraft: (sessionId, draft) =>
+    set((state) => {
+      const next = { ...state.composerDraftsBySession };
+      if (!draft || (!draft.text && draft.attachments.length === 0)) {
+        delete next[sessionId];
+      } else {
+        next[sessionId] = {
+          text: draft.text,
+          attachments: draft.attachments.slice(0, COMPOSER_DRAFT_MAX_ATTACHMENTS),
+          updatedAt: draft.updatedAt,
+        };
+      }
+      persistComposerDrafts(next);
+      flushComposerDraftPersistence();
+      return { composerDraftsBySession: next };
+    }),
+  clearComposerDraft: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.composerDraftsBySession)) return {};
+      const next = { ...state.composerDraftsBySession };
+      delete next[sessionId];
+      persistComposerDrafts(next);
+      flushComposerDraftPersistence();
+      return { composerDraftsBySession: next };
+    }),
 
   // --- Actions: 外观设置 ---
   setAccentColor: (accentColor) => {
@@ -2436,6 +2930,9 @@ export const useStore = create<Store>((set, get) => ({
           if (items.length > 0) queues[sid] = [items[0]];
         }
         next.messageQueueBySession = queues;
+      }
+      if (patch.composerDrafts && typeof patch.composerDrafts === 'object') {
+        next.composerDraftsBySession = sanitizeComposerDrafts(patch.composerDrafts);
       }
       return next;
     }),

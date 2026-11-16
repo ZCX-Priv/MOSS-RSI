@@ -6,13 +6,11 @@
 export const PTC_FORBIDDEN_TOOL_NAMES = [
   'ask',
   'agent',
-  'agent_status',
-  'agent_message',
   'todo',
 ] as const;
 
 /** 提示词/错误文案中的可读标签 */
-export const PTC_FORBIDDEN_TOOL_LABEL = 'ask / agent / agent_status / agent_message / todo';
+export const PTC_FORBIDDEN_TOOL_LABEL = 'ask / agent / todo';
 
 const PTC_FORBIDDEN_TOOL_SET: ReadonlySet<string> = new Set(PTC_FORBIDDEN_TOOL_NAMES);
 

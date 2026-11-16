@@ -120,12 +120,46 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, groupTasksMeta, ensureGroupLoaded, loadMoreGroup, ensureAllGroupsLoaded } = useTasks();
+  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, groupTasksMeta, ensureGroupLoaded, loadMoreGroup, ensureAllGroupsLoaded, refreshGroups } = useTasks();
+  /** 分组级运行集合（折叠分组不加载任务时，标题仍显示运行转圈） */
+  const runningSessionIdsByGroup = useStore((s) => s.runningSessionIdsByGroup);
+  /** 分组级错误集合（折叠分组不加载任务时，标题仍显示错误图标） */
+  const errorSessionIdsByGroup = useStore((s) => s.errorSessionIdsByGroup);
   const isSettingsRoute = pathname.startsWith('/settings');
   const [settingsSearch, setSettingsSearch] = useState('');
   const { isMobile, setOpenMobile } = useSidebar();
   const { platform } = usePlatform();
   const mobileUnavailable = platform.isAndroid;
+
+  // 从其他页面切回任务区：用后端分组快照对账运行态（Sidebar 常驻，切页不会自动重拉分组）
+  const prevPathRef = useRef(pathname);
+  useEffect(() => {
+    const prev = prevPathRef.current;
+    prevPathRef.current = pathname;
+    if (!pathname.startsWith('/task')) return;
+    if (prev.startsWith('/task')) return; // 任务内切换由任务页挂载对账
+    void refreshGroups();
+  }, [pathname, refreshGroups]);
+
+  // 窗口恢复可见/聚焦：仍有运行态时对账一次，兜底漏掉的 running:false 广播
+  useEffect(() => {
+    const onResume = () => {
+      const st = useStore.getState();
+      const hasRunning =
+        Object.keys(st.runningSessionIdsByGroup).length > 0 ||
+        Object.values(st.generatingBySession).some(Boolean);
+      if (hasRunning) void refreshGroups();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onResume();
+    };
+    window.addEventListener('focus', onResume);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onResume);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refreshGroups]);
 
   // 移动端点击导航后关闭 Sheet 抽屉，避免 z-50 遮罩持续覆盖屏幕
   const closeMobile = useCallback(() => {
@@ -752,6 +786,11 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 const expanded = group.expanded ?? (group.id === 'default');
                 const meta = groupTasksMeta[group.id];
                 const GroupIcon = expanded ? FolderOpen : Folder;
+                // 折叠时按「错误 > 运行」显示组级状态；展开态由各任务行自行显示
+                const groupErrored =
+                  !expanded && (errorSessionIdsByGroup[group.id]?.length ?? 0) > 0;
+                const groupRunning =
+                  !expanded && !groupErrored && (runningSessionIdsByGroup[group.id]?.length ?? 0) > 0;
                 // 默认分组为常驻分组：文案固定且随语言本地化
                 const groupLabel = group.id === 'default' ? t('sidebar.defaultGroup') : group.name;
                 return (
@@ -771,6 +810,26 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                             <span className="truncate pr-6">{groupLabel}</span>
                           </SidebarMenuButton>
                         </CollapsibleTrigger>
+                        {/* 运行/错误放在右侧操作位：未悬停显示状态，悬停让位给三点菜单。
+                            优先级：错误 > 运行（与任务行一致）。
+                            默认分组没有操作菜单，因此其状态图标不在 hover 时隐藏。 */}
+                        {(groupErrored || groupRunning) && (
+                          <span
+                            className={cn(
+                              'pointer-events-none absolute right-0 top-1/2 z-[5] flex size-6 -translate-y-1/2 items-center justify-center',
+                              group.id !== 'default' && 'group-hover/group-item:hidden',
+                            )}
+                            aria-label={
+                              groupErrored ? t('sidebar.statusError') : t('sidebar.statusRunning')
+                            }
+                          >
+                            {groupErrored ? (
+                              <CircleAlert className="size-3.5 text-destructive" />
+                            ) : (
+                              <Loader2 className="size-3.5 animate-spin text-primary" />
+                            )}
+                          </span>
+                        )}
                         {group.id !== 'default' && (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
@@ -1066,10 +1125,11 @@ const TaskRow = memo(function TaskRow({
     disabled: !draggable,
     data: { groupId: task.groupId },
   });
-  // 状态指示器：运行中（转圈）/ 出错（红警示），空闲不显示；WS 事件流驱动
+  // 状态指示器：运行中/出错时常显；hover 与选中态让位给三点菜单（同一右侧操作位）
   const sid = task.sessionId ?? task.id;
   const generating = useStore((s) => s.generatingBySession[sid] ?? false);
   const errored = useStore((s) => s.errorBySession[sid] ?? false);
+  const active = pathname === `/task/${task.id}`;
   // 仅垂直拖拽：剥离 x 分量（列表语义，跨组也是纵向移入）
   const restrictedTransform = transform ? { ...transform, x: 0 } : null;
   // 被拖行原位作占位（半透明 + 虚线框），DragOverlay 浮起卡片跟随指针
@@ -1122,21 +1182,25 @@ const TaskRow = memo(function TaskRow({
   return (
     <li ref={setNodeRef} style={style} className="group/menu-item relative group/item">
       <SidebarMenuButton
-        isActive={pathname === `/task/${task.id}`}
+        isActive={active}
         onClick={() => onNavigate(task.id)}
       >
         <span className="truncate pr-5">{task.title}</span>
       </SidebarMenuButton>
       {/* 普通模式不提供拖拽手柄：仅管理模式（列表管理按钮）下可拖拽排序/移组 */}
-      {/* 状态指示器：运行中/出错时常显，hover 时被菜单按钮覆盖；标题 pr-5 为其预留空间 */}
+      {/* 右侧操作位：错误 > 转圈；hover 或选中任务时让位给三点菜单（同一位置切换） */}
       <span
-        className="pointer-events-none absolute right-0.75 top-1/2 z-[5] flex size-4 -translate-y-1/2 items-center justify-center"
-        aria-label={generating ? t('sidebar.statusRunning') : errored ? t('sidebar.statusError') : undefined}
+        className={cn(
+          'pointer-events-none absolute right-0.5 top-1/2 z-[5] flex size-4 -translate-y-1/2 items-center justify-center',
+          'group-hover/item:hidden',
+          active && 'hidden',
+        )}
+        aria-label={errored ? t('sidebar.statusError') : generating ? t('sidebar.statusRunning') : undefined}
       >
-        {generating ? (
-          <Loader2 className="size-3.5 animate-spin text-primary-strong" />
-        ) : errored ? (
+        {errored ? (
           <CircleAlert className="size-3.5 text-destructive" />
+        ) : generating ? (
+          <Loader2 className="size-3.5 animate-spin text-primary-strong" />
         ) : null}
       </span>
       <DropdownMenu>
@@ -1145,10 +1209,8 @@ const TaskRow = memo(function TaskRow({
             variant="ghost"
             size="icon-xs"
             className={cn(
-              'absolute top-1/2 z-10 -translate-y-1/2 opacity-0 transition-opacity group-hover/item:opacity-100 data-[state=open]:opacity-100',
-              // 运行中/出错：状态指示器常显占右侧 3~19px，三点左移至 right-5（20px）避免叠在圆圈上；
-              // 空闲：指示器不显示，三点贴边仅内收 2px（right-0.5，rem 自适应字号）
-              generating || errored ? 'right-5' : 'right-0.5',
+              'absolute right-0.5 top-1/2 z-10 -translate-y-1/2 transition-opacity data-[state=open]:opacity-100',
+              active ? 'opacity-100' : 'opacity-0 group-hover/item:opacity-100',
             )}
             onClick={(e) => e.stopPropagation()}
           >

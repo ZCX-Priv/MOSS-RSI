@@ -9,6 +9,8 @@ import type { TaskMessage, ToolCall, ToolResult } from '../../types/api';
 
 /** agent 工具参数（宽松解析，未知字段忽略） */
 export interface AgentCallArgs {
+  /** 合并后的统一 action：缺省=delegate；status/message/manage 不是子代理派发 */
+  action?: string;
   /** 历史会话可能带 mode；已废弃的 agenteam 模式据此排除 */
   mode?: string;
   /** subagent：模板 agent id */
@@ -35,6 +37,8 @@ export function parseAgentArgs(tc: ToolCall): AgentCallArgs | null {
 export function isAgentCall(tc: ToolCall): boolean {
   const args = parseAgentArgs(tc);
   if (args?.mode === 'agenteam') return false;
+  // 合并工具：仅 delegate（缺省）渲染为子代理专属卡片；status/message/manage 回落通用工具卡
+  if (args?.action !== undefined && args.action !== 'delegate') return false;
   if (tc.name === 'agent') return true;
   if (!args) return false;
   return typeof args.template === 'string' && typeof args.task === 'string';

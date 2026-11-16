@@ -378,8 +378,11 @@ export interface MentionEditorHandle {
   commitVoice(): void;
   /** 语音输入开始前：聚焦编辑器并确保光标可见（选区不在框内时落到末尾） */
   focusForVoice(): void;
-  /** 覆盖编辑器内容（「编辑队列消息」回填用）：清空后按 wire 格式写入文本（\n→<br>） */
-  setValue(text: string): void;
+  /** 覆盖编辑器内容（回填/草稿恢复用）：清空后按 wire 格式写入；已知 token 还原为 chip
+   * @param tokens 强制 token（如插件库“使用”）；text 与 token 线格式一致时直接渲染 chip
+   * @param opts.focus 是否聚焦并把光标落到末尾（草稿恢复传 false，避免抢焦点）
+   */
+  setValue(text: string, tokens?: ComposerToken[], opts?: { focus?: boolean }): void;
 }
 
 interface MentionEditorProps {
@@ -768,13 +771,41 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       setVoiceDraft,
       commitVoice,
       focusForVoice,
-      setValue: (text: string) => {
+      setValue: (text, tokens, opts) => {
         const root = rootRef.current;
         if (!root) return;
         root.innerHTML = '';
-        // 复用语音草稿的建节点逻辑：\n → <br>，保证 wire 口径与文本一致
-        for (const node of buildVoiceNodes(text)) root.appendChild(node);
+
+        // 显式 token（插件库“使用”等）：text 与 token 线格式完全一致时直接渲染 chip，
+        // 不依赖技能名单是否已刷新，避免退化成纯文本 + 触发下拉。
+        const forced = tokens?.find((token) => text.trim() === tokenWireText(token));
+        if (forced) {
+          const label = forced.kind === 'file'
+            ? (computeFileLabels([forced.path]).get(forced.path) ?? fileNameOf(forced.path))
+            : '';
+          root.appendChild(createChipElement(forced, label));
+        } else {
+          // 线格式反解析：命令/技能/智能体按已知名单还原，文件按 #<> 定界符还原。
+          const segments = parseMentionText(text, lookupsRef.current);
+          const filePaths = segments.flatMap((seg) =>
+            seg.type === 'token' && seg.token.kind === 'file' ? [seg.token.path] : [],
+          );
+          const fileLabels = computeFileLabels(filePaths);
+          for (const seg of segments) {
+            if (seg.type === 'text') {
+              for (const node of buildVoiceNodes(seg.text)) root.appendChild(node);
+              continue;
+            }
+            const token = seg.token;
+            const label = token.kind === 'file'
+              ? (fileLabels.get(token.path) ?? fileNameOf(token.path))
+              : '';
+            root.appendChild(createChipElement(token, label));
+          }
+        }
+
         syncFromDom();
+        if (opts?.focus === false) return;
         root.focus();
         // 光标落到末尾，便于用户直接续写
         const sel = window.getSelection();

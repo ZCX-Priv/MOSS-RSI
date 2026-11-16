@@ -98,9 +98,14 @@ export function classifyRisk(
   if (toolName === 'set') {
     return action === 'list' || action === 'search' ? 'L0' : 'L3';
   }
-  // agent：内部委派（一次性子代理），本身无直接文件/外部副作用 → L2。
-  // 这样 auto 模式下嵌套子代理派发不会弹"无人可应答"的确认而白等超时。
-  if (toolName === 'agent') return 'L2';
+  // agent：统一多智能体工具，按 action 分级：
+  //   manage（创建/修改/删除 Agent 定义 → 写文件）L3；status/message（会话协作）L1；
+  //   delegate（内部委派，本身无直接文件/外部副作用）L2 —— auto 模式下嵌套派发不会弹确认而白等超时。
+  if (toolName === 'agent') {
+    if (action === 'manage') return 'L3';
+    if (action === 'status' || action === 'message') return 'L1';
+    return 'L2';
+  }
   // context：会话级状态操作（压缩/历史检索），无文件或外部副作用 → L1（ask 模式放行）
   if (toolName === 'context') return 'L1';
 

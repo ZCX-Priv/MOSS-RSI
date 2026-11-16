@@ -211,27 +211,6 @@ function buildCommandMarkdown(data: {
 // skill
 // ============================================================================
 
-function listSkills(p: SetParams, ctx: ToolContext, env: Environment): ToolResult {
-  const registry = resolveSkillRegistry(ctx);
-  const nameFilter = typeof p.name === 'string' ? p.name.trim() : '';
-  const skills = registry
-    .list()
-    .filter((s) => !nameFilter || s.name === nameFilter)
-    .sort((a, b) => a.name.localeCompare(b.name));
-  if (skills.length === 0) return textResult(t('tools.setListEmpty', { kind: 'skill' }));
-  const lines = skills.map((s) => {
-    const flags = [
-      isBuiltinSkill(env, s.name) ? 'builtin' : null,
-      registry.isEnabled(s.name) ? 'enabled' : 'disabled',
-    ].filter(Boolean) as string[];
-    return `- ${s.name} [${flags.join(', ')}]: ${s.description || '-'}`;
-  });
-  return textResult(
-    `${t('tools.setListHeader', { kind: 'skill', count: skills.length })}\n${lines.join('\n')}`,
-    { count: skills.length },
-  );
-}
-
 function createSkill(p: SetParams, ctx: ToolContext, env: Environment): ToolResult {
   const registry = resolveSkillRegistry(ctx);
   const name = requireName(p);
@@ -365,7 +344,8 @@ async function dispatchSkill(
 ): Promise<ToolResult> {
   switch (action) {
     case 'list':
-      return listSkills(p, ctx, env);
+      // skill 列表统一由 skill(action=list) 提供（渐进式披露入口），此处不再重复实现
+      throw new SetError(t('tools.setSkillListMoved'));
     case 'create':
       return createSkill(p, ctx, env);
     case 'update':

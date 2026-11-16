@@ -38,16 +38,78 @@ function visibleTasks(engine: AgentEngineWithTasks): ReturnType<NonNullable<Agen
   return (engine.listTasks?.() ?? []).filter((tk) => !hidden.has(tk.groupId));
 }
 
+/**
+ * 为分组补充权威运行/错误会话 id（折叠分组不加载任务，前端据此显示组级状态）。
+ * 只统计可见分组；隐藏分组（subagent）的运行/错误态不进入侧边栏。
+ */
+function withGroupRuntime<T extends { id: string }>(
+  services: ServiceRegistry,
+  engine: AgentEngineWithTasks,
+  groups: T[],
+): Array<T & { runningSessionIds: string[]; errorSessionIds: string[] }> {
+  const server = services.tryResolve<{ isSessionRunning?: (sid: string) => boolean }>(
+    ServiceNames.SERVER_INSTANCE,
+  );
+  const hidden = hiddenGroupIds(engine);
+  const running = new Map<string, string[]>();
+  const errored = new Map<string, string[]>();
+  for (const tk of engine.listTasks?.() ?? []) {
+    if (hidden.has(tk.groupId)) continue;
+    const sid = tk.sessionId ?? tk.id;
+    const isRunning = server?.isSessionRunning?.(sid) === true;
+    if (isRunning) {
+      const list = running.get(tk.groupId) ?? [];
+      list.push(sid);
+      running.set(tk.groupId, list);
+    }
+    // 运行中一律视为无错误（新 run 已开始，lastError 的清空可能晚一个 tick）
+    if (!isRunning && engine.getSessionLastError?.(sid)) {
+      const list = errored.get(tk.groupId) ?? [];
+      list.push(sid);
+      errored.set(tk.groupId, list);
+    }
+  }
+  return groups.map((g) => ({
+    ...g,
+    runningSessionIds: running.get(g.id) ?? [],
+    errorSessionIds: errored.get(g.id) ?? [],
+  }));
+}
+
 /** 可见分组（剔除隐藏分组） */
-function visibleGroups(engine: AgentEngineWithTasks): ReturnType<NonNullable<AgentEngineWithTasks['listTaskGroups']>> {
-  return (engine.listTaskGroups?.() ?? []).filter((g) => g.hidden !== true);
+function visibleGroups(services: ServiceRegistry, engine: AgentEngineWithTasks): ReturnType<NonNullable<AgentEngineWithTasks['listTaskGroups']>> {
+  const groups = (engine.listTaskGroups?.() ?? []).filter((g) => g.hidden !== true);
+  return withGroupRuntime(services, engine, groups);
+}
+
+/** 给任务补上后端权威运行/错误态（列表、全量快照、重排响应统一口径） */
+function enrichTasks<T extends { id: string; sessionId?: string }>(
+  services: ServiceRegistry,
+  engine: AgentEngineWithTasks,
+  tasks: T[],
+): Array<T & { running: boolean; error: boolean }> {
+  const server = services.tryResolve<{ isSessionRunning?: (sid: string) => boolean }>(
+    ServiceNames.SERVER_INSTANCE,
+  );
+  return tasks.map((tk) => {
+    const sid = tk.sessionId ?? tk.id;
+    const running = server?.isSessionRunning?.(sid) ?? false;
+    return {
+      ...tk,
+      running,
+      error: running ? false : Boolean(engine.getSessionLastError?.(sid)),
+    };
+  });
 }
 
 /** 广播完整任务 + 分组快照（分组增删 / 批量迁移等无法局部描述的场景） */
 function broadcastTasksChanged(services: ServiceRegistry, engine: AgentEngineWithTasks): void {
   broadcastWS(services, {
     type: 'tasks.changed',
-    payload: { tasks: visibleTasks(engine), groups: visibleGroups(engine) },
+    payload: {
+      tasks: enrichTasks(services, engine, visibleTasks(engine)),
+      groups: visibleGroups(services, engine),
+    },
   });
 }
 
@@ -106,6 +168,8 @@ type AgentEngineWithTasks = AgentEngine & {
   } | null;
   deleteTask?: (id: string) => boolean;
   reorderTasks?: (taskIds: string[]) => boolean;
+  /** 会话最近一次 run 的错误（任务/分组错误态事实源） */
+  getSessionLastError?: (id: string) => { message: string; at: string } | undefined;
   listTaskGroups?: () => Array<{
     id: string;
     name: string;
@@ -114,6 +178,8 @@ type AgentEngineWithTasks = AgentEngine & {
     source?: 'folder' | 'manual';
     dir?: string;
     hidden?: boolean;
+    runningSessionIds?: string[];
+    errorSessionIds?: string[];
   }>;
   createTaskGroup?: (
     name: string,
@@ -191,10 +257,7 @@ export function createListTasksHandler(services: ServiceRegistry): RouteHandler 
         tasks: [],
         total: 0,
       };
-      const withRunning = tasks.map((tk) => ({
-        ...tk,
-        running: server?.isSessionRunning?.(tk.sessionId ?? tk.id) ?? false,
-      }));
+      const withRunning = enrichTasks(services, engine, tasks);
       return {
         status: 200,
         body: {
@@ -204,11 +267,8 @@ export function createListTasksHandler(services: ServiceRegistry): RouteHandler 
       };
     }
     // 全量（无 groupId）：分组 + 全部可见任务。供 SearchModal / WS 重连恢复 / 既有文档契约使用。
-    const all = visibleTasks(engine).map((tk) => ({
-      ...tk,
-      running: server?.isSessionRunning?.(tk.sessionId ?? tk.id) ?? false,
-    }));
-    return { status: 200, body: { groups: visibleGroups(engine), tasks: all } };
+    const all = enrichTasks(services, engine, visibleTasks(engine));
+    return { status: 200, body: { groups: visibleGroups(services, engine), tasks: all } };
   };
 }
 
@@ -321,7 +381,7 @@ export function createUpdateTaskHandler(services: ServiceRegistry): RouteHandler
     }
     // 移组可能触发空分组自动销毁 → 一并广播分组列表
     broadcastWS(services, { type: 'task.updated', payload: { taskId: task.id, task } });
-    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(engine) } });
+    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(services, engine) } });
     return { status: 200, body: task };
   };
 }
@@ -351,7 +411,7 @@ export function createDeleteTaskHandler(services: ServiceRegistry): RouteHandler
     }
     // 删除可能触发空分组自动销毁 → 一并广播分组列表
     broadcastWS(services, { type: 'task.deleted', payload: { taskId: id } });
-    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(engine) } });
+    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(services, engine) } });
     return { status: 200, body: { deleted: true } };
   };
 }
@@ -375,7 +435,7 @@ export function createReorderTasksHandler(services: ServiceRegistry): RouteHandl
       return { status: 400, body: { error: ErrorCode.SOME_TASK_NOT_FOUND } };
     }
     // 顺序是全局信息，广播完整可见列表（拖拽一次 = 一次广播，低频）
-    const tasks = visibleTasks(engine);
+    const tasks = enrichTasks(services, engine, visibleTasks(engine));
     broadcastWS(services, { type: 'tasks.reordered', payload: { tasks } });
     return { status: 200, body: { reordered: true, tasks } };
   };
@@ -393,8 +453,8 @@ export function createListTaskGroupsHandler(services: ServiceRegistry): RouteHan
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
     await (engine as unknown as { whenReady?: () => Promise<void> }).whenReady?.();
-    const groups = (engine.listTaskGroups?.() ?? []).filter((g) => g.hidden !== true);
-    return { status: 200, body: { groups } };
+    // runningSessionIds：折叠分组不加载任务，前端仍需展示组级运行转圈
+    return { status: 200, body: { groups: visibleGroups(services, engine) } };
   };
 }
 
@@ -409,7 +469,7 @@ export function createCreateTaskGroupHandler(services: ServiceRegistry): RouteHa
       return { status: 400, body: { error: ErrorCode.TASK_NAME_REQUIRED } };
     }
     const group = engine.createTaskGroup(body.name, body.source);
-    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(engine) } });
+    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(services, engine) } });
     return { status: 201, body: group };
   };
 }
@@ -429,7 +489,7 @@ export function createUpdateTaskGroupHandler(services: ServiceRegistry): RouteHa
     if (!group) {
       return { status: 404, body: { error: ErrorCode.GROUP_NOT_FOUND } };
     }
-    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(engine) } });
+    broadcastWS(services, { type: 'task-groups.changed', payload: { groups: visibleGroups(services, engine) } });
     return { status: 200, body: group };
   };
 }

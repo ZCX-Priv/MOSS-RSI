@@ -85,7 +85,7 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '- 是否挂载这些入口由你决定；只在确实有产物/来源时列出，不要为了凑卡片编造路径或链接。',
   );
   parts.push(
-    `硬限制：程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}（\`tools.ask\` / \`tools.agent\` / \`tools.agent_status\` / \`tools.agent_message\` / \`tools.todo\` 不存在）。需要提问、派发/查询/对话子代理或维护待办时，直接调用原生 \`ask\` / \`agent\` / \`agent_status\` / \`agent_message\` / \`todo\`，不要写进 run_code 程序。`,
+    `硬限制：程序内禁止调用 ${PTC_FORBIDDEN_TOOL_LABEL}（\`tools.ask\` / \`tools.agent\` / \`tools.todo\` 不存在）。需要提问、派发/查询/对话子代理或维护待办时，直接调用原生 \`ask\` / \`agent\` / \`todo\`，不要写进 run_code 程序。`,
   );
   parts.push(
     '',
@@ -118,7 +118,7 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     '- 忘记 `await`：`tools.*` 返回 Promise，不 `await` 会拿到 `{}` 或触发未处理拒绝。',
     '- 把对象写成 JSON 字符串：宿主会自动解析一次，但不要依赖；直接传对象。',
     '- 返回超大对象：只返回必要字段，先在程序内聚合/裁剪。',
-    '- 在 PTC 里调用 `agent` / `agent_status` / `agent_message` / `ask` / `todo`：这些必须直接调用原生工具。',
+    '- 在 PTC 里调用 `agent` / `ask` / `todo`：这些必须直接调用原生工具（agent 的 status/message/manage 也在程序内禁止）。',
   );
   parts.push(
     '',

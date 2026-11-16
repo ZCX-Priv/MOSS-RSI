@@ -680,6 +680,15 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       // 原始 provider 错误文本（用于错误卡片正文 + 「诊断」弹窗输入；与刷新后历史恢复字段一致）
       const errorDetail = event.providerError ?? localizedMessage;
       if (sessionId) {
+        // 错误态：会话 → 分组同步（payload.task 由后端在 error 事件中补齐）
+        s.touchSessionRuntime(sessionId);
+        // 失败即终态：随后的 task.updated(false) 会因 runId 已进终止集合被守卫忽略，
+        // 因此这里必须同步清掉分组运行集合，错误集合稍后由分组快照/update 收敛。
+        s.clearGroupRunningSession(sessionId);
+        const errorTask = ((msg.payload ?? {}) as { task?: TaskItem }).task;
+        if (errorTask?.groupId) {
+          s.syncGroupRuntimeSession(errorTask.groupId, sessionId, { error: true });
+        }
         // 失败终止：未生效的引导不会被执行（后端 run 已结束）
         pendingGuideRunIds.clear(sessionId);
         s.finalizeStreamingMessages(sessionId, eventRunId);
@@ -712,6 +721,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         nextRunId?: string;
       };
       if (sessionId) {
+        s.touchSessionRuntime(sessionId);
+        // 终态后 runId 会进入终止集合，后续 task.updated(false) 会被守卫忽略 → 这里主动清运行集合
+        s.clearGroupRunningSession(sessionId);
         // 只定稿本轮消息：引导交接时新 run 可能已开始流式，不能把它的消息一并定稿
         flushRunCodeProgress(sessionId);
         s.finalizeStreamingMessages(sessionId, doneEvent.runId ?? eventRunId);
@@ -782,6 +794,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       const taskDoneEvent = (msg.payload ?? {}) as { runId?: string; nextRunId?: string };
       if (sessionId) {
+        s.touchSessionRuntime(sessionId);
+        // 终态后 runId 进入终止集合，后续 task.updated(false) 会被守卫忽略 → 主动清运行集合
+        s.clearGroupRunningSession(sessionId);
         // 只定稿本轮消息（同 done：交接瞬间不得定稿下一轮已在流式的消息）
         flushRunCodeProgress(sessionId);
         s.finalizeStreamingMessages(sessionId, eventRunId);
@@ -817,6 +832,9 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       if (terminalRunIdMismatch) break; // 旧 run 的终态：只观测，不改当前状态
       // 用户主动中断：后端 run 已结束，这里才是「彻底停下」的权威收敛点
       if (sessionId) {
+        s.touchSessionRuntime(sessionId);
+        // 终态后 runId 进入终止集合，后续 task.updated(false) 会被守卫忽略 → 主动清运行集合
+        s.clearGroupRunningSession(sessionId);
         // 未生效的引导随停止一并作废（后端已中止，不会再续跑）
         pendingGuideRunIds.clear(sessionId);
         flushRunCodeProgress(sessionId);
@@ -865,8 +883,22 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     case 'session-truncated': {
       // 消息撤回已执行：删除 timestamp >= 截断起点的本地消息（含 1s 容差）
       if (!sessionId) break;
-      const payload = (msg.payload ?? {}) as { messageTimestamp?: string };
+      const payload = (msg.payload ?? {}) as {
+        messageTimestamp?: string;
+        error?: boolean;
+        task?: TaskItem;
+      };
       if (!payload.messageTimestamp) break;
+      if (typeof payload.error === 'boolean') {
+        const st = useStore.getState();
+        st.touchSessionRuntime(sessionId);
+        st.setTaskError(sessionId, payload.error);
+        if (payload.task?.groupId) {
+          st.syncGroupRuntimeSession(payload.task.groupId, sessionId, { error: payload.error });
+        } else if (!payload.error) {
+          st.clearGroupErrorSession(sessionId);
+        }
+      }
       const cutoff = Date.parse(payload.messageTimestamp) - 1000;
       const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
       const removed = msgs.filter((m) => Date.parse(m.timestamp) >= cutoff);
@@ -887,6 +919,19 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     }
     case 'session-restored': {
       if (!sessionId) break;
+      const restoredPayload = (msg.payload ?? {}) as { error?: boolean; task?: TaskItem };
+      if (typeof restoredPayload.error === 'boolean') {
+        const st = useStore.getState();
+        st.touchSessionRuntime(sessionId);
+        st.setTaskError(sessionId, restoredPayload.error);
+        if (restoredPayload.task?.groupId) {
+          st.syncGroupRuntimeSession(restoredPayload.task.groupId, sessionId, {
+            error: restoredPayload.error,
+          });
+        } else if (!restoredPayload.error) {
+          st.clearGroupErrorSession(sessionId);
+        }
+      }
       const backup = useStore.getState().truncateBackups[sessionId];
       if (backup) {
         const msgs = useStore.getState().messagesBySession[sessionId] ?? [];
@@ -1105,6 +1150,8 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         task?: TaskItem;
         taskId?: string;
         running?: boolean;
+        /** 最近一次 run 是否失败（后端以 session.lastError 为唯一事实源） */
+        error?: boolean;
         /** set 工具切换会话权限模式后的实时徽章同步（后端新增；旧后端缺省） */
         permissionMode?: 'ask' | 'auto' | 'skip';
         /** 该广播所描述的那一轮 run 身份（后端新增；旧后端缺省） */
@@ -1112,6 +1159,42 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       };
       const st = useStore.getState();
       const sid = payload.taskId ?? payload.task?.sessionId ?? payload.task?.id;
+      const hasRuntime = typeof payload.running === 'boolean' || typeof payload.error === 'boolean';
+      if (sid && hasRuntime) {
+        st.touchSessionRuntime(sid);
+        const localRunId = st.activeRunBySession[sid]?.runId ?? pendingRunId.get(sid);
+        // 旧 run 守卫：已终止 / 与当前 run 不一致的停止或错误事件，不得改写分组状态
+        const terminated = payload.runId !== undefined && st.isRunTerminated(sid, payload.runId);
+        const staleStop =
+          payload.running === false &&
+          payload.runId !== undefined &&
+          localRunId !== undefined &&
+          payload.runId !== localRunId;
+        const staleError =
+          payload.error !== undefined &&
+          payload.runId !== undefined &&
+          localRunId !== undefined &&
+          payload.runId !== localRunId;
+        // 运行/错误分别守卫：终态 run 的 running 更新必须忽略，但它的 error 终态仍应生效；
+        // 只有“错误属于已被顶替的旧 run”时（staleError）才丢弃错误更新。
+        const groupId = payload.task?.groupId;
+        if (typeof payload.running === 'boolean' && !terminated && !staleStop) {
+          if (groupId) {
+            st.syncGroupRuntimeSession(groupId, sid, { running: payload.running });
+          } else if (!payload.running) {
+            // 结束事件缺 task 元信息：从所有分组兜底移除，避免永久转圈
+            st.clearGroupRunningSession(sid);
+          }
+        }
+        if (typeof payload.error === 'boolean' && !staleError) {
+          st.setTaskError(sid, payload.error);
+          if (groupId) {
+            st.syncGroupRuntimeSession(groupId, sid, { error: payload.error });
+          } else if (!payload.error) {
+            st.clearGroupErrorSession(sid);
+          }
+        }
+      }
       if (typeof payload.running === 'boolean') {
         if (sid) {
           const localRunId = st.activeRunBySession[sid]?.runId ?? pendingRunId.get(sid);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -34,7 +34,7 @@ import {
   DropdownMenuSubContent,
 } from '@/components/ui/dropdown-menu';
 import type { OverlayType } from '../../types';
-import { useStore, SYSTEM_WORKING_DIRECTORY } from '../../store';
+import { useStore, SYSTEM_WORKING_DIRECTORY, flushComposerDraftPersistence } from '../../store';
 import { ModelSelector } from '../overlays/ModelSelector';
 import { PermissionModeSelector } from '../overlays/PermissionModeSelector';
 import { useDirectoryPicker } from '../../hooks/useDirectoryPicker';
@@ -151,6 +151,8 @@ function skillToItem(s: SkillItem, group: 'recent' | 'skills'): MentionItem {
 
 interface TaskInputProps {
   placeholder?: string;
+  /** 草稿键：会话 id（空白新建页传 ''）。切换时自动保存旧草稿、恢复新草稿 */
+  draftKey: string;
   onOpenOverlay?: (overlay: OverlayType) => void;
   /** 发送回调：text = 最终消息文本（含附件块 / 命令注入块），attachments = 附件绝对路径（结构化字段） */
   onSend?: (text: string, attachments: string[]) => void;
@@ -168,6 +170,7 @@ interface TaskInputProps {
 
 export function TaskInput({
   placeholder,
+  draftKey,
   onOpenOverlay,
   onSend,
   isGenerating = false,
@@ -202,6 +205,15 @@ export function TaskInput({
   // 附件（纯本地路径引用：内建选择器「文件模式」选路径 / 粘贴落盘；均不向模型传内容）
   // ==========================================================================
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  /** 附件镜像（供卸载/切会话时同步保存草稿，避免闭包拿到旧值） */
+  const attachmentsRef = useRef<AttachmentItem[]>([]);
+  attachmentsRef.current = attachments;
+  /** 草稿当前所属会话键（'' = 空白页） */
+  const draftKeyRef = useRef(draftKey);
+  /** 首帧草稿恢复完成标记（避免空的初始 state 覆盖已存草稿） */
+  const draftReadyRef = useRef(false);
+  /** 草稿恢复中：抑制输入/附件变化触发的持久化 */
+  const restoringDraftRef = useRef(false);
   /** 内建文件选择器弹窗开关（新增附件用；与工作目录弹窗相互独立） */
   const [attachBrowseOpen, setAttachBrowseOpen] = useState(false);
 
@@ -305,11 +317,80 @@ export function TaskInput({
   /** 已消费的回填序号（去重：同一 seq 只回填一次） */
   const lastInjectionSeqRef = useRef(0);
 
-  // 「编辑队列消息」回填：文本写入编辑器 + 恢复其附件（消费后清空回填通道）
+  // ==========================================================================
+  // 发送区草稿：按会话独立恢复/保存（切换路由、刷新页面均不丢）
+  // ==========================================================================
+  /** 保存某会话草稿（空文本 + 空附件 → 删除该会话草稿） */
+  const persistDraft = (key: string, text: string, atts: AttachmentItem[]) => {
+    const meta = atts.map((a) => ({ path: a.path, name: a.name, size: a.size }));
+    useStore.getState().setComposerDraft(
+      key,
+      text || meta.length > 0 ? { text, attachments: meta, updatedAt: Date.now() } : null,
+    );
+  };
+
+  /** 恢复某会话草稿：wire 文本由编辑器按已知名单还原为 chip（完整富文本） */
+  const restoreDraft = (key: string) => {
+    const draft = useStore.getState().composerDraftsBySession[key];
+    const text = draft?.text ?? '';
+    const items: AttachmentItem[] = (draft?.attachments ?? []).map((a, i) => ({
+      id: `draft-${key}-${i}-${a.path}`,
+      path: a.path,
+      name: a.name,
+      size: a.size,
+      kind: getAttachmentKind(a.name, ''),
+    }));
+    restoringDraftRef.current = true;
+    if (text) {
+      editorRef.current?.setValue(text, undefined, { focus: false });
+    } else if ((editorRef.current?.getValue() ?? '') !== '') {
+      editorRef.current?.setValue('', undefined, { focus: false });
+    }
+    setInput(text);
+    setAttachments(items);
+    restoringDraftRef.current = false;
+  };
+
+  // 会话切换/首次挂载：恢复目标会话草稿；卸载或切走前保存当前草稿
+  useLayoutEffect(() => {
+    const key = draftKey;
+    const switched = draftKeyRef.current !== key;
+    if (switched) draftKeyRef.current = key;
+    if (switched || !draftReadyRef.current) {
+      restoreDraft(key);
+      draftReadyRef.current = true;
+    }
+    return () => {
+      // key 为本次 effect 对应的草稿键：切换时保存旧会话，卸载时保存当前会话
+      const text = editorRef.current?.getValue() ?? '';
+      persistDraft(key, text, attachmentsRef.current);
+      // 卸载/切会话立即冲刷，避免 500ms 防抖窗口内刷新丢草稿
+      flushComposerDraftPersistence();
+    };
+    // persistDraft / restoreDraft 为纯闭包逻辑，仅随 draftKey 重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey]);
+
+  // 输入或附件变化 → 写入当前会话草稿（store 内 500ms 防抖落盘）
+  // 注意：必须使用本次渲染闭包里的 draftKey，不能读 draftKeyRef.current——
+  // 会话切换时 layout effect 会先更新 ref，而旧渲染挂起的 passive effect 随后才执行，
+  // 读 ref 会把旧会话内容写到新会话/空白页草稿键（撤回内容串到新任务页的根因）。
+  useEffect(() => {
+    if (!draftReadyRef.current || restoringDraftRef.current) return;
+    persistDraft(draftKey, input, attachments);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, attachments]);
+
+  // 「编辑队列消息」/撤回回填：文本写入编辑器 + 恢复其附件（消费后清空回填通道）
   useEffect(() => {
     if (!composerInjection || composerInjection.seq === lastInjectionSeqRef.current) return;
+    // 回填目标归属：只消费发给当前会话的注入（'' = 空白新建页）。
+    // 不标记 seq / 不清除：切换去其他页面时忽略，回到目标会话仍可消费。
+    if (composerInjection.targetKey !== undefined && composerInjection.targetKey !== draftKey) {
+      return;
+    }
     lastInjectionSeqRef.current = composerInjection.seq;
-    editorRef.current?.setValue(composerInjection.text);
+    editorRef.current?.setValue(composerInjection.text, composerInjection.tokens);
     const inject = composerInjection.attachments;
     if (inject && inject.length > 0) {
       setAttachments((prev) => {
@@ -327,7 +408,7 @@ export function TaskInput({
       });
     }
     clearComposerInjection();
-  }, [composerInjection, clearComposerInjection]);
+  }, [composerInjection, clearComposerInjection, draftKey]);
 
   // ---- / 菜单与「+ → 命令」子菜单共用数据源：commands + skills + 最近使用（localStorage） ----
   const recentRef = useRef(readRecentCommands());
@@ -543,6 +624,8 @@ export function TaskInput({
     onSend?.(message, uniquePaths);
     setAttachments([]);
     editorRef.current?.clear();
+    setInput('');
+    useStore.getState().clearComposerDraft(draftKeyRef.current);
   };
 
   // ==========================================================================

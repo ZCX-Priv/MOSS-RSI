@@ -415,17 +415,36 @@ export class WsHandler {
    * 所有客户端（含新开的标签页）据此实时更新侧边栏转圈 / 空闲态，无需轮询或刷新。
    * task 元信息由 agent 引擎补齐；隐藏会话（subagent 等）取不到时仅发 taskId + running。
    */
-  private broadcastTaskRunning(sessionId: string, running: boolean, runId?: string): void {
+  private broadcastTaskRunning(
+    sessionId: string,
+    running: boolean,
+    runId?: string,
+    errorOverride?: boolean,
+  ): void {
     try {
-      const agent = this.services.tryResolve<AgentEngine & { getTask?: (id: string) => unknown }>(
-        ServiceNames.AGENT_ENGINE,
-      );
+      const agent = this.services.tryResolve<
+        AgentEngine & {
+          getTask?: (id: string) => unknown;
+          getSessionLastError?: (id: string) => { message: string; at: string } | undefined;
+        }
+      >(ServiceNames.AGENT_ENGINE);
       const task = agent?.getTask?.(sessionId) ?? null;
+      // 错误态单一事实源：running=true 表示新一轮开始 → 清错误；
+      // running=false 时读取会话持久化的 lastError（成功/中止为空，失败有值）。
+      const error = running
+        ? false
+        : (errorOverride ?? Boolean(agent?.getSessionLastError?.(sessionId)));
       this.broadcast({
         type: 'task.updated',
         // runId 是运行态广播的身份：前端据此只终止「该 run」，绝不把刚发起的新 run
         // 当作被终止对象（否则新 runId 会进终止集合，其全部事件被永久丢弃）。
-        payload: { taskId: sessionId, running, ...(runId ? { runId } : {}), ...(task ? { task } : {}) },
+        payload: {
+          taskId: sessionId,
+          running,
+          error,
+          ...(runId ? { runId } : {}),
+          ...(task ? { task } : {}),
+        },
       });
     } catch {
       // 广播失败不影响任务
@@ -586,10 +605,14 @@ export class WsHandler {
         // 用户已停止：不再把 engine 收尾阶段的分片/工具事件发往前端。
         // （终态由外层统一发送 task.aborted；即使这里漏掉，sendEvent 也会按 runId 过滤）
         if (abortController.signal.aborted) return;
+        // 错误事件附带 task 元信息：前端据此把错误态同步到会话所在分组（含折叠未加载分组）
+        const task = event.type === 'error'
+          ? (agent as { getTask?: (id: string) => unknown }).getTask?.(sessionId) ?? null
+          : null;
         this.sendEvent(sessionId, {
           type: event.type,
           sessionId: event.sessionId,
-          payload: { ...event, runId: currentRunId },
+          payload: { ...event, runId: currentRunId, ...(task ? { task } : {}) },
         });
       };
 
@@ -777,6 +800,14 @@ export class WsHandler {
     this.batcher.discard(sid);
     // 3) 中断后端 run
     controller.abort();
+    // 3.5) 立即释放权威运行态：否则引擎收尾前 activeRuns 仍存在，
+    //      isSessionRunning / 分组快照继续返回 running=true——用户切页再回来
+    //      会把已手动停止的任务重新点亮成转圈。若期间已有新 run 顶替则不动。
+    if (this.activeRuns.get(sid) === controller) {
+      this.activeRuns.delete(sid);
+      this.activeRunIds.delete(sid);
+    }
+    this.broadcastTaskRunning(sid, false, runId);
     this.logger.info(t('server.taskAborted', { sessionId: sid }));
 
     // 4) 立即向前端确认停止（不等 engine 收尾），避免「停止转圈永远不恢复」。
@@ -855,6 +886,7 @@ export class WsHandler {
       AgentEngine & {
         getHistoryPage?: (id: string, opts?: { limit?: number }) => { total: number; newestIndex: number } | undefined;
         getLiveDraft?: (id: string) => unknown;
+        getSessionLastError?: (id: string) => { message: string; at: string } | undefined;
       }
     >(ServiceNames.AGENT_ENGINE);
     let total = 0;
@@ -873,8 +905,12 @@ export class WsHandler {
       liveDraft = null;
     }
     const runId = this.activeRunIds.get(sessionId);
+    const running = this.activeRuns.has(sessionId);
+    // 运行中一律视为无错误：新 run 已开始，engine 清 lastError 可能有毫秒级窗口
+    const error = running ? false : Boolean(agent?.getSessionLastError?.(sessionId));
     return {
-      running: this.activeRuns.has(sessionId),
+      running,
+      error,
       ...(runId ? { runId } : {}),
       totalMessages: total,
       newestIndex,

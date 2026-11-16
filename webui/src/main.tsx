@@ -94,6 +94,8 @@ const PERSISTED_KEYS = [
   'moss-animation-settings',
   // 排队消息队列：刷新后队列不丢，任务结束后按序继续投递
   'moss-message-queues',
+  // 发送区草稿（结构化：wire 文本 + 附件元数据；按会话独立）
+  'moss-composer-drafts',
   // 外观设置（此前只写不读：刷新后一律回默认，导致「改了没生效」）
   'moss-accent-color',
   'moss-font-size',
@@ -242,6 +244,10 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
     messageQueues:
       data['moss-message-queues'] && typeof data['moss-message-queues'] === 'object'
         ? (data['moss-message-queues'] as PersistedState['messageQueues'])
+        : undefined,
+    composerDrafts:
+      data['moss-composer-drafts'] && typeof data['moss-composer-drafts'] === 'object'
+        ? (data['moss-composer-drafts'] as PersistedState['composerDrafts'])
         : undefined,
   };
 }

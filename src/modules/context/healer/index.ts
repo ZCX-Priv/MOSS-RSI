@@ -150,21 +150,32 @@ export function healToolCall(input: HealToolCallInput): HealResult {
   };
 }
 
-/** 从 inputSchema 生成简要用法提示（参数名/类型/必填） */
+/** 从 inputSchema 生成简要用法提示（参数名/类型/必填/枚举值） */
 function buildUsageHint(name: string, inputSchema: unknown): string {
   if (!inputSchema || typeof inputSchema !== 'object') {
     return `工具 "${name}" 的参数定义不可用。`;
   }
   const schema = inputSchema as {
-    properties?: Record<string, { type?: string | string[]; description?: string }>;
+    properties?: Record<string, {
+      type?: string | string[];
+      description?: string;
+      enum?: unknown[];
+      items?: { type?: string };
+    }>;
     required?: string[];
   };
   const props = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
   const lines = Object.entries(props).map(([key, prop]) => {
-    const type = Array.isArray(prop.type) ? prop.type.join('|') : (prop.type ?? 'any');
+    const baseType = Array.isArray(prop.type) ? prop.type.join('|') : (prop.type ?? 'any');
+    const type = baseType === 'array' && prop.items?.type
+      ? `array<${prop.items.type}>`
+      : baseType;
     const req = required.has(key) ? '必填' : '可选';
-    return `- ${key} (${type}, ${req})${prop.description ? `：${prop.description}` : ''}`;
+    const enumHint = Array.isArray(prop.enum) && prop.enum.length > 0
+      ? `，可选值: ${prop.enum.map(String).join(' | ')}`
+      : '';
+    return `- ${key} (${type}, ${req}${enumHint})${prop.description ? `：${prop.description}` : ''}`;
   });
   return lines.length > 0
     ? `工具 "${name}" 参数:\n${lines.join('\n')}`

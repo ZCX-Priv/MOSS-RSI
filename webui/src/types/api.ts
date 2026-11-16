@@ -457,11 +457,15 @@ export interface SessionState {
   }>;
   permissionMode?: 'ask' | 'auto' | 'skip';
   lastRunStats?: RunStats;
+  /** 最近一次 run 的失败（新 run 开始清空；刷新/重连恢复错误态） */
+  lastError?: { message: string; at: string };
 }
 
 /** WS session.subscribed 回复载荷（与 SessionState 同构的超集） */
 export interface SessionSubscribedPayload {
   running: boolean;
+  /** 后端权威错误态（最近一次 run 是否失败） */
+  error?: boolean;
   runId?: string;
   totalMessages?: number;
   newestIndex?: number;
@@ -1160,6 +1164,8 @@ export interface TaskItem {
   order?: number;
   /** 后端权威运行态（GET /api/tasks 附带）：刷新后首屏即可显示「运行中」 */
   running?: boolean;
+  /** 后端权威错误态（最近一次 run 是否失败；刷新后恢复侧边栏错误图标） */
+  error?: boolean;
 }
 
 export interface TaskGroup {
@@ -1169,6 +1175,10 @@ export interface TaskGroup {
   taskCount?: number;
   /** 分组来源：folder = 按工作目录自动创建（空时后端自动销毁）；manual = 手动新建（允许空状态） */
   source?: 'folder' | 'manual';
+  /** 后端权威运行会话 id（折叠分组不加载任务时，用于组标题显示运行转圈） */
+  runningSessionIds?: string[];
+  /** 后端权威错误会话 id（折叠分组不加载任务时，用于组标题显示错误图标） */
+  errorSessionIds?: string[];
 }
 
 export interface TodoItem {

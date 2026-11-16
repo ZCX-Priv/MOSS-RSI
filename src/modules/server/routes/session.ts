@@ -27,6 +27,7 @@ type AgentEngineExt = AgentEngine & {
   getActiveSkill?: (id: string) => { name: string; mode: 'system' | 'message'; content: string } | undefined;
   getPermissionMode?: (id: string) => 'ask' | 'auto' | 'skip' | undefined;
   getLastRunStats?: (id: string) => unknown;
+  getSessionLastError?: (id: string) => { message: string; at: string } | undefined;
   getToolResult?: (
     id: string,
     toolCallId: string,
@@ -261,6 +262,8 @@ export function createSessionStateHandler(services: ServiceRegistry): RouteHandl
 
     const permissionMode = agent?.getPermissionMode?.(sessionId) ?? undefined;
     const lastRunStats = agent?.getLastRunStats?.(sessionId) ?? undefined;
+    // 运行中一律视为无错误：新 run 已开始，lastError 的持久化清空可能晚一个 tick
+    const lastError = running ? undefined : agent?.getSessionLastError?.(sessionId);
 
     return {
       status: 200,
@@ -274,6 +277,7 @@ export function createSessionStateHandler(services: ServiceRegistry): RouteHandl
         pendingConfirms,
         ...(permissionMode ? { permissionMode } : {}),
         ...(lastRunStats ? { lastRunStats } : {}),
+        ...(lastError ? { lastError } : {}),
       },
     };
   };

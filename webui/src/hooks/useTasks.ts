@@ -128,8 +128,10 @@ export function useTasks() {
       // 首载：分组全量 + 展开中的分组任务按需预载。
       // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503，退避重试后无需刷新即可自愈。
       try {
+        const requestedAt = Date.now();
         const { groups } = await withRetry(() => api.listTaskGroups());
-        setTaskGroups(groups);
+        // 快照防倒灌：请求发出后若有更新的 running/error 事件，整份快照会被丢弃
+        useStore.getState().applyGroupRuntimeSnapshot(groups, requestedAt);
         // 关键：只有真正的首次加载才清空已物化任务。
         // 后续 reload（WS 断开兜底、移组失败等）必须保留数据 —— 否则用户会看到
         // 所有分组条目瞬间消失再重新加载（「关一个组，另一个组重新加载」的放大来源）。
@@ -272,6 +274,21 @@ export function useTasks() {
     }
   }, [load]);
 
+  /**
+   * 轻量权威对账：只拉分组快照（含 runningSessionIds），重建分组运行集合，
+   * 并收敛已物化任务的 generating 态。用于切回任务路由 / 窗口恢复 / 手动停止后的兜底。
+   */
+  const refreshGroups = useCallback(async (): Promise<void> => {
+    try {
+      const requestedAt = Date.now();
+      const { groups } = await api.listTaskGroups();
+      useStore.getState().applyGroupRuntimeSnapshot(groups, requestedAt);
+    } catch (err) {
+      // 后端未就绪/瞬时失败：保持现值，不制造闪烁
+      console.warn('refreshGroups failed:', err);
+    }
+  }, []);
+
   return {
     tasks: useStore((s) => s.tasks),
     taskGroups: useStore((s) => s.taskGroups),
@@ -279,6 +296,8 @@ export function useTasks() {
     /** 各分组任务加载态（按需加载 + 组内分页） */
     groupTasksMeta: useStore((s) => s.groupTasksMeta),
     reload: load,
+    /** 只刷新分组与运行态（不重拉任务列表） */
+    refreshGroups,
     /** 加载某分组第 1 页（展开时按需调用，幂等） */
     ensureGroupLoaded,
     /** 续载某分组下一页（组内哨兵触发） */

@@ -139,7 +139,7 @@ export class SubagentRunner {
     return output;
   }
 
-  /** 取消一个子代理及其全部后代（agent_status cancel / 前端单 Agent 终止按钮） */
+  /** 取消一个子代理及其全部后代（agent action=status statusAction=cancel / 前端单 Agent 终止按钮） */
   stop(sessionId: string): boolean {
     let stopped = false;
     const controller = this.activeRuns.get(sessionId);

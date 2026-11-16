@@ -77,6 +77,11 @@ export interface Session {
   memoryState?: SessionMemoryState;
   /** 最近一次 run 的运行统计（run 级口径：每次发送消息重置；中控台指标栏刷新恢复用） */
   lastRunStats?: RunStats;
+  /**
+   * 最近一次 run 的失败信息（新 run 开始/成功/中止时清空）。
+   * 用于刷新/重启后仍能在侧边栏与分组标题恢复错误态。
+   */
+  lastError?: { message: string; at: string };
   /** 消息撤回（截断）恢复窗口栈（尾部为最近窗口；支持连续撤回后按栈序逐层恢复） */
   lastTruncations?: TruncationInfo[];
   /**
@@ -466,6 +471,11 @@ export class SessionStore {
           ...(parsed.envContext ? { envContext: parsed.envContext } : {}),
           ...(Array.isArray(parsed.compactions) ? { compactions: parsed.compactions } : {}),
           ...(parsed.lastRunStats ? { lastRunStats: parsed.lastRunStats } : {}),
+          ...(parsed.lastError &&
+          typeof parsed.lastError.message === 'string' &&
+          typeof parsed.lastError.at === 'string'
+            ? { lastError: parsed.lastError }
+            : {}),
           // 上下文遥测（usageTotals / usageDaily / cacheHits）：重启后恢复，否则再次落盘会丢累计数据
           ...(parsed.contextTelemetry ? { contextTelemetry: parsed.contextTelemetry } : {}),
           ...(Array.isArray(parsed.lastTruncations)
@@ -741,6 +751,33 @@ export class SessionStore {
   /** 写入最近一次 run 统计（不落盘，由调用方按需 persistSession） */
   setLastRunStats(session: Session, stats: RunStats): void {
     session.lastRunStats = stats;
+  }
+
+  /** 记录最近一次 run 的失败（侧边栏/分组错误态的唯一事实源） */
+  setLastError(session: Session, message: string): void {
+    const text = message.trim().slice(0, 2000) || 'error';
+    session.lastError = { message: text, at: new Date().toISOString() };
+    session.updatedAt = session.lastError.at;
+    this.markDirty(session);
+  }
+
+  /** 清空最近一次 run 的失败（无值时跳过，避免无意义落盘） */
+  clearLastError(session: Session): void {
+    if (!session.lastError) return;
+    delete session.lastError;
+    session.updatedAt = new Date().toISOString();
+    this.markDirty(session);
+  }
+
+  /**
+   * 按当前可见历史重算 lastError（撤回/恢复后调用）：
+   * 最后一条可见消息是错误卡片 → 保留错误；否则清空。
+   */
+  recomputeLastError(session: Session): void {
+    const visible = session.messages.filter((m) => !m.deletedAt);
+    const last = visible[visible.length - 1];
+    if (last?.isError) this.setLastError(session, last.content);
+    else this.clearLastError(session);
   }
 
   /**

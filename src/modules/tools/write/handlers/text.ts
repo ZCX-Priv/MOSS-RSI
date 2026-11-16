@@ -4,9 +4,9 @@
 // 返回纯数据，由调度层组装 ToolResult 和调用 fileHistory 服务。
 // filesys 统一化：两路径写入均更新 filesys 缓存并发出变更事件（大文件经 recordExternalWrite 登记）。
 
-import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { computeLineDiff } from '../../../file-history/diff';
+import { ensureDirectory, explainFsWriteError } from '../../../../utils/fs';
 import { atomicWriteFileStream } from '../shared/streaming';
 import { readOldContentForDiff } from '../shared/diff-guard';
 import type { FilesysService } from '../../../contracts';
@@ -54,7 +54,7 @@ export async function writeText(params: WriteTextParams): Promise<WriteTextResul
 
   // 1. 创建父目录（若需要；writeFile 的 createDirs 也可处理，streaming 路径需要）
   if (createDirs) {
-    mkdirSync(dirname(absPath), { recursive: true });
+    ensureDirectory(dirname(absPath));
   }
 
   // 2. 计算字节大小（diff 守卫 + 路径分界）
@@ -83,11 +83,17 @@ export async function writeText(params: WriteTextParams): Promise<WriteTextResul
     hash = r.sha256;
   } else {
     // 大文件：流式原子写入 + 流式 sha256，随后登记缓存派生值 + 事件
-    const streamed = await atomicWriteFileStream(absPath, content, {
-      fsync: true,
-      preserveBom: true,
-      preserveMode: true,
-    });
+    let streamed: Awaited<ReturnType<typeof atomicWriteFileStream>>;
+    try {
+      streamed = await atomicWriteFileStream(absPath, content, {
+        fsync: true,
+        preserveBom: true,
+        preserveMode: true,
+      });
+    } catch (err) {
+      // 盘符根 ACL 拒绝等系统错误 → 可行动提示（与 filesys.writeFile 同口径）
+      throw new Error(explainFsWriteError(err, absPath));
+    }
     bytes = streamed.bytes;
     hash = streamed.hash;
     filesys.recordExternalWrite(absPath, { sha256: hash, bytes }, {

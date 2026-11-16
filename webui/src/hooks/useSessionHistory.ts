@@ -261,7 +261,10 @@ export function useSessionHistory(
    * 用于：首屏、WS 重连、offset 缺口自愈三种时机。
    */
   const reconcileFromState = useCallback(
-    async (sessionId: string, opts?: { allowIdleConverge?: boolean }): Promise<void> => {
+    async (
+      sessionId: string,
+      opts?: { allowIdleConverge?: boolean; idleGraceMs?: number },
+    ): Promise<void> => {
     let state: SessionState;
     try {
       state = await withRetry(() => api.getSessionState(sessionId));
@@ -290,7 +293,8 @@ export function useSessionHistory(
       // 终止集合，使该轮全部事件被永久丢弃（这是「响应中」永挂的第二处入口）。
       // 与 session.subscribed 快照的 RUN_STALE_GRACE_MS 同口径。
       const activeRun = st.activeRunBySession[sessionId];
-      const fresh = !!activeRun && Date.now() - activeRun.startedAt < RUN_STALE_GRACE_MS;
+      const fresh = !!activeRun
+        && Date.now() - activeRun.startedAt < (opts?.idleGraceMs ?? RUN_STALE_GRACE_MS);
       if (fresh) {
         finishResync(sessionId);
         return;
@@ -306,6 +310,20 @@ export function useSessionHistory(
       pendingAssistant.delete(sessionId);
       pendingRunId.delete(sessionId);
       pendingGuideRunIds.clear(sessionId);
+    }
+
+    // 错误态：以后端 lastError 为唯一事实源；仅在本会话没有刚发生的本地错误时清空
+    // 注意：这里本身是权威快照，不写入 lastRuntimeEventAtBySession（否则会误伤在途分组快照）
+    const errSt = useStore.getState();
+    if (state.running) {
+      errSt.setTaskError(sessionId, false);
+    } else if (state.lastError) {
+      errSt.setTaskError(sessionId, true);
+    } else {
+      const lastAt = errSt.lastRuntimeEventAtBySession[sessionId] ?? 0;
+      const freshLocalError =
+        (errSt.errorBySession[sessionId] ?? false) && Date.now() - lastAt < 5_000;
+      if (!freshLocalError) errSt.setTaskError(sessionId, false);
     }
 
     // ② 半截流式草稿（含 stale 的历史残留）
@@ -461,7 +479,10 @@ export function useSessionHistory(
     }
 
     // ② 权威状态快照（运行态 + 半截草稿 + 待答 / 待确认）
-    void reconcileFromState(taskId)
+    // 挂载时允许按后端空闲态收敛：切走再切回时，若任务已完成但本地仍残留 generating，
+    // 这里负责熄灭转圈。宽限缩短到 5s：挂载场景下 run 早已在后端注册，不需要 90s 保守窗口；
+    // liveDraft 保护仍然生效，不会误杀正在输出的任务。
+    void reconcileFromState(taskId, { allowIdleConverge: true, idleGraceMs: 5_000 })
       .catch(() => {})
       .finally(() => {
         useStore.getState().setWsRestoring(taskId, false);
@@ -515,6 +536,10 @@ export function useSessionHistory(
 
     const unsubSnapshot = onSessionSnapshot((sessionId, payload) => {
       if (sessionId !== taskId) return;
+      // 错误态：后端 session.lastError 的派生快照（重连/切会话恢复）
+      if (typeof payload.error === 'boolean') {
+        useStore.getState().setTaskError(sessionId, payload.error);
+      }
       // 运行态：true 直接点亮（已在 ws-events 处理）；false 时**不能无条件降级**——
       // 刷新/切会话/重连期间的旧快照可能恰好落在「本地已发起、后端尚未注册 run」的窗口，
       // 无条件 setGenerating(false) 会让发送/停止按钮来回跳。只有当快照确认是同一轮、

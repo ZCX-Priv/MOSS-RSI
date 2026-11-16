@@ -3,7 +3,7 @@
 
 import { t } from '../core/i18n';
 import { resolve, normalize, isAbsolute, relative, sep, parse, dirname, join } from 'node:path';
-import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, realpathSync, mkdirSync } from 'node:fs';
 import { isValidUtf8, stripBom } from './encoding';
 import { readHeadBytes } from './fs-atomic';
 
@@ -16,6 +16,35 @@ import { readHeadBytes } from './fs-atomic';
 export function resolvePath(path: string, cwd: string): string {
   const base = cwd || process.cwd();
   return isAbsolute(path) ? normalize(path) : normalize(resolve(base, path));
+}
+
+/**
+ * 确保目录存在（幂等）。
+ *
+ * 不能直接 `mkdirSync(dir, { recursive: true })`：
+ * - Windows 盘符根（如 `C:\`）即使已存在也会抛 `EPERM`；
+ * - 并发/竞态下已存在目录也可能抛 `EEXIST`。
+ * 因此先 stat 短路；mkdir 后命中 EEXIST/EPERM 时再次 stat，确认是目录即视为成功。
+ */
+export function ensureDirectory(dir: string): void {
+  try {
+    if (statSync(dir).isDirectory()) return;
+  } catch {
+    // 不存在或不可 stat：继续尝试创建
+  }
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' || code === 'EPERM') {
+      try {
+        if (statSync(dir).isDirectory()) return;
+      } catch {
+        // stat 仍失败：抛出原始错误
+      }
+    }
+    throw err;
+  }
 }
 
 /**
@@ -132,6 +161,22 @@ export function isRootPath(p: string): boolean {
   // Windows 驱动器根：C:\、D:\ 等（parse 后 dir === root 且 base 为空）
   const { root, dir, base } = parse(normalized);
   return root !== '' && dir === root && base === '';
+}
+
+/**
+ * 写文件失败 → 人类可读错误。
+ * Windows 盘符根的 ACL 通常只授予 Authenticated Users「创建子目录」（AD），
+ * 不授予「创建文件」（WD）：普通权限进程无法在 C:\ 根直接落文件。
+ * 这里把系统 EPERM 转换成可行动提示，避免用户误以为 MOSS 自己限制了路径。
+ */
+export function explainFsWriteError(err: unknown, absPath: string): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = (err as NodeJS.ErrnoException)?.code;
+  const dir = dirname(absPath);
+  if ((code === 'EPERM' || code === 'EACCES') && isRootPath(dir)) {
+    return t('fs.driveRootWriteDenied', { dir });
+  }
+  return message;
 }
 
 const VCS_MARKERS = ['.git', '.svn', '.hg'];

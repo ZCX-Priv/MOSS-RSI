@@ -300,6 +300,10 @@ export function useTask() {
       //    不再删除 pendingRunId —— 删除会让 runId 过滤失效，旧 run 的迟到分片
       //    反而被放行，表现为「点了停止还在输出」。
       st.terminateRun(sid, runId);
+      // 手动停止是本地权威决策：立即从分组运行集合移除，不等后端 running:false。
+      // 若后端实际仍在跑，随后的 task.updated(running:true) 会重新加回。
+      st.clearGroupRunningSession(sid);
+      st.touchSessionRuntime(sid);
 
       // 2) 先冲刷再强制清空流缓冲：缓冲里尚未应用的分片随后会因 streamEndedAt 被丢弃，
       //    force 绕过「生成中跳过清理」的保护（旧实现正是因此留下大量残片）。
@@ -333,7 +337,7 @@ export function useTask() {
   const editQueuedMessage = useCallback((sessionId: string, messageId: string) => {
     const item = useStore.getState().takeFromMessageQueue(sessionId, messageId);
     if (!item) return;
-    useStore.getState().injectComposer(item.content, item.attachments);
+    useStore.getState().injectComposer(item.content, item.attachments, undefined, sessionId);
   }, []);
 
   /** 中断发送：移出队列 → 中断当前运行 → 立即发送该消息（不等待本轮结束） */

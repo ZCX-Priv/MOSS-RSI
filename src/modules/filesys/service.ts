@@ -3,9 +3,10 @@
 // 读缓存（一次 I/O 全派生）+ roots 越权 + 原子写 + 乐观锁（sha256 一律对原始字节，
 // 修复 BOM 文件 read→edit expectHash 断裂）+ 变更事件 + 终端命令快照检测。
 
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hasUtf8Bom } from '../../utils/encoding';
+import { ensureDirectory, explainFsWriteError } from '../../utils/fs';
 import { readHeadBytes, atomicWriteFile } from '../../utils/fs-atomic';
 import { classifyBufferHead } from '../../utils/fs';
 import { FileCache } from './cache';
@@ -136,7 +137,7 @@ export class FilesysServiceImpl implements FilesysService {
     // 3. 原子写（BOM 已由本层处理，禁用 atomicWriteFile 内置分支避免二次前置）
     try {
       if (opts.createDirs !== false) {
-        mkdirSync(dirname(absPath), { recursive: true });
+        ensureDirectory(dirname(absPath));
       }
       atomicWriteFile(absPath, finalBuffer, {
         fsync: opts.fsync ?? true,
@@ -147,7 +148,7 @@ export class FilesysServiceImpl implements FilesysService {
       return {
         ok: false,
         reason: 'io-error',
-        message: err instanceof Error ? err.message : String(err),
+        message: explainFsWriteError(err, absPath),
       };
     }
 

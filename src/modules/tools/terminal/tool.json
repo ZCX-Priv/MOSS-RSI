@@ -21,8 +21,8 @@
           "kill",
           "restart"
         ],
-        "description": "操作类型：exec（缺省）=在默认终端内执行 command 并复用该终端；create=新建额外终端（仅并行时用）；send=在 terminalId 内执行 command；restart=重启默认终端；read=读取 terminalId 最近输出；list=列出本会话终端；kill=关闭 terminalId。",
-        "description_en": "Operation: exec (default) = run command in the default terminal and reuse it; create = new extra terminal (parallel use only); send = run command inside terminalId; restart = restart the default terminal; read = recent output of terminalId; list = list session terminals; kill = close terminalId."
+        "description": "操作类型：exec（缺省）=在默认终端内执行 command 并复用该终端；create=新建额外终端（仅并行时用）；send=在 terminalId 内执行 command；restart=重启默认终端；read=读取 terminalId 最近输出；list=列出本会话终端；kill=关闭 terminalId。枚举值必须原样使用 exec（不是 execute / run / shell）。",
+        "description_en": "Operation: exec (default) = run command in the default terminal and reuse it; create = new extra terminal (parallel use only); send = run command inside terminalId; restart = restart the default terminal; read = recent output of terminalId; list = list session terminals; kill = close terminalId. Use the enum value exec verbatim (not execute / run / shell)."
       },
       "command": {
         "type": "string",

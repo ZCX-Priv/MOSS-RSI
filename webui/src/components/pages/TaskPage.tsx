@@ -856,6 +856,22 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     setTruncating(true);
     try {
       const resp = await api.truncateSession(taskId, truncateTarget.timestamp, truncateTarget.content);
+      // 撤回用户消息 → 正文（剥离注入块/附件块）+ 附件自动回填发送框，供用户修改后重发。
+      // 先剥注入块再剥附件块（与发送顺序「正文 → 附件块 → 注入块」一致）。
+      if (truncateTarget.role === 'user') {
+        const body = stripAttachmentBlock(stripInjectBlock(truncateTarget.content));
+        const parsed = parseAttachmentBlock(truncateTarget.content);
+        const paths = [
+          ...new Set([...(truncateTarget.attachments ?? []), ...(parsed?.paths ?? [])]),
+        ];
+        if (body.trim() || paths.length > 0) {
+          useStore.getState().injectComposer(body, paths, undefined, taskId);
+        }
+      }
+      // 撤回期间不允许生成中操作；历史变更后运行/错误态都由后端重算，
+      // 这里先本地清理，随后以 session-truncated.payload.error 为准。
+      useStore.getState().clearGroupRuntimeSession(taskId);
+      useStore.getState().touchSessionRuntime(taskId);
       const hasFiles = resp.rolledBackFiles > 0;
       toast(t('task.truncateDone', { count: resp.removedCount, files: resp.rolledBackFiles }), {
         description: hasFiles ? t('task.truncateFilesRolled', { files: resp.rolledBackFiles }) : undefined,
@@ -2052,6 +2068,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         {/* Task Input */}
         <div className="shrink-0 p-3 pt-1.5">
           <TaskInput
+            draftKey={taskId}
             isGenerating={isGenerating}
             isSending={isSending}
             isStopping={isStopping}
