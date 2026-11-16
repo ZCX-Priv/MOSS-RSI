@@ -16,6 +16,8 @@ export interface GenUIRenderContext {
   resolveToBoolean: (value: unknown) => boolean;
   /** 把 $action 绑定转成事件处理器；非动作绑定返回 undefined */
   action: (value: unknown) => ((eventValue?: GenUIStateValue) => void) | undefined;
+  /** Embed 节点的 TSX 编译产物（按 __embedId 索引） */
+  embedScripts?: Record<string, string>;
 }
 
 export interface GenUIComponentProps {

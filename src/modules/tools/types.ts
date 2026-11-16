@@ -153,7 +153,7 @@ export interface RunCodeProgressCall {
 
 /** run_code 执行进度事件（只用于 UI 流式展示，不落库） */
 export interface RunCodeProgressEvent {
-  phase: 'started' | 'log' | 'call-start' | 'call-end';
+  phase: 'started' | 'log' | 'call-start' | 'call-end' | 'ui';
   /** 程序开始执行时刻（epoch ms；仅 started 帧携带） */
   startedAtMs?: number;
   /** 已执行时长（仅 call-end 帧携带，便于前端无需本地时钟） */
@@ -162,6 +162,8 @@ export interface RunCodeProgressEvent {
   log?: string;
   /** 单次嵌套调用（phase=call-start/call-end） */
   call?: RunCodeProgressCall;
+  /** 已通过宿主净化的 UI 快照（phase=ui；仅用于执行期渐进渲染） */
+  uiSpec?: unknown;
 }
 
 export interface ToolContext {

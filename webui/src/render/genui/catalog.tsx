@@ -20,6 +20,8 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer';
+import { useDarkMode } from '../core/use-dark-mode';
+import { PageFrame } from './page/PageFrame';
 import { genuiIcon } from './icons';
 import type { GenUIComponentProps, GenUIComponent } from './context';
 import type { GenUIPropValue, GenUIStateValue } from './types';
@@ -1106,6 +1108,30 @@ const COMPONENTS: Record<string, GenUIComponent> = {
         alt={ctx.resolveText(props.alt) || ''}
         style={{ ...(height ? { height } : { maxHeight: 420 }), maxWidth: '100%', width: 'auto' }}
         className={cn('object-center', fit === 'cover' ? 'object-cover' : 'object-contain', RADIUS_CLASS[radius])}
+      />
+    );
+  },
+
+  Embed({ node, ctx }) {
+    const dark = useDarkMode();
+    const props = node.props ?? {};
+    const mode = resolveEnum(node, ctx, 'mode', ['html', 'tsx'] as const, 'html');
+    const source = ctx.resolveText(props.source);
+    if (!source) return null;
+    const title = ctx.resolveText(props.title) || undefined;
+    const height = clampNumber(resolveNumberProp(node, ctx, 'height', 360), 240, 1200);
+    const embedId = typeof props.__embedId === 'string' ? props.__embedId : '';
+    const compiledJs = embedId ? ctx.embedScripts?.[embedId] : undefined;
+    // 沙箱 iframe：与 run_code 内嵌页面同源同能力（含刷新按钮与 CDN 设置）
+    return (
+      <PageFrame
+        mode={mode}
+        source={source}
+        title={title}
+        height={height}
+        streaming={false}
+        dark={dark}
+        compiledJs={compiledJs}
       />
     );
   },

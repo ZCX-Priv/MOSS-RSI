@@ -2287,6 +2287,7 @@ export function ToolsSettings() {
   const codeMode: CodeModeConfig = agentCfg?.codeMode ?? {
     enabled: true,
     uiEnabled: true,
+    allowCdn: true,
     timeoutMs: 120_000,
     maxCodeChars: 20_000,
     maxParallelSubCalls: 10,
@@ -2455,6 +2456,19 @@ export function ToolsSettings() {
               disabled={!codeMode.enabled}
               onCheckedChange={(v) => void patchCodeMode({ uiEnabled: v })}
               aria-label={t('settings.tools.codeModeUiEnabled')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeCdnEnabled')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeCdnEnabledDesc')}</span>
+            </div>
+            <Switch
+              checked={codeMode.allowCdn}
+              disabled={!codeMode.enabled}
+              onCheckedChange={(v) => void patchCodeMode({ allowCdn: v })}
+              aria-label={t('settings.tools.codeModeCdnEnabled')}
             />
           </div>
 

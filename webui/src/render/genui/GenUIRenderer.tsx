@@ -38,6 +38,8 @@ import {
 export interface GenUIRendererProps {
   spec: GenUISpec;
   className?: string;
+  /** Embed 节点的 TSX 编译产物（按 __embedId 索引） */
+  embedScripts?: Record<string, string>;
 }
 
 /** 单次事件最多执行的原子动作数（防 seq 嵌套或异常规格拖死前端） */
@@ -59,7 +61,7 @@ function resolvedToText(value: unknown): string {
   return String(value);
 }
 
-export function GenUIRenderer({ spec, className }: GenUIRendererProps) {
+export function GenUIRenderer({ spec, className, embedScripts }: GenUIRendererProps) {
   const { t } = useTranslation();
   const [state, setState] = useState<Record<string, GenUIStateValue>>(() => ({ ...(spec.state ?? {}) }));
   const stateRef = useRef<Record<string, GenUIStateValue>>({ ...(spec.state ?? {}) });
@@ -222,8 +224,8 @@ export function GenUIRenderer({ spec, className }: GenUIRendererProps) {
   );
 
   const ctx: GenUIRenderContext = useMemo(
-    () => ({ state, resolve, resolveText, resolveToNumber, resolveToBoolean, action }),
-    [state, resolve, resolveText, resolveToNumber, resolveToBoolean, action],
+    () => ({ state, resolve, resolveText, resolveToNumber, resolveToBoolean, action, embedScripts }),
+    [state, resolve, resolveText, resolveToNumber, resolveToBoolean, action, embedScripts],
   );
 
   function renderChildren(children: GenUINode['children']): ReactNode {

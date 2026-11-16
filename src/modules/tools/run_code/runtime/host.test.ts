@@ -70,6 +70,28 @@ describe('run_code runtime host', () => {
     expect(result.ui).toBeTruthy();
   });
 
+  test('pushes a validated UI snapshot at ui.render before the program ends', async () => {
+    const snapshots: unknown[] = [];
+    const result = await runCodeProgram({
+      program: ["ui.render(ui.text({}, 'streamed'));", 'await sleep(300);', "return 'ok';"].join('\n'),
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+      onProgress: (event) => {
+        if (event.phase === 'ui') snapshots.push(event.uiSpec);
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(snapshots.length).toBeGreaterThan(0);
+    const first = validateUISpec(snapshots[0]);
+    expect(first.fatal).toBe(false);
+    expect(first.spec?.root.type).toBe('Text');
+  });
+
   test('injects Grid and local computation actions into the child namespace', async () => {
     const result = await runCodeProgram({
       program: [

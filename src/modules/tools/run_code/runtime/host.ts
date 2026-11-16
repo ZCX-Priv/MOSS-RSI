@@ -9,6 +9,7 @@ import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { SYSTEM_SCOPE, systemRoot } from '../../../filesys/roots';
 import type { Logger } from '../../../../core/types';
 import type { RunCodeProgressEvent, ToolResult } from '../../types';
+import { validateUISpec } from '../ui/validate';
 import {
   byteLength,
   CALL_ID_RE,
@@ -413,6 +414,23 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           return;
         }
         appendLog(typeof frame.text === 'string' ? frame.text : String(frame.text));
+        return;
+      }
+      if (frame.type === 'ui') {
+        if (!runSent) {
+          void settle(protocolError('ui frame before run'));
+          return;
+        }
+        // 渐进快照同样过宿主净化：非法/error 级规格直接丢弃，最终 result 帧仍给权威诊断
+        const validation = validateUISpec(frame.ui);
+        if (validation.fatal || !validation.spec) return;
+        if (validation.diagnostics.some((d) => d.severity === 'error')) return;
+        const rawDiagnostics = Array.isArray(frame.uiDiagnostics) ? frame.uiDiagnostics : [];
+        const hasBuilderError = rawDiagnostics.some(
+          (d) => !!d && typeof d === 'object' && (d as { severity?: unknown }).severity === 'error',
+        );
+        if (hasBuilderError) return;
+        emitProgress({ phase: 'ui', uiSpec: validation.spec });
         return;
       }
       if (frame.type === 'call') {

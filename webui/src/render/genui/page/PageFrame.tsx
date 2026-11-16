@@ -6,9 +6,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ExternalLink, Loader2, TriangleAlert } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw, TriangleAlert } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { injectBodyScript, injectHeadScript, MEASURE_SCRIPT, SANDBOX_SHIM } from './sandbox-compat';
+import { useStore } from '../../../store';
+import { injectBodyScript, injectHeadHtml, injectHeadScript, MEASURE_SCRIPT, SANDBOX_SHIM } from './sandbox-compat';
 
 export interface PageFrameProps {
   mode: 'html' | 'tsx';
@@ -35,6 +36,12 @@ const FRAGMENT_RESET =
   'body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif}' +
   'button,input,select,textarea{font:inherit}</style>';
 
+/** 关闭 CDN 时注入的 CSP：拦截外链 script/style/font，保留内联、图片、fetch 与内联 Worker */
+const NO_CDN_CSP =
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; " +
+  "img-src http: https: data: blob:; media-src http: https: data: blob:; font-src data:; " +
+  "connect-src http: https: ws: wss:; worker-src blob: data:";
+
 /** 非完整文档（片段）补一层最小外壳；完整文档原样使用 */
 function normalizeHtml(source: string, dark: boolean): string {
   const trimmed = source.trimStart();
@@ -55,12 +62,14 @@ function stripScriptsForPreview(source: string): string {
 
 export function PageFrame({ mode, source, title, height, streaming, dark, compiledJs }: PageFrameProps) {
   const { t } = useTranslation();
+  const allowCdn = useStore((s) => s.appConfig?.agent.codeMode.allowCdn ?? true);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [tsxHtml, setTsxHtml] = useState<string | null>(null);
   const [tsxError, setTsxError] = useState<string | null>(null);
   const [contentHeight, setContentHeight] = useState<number | null>(null);
+  const [reloadSeq, setReloadSeq] = useState(0);
 
   // 容器宽度：页面按桌面宽度排版后等比缩放到聊天列
   useEffect(() => {
@@ -88,7 +97,7 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
     let alive = true;
     void import('./tsx-page')
       .then(({ buildTsxDocument }) => {
-        if (alive) setTsxHtml(buildTsxDocument(compiledJs, dark));
+        if (alive) setTsxHtml(buildTsxDocument(compiledJs, dark, allowCdn));
       })
       .catch((err: unknown) => {
         if (alive) setTsxError(err instanceof Error ? err.message : String(err));
@@ -96,7 +105,7 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
     return () => {
       alive = false;
     };
-  }, [mode, compiledJs, streaming, dark]);
+  }, [mode, compiledJs, streaming, dark, allowCdn]);
 
   // 内容变化时重新测量
   useEffect(() => {
@@ -118,10 +127,14 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
 
   const html = useMemo(() => {
     if (mode === 'tsx') return tsxHtml;
-    if (streaming) return normalizeHtml(stripScriptsForPreview(source), dark);
+    let doc = normalizeHtml(streaming ? stripScriptsForPreview(source) : source, dark);
+    if (!allowCdn) {
+      doc = injectHeadHtml(doc, `<meta http-equiv="Content-Security-Policy" content="${NO_CDN_CSP}"/>`);
+    }
+    if (streaming) return doc;
     // 完成态：先装沙箱兼容层（不透明源的 storage），再挂内容高度测量
-    return injectBodyScript(injectHeadScript(normalizeHtml(source, dark), SANDBOX_SHIM), MEASURE_SCRIPT);
-  }, [mode, source, streaming, dark, tsxHtml]);
+    return injectBodyScript(injectHeadScript(doc, SANDBOX_SHIM), MEASURE_SCRIPT);
+  }, [mode, source, streaming, dark, tsxHtml, allowCdn]);
 
   const baseHeight = Math.max(240, Math.min(1200, height ?? DEFAULT_HEIGHT));
   // 设计宽度：不低于 960；容器更宽时直接用容器宽度（scale = 1）
@@ -140,6 +153,12 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   };
 
+  /** 重新挂载 iframe：重跑页面脚本并重新测量内容高度 */
+  const reload = (): void => {
+    setContentHeight(null);
+    setReloadSeq((n) => n + 1);
+  };
+
   return (
     <div ref={containerRef} className="min-w-0 overflow-hidden rounded-xl border border-border/70 bg-card/40 shadow-sm">
       <div className="flex h-9 items-center gap-2 border-b border-border/60 px-2.5">
@@ -156,6 +175,16 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
         <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
           {mode}
         </span>
+        <button
+          type="button"
+          onClick={reload}
+          disabled={!html || streaming}
+          title={t('task.runCode.page.refresh')}
+          aria-label={t('task.runCode.page.refresh')}
+          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <RefreshCw className="size-3.5" />
+        </button>
         <button
           type="button"
           onClick={openInNewTab}
@@ -212,8 +241,8 @@ export function PageFrame({ mode, source, title, height, streaming, dark, compil
         <div className="relative w-full overflow-hidden" style={{ height: visualHeight }}>
           <iframe
             ref={iframeRef}
-            // 流式/完成态切换时强制重挂，确保 sandbox 权限生效
-            key={streaming ? 'stream' : 'final'}
+            // 流式/完成态切换或手动刷新时强制重挂，确保 sandbox 权限与新脚本文档生效
+            key={`${streaming ? 'stream' : 'final'}-${reloadSeq}`}
             title={title || t('task.runCode.page.untitled')}
             srcDoc={html}
             sandbox={streaming ? '' : SANDBOX_FINAL}

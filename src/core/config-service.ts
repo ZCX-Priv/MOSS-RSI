@@ -56,6 +56,7 @@ export function defaultAppConfig(): AppConfig {
       codeMode: {
         enabled: true,
         uiEnabled: true,
+        allowCdn: true,
         timeoutMs: 120_000,
         maxCodeChars: 20_000,
         maxParallelSubCalls: 10,

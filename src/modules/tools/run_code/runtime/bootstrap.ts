@@ -11,11 +11,12 @@
 // 真正的边界是外层 run_code 的用户确认与嵌套工具的逐次 safety 决策。
 
 import {
+  buildUiSpec,
   createDisabledUiNamespace,
   createUiBuilder,
   type UiNamespace,
 } from '../ui/builder';
-import type { UIDiagnostic, UINode, UIStateValue, UISpec } from '../ui/spec';
+import type { UIDiagnostic } from '../ui/spec';
 import {
   byteLength,
   MAX_FRAME_BYTES,
@@ -256,7 +257,18 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
     return;
   }
 
-  const builder = createUiBuilder();
+  let lastUiSnapshotAt = 0;
+  const builder = createUiBuilder({
+    onRender: (built) => {
+      const spec = buildUiSpec(built);
+      if (!spec) return;
+      // 100ms 节流：首次立即发；密集多次 render 由最终 result 帧兜底
+      const now = Date.now();
+      if (now - lastUiSnapshotAt < 100) return;
+      lastUiSnapshotAt = now;
+      void writeFrame({ v: 1, type: 'ui', ui: spec, uiDiagnostics: built.diagnostics });
+    },
+  });
   const ui: UiNamespace = frame.uiEnabled ? builder.ui : createDisabledUiNamespace();
   const tools = createToolsProxy(frame.bindings);
   const consoleShim = createConsoleShim();
@@ -314,15 +326,7 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   }
 
   const built = builder.getResult();
-  const spec: UISpec | undefined = built.hasUi && built.root
-    ? {
-        version: 1,
-        ...(built.title ? { title: built.title } : {}),
-        ...(built.framed === undefined ? {} : { framed: built.framed }),
-        root: built.root as UINode,
-        state: built.state as Record<string, UIStateValue>,
-      }
-    : undefined;
+  const spec = buildUiSpec(built);
   const diagnostics: UIDiagnostic[] = built.diagnostics;
 
   const resultLine = `${JSON.stringify({

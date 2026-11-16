@@ -165,4 +165,38 @@ describe('validateUISpec', () => {
     const diagnostic = result.diagnostics.find((d) => d.code === 'unknown_prop');
     expect(diagnostic?.detail).toContain('allowed props: value, max, label, tone');
   });
+
+  test('Embed 接受 html/tsx 字面量规格', () => {
+    const html = validateUISpec({
+      version: 1,
+      root: { type: 'Embed', props: { mode: 'html', source: '<!doctype html><p>hi</p>', height: 360 } },
+      state: {},
+    });
+    expect(html.fatal).toBe(false);
+    expect(html.spec?.root.type).toBe('Embed');
+    expect(html.diagnostics.some((d) => d.severity === 'error')).toBe(false);
+
+    const tsx = validateUISpec({
+      version: 1,
+      root: { type: 'Embed', props: { mode: 'tsx', source: 'export default function App(){return null;}' } },
+      state: {},
+    });
+    expect(tsx.fatal).toBe(false);
+    expect(tsx.spec?.root.props?.mode).toBe('tsx');
+  });
+
+  test('Embed 缺少 source 时致命失败', () => {
+    const result = validateUISpec({ version: 1, root: { type: 'Embed', props: { mode: 'tsx' } }, state: {} });
+    expect(result.fatal).toBe(true);
+    expect(result.spec).toBeUndefined();
+    expect(result.diagnostics.some((d) => d.code === 'missing_prop')).toBe(true);
+  });
+
+  test('ui.embed 是可用的工厂函数', () => {
+    const builder = createUiBuilder();
+    const node = builder.ui.embed({ mode: 'html', source: '<p>hi</p>', height: 360 });
+    expect(node.type).toBe('Embed');
+    expect(node.props?.mode).toBe('html');
+    expect(node.props?.source).toBe('<p>hi</p>');
+  });
 });

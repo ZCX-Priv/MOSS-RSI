@@ -14,6 +14,7 @@ import {
   type UIDiagnostic,
   type UINode,
   type UIPropValue,
+  type UISpec,
   type UIStateValue,
 } from './spec';
 
@@ -70,6 +71,7 @@ export interface UiNamespace extends UiCore {
   tabs: UiComponentFactory;
   image: UiComponentFactory;
   callout: UiComponentFactory;
+  embed: UiComponentFactory;
   emptyState: UiComponentFactory;
 }
 
@@ -88,8 +90,25 @@ export interface UiBuilder {
   getResult(): UiBuildResult;
 }
 
+export interface UiBuilderOptions {
+  /** ui.render 后立即回调一份构建结果（供 bootstrap 推送渐进快照） */
+  onRender?: (built: UiBuildResult) => void;
+}
+
+/** 把 builder 结果组装成可下发的 UISpec（result 帧与渐进快照共用） */
+export function buildUiSpec(built: UiBuildResult): UISpec | undefined {
+  if (!built.hasUi || !built.root) return undefined;
+  return {
+    version: 1,
+    ...(built.title ? { title: built.title } : {}),
+    ...(built.framed === undefined ? {} : { framed: built.framed }),
+    root: built.root,
+    state: built.state,
+  };
+}
+
 /** 创建一次 run 的 ui 命名空间（内部状态一次性，不跨 run 复用） */
-export function createUiBuilder(): UiBuilder {
+export function createUiBuilder(builderOptions: UiBuilderOptions = {}): UiBuilder {
   const stateStore: Record<string, UIStateValue> = Object.create(null) as Record<string, UIStateValue>;
   const diagnostics: UIDiagnostic[] = [];
   let root: UINode | undefined;
@@ -300,6 +319,8 @@ export function createUiBuilder(): UiBuilder {
       if (options && typeof options.framed === 'boolean') {
         specFramed = options.framed;
       }
+      // 渐进快照：render 后立即回调，程序继续执行期间前端已能渲染
+      builderOptions.onRender?.(buildResult());
     },
 
     markdown(text: string): UINode {
@@ -340,25 +361,29 @@ export function createUiBuilder(): UiBuilder {
     tabs: factory('Tabs'),
     image: factory('Image'),
     callout: factory('Callout'),
+    embed: factory('Embed'),
     emptyState: factory('EmptyState'),
   };
 
+  /** 组装构建结果；result 帧与渐进快照共用 */
+  function buildResult(): UiBuildResult {
+    const hasState = Object.keys(stateStore).length > 0;
+    if (!rendered && hasState) {
+      record('missing_render', 'root', 'warning', 'ui.state/expr used but ui.render was not called');
+    }
+    return {
+      hasUi: rendered && !!root,
+      ...(root ? { root } : {}),
+      state: stateStore,
+      ...(specTitle ? { title: specTitle } : {}),
+      ...(specFramed === undefined ? {} : { framed: specFramed }),
+      diagnostics,
+    };
+  }
+
   return {
     ui: Object.freeze(ui),
-    getResult(): UiBuildResult {
-      const hasState = Object.keys(stateStore).length > 0;
-      if (!rendered && hasState) {
-        record('missing_render', 'root', 'warning', 'ui.state/expr used but ui.render was not called');
-      }
-      return {
-        hasUi: rendered && !!root,
-        ...(root ? { root } : {}),
-        state: stateStore,
-        ...(specTitle ? { title: specTitle } : {}),
-        ...(specFramed === undefined ? {} : { framed: specFramed }),
-        diagnostics,
-      };
-    },
+    getResult: buildResult,
   };
 }
 

@@ -20,7 +20,7 @@ import { runCodeProgram, type CodeRunCallRecord } from './runtime/host';
 import { validateToolArguments } from './runtime/schema';
 import type { CodeFailureKind, CodeValue } from './runtime/protocol';
 import { validateUISpec } from './ui/validate';
-import type { UIDiagnostic, UISpec } from './ui/spec';
+import type { UIDiagnostic, UINode, UISpec } from './ui/spec';
 
 interface RunCodeParams {
   code?: unknown;
@@ -49,6 +49,8 @@ export interface CodeRunMetadata {
   uiDiagnostics?: UIDiagnostic[];
   /** 是否含内嵌页面（源码以 toolCall.arguments 为渲染真相，metadata 不重复存储） */
   hasPage?: boolean;
+  /** 智能界面 Embed 的 TSX 编译产物（按节点 __embedId 索引） */
+  uiEmbedScripts?: Record<string, string>;
   /** tsx 页面的编译产物（CJS 文本；html 模式没有） */
   pageScript?: string;
   /** 完整返回值文本（供结果区展示，不再按长度裁剪） */
@@ -108,8 +110,17 @@ export default {
     let pageScript: string | undefined;
     if (page && page.mode === 'tsx') {
       const compiled = await compileTsxPage(page.source);
-      if (!compiled.ok) return err(`TSX 编译失败：${compiled.error}`);
+      if (!compiled.ok) return err(`TSX 编译失败：${compiled.error}。请修复 TSX 源码后重新调用 run_code。`);
       pageScript = compiled.js;
+      if (!codeMode.allowCdn) {
+        const externals = findExternalPageImports(pageScript);
+        if (externals.length > 0) {
+          return err(
+            `CDN 资源已禁用：page.mode="tsx" 不能 import ${externals.join('、')}。` +
+              '请在设置 → 工具 → 代码模式中开启“允许 CDN 资源”，或改用内置 React 实现。',
+          );
+        }
+      }
     }
 
     // ---- 纯页面调用：页面源码即全部内容，不启动子进程 ----
@@ -203,7 +214,17 @@ export default {
     const builderDiagnostics = normalizeDiagnostics(hostResult.uiDiagnostics);
     const validation = hostResult.ui !== undefined ? validateUISpec(hostResult.ui) : { diagnostics: [], fatal: false };
     const uiDiagnostics = [...builderDiagnostics, ...validation.diagnostics];
-    const uiSpec = validation.spec;
+    // error 级诊断（含 fatal）一律视为界面构建失败：不渲染 UI，按标准工具错误回传
+    const uiFailed = validation.fatal || uiDiagnostics.some((d) => d.severity === 'error');
+    const uiSpec = uiFailed ? undefined : validation.spec;
+
+    // ---- 智能界面 Embed：TSX 服务端编译（HTML 直接渲染） ----
+    let uiEmbedScripts: Record<string, string> | undefined;
+    if (uiSpec) {
+      const embeds = await compileUiEmbeds(uiSpec, codeMode.allowCdn);
+      if (!embeds.ok) return err(embeds.error);
+      uiEmbedScripts = embeds.scripts;
+    }
 
     const hostFailed = !!hostResult.error;
     const kind: CodeRunMetadata['kind'] = hostFailed
@@ -227,7 +248,7 @@ export default {
       valueWarnings: hostResult.valueWarnings,
       logs: hostResult.logs,
       uiDiagnostics,
-      uiFatal: validation.fatal,
+      uiFailed,
       durationMs: hostResult.durationMs,
       description,
     });
@@ -245,6 +266,7 @@ export default {
       calls: hostResult.calls,
       ...(hostResult.callsTruncated ? { callsTruncated: true } : {}),
       ...(uiSpec ? { uiSpec } : {}),
+      ...(uiEmbedScripts ? { uiEmbedScripts } : {}),
       ...(page ? { hasPage: true } : {}),
       ...(pageScript ? { pageScript } : {}),
       ...(uiDiagnostics.length > 0 ? { uiDiagnostics } : {}),
@@ -278,7 +300,7 @@ export default {
 
     return {
       content,
-      isError: hostFailed,
+      isError: hostFailed || uiFailed,
       metadata: { codeRun: metadata },
     };
   },
@@ -341,6 +363,31 @@ function stripNonCode(code: string): string {
   return out;
 }
 
+/** react 家族由内置运行时提供，不算 CDN 依赖 */
+const BUILTIN_PAGE_MODULES = new Set([
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'react/jsx-dev-runtime',
+]);
+
+/** 从编译后的 CJS 中提取外部 import（sucrase 静态 import 会变成 require("…")） */
+function findExternalPageImports(js: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const re of [/\brequire\(\s*(["'])([^"']+)\1\s*\)/g, /\bimport\(\s*(["'])([^"']+)\1\s*\)/g]) {
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(js)) !== null) {
+      const spec = match[2];
+      if (!spec || BUILTIN_PAGE_MODULES.has(spec) || seen.has(spec)) continue;
+      seen.add(spec);
+      out.push(spec);
+    }
+  }
+  return out;
+}
+
 /** TSX → CJS（仅 tsx 页面使用；sucrase 动态加载，不影响后端启动） */
 async function compileTsxPage(source: string): Promise<{ ok: true; js: string } | { ok: false; error: string }> {
   try {
@@ -356,6 +403,65 @@ async function compileTsxPage(source: string): Promise<{ ok: true; js: string } 
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * 为 uiSpec 里的 Embed 节点编译 TSX（HTML 无需编译），并注入稳定的 __embedId。
+ * mode/source 必须是字面量；绑定无法在服务端编译，直接返回工具错误。
+ */
+async function compileUiEmbeds(
+  spec: UISpec,
+  allowCdn: boolean,
+): Promise<{ ok: true; scripts?: Record<string, string> } | { ok: false; error: string }> {
+  const scripts: Record<string, string> = {};
+  let seq = 0;
+  let failed: string | undefined;
+
+  const walk = async (node: UINode, path: string): Promise<void> => {
+    if (failed) return;
+    if (node.type === 'Embed') {
+      const mode = node.props?.mode;
+      const source = node.props?.source;
+      if (mode !== 'html' && mode !== 'tsx') {
+        failed = `Embed.mode 必须是 "html" 或 "tsx"（${path}）`;
+        return;
+      }
+      if (typeof source !== 'string') {
+        failed = `Embed.source 必须是字符串字面量（${path}）；不支持 $state/$expr 绑定`;
+        return;
+      }
+      if (mode === 'tsx') {
+        const compiled = await compileTsxPage(source);
+        if (!compiled.ok) {
+          failed = `Embed TSX 编译失败 @ ${path}：${compiled.error}。请修复后重新调用 run_code。`;
+          return;
+        }
+        if (!allowCdn) {
+          const externals = findExternalPageImports(compiled.js);
+          if (externals.length > 0) {
+            failed =
+              `CDN 资源已禁用：Embed 不能 import ${externals.join('、')}（${path}）。` +
+              '请开启“允许 CDN 资源”，或改用内置 React 实现。';
+            return;
+          }
+        }
+        const id = `e${seq++}`;
+        node.props = { ...(node.props ?? {}), __embedId: id };
+        scripts[id] = compiled.js;
+      }
+    }
+    const children = node.children ?? [];
+    for (let i = 0; i < children.length; i += 1) {
+      const child = children[i];
+      if (child && typeof child === 'object' && !Array.isArray(child) && 'type' in child && typeof child.type === 'string') {
+        await walk(child as UINode, `${path}.children[${i}]`);
+      }
+    }
+  };
+
+  await walk(spec.root, 'root');
+  if (failed) return { ok: false, error: failed };
+  return { ok: true, ...(seq > 0 ? { scripts } : {}) };
 }
 
 /** 内嵌页面参数净化：模式/源码/高度/标题 */
@@ -411,7 +517,7 @@ interface FormatInput {
   valueWarnings?: Array<{ path: string; reason: string }>;
   logs: string[];
   uiDiagnostics: UIDiagnostic[];
-  uiFatal: boolean;
+  uiFailed: boolean;
   durationMs: number;
   description: string;
 }
@@ -447,7 +553,9 @@ function formatResultText(input: FormatInput): string {
       );
     }
   } else {
-    if (input.kind === 'ui') {
+    if (input.uiFailed) {
+      parts.push(`[run_code] 交互界面构建失败（未渲染，${duration}）`);
+    } else if (input.kind === 'ui') {
       parts.push(`已渲染交互界面：${input.description}`);
     } else if (input.kind === 'page') {
       parts.push(`已渲染交互页面：${input.description}`);
@@ -459,17 +567,20 @@ function formatResultText(input: FormatInput): string {
     if (input.value !== undefined) {
       parts.push(`返回值：\n${formatValue(input.value)}`);
     }
-    if (input.kind === 'text' && input.value === undefined && input.logs.length === 0) {
+    if (!input.uiFailed && input.kind === 'text' && input.value === undefined && input.logs.length === 0) {
       parts.push('（无返回值、无日志）');
     }
   }
 
-  if (input.uiFatal) {
-    parts.push('界面规格校验失败，已回退为文本结果。');
+  if (input.uiFailed && input.uiDiagnostics.length === 0) {
+    parts.push('界面规格未通过校验，已回退为文本结果。');
   }
   if (input.uiDiagnostics.length > 0) {
     const shown = input.uiDiagnostics.slice(0, 8).map((d) => `${d.code} @ ${d.path}${d.detail ? `: ${d.detail}` : ''}`);
     parts.push(`[UI 诊断]\n${shown.join('\n')}${input.uiDiagnostics.length > 8 ? `\n… 共 ${input.uiDiagnostics.length} 条` : ''}`);
+  }
+  if (input.hostFailed || input.uiFailed) {
+    parts.push('请根据上述错误修复后重新调用 run_code，不要直接结束本轮。');
   }
   if (input.valueWarnings && input.valueWarnings.length > 0) {
     const shown = input.valueWarnings

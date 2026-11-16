@@ -850,6 +850,7 @@ export class AgentEngineImpl implements AgentEngine {
       ];
       const section = buildCodeModePromptExtras({
         uiEnabled: codeMode.uiEnabled,
+        allowCdn: codeMode.allowCdn,
         tools: sdkTools,
       });
       if (section) promptExtras.push(section);

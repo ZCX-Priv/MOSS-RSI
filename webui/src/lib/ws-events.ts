@@ -32,6 +32,7 @@ import { emitInsightEvent } from './insight-bus';
 import { bindSubagentSession } from './subagent-sessions';
 import { applyAgentBusMember, applyAgentBusMessage } from './agent-bus';
 import i18n from '../i18n';
+import type { GenUISpec } from '../render/genui/types';
 import type {
   AgentEvent,
   TaskMessage,
@@ -564,10 +565,11 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         toolCallId?: string;
         messageId?: string;
         payload?: {
-          phase?: 'started' | 'log' | 'call-start' | 'call-end';
+          phase?: 'started' | 'log' | 'call-start' | 'call-end' | 'ui';
           startedAtMs?: number;
           log?: string;
           call?: CodeRunLiveCall;
+          uiSpec?: GenUISpec;
         };
       };
       if (!sessionId || !event.toolCallId || !event.payload) break;
@@ -1420,6 +1422,8 @@ interface PendingRunCodeProgress {
   logs: string[];
   /** 尚未落库的嵌套调用状态（按 id 覆盖合并） */
   calls: Map<string, CodeRunLiveCall>;
+  /** 执行期渐进 UI 快照（后到覆盖先到） */
+  uiSpec?: GenUISpec;
 }
 
 const pendingRunCode = new Map<string, PendingRunCodeProgress>();
@@ -1429,10 +1433,11 @@ function queueRunCodeProgress(
   sessionId: string,
   toolCallId: string,
   progress: {
-    phase?: 'started' | 'log' | 'call-start' | 'call-end';
+    phase?: 'started' | 'log' | 'call-start' | 'call-end' | 'ui';
     startedAtMs?: number;
     log?: string;
     call?: CodeRunLiveCall;
+    uiSpec?: GenUISpec;
   },
 ): void {
   const key = `${sessionId}:${toolCallId}`;
@@ -1453,6 +1458,8 @@ function queueRunCodeProgress(
     const call = progress.call;
     const prev = entry.calls.get(call.id);
     entry.calls.set(call.id, prev ? { ...prev, ...call } : call);
+  } else if (progress.phase === 'ui' && progress.uiSpec) {
+    entry.uiSpec = progress.uiSpec;
   }
   if (runCodeFlushTimer === null) {
     runCodeFlushTimer = setTimeout(() => {
@@ -1516,6 +1523,7 @@ function flushRunCodeProgress(sessionId?: string, toolCallId?: string): void {
         live: {
           ...live,
           ...(entry.startedAtMs ? { startedAtMs: entry.startedAtMs } : {}),
+          ...(entry.uiSpec ? { uiSpec: entry.uiSpec } : {}),
           logs,
           calls: sortLiveCalls([...callMap.values()]),
         },

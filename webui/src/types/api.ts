@@ -69,6 +69,8 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];
+  /** Embed TSX 编译产物（按节点 __embedId 索引） */
+  uiEmbedScripts?: Record<string, string>;
   /** 完整返回值文本（供结果区展示，不按长度裁剪） */
   valuePreview?: string;
   durationMs: number;
@@ -90,6 +92,8 @@ export interface ToolCall {
     calls: CodeRunLiveCall[];
     logs: string[];
     startedAtMs?: number;
+    /** 执行期渐进 UI 快照（宿主已净化；最终以 metadata.uiSpec 为准） */
+    uiSpec?: GenUISpec;
   };
 }
 
@@ -489,6 +493,8 @@ export interface CodeModeConfig {
   enabled: boolean;
   /** 是否允许程序内使用 ui.* 构建交互界面 */
   uiEnabled: boolean;
+  /** 是否允许内嵌页面 / 智能界面引用外部 CDN 资源 */
+  allowCdn: boolean;
   /** 单次程序执行预算（毫秒） */
   timeoutMs: number;
   /** 程序源码长度上限 */
@@ -1732,11 +1738,12 @@ export type AgentEvent =
       toolCallId: string;
       messageId?: string;
       payload: {
-        phase: 'started' | 'log' | 'call-start' | 'call-end';
+        phase: 'started' | 'log' | 'call-start' | 'call-end' | 'ui';
         startedAtMs?: number;
         elapsedMs?: number;
         log?: string;
         call?: CodeRunLiveCall;
+        uiSpec?: GenUISpec;
       };
       runId?: string;
     }

@@ -131,8 +131,12 @@ export const RunCodeCard = memo(function RunCodeCard({
   const running = !hasResult && (status === 'generating' || status === 'executing');
   const hasCode = typeof parsed.code === 'string' && parsed.code.trim().length > 0;
   const liveCalls = toolCall.live?.calls ?? [];
+  const liveUiSpec = toolCall.live?.uiSpec;
   const calls = sortCallsBySeq(meta?.calls?.length ? meta.calls : liveCalls);
-  const hasUi = hasUiFromResult || meta?.uiSpec !== undefined;
+  const hasUi =
+    hasUiFromResult || meta?.uiSpec !== undefined || (!meta && liveUiSpec !== undefined);
+  // 执行期先渲染渐进快照；结果到达后只信 metadata（失败时 isError 会隐藏 UI）
+  const renderedUiSpec = meta ? meta.uiSpec : running ? liveUiSpec : undefined;
 
   // 执行中本地 ticker：仅运行中的卡片启动（避免每个历史卡片都挂定时器）。
   // 耗时按秒展示，1s 刷新即可；250ms 会让整卡（含嵌套调用）每秒重渲染 4 次。
@@ -264,16 +268,16 @@ export const RunCodeCard = memo(function RunCodeCard({
         </div>
       )}
 
-      {/* IntelligentUI：折叠代码卡也常显（历史投影 hasUi=true 时自动补拉 spec）；
-          仅程序卡片展开时才懒加载渲染器属于旧行为，刷新后图表会被收进折叠区 */}
-      {meta?.uiSpec && !isError && (
+      {/* IntelligentUI：执行期渲染渐进快照；结果到达后以 metadata 为准（失败不渲染）；
+          折叠代码卡也常显（历史投影 hasUi=true 时自动补拉 spec） */}
+      {renderedUiSpec && !isError && (
         <div className="mt-0.5 ml-1 min-w-0">
           <Suspense
             fallback={
               <div className="text-[11px] text-muted-foreground">{t('task.runCode.loadingUi')}</div>
             }
           >
-            <GenUIRenderer spec={meta.uiSpec} />
+            <GenUIRenderer spec={renderedUiSpec} embedScripts={meta?.uiEmbedScripts} />
           </Suspense>
         </div>
       )}

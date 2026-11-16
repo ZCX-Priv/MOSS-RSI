@@ -450,6 +450,16 @@ export const UI_COMPONENTS: readonly UIComponentSpec[] = [
     requiredChildren: true,
   },
   {
+    name: 'Embed',
+    description: '嵌入完整 HTML/TSX 页面（沙箱 iframe）；TSX 由服务端编译；mode/source 必须是字面量，source 建议 < 150KB',
+    props: {
+      mode: { kind: 'enum', values: ['html', 'tsx'] as const, required: true },
+      source: { kind: 'string', required: true, maxLength: 150_000 },
+      title: { kind: 'string', maxLength: 500 },
+      height: { kind: 'number', min: 240, max: 1200 },
+    },
+  },
+  {
     name: 'EmptyState',
     description: '空状态占位',
     props: {
@@ -476,10 +486,10 @@ export function buildUiSdkText(): string {
     '### ui 构建器（规格化智能界面）',
     '',
     '在 run_code 程序内用 `ui.*` 构建界面规格；前端会把它渲染在「代码」步骤下方的消息流里。',
-    '它不是 HTML/iframe，也不是工具卡片；交互在浏览器本地闭环（点击/输入只改 state、重算表达式），不会回调模型。',
+    '除 `Embed` 外，它不是 HTML/iframe，也不是工具卡片；交互在浏览器本地闭环（点击/输入只改 state、重算表达式），不会回调模型。',
     '',
     '**何时用**：数据仪表盘、表单、计算器、筛选器、配置器、数据浏览器、状态驱动的棋盘/小游戏。',
-    '**何时不用**：一次问答、纯文本结论、代码解释；需要任意 CSS/动画/像素级视觉时，改用 run_code 的 `page` 参数（见「内嵌页面」说明）。',
+    '**何时不用**：一次问答、纯文本结论、代码解释；需要任意 CSS/动画/像素级视觉时，改用 run_code 的 `page` 参数（见「内嵌页面」说明）；在智能界面内部需要局部页面时用 `ui.embed({ mode, source })`。',
     '**禁令**：不要用 `browser` 截图冒充聊天内界面；`browser` 只用于访问/验证外部网页。',
     '',
     '```ts',

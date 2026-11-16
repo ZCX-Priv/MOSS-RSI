@@ -61,20 +61,24 @@ export const MEASURE_SCRIPT = `(function(){
   setTimeout(schedule,0);setTimeout(schedule,200);setTimeout(schedule,800);
 })();`;
 
-/** 插到页面脚本之前：<head> 后 → <!doctype> 后 → 文档最前 */
-export function injectHeadScript(html: string, script: string): string {
-  const tag = `<script>${script}</script>`;
+/** 插到页面头部：<head> 后 → <!doctype> 后 → 文档最前 */
+export function injectHeadHtml(html: string, chunk: string): string {
   const head = /<head[^>]*>/i.exec(html);
   if (head && head.index !== undefined) {
     const at = head.index + head[0].length;
-    return html.slice(0, at) + tag + html.slice(at);
+    return html.slice(0, at) + chunk + html.slice(at);
   }
   const doctype = /<!doctype[^>]*>/i.exec(html);
   if (doctype && doctype.index !== undefined) {
     const at = doctype.index + doctype[0].length;
-    return html.slice(0, at) + tag + html.slice(at);
+    return html.slice(0, at) + chunk + html.slice(at);
   }
-  return tag + html;
+  return chunk + html;
+}
+
+/** 插到页面脚本之前 */
+export function injectHeadScript(html: string, script: string): string {
+  return injectHeadHtml(html, `<script>${script}</script>`);
 }
 
 /** 插到 </body> 前（没有 body 时追加到末尾） */

@@ -240,6 +240,8 @@ export interface AppConfig {
     codeMode: {
       enabled: boolean;
       uiEnabled: boolean;
+      /** 是否允许内嵌页面 / 智能界面引用外部 CDN 资源 */
+      allowCdn: boolean;
       timeoutMs: number;
       maxCodeChars: number;
       maxParallelSubCalls: number;

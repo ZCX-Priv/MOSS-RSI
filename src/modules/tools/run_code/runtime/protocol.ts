@@ -45,6 +45,7 @@ export type HostToChild =
 export type ChildToHost =
   | { v: 1; type: 'ready' }
   | { v: 1; type: 'log'; text: string }
+  | { v: 1; type: 'ui'; ui: unknown; uiDiagnostics?: unknown }
   | { v: 1; type: 'call'; id: string; ns: 'tools'; name: string; args: unknown }
   | {
       v: 1;

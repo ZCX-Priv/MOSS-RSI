@@ -318,6 +318,8 @@ const contextSchema = z.object({
 const codeModeSchema = z.object({
   enabled: z.boolean().default(true),
   uiEnabled: z.boolean().default(true),
+  /** 是否允许内嵌页面 / 智能界面引用外部 CDN 资源 */
+  allowCdn: z.boolean().default(true),
   timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
   maxCodeChars: z.number().int().min(1_000).max(200_000).default(20_000),
   maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
@@ -363,6 +365,7 @@ export const appConfigSchema = z.object({
     codeMode: codeModeSchema.default({
       enabled: true,
       uiEnabled: true,
+      allowCdn: true,
       timeoutMs: 120_000,
       maxCodeChars: 20_000,
       maxParallelSubCalls: 10,
