@@ -61,9 +61,9 @@ async function handleInit(req: Extract<VoiceWorkerRequest, { type: 'init' }>): P
     };
     // 只预热识别器，不创建会话
     await ensureLocalRecognizer(runtime, { ...currentInit, vadModel: null });
-    post({ type: 'inited', elapsedMs: Date.now() - startedAt });
+    post({ type: 'inited', initId: req.initId, elapsedMs: Date.now() - startedAt });
   } catch (err) {
-    post({ type: 'init-error', error: errorText(err) });
+    post({ type: 'init-error', initId: req.initId, error: errorText(err) });
   }
 }
 

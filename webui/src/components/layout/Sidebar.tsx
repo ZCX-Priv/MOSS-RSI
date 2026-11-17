@@ -20,6 +20,7 @@ import {
   FolderPlus,
   Loader2,
   CircleAlert,
+  Inbox,
 } from 'lucide-react';
 import {
   DndContext,
@@ -120,7 +121,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, groupTasksMeta, ensureGroupLoaded, loadMoreGroup, ensureAllGroupsLoaded, refreshGroups } = useTasks();
+  const { tasks, taskGroups, updateTask, deleteTask, reorderTasks, createTaskGroup, updateTaskGroup, deleteTaskGroup, reload, groupTasksMeta, ensureGroupLoaded, loadMoreGroup, ensureAllGroupsLoaded, refreshGroups, groupsLoaded } = useTasks();
   /** 分组级运行集合（折叠分组不加载任务时，标题仍显示运行转圈） */
   const runningSessionIdsByGroup = useStore((s) => s.runningSessionIdsByGroup);
   /** 分组级错误集合（折叠分组不加载任务时，标题仍显示错误图标） */
@@ -723,7 +724,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
             </div>
           </div>
           <SidebarGroupContent className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
-            {manageMode && (
+            {manageMode && taskGroups.length > 0 && (
               <div className="flex items-center gap-1 px-2 pb-1">
                 <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={toggleSelectAll}>
                   <CheckCheck className="size-3.5" />
@@ -756,6 +757,13 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 </div>
               </div>
             )}
+            {!groupsLoaded ? null : taskGroups.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+                <Inbox className="size-7 text-muted-foreground/40" />
+                <div className="text-xs text-muted-foreground">{t('sidebar.emptyTasks')}</div>
+                <div className="text-[11px] text-muted-foreground/60">{t('sidebar.emptyTasksHint')}</div>
+              </div>
+            ) : (
             <SidebarMenu>
               {/* 单一顶层 DndContext：任务可跨组拖拽（同组精确排序 / 异组精确插入悬停位置）；
                   measuring Always 保证跨容器拖动时目标组测量准确、让位动画平滑 */}
@@ -768,18 +776,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 onDragEnd={handleDragEnd}
                 onDragCancel={handleDragCancel}
               >
-              {taskGroups
-                // 默认分组为空时隐藏整个条目（常驻分组，持有任务才显示）。
-                // 判定以与分组同帧返回的权威 taskCount 为准（后端由全量任务计算，不受任务分页影响），
-                // 保证默认分组与其它分组同帧出现；displayTasks 兜底覆盖「新任务已到但 taskCount 尚未刷新」。
-                // 非默认分组恒显示；拖动期间以草稿 displayTasks 为渲染源（跨组实时预览）
-                .filter(
-                  (group) =>
-                    group.id !== 'default' ||
-                    (group.taskCount ?? 0) > 0 ||
-                    displayTasks.some((task) => task.groupId === group.id),
-                )
-                .map((group) => {
+              {taskGroups.map((group) => {
                 const groupTasks = displayTasks.filter((task) => task.groupId === group.id);
                 const groupTaskIds = groupTasks.map((t) => t.id);
                 // 展开状态以后端 group.expanded 为准（默认分组缺省展开，其余缺省折叠）
@@ -911,6 +908,7 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
               </DragOverlay>
               </DndContext>
             </SidebarMenu>
+            )}
           </SidebarGroupContent>
         </SidebarGroup>
           </>

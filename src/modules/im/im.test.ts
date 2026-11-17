@@ -53,8 +53,15 @@ function fakeLogger(): Logger {
 }
 
 class FakeAgent {
-  readonly tasks: Array<{ id: string; title: string; groupId: string; createdAt: string; updatedAt: string }> = [];
-  readonly groups = new Map<string, { id: string; name: string }>();
+  readonly tasks: Array<{
+    id: string;
+    title: string;
+    groupId: string;
+    createdAt: string;
+    updatedAt: string;
+    sessionId?: string;
+  }> = [];
+  readonly groups = new Map<string, { id: string; name: string; expanded?: boolean; dir?: string }>();
   readonly runs: Array<{
     sessionId: string;
     userMessage: string;
@@ -86,6 +93,11 @@ class FakeAgent {
 
   createTask(title: string, groupId?: string, id?: string) {
     const taskId = id ?? `task-${this.tasks.length + 1}`;
+    const existing = this.tasks.find(task => task.id === taskId);
+    if (existing) {
+      if (groupId) existing.groupId = groupId;
+      return existing;
+    }
     const task = {
       id: taskId,
       title,
@@ -98,12 +110,45 @@ class FakeAgent {
     return task;
   }
 
-  createTaskGroup(name: string) {
-    const existing = [...this.groups.values()].find(group => group.name === name);
+  getTask(id: string) {
+    return this.tasks.find(task => task.id === id) ?? null;
+  }
+
+  updateTask(id: string, patch: { title?: string; groupId?: string }) {
+    const task = this.tasks.find(item => item.id === id);
+    if (!task) return null;
+    if (patch.title !== undefined) task.title = patch.title;
+    if (patch.groupId !== undefined) task.groupId = patch.groupId;
+    task.updatedAt = new Date().toISOString();
+    return task;
+  }
+
+  createTaskGroup(name: string, _source?: 'folder' | 'manual', opts?: { id?: string; dir?: string; hidden?: boolean }) {
+    const id = opts?.id ?? `group-${this.groups.size + 1}`;
+    const existing = this.groups.get(id) ?? [...this.groups.values()].find(group => group.name === name);
     if (existing) return existing;
-    const group = { id: `group-${this.groups.size + 1}`, name };
+    const group = { id, name, expanded: false, ...(opts?.dir ? { dir: opts.dir } : {}) };
     this.groups.set(group.id, group);
     return group;
+  }
+
+  updateTaskGroup(id: string, patch: { name?: string; expanded?: boolean }) {
+    const group = this.groups.get(id);
+    if (!group) return null;
+    if (patch.name !== undefined) group.name = patch.name;
+    if (patch.expanded !== undefined) group.expanded = patch.expanded;
+    return group;
+  }
+
+  deleteTaskGroup(id: string, opts?: { moveTasksTo?: string }): boolean {
+    if (!this.groups.has(id)) return false;
+    this.groups.delete(id);
+    if (opts?.moveTasksTo) {
+      for (const task of this.tasks) {
+        if (task.groupId === id) task.groupId = opts.moveTasksTo;
+      }
+    }
+    return true;
   }
 
   listTaskGroups() {
@@ -375,6 +420,74 @@ describe('gateway', () => {
     expect(server.agentEvents.length).toBeGreaterThan(0);
     // IM 会话有人交互：不再标记 headless（否则 ask/confirm 会快速失败）
     expect(agent.headless.length).toBe(0);
+  });
+
+  test('会话映射指向已删除任务 → 自动补建到 im 分组并沿用原 sessionId', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    const sessionId = 'session-existing';
+    state.setConversation(`${bot.botId}:direct:10001`, {
+      taskId: sessionId,
+      sessionId,
+      title: '旧会话',
+      updatedAt: new Date().toISOString(),
+    });
+    const gateway = new ImGateway({
+      logger: fakeLogger(),
+      services: fakeRegistry(agent, { workingDirectory: '' }),
+      state,
+      server: fakeServer(),
+      dataDir: tempDir(),
+      supportsMarkdown: () => false,
+      channelLabel: () => 'QQ用户模式',
+      sendText: async () => undefined,
+      setTyping: async () => undefined,
+      getBot: botId => (botId === bot.botId ? bot : null),
+      updateBotOptions: async () => undefined,
+    });
+
+    gateway.handle(bot, inbound({ text: '继续', messageId: 'm-1' }));
+    await Bun.sleep(50);
+
+    expect(agent.runs[0]?.sessionId).toBe(sessionId);
+    expect(agent.tasks.length).toBe(1);
+    expect(agent.tasks[0]?.id).toBe(sessionId);
+    expect(agent.tasks[0]?.groupId).toBe('im');
+    expect(agent.groups.get('im')?.expanded).toBe(true);
+  });
+
+  test('任务存在但不在 im 分组 → 自动移入 im', async () => {
+    const { state, bot } = await makeBot();
+    state.bind(bot.botId, { id: '10001', name: 'u', boundAt: new Date().toISOString() });
+    const agent = new FakeAgent();
+    agent.createTaskGroup('其它分组', 'manual', { id: 'other' });
+    const task = agent.createTask('旧任务', 'other', 'session-move');
+    state.setConversation(`${bot.botId}:direct:10001`, {
+      taskId: task.id,
+      sessionId: task.id,
+      title: task.title,
+      updatedAt: new Date().toISOString(),
+    });
+    const gateway = new ImGateway({
+      logger: fakeLogger(),
+      services: fakeRegistry(agent, { workingDirectory: '' }),
+      state,
+      server: fakeServer(),
+      dataDir: tempDir(),
+      supportsMarkdown: () => false,
+      channelLabel: () => 'QQ用户模式',
+      sendText: async () => undefined,
+      setTyping: async () => undefined,
+      getBot: botId => (botId === bot.botId ? bot : null),
+      updateBotOptions: async () => undefined,
+    });
+
+    gateway.handle(bot, inbound({ text: '继续', messageId: 'm-2' }));
+    await Bun.sleep(50);
+
+    expect(agent.runs[0]?.sessionId).toBe(task.id);
+    expect(agent.tasks.find(item => item.id === task.id)?.groupId).toBe('im');
   });
 
   test('图片/文件附件落盘并注入 agent', async () => {

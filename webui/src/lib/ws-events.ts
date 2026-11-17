@@ -173,6 +173,27 @@ function emitHistoryInvalidated(sessionId: string): void {
   }
 }
 
+/** tasks.file-changed 合并窗口：连续落盘事件只触发一次静默拉取 */
+let taskListSyncTimer: number | null = null;
+
+/** 磁盘任务/分组变化：静默重新拉取权威列表（不显示 loading、不刷新页面） */
+function scheduleTaskListSync(): void {
+  if (taskListSyncTimer !== null) window.clearTimeout(taskListSyncTimer);
+  taskListSyncTimer = window.setTimeout(() => {
+    taskListSyncTimer = null;
+    void api
+      .listTasks()
+      .then(({ groups, tasks }) => {
+        const st = useStore.getState();
+        if (Array.isArray(groups)) st.setTaskGroups(groups);
+        if (Array.isArray(tasks)) st.applyFullTaskSnapshot(tasks);
+      })
+      .catch(() => {
+        // 后端重启窗口等瞬时失败：保持现状，下一次事件会重试
+      });
+  }, 150);
+}
+
 const truncatedHandlers = new Set<(sessionId: string) => void>();
 
 /**
@@ -1131,12 +1152,33 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
     // ======================================================================
     // 任务列表实时同步（后端广播：任意客户端的增删改都不需要刷新本端）
     // ======================================================================
+    case 'tasks.file-changed': {
+      // 磁盘外部变化（后端 watcher）：静默重新拉取，避免在 WS 里复制隐藏分组/运行态富化逻辑
+      scheduleTaskListSync();
+      break;
+    }
+    case 'session.file-changed': {
+      // 会话 JSON 被外部修改：失效本地缓存并整体重载末页（不刷新页面）
+      const payload = (msg.payload ?? {}) as { sessionId?: string };
+      const sid = msg.sessionId ?? payload.sessionId;
+      if (!sid) break;
+      const st = useStore.getState();
+      if (st.generatingBySession[sid]) break;
+      st.clearMessages(sid);
+      st.resetHistory(sid);
+      st.clearHistoryCache(sid);
+      emitHistoryInvalidated(sid);
+      break;
+    }
     case 'task.created': {
       const payload = (msg.payload ?? {}) as { task?: TaskItem; group?: TaskGroup };
       if (payload.task) {
         const st = useStore.getState();
         const group = payload.group;
-        if (group && !st.taskGroups.some((g) => g.id === group.id)) st.addTaskGroup(group);
+        // 新分组强制展开：新建任务必须立即可见（后端缺省折叠/旧快照都不会把任务行藏起来）
+        if (group && !st.taskGroups.some((g) => g.id === group.id)) {
+          st.addTaskGroup({ ...group, expanded: true });
+        }
         // 已存在同 id（本端已乐观插入 / HTTP 响应先到）→ 用服务端条目覆盖合并：
         // 关键是把 groupId 校正为服务端权威分组，并在分组栏中归位，而不是直接丢弃事件。
         if (st.tasks.some((tk) => tk.id === payload.task!.id)) {

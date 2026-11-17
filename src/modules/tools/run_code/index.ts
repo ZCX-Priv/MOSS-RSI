@@ -47,6 +47,8 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: UISpec;
   uiDiagnostics?: UIDiagnostic[];
+  /** 界面因诊断未渲染（严格模式：任意诊断都视为构建失败） */
+  uiFailed?: boolean;
   /** 是否含内嵌页面（源码以 toolCall.arguments 为渲染真相，metadata 不重复存储） */
   hasPage?: boolean;
   /** 智能界面 Embed 的 TSX 编译产物（按节点 __embedId 索引） */
@@ -214,8 +216,9 @@ export default {
     const builderDiagnostics = normalizeDiagnostics(hostResult.uiDiagnostics);
     const validation = hostResult.ui !== undefined ? validateUISpec(hostResult.ui) : { diagnostics: [], fatal: false };
     const uiDiagnostics = [...builderDiagnostics, ...validation.diagnostics];
-    // error 级诊断（含 fatal）一律视为界面构建失败：不渲染 UI，按标准工具错误回传
-    const uiFailed = validation.fatal || uiDiagnostics.some((d) => d.severity === 'error');
+    // 严格模式：任意诊断（含 warning）都视为界面构建失败——不渲染 UI，按标准工具错误回传，
+    // 由模型根据诊断修正后重新调用。只有零诊断的规格才允许进入前端。
+    const uiFailed = validation.fatal || uiDiagnostics.length > 0;
     const uiSpec = uiFailed ? undefined : validation.spec;
 
     // ---- 智能界面 Embed：TSX 服务端编译（HTML 直接渲染） ----
@@ -266,6 +269,7 @@ export default {
       calls: hostResult.calls,
       ...(hostResult.callsTruncated ? { callsTruncated: true } : {}),
       ...(uiSpec ? { uiSpec } : {}),
+      ...(uiFailed ? { uiFailed: true } : {}),
       ...(uiEmbedScripts ? { uiEmbedScripts } : {}),
       ...(page ? { hasPage: true } : {}),
       ...(pageScript ? { pageScript } : {}),

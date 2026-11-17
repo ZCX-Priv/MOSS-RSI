@@ -10,30 +10,67 @@ export const CHANNEL_TEXT_LIMIT: Record<ImChannelId, number> = {
 };
 
 /**
+ * 代码围栏保护：围栏内只去掉语言标记与收尾围栏，正文原样保留。
+ * 不能对代码内容跑 Markdown 正则（会把 `foo_bar`、`a*b` 之类误删）。
+ */
+function stripCodeFence(fence: string): string {
+  return fence
+    .replace(/^```[^\n]*\n?/, '')
+    .replace(/\n?```\s*$/, '');
+}
+
+/** 行内 Markdown → 纯文本（保守：只处理成对强调，避免破坏标识符） */
+function stripInlineMarkdown(text: string): string {
+  let out = text;
+  // 行内代码：去掉反引号，保留内容
+  out = out.replace(/`([^`\n]+)`/g, '$1');
+  // 标题前缀
+  out = out.replace(/^#{1,6}\s+/gm, '');
+  // 粗体 / 斜体 / 删除线：要求标记两侧不是单词字符（避免 __init__ / foo_bar 被吃掉）
+  out = out.replace(/(^|[^\w])\*\*(?=\S)([\s\S]*?\S)\*\*(?![\w])/g, '$1$2');
+  out = out.replace(/(^|[^\w])__(?=\S)([\s\S]*?\S)__(?![\w])/g, '$1$2');
+  out = out.replace(/(^|[^\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])/g, '$1$2');
+  out = out.replace(/(^|[^\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])/g, '$1$2');
+  out = out.replace(/(^|[^\w])~~(?=\S)([\s\S]*?\S)~~(?![\w])/g, '$1$2');
+  // 链接 [text](url) → text (url)
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)');
+  // 图片 ![alt](url) → alt (url)
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '$1 ($2)');
+  // 表格分隔行 |---|:---:| → 删除
+  out = out.replace(/^\s*\|?[\s:|-]+\|[\s:|-]*\s*$/gm, '');
+  return out;
+}
+
+/**
  * Markdown → 纯文本：去掉渲染标记但保留内容与换行。
- * 只做最小必要转换（完整 Markdown 解析对 IM 纯文本没有价值）。
+ * 代码围栏整体保护（正文不参与 Markdown 转换），避免代码/标识符丢字。
  */
 export function toPlainText(markdown: string): string {
-  let text = markdown.replace(/\r\n/g, '\n');
-  // 代码围栏：去掉 ```lang 与收尾 ```，保留代码正文
-  text = text.replace(/```[^\n]*\n?/g, '');
-  // 行内代码
-  text = text.replace(/`([^`\n]+)`/g, '$1');
-  // 标题前缀
-  text = text.replace(/^#{1,6}\s+/gm, '');
-  // 粗体 / 斜体 / 删除线
-  text = text.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  text = text.replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, '$2');
-  text = text.replace(/~~(.*?)~~/g, '$1');
-  // 链接 [text](url) → text (url)
-  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)');
-  // 图片 ![alt](url) → alt (url)
-  text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '$1 ($2)');
-  // 表格分隔行 |---|:---:| → 删除
-  text = text.replace(/^\s*\|?[\s:|-]+\|[\s:|-]*\s*$/gm, '');
+  const source = markdown.replace(/\r\n/g, '\n');
+  const parts = source.split(/(```[\s\S]*?```)/g);
+  const text = parts
+    .map((part) => (part.startsWith('```') ? stripCodeFence(part) : stripInlineMarkdown(part)))
+    .join('');
   // 列表符号保留（IM 里可读），但收敛多余空行
-  text = text.replace(/\n{3,}/g, '\n\n');
-  return text.trim();
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 硬切长行：边界避开 UTF-16 代理对，emoji 不会被劈成乱码 */
+function hardSplit(line: string, limit: number): string[] {
+  const chunks: string[] = [];
+  let index = 0;
+  while (index < line.length) {
+    let end = Math.min(line.length, index + limit);
+    if (end < line.length) {
+      const code = line.charCodeAt(end - 1);
+      // 高代理项：退一格，保证代理对完整落在同一段
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+      if (end <= index) end = Math.min(line.length, index + limit + 1);
+    }
+    chunks.push(line.slice(index, end));
+    index = end;
+  }
+  return chunks;
 }
 
 /**
@@ -70,9 +107,7 @@ export function splitText(text: string, limit: number): string[] {
         continue;
       }
       flush();
-      for (let index = 0; index < line.length; index += limit) {
-        chunks.push(line.slice(index, index + limit));
-      }
+      chunks.push(...hardSplit(line, limit));
     }
   }
   flush();

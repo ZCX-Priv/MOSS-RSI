@@ -40,7 +40,7 @@ export interface TaskGroup {
   taskCount?: number;
   /** 分组来源：folder = 按工作目录自动创建（空时自动销毁）；manual = 手动新建（允许空状态）。旧数据无该字段视为 manual */
   source?: 'folder' | 'manual';
-  /** 相对存储目录（tasks/ 下），缺省 = safeGroupId(id)。支持自定义嵌套布局 */
+  /** 相对存储目录（tasks/ 下）：main/<groupId> / subagent / im */
   dir?: string;
   /** 隐藏分组：其会话不出现在侧边栏列表（subagent 衍生会话），但可经卡片/任务页进入 */
   hidden?: boolean;
@@ -50,7 +50,8 @@ export interface TaskGroup {
 interface TaskRootStore {
   /**
    * 数据版本：4 = 分散存储体系（总管 + 按组目录）；
-   * 5 = 分组 expanded 状态后端化（默认分组展开、其余折叠，之后由前端 PATCH 持久化）
+   * 5 = 分组 expanded 状态后端化；
+   * 6 = 类别目录布局：tasks/main/<groupId>、tasks/subagent、tasks/im
    */
   version?: number;
   groups: TaskGroup[];
@@ -65,8 +66,14 @@ interface LegacyTaskStore {
   tasks: TaskItem[];
 }
 
+const STORE_VERSION = 6;
 const DEFAULT_GROUP_ID = 'default';
 const DEFAULT_GROUP_NAME = '默认任务';
+const SUBAGENT_GROUP_ID = 'subagent';
+const IM_GROUP_ID = 'im';
+const IM_GROUP_NAME = 'IM 连接';
+/** 普通分组的类别目录（分组目录 = main/<groupId>） */
+const MAIN_CATEGORY = 'main';
 /** 组内任务元信息文件名（与根总管 task.json 同名，不同层级） */
 const GROUP_TASKS_FILE = 'task.json';
 
@@ -103,6 +110,8 @@ export class TaskStore {
   private readonly tasksByGroup = new Map<string, TaskItem[]>();
   /** 后台分组加载 promise（惰性启动） */
   private readyPromise: Promise<void> | null = null;
+  /** 磁盘重载防重入（外部文件热同步） */
+  private reloadPromise: Promise<void> | null = null;
 
   constructor(env: Environment, logger: Logger) {
     this.rootPath = join(env.dataDir, 'task.json');
@@ -124,26 +133,206 @@ export class TaskStore {
   /** 只读总管：分组定义 + task↔session 索引；各分组任务列表留空待后台填充 */
   private loadRootOnly(): void {
     const root = readJsonStore<Partial<TaskRootStore>>(this.rootPath, {} as Partial<TaskRootStore>, this.logger);
-    this.groups = Array.isArray(root.groups) ? [...root.groups] : [];
-    if (!this.groups.find(g => g.id === DEFAULT_GROUP_ID)) {
-      this.groups.unshift({ id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, expanded: true });
-    }
-    // 一次性迁移（v4 → v5）：此前 expanded 从未被前端读写，旧数据里的 true 只是默认值。
-    // 规范化为「默认分组展开、其余折叠」，之后展开/收起由前端 PATCH 持久化，
-    // 跨浏览器/多端以 task.json 为唯一真相。
-    if (root.version !== 5) {
-      this.groups = this.groups.map(g => ({
-        ...g,
-        expanded: g.id === DEFAULT_GROUP_ID,
-      }));
-    }
+    this.groups = Array.isArray(root.groups) ? root.groups.map(g => ({ ...g })) : [];
     this.index = root.index && typeof root.index === 'object' ? { ...root.index } : {};
+    const needsMigration = root.version !== STORE_VERSION;
+    if (needsMigration) {
+      this.migrateLayoutV6();
+    } else {
+      this.normalizeGroupDirs();
+    }
     this.tasksByGroup.clear();
     for (const g of this.groups) {
       if (!this.tasksByGroup.has(g.id)) this.tasksByGroup.set(g.id, []);
     }
-    // 迁移结果落盘（saveRoot 内部写 version: 5）；仅在版本不符时触发，后续启动零开销
-    if (root.version !== 5) this.saveRoot();
+    // 迁移结果落盘（saveRoot 内部写 STORE_VERSION）；仅在版本不符时触发，后续启动零开销
+    if (needsMigration) this.saveRoot();
+  }
+
+  /** 分组相对目录：main/<groupId> / subagent / im（类别目录布局） */
+  private dirForGroup(group: TaskGroup): string {
+    if (group.id === SUBAGENT_GROUP_ID || group.hidden === true) return SUBAGENT_GROUP_ID;
+    if (group.id === IM_GROUP_ID) return IM_GROUP_ID;
+    return `${MAIN_CATEGORY}/${safeGroupId(group.id) || DEFAULT_GROUP_ID}`;
+  }
+
+  /** 按分组 id 推导目录（分组定义缺失时的兜底） */
+  private dirForId(id: string): string {
+    if (id === SUBAGENT_GROUP_ID) return SUBAGENT_GROUP_ID;
+    if (id === IM_GROUP_ID) return IM_GROUP_ID;
+    return `${MAIN_CATEGORY}/${safeGroupId(id) || DEFAULT_GROUP_ID}`;
+  }
+
+  /** v6 存档规整：补齐类别目录、统一 IM/subagent/default 语义 */
+  private normalizeGroupDirs(): void {
+    for (const g of this.groups) {
+      if (g.id === DEFAULT_GROUP_ID) g.source = 'folder';
+      if (g.id === SUBAGENT_GROUP_ID) g.hidden = true;
+      if (g.id === IM_GROUP_ID) {
+        g.source = 'folder';
+        g.hidden = false;
+      }
+      g.dir = this.dirForGroup(g);
+    }
+  }
+
+  /**
+   * v5 → v6 迁移：把旧分组目录搬入 main/<groupId>、subagent、im 三类。
+   * 可重入：源目录不存在或目标已存在时跳过，不丢数据；task.json 冲突按任务 id 合并。
+   */
+  private migrateLayoutV6(): void {
+    // 1) 历史 IM 分组（名称“IM 连接”但 id 随机）统一为 id=im
+    const imGroup = this.groups.find(g => g.name === IM_GROUP_NAME);
+    if (imGroup && imGroup.id !== IM_GROUP_ID) {
+      const oldId = imGroup.id;
+      const already = this.groups.find(g => g.id === IM_GROUP_ID && g !== imGroup);
+      if (already) {
+        // 已有规范 im 分组：先合并旧目录内容，再丢弃重复定义
+        const oldDir = imGroup.dir ? safeRelDir(imGroup.dir) : safeGroupId(oldId);
+        if (oldDir && oldDir !== IM_GROUP_ID) this.moveDirContents(oldDir, IM_GROUP_ID);
+        this.groups = this.groups.filter(g => g !== imGroup);
+      } else {
+        imGroup.id = IM_GROUP_ID;
+      }
+      for (const entry of Object.values(this.index)) {
+        if (entry.groupId === oldId) entry.groupId = IM_GROUP_ID;
+      }
+    }
+
+    // 2) 普通分组：旧目录 → 类别目录
+    const kept: TaskGroup[] = [];
+    const claimedDirs = new Set<string>();
+    for (const g of this.groups) {
+      if (g.id === DEFAULT_GROUP_ID) {
+        g.source = 'folder';
+        g.expanded = true;
+      } else {
+        g.expanded = g.expanded ?? false;
+      }
+      if (g.id === SUBAGENT_GROUP_ID) g.hidden = true;
+      if (g.id === IM_GROUP_ID) {
+        g.source = 'folder';
+        g.hidden = false;
+      }
+
+      const newDir = this.dirForGroup(g);
+      const oldDir = g.dir ? safeRelDir(g.dir) : safeGroupId(g.id);
+      if (oldDir && oldDir !== newDir) this.moveDirContents(oldDir, newDir);
+      g.dir = newDir;
+
+      const taskCount = this.countTasksInDir(newDir);
+      const autoGroup =
+        g.source === 'folder' || g.hidden === true || g.id === DEFAULT_GROUP_ID;
+      if (taskCount === 0 && autoGroup) {
+        this.removeGroupDir(newDir);
+        continue;
+      }
+      if (!existsSync(join(this.tasksDir, newDir))) {
+        if (g.source === 'manual' && g.hidden !== true) {
+          // 手动空分组：补齐空目录，保证“有文件夹才显示”
+          this.writeEmptyGroup(newDir);
+        } else {
+          continue;
+        }
+      }
+      if (claimedDirs.has(newDir)) continue;
+      claimedDirs.add(newDir);
+      kept.push(g);
+    }
+    this.groups = kept;
+  }
+
+  /** 读取某目录 task.json 的任务数（不存在视为 0） */
+  private countTasksInDir(relDir: string): number {
+    const file = join(this.tasksDir, relDir, GROUP_TASKS_FILE);
+    if (!existsSync(file)) return 0;
+    return readJsonStore<TaskItem[]>(file, [] as TaskItem[], this.logger)
+      .filter(tk => typeof tk?.id === 'string').length;
+  }
+
+  /** 写空组文件（manual 空分组可见性依赖目录存在） */
+  private writeEmptyGroup(relDir: string): void {
+    try {
+      writeJsonStore(join(this.tasksDir, relDir, GROUP_TASKS_FILE), []);
+    } catch (err) {
+      this.logger.warn('agent: task store create empty group failed', {
+        dir: relDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 搬移旧目录中的组文件到新类别目录；目标同名文件按任务 id 合并 */
+  private moveDirContents(fromRel: string, toRel: string): void {
+    if (!fromRel || fromRel === toRel) return;
+    const fromAbs = join(this.tasksDir, fromRel);
+    if (!existsSync(fromAbs)) return;
+    const toAbs = join(this.tasksDir, toRel);
+    try {
+      mkdirSync(toAbs, { recursive: true });
+      for (const entry of readdirSync(fromAbs, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const src = join(fromAbs, entry.name);
+        const dest = join(toAbs, entry.name);
+        if (existsSync(dest)) {
+          if (entry.name === GROUP_TASKS_FILE) this.mergeTaskFiles(dest, src);
+          continue;
+        }
+        renameSync(src, dest);
+      }
+      rmdirSync(fromAbs);
+    } catch {
+      // 源目录非空/被占用：保留，下次启动继续迁移（幂等）
+    }
+    this.pruneEmptyParentDirs(fromRel);
+  }
+
+  /** 合并两份组任务文件（按任务 id 去重，目标优先） */
+  private mergeTaskFiles(destFile: string, srcFile: string): void {
+    try {
+      const destTasks = readJsonStore<TaskItem[]>(destFile, [] as TaskItem[], this.logger);
+      const srcTasks = readJsonStore<TaskItem[]>(srcFile, [] as TaskItem[], this.logger);
+      const byId = new Map<string, TaskItem>();
+      for (const tk of [...destTasks, ...srcTasks]) {
+        if (typeof tk?.id === 'string' && !byId.has(tk.id)) byId.set(tk.id, tk);
+      }
+      writeJsonStore(destFile, [...byId.values()]);
+      unlinkSync(srcFile);
+    } catch (err) {
+      this.logger.warn('agent: task store merge group failed', {
+        dest: destFile,
+        src: srcFile,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 删除空分组目录（若仍有会话文件则保留，避免误删数据） */
+  private removeGroupDir(relDir: string): void {
+    const abs = join(this.tasksDir, relDir);
+    if (!existsSync(abs)) return;
+    try {
+      const remaining = readdirSync(abs).filter(name => name !== GROUP_TASKS_FILE);
+      if (remaining.length > 0) return;
+      const taskFile = join(abs, GROUP_TASKS_FILE);
+      if (existsSync(taskFile)) unlinkSync(taskFile);
+      rmdirSync(abs);
+      this.pruneEmptyParentDirs(relDir);
+    } catch {
+      // 被占用/非空：保留，下一轮清理
+    }
+  }
+
+  /** 重新从磁盘加载总管与分组（外部文件变化热同步用；防重入） */
+  async reloadFromDisk(): Promise<void> {
+    if (this.reloadPromise) return this.reloadPromise;
+    this.reloadPromise = (async () => {
+      this.loadRootOnly();
+      await this.loadGroupsAsync();
+    })().finally(() => {
+      this.reloadPromise = null;
+    });
+    return this.reloadPromise;
   }
 
   /**
@@ -247,7 +436,7 @@ export class TaskStore {
 
   /**
    * 查询 taskId 的存储相对目录（供 SessionStore 解析 session 文件路径）。
-   * 普通组 = 组目录名；嵌套组（group.dir 非空）= group.dir。未知返回 null。
+   * v6 布局：main/<groupId> / subagent / im。未知返回 null。
    */
   getDirOf(taskId: string): string | null {
     // 索引可能在极端时序下缺失（创建/移组与首次落盘并发）→ 回落到任务实体，
@@ -257,12 +446,12 @@ export class TaskStore {
     return this.dirOf(gid);
   }
 
-  /** 分组相对存储目录：group.dir（清洗）优先，否则 safeGroupId(id) */
+  /** 分组相对存储目录：group.dir（清洗）优先，否则按 id 推导类别目录 */
   private dirOf(groupId: string): string {
     const g = this.groups.find((x) => x.id === groupId);
     const cleaned = g?.dir ? safeRelDir(g.dir) : '';
     if (cleaned) return cleaned;
-    return safeGroupId(groupId) || DEFAULT_GROUP_ID;
+    return this.dirForId(groupId);
   }
 
   createTask(title: string, groupId?: string, id?: string): TaskItem {
@@ -284,7 +473,8 @@ export class TaskStore {
     // 前端可预分配会话 id（乐观导航：点发送即刻进入任务页，task.id 即 sessionId）。
     // 传入且未被占用则沿用；缺失时回退新 UUID。
     const taskId = id ?? crypto.randomUUID();
-    const gid = this.validGroupId(groupId) ?? DEFAULT_GROUP_ID;
+    // 默认分组按需创建：只有任务确实需要落到 default 时才建立 main/default
+    const gid = this.validGroupId(groupId) ?? this.ensureDefaultGroup().id;
     const groupTasks = this.tasksByGroup.get(gid) ?? [];
     // 新任务置于分组顶部：取分组内现有最小 order - 1（无任务时 0）
     const nextOrder = groupTasks.length
@@ -422,11 +612,15 @@ export class TaskStore {
   // ==========================================================================
 
   listGroups(): TaskGroup[] {
-    // 附带 taskCount
-    return this.groups.map(g => ({
-      ...g,
-      taskCount: (this.tasksByGroup.get(g.id) ?? []).length,
-    }));
+    // 附带 taskCount；没有任务且目录不存在的分组不返回（“有文件夹才显示”，
+    // default/im 等按需分组在首次使用前不会出现在侧边栏）。
+    const out: TaskGroup[] = [];
+    for (const g of this.groups) {
+      const taskCount = (this.tasksByGroup.get(g.id) ?? []).length;
+      if (taskCount === 0 && !existsSync(join(this.tasksDir, this.dirOf(g.id)))) continue;
+      out.push({ ...g, taskCount });
+    }
+    return out;
   }
 
   createGroup(
@@ -435,19 +629,74 @@ export class TaskStore {
     opts?: { id?: string; dir?: string; hidden?: boolean },
   ): TaskGroup {
     const id = opts?.id ?? crypto.randomUUID();
+    const effectiveSource = source ?? 'manual';
+    // 目录式分组按名称幂等：空组可能因“有文件夹才显示”不在 listGroups 中，
+    // 但同名的定义仍应复用，避免同目录反复新建随机 id 的空分组。
+    if (!opts?.id && effectiveSource === 'folder') {
+      const target = name.trim().toLowerCase();
+      if (target) {
+        const byName = this.groups.find(
+          g => g.hidden !== true && g.name.trim().toLowerCase() === target,
+        );
+        if (byName) {
+          if (!byName.dir) byName.dir = this.dirForGroup(byName);
+          if (!this.tasksByGroup.has(byName.id)) this.tasksByGroup.set(byName.id, []);
+          this.saveRoot();
+          return { ...byName, taskCount: (this.tasksByGroup.get(byName.id) ?? []).length };
+        }
+      }
+    }
+    // 幂等：同 id 已存在（调用方未从 listGroups 看到它，例如空组被“有文件夹才显示”过滤）
+    // 时复用定义，避免 root 里出现重复 id 的分组。
+    const existing = this.groups.find(g => g.id === id);
+    if (existing) {
+      if (name && name.trim()) existing.name = name;
+      if (source) existing.source = source;
+      if (opts?.dir) existing.dir = safeRelDir(opts.dir);
+      if (opts?.hidden) existing.hidden = true;
+      if (!this.tasksByGroup.has(id)) this.tasksByGroup.set(id, []);
+      this.saveRoot();
+      if ((existing.source ?? 'manual') === 'manual' && existing.hidden !== true) {
+        this.saveGroupTasks(id);
+      }
+      return { ...existing, taskCount: (this.tasksByGroup.get(id) ?? []).length };
+    }
     const group: TaskGroup = {
       id,
       name: name || '新分组',
-      // 默认折叠：新建分组不触发任务加载，用户首次点击展开时才懒加载
-      expanded: false,
-      ...(source ? { source } : {}),
-      ...(opts?.dir ? { dir: opts.dir } : {}),
+      // 目录式分组（通常由新任务创建工作目录触发）默认展开：新任务必须在侧边栏立即可见；
+      // 手动分组/隐藏分组保持折叠，避免无任务时触发多余加载。
+      expanded: effectiveSource === 'folder' && opts?.hidden !== true,
+      source: effectiveSource,
       ...(opts?.hidden ? { hidden: true } : {}),
     };
+    group.dir = opts?.dir ? safeRelDir(opts.dir) : this.dirForGroup(group);
     this.groups.push(group);
     this.tasksByGroup.set(id, []);
     this.saveRoot();
+    // 手动空分组立即落出目录（用户显式创建，空状态也应可见）；
+    // 目录式/隐藏分组等第一个任务写入时再建目录，避免初始出现空分组。
+    if (effectiveSource === 'manual' && group.hidden !== true) {
+      this.saveGroupTasks(id);
+    }
     return { ...group, taskCount: 0 };
+  }
+
+  /** 按需创建默认分组：不主动建目录，首个任务写入时才落出 main/default */
+  private ensureDefaultGroup(): TaskGroup {
+    const existing = this.groups.find(g => g.id === DEFAULT_GROUP_ID);
+    if (existing) return existing;
+    const group: TaskGroup = {
+      id: DEFAULT_GROUP_ID,
+      name: DEFAULT_GROUP_NAME,
+      expanded: true,
+      source: 'folder',
+      dir: this.dirForId(DEFAULT_GROUP_ID),
+    };
+    this.groups.push(group);
+    this.tasksByGroup.set(DEFAULT_GROUP_ID, []);
+    this.saveRoot();
+    return group;
   }
 
   updateGroup(id: string, patch: { name?: string; expanded?: boolean }): TaskGroup | null {
@@ -488,9 +737,12 @@ export class TaskStore {
       return true;
     }
 
-    // 迁移任务到目标分组或默认分组（组文件 + session 文件一并搬移）
-    const targetGroup = this.validGroupId(opts?.moveTasksTo) ? opts!.moveTasksTo! : DEFAULT_GROUP_ID;
+    // 迁移任务到目标分组或默认分组（组文件 + session 文件一并搬移）。
+    // 空组删除不创建默认分组/目录：只有确实有任务需要迁入时才按需建立。
     const moving = this.tasksByGroup.get(id) ?? [];
+    const targetGroup =
+      this.validGroupId(opts?.moveTasksTo) ??
+      (moving.length > 0 ? this.ensureDefaultGroup().id : DEFAULT_GROUP_ID);
     const targetList = this.tasksByGroup.get(targetGroup) ?? [];
     const now = new Date().toISOString();
     let failedMoves = 0;
@@ -515,7 +767,7 @@ export class TaskStore {
       this.tasksByGroup.delete(id);
     }
     this.groups.splice(idx, 1);
-    this.saveGroupTasks(targetGroup);
+    if (moving.length > 0) this.saveGroupTasks(targetGroup);
     if (failedMoves === 0) this.saveGroupTasks(id);
     this.saveRoot();
     // 仅在全部 session 文件搬移成功时清理旧组目录；失败时保留（防物理删除未搬走的
@@ -540,15 +792,14 @@ export class TaskStore {
   }
 
   /**
-   * 销毁空的自动分组：source='folder'（按工作目录自动创建）或 hidden=true
-   * （subagent 等隐藏衍生分组，须"跑过才建"、无任务即消失）且无任务。
+   * 销毁空的自动分组：source='folder'、hidden=true 或 default 且无任务。
    * 任务移出/删除后即时调用；load 时兜底清理「创建后从未有任务」的残留空组。
-   * 普通手动分组（manual / 旧数据无 source）与默认分组不在清理范围。
+   * 用户手动新建的 manual 空分组允许保留。
    */
   private pruneEmptyFolderGroups(): void {
     const doomed = this.groups.filter(
       g =>
-        (g.source === 'folder' || g.hidden === true) &&
+        (g.source === 'folder' || g.hidden === true || g.id === DEFAULT_GROUP_ID) &&
         (this.tasksByGroup.get(g.id) ?? []).length === 0,
     );
     if (doomed.length === 0) return;
@@ -557,15 +808,8 @@ export class TaskStore {
     this.groups = this.groups.filter(g => !doomed.find(d => d.id === g.id));
     for (const { id, dir } of doomedDirs) {
       this.tasksByGroup.delete(id);
-      try {
-        rmSync(join(this.tasksDir, dir), { recursive: true, force: true });
-      } catch (err) {
-        this.logger.warn(t('agent.taskStoreCleanupFailed'), {
-          dir,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      this.pruneEmptyParentDirs(dir);
+      // 只删空目录；若仍有残留会话文件则保留磁盘数据，仅移除分组定义
+      this.removeGroupDir(dir);
     }
     this.saveRoot();
   }
@@ -708,62 +952,6 @@ export class TaskStore {
   // 持久化
   // ==========================================================================
 
-  /** 加载总管 + 扫描各组 task.json，以文件为真相源自愈索引 */
-  private load(): void {
-    const root = readJsonStore<Partial<TaskRootStore>>(this.rootPath, {} as Partial<TaskRootStore>, this.logger);
-    this.groups = Array.isArray(root.groups) ? [...root.groups] : [];
-    if (!this.groups.find(g => g.id === DEFAULT_GROUP_ID)) {
-      this.groups.unshift({ id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, expanded: true });
-    }
-    this.index = root.index && typeof root.index === 'object' ? { ...root.index } : {};
-    this.tasksByGroup.clear();
-
-    // 扫描分组目录中的 task.json（以磁盘目录为准，单文件损坏自动 .corrupt 留档跳过）：
-    //   一级 tasks/<d1>/task.json（普通组）
-    //   二级 tasks/<d1>/<d2>/task.json（自定义嵌套组）
-    if (existsSync(this.tasksDir)) {
-      for (const entry of readdirSync(this.tasksDir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const d1 = safeGroupId(entry.name);
-        if (!d1) continue;
-        this.loadGroupDir(d1);
-        for (const sub of readdirSync(join(this.tasksDir, entry.name), { withFileTypes: true })) {
-          if (!sub.isDirectory()) continue;
-          const d2 = safeGroupId(sub.name);
-          if (!d2) continue;
-          this.loadGroupDir(`${d1}/${d2}`);
-        }
-      }
-    }
-    // 确保每个分组都有任务列表
-    for (const g of this.groups) {
-      if (!this.tasksByGroup.has(g.id)) this.tasksByGroup.set(g.id, []);
-    }
-
-    // 自愈索引：文件为准补缺、删悬空；有变化回写
-    let dirty = false;
-    for (const [gid, tasks] of this.tasksByGroup) {
-      for (const tk of tasks) {
-        if (!this.index[tk.id]) {
-          this.index[tk.id] = { groupId: gid, sessionId: tk.sessionId ?? tk.id };
-          dirty = true;
-        } else if (this.index[tk.id].groupId !== gid) {
-          this.index[tk.id] = { groupId: gid, sessionId: tk.sessionId ?? tk.id };
-          dirty = true;
-        }
-      }
-    }
-    for (const id of Object.keys(this.index)) {
-      if (!this.findTask(id)) {
-        delete this.index[id];
-        dirty = true;
-      }
-    }
-    if (dirty) this.saveRoot();
-    // 启动兜底：清理「创建后从未有任务」的残留空文件夹分组
-    this.pruneEmptyFolderGroups();
-  }
-
   /**
    * 读取某相对目录（tasks/<relDir>）下的组任务文件。
    * 无 task.json 视为非分组目录（如嵌套分组父目录）：跳过且不补占位分组。
@@ -781,17 +969,48 @@ export class TaskStore {
 
   /**
    * 按相对目录定位分组定义；缺失则补占位分组（保留 dir，保证路径可复现）。
-   * 磁盘目录无对应分组定义（分组定义被手删）时避免任务不可见。
+   * v6 目录语义：main/<groupId> / subagent / im；外部新建目录时也按此规则归组。
    */
   private groupByDir(relDir: string): TaskGroup {
     const found = this.groups.find(g => this.dirOf(g.id) === relDir);
     if (found) return found;
+    const segs = relDir.split('/');
+    let id: string;
+    let name: string;
+    let hidden = false;
+    let source: 'folder' | 'manual' = 'manual';
+    if (segs[0] === MAIN_CATEGORY && segs.length > 1) {
+      id = safeGroupId(segs[1]) || relDir;
+      // default 是自动分组：即使目录被外部保留/重建，也按“空则销毁”处理
+      name = id === DEFAULT_GROUP_ID ? DEFAULT_GROUP_NAME : id;
+      if (id === DEFAULT_GROUP_ID) source = 'folder';
+    } else if (relDir === SUBAGENT_GROUP_ID) {
+      id = SUBAGENT_GROUP_ID;
+      name = 'Subagent';
+      hidden = true;
+      source = 'folder';
+    } else if (relDir === IM_GROUP_ID) {
+      id = IM_GROUP_ID;
+      name = IM_GROUP_NAME;
+      source = 'folder';
+    } else {
+      id = safeGroupId(relDir) || relDir;
+      name = relDir;
+    }
+    // 同 id 已存在（目录被外部移动/重命名）：复用定义并校正目录
+    const byId = this.groups.find(g => g.id === id);
+    if (byId) {
+      byId.dir = relDir;
+      return byId;
+    }
     const placeholder: TaskGroup = {
-      id: safeGroupId(relDir) || relDir,
-      name: relDir,
+      id,
+      name,
       // 占位分组与普通分组一致：默认折叠（展开时才拉任务）
       expanded: false,
+      source,
       dir: relDir,
+      ...(hidden ? { hidden: true } : {}),
     };
     this.groups.push(placeholder);
     return placeholder;
@@ -800,7 +1019,7 @@ export class TaskStore {
   /** 写总管 task.json（分组定义 + task↔session 索引） */
   private saveRoot(): void {
     try {
-      const root: TaskRootStore = { version: 5, groups: this.groups, index: this.index };
+      const root: TaskRootStore = { version: STORE_VERSION, groups: this.groups, index: this.index };
       writeJsonStore(this.rootPath, root);
     } catch (err) {
       this.logger.error(t('agent.saveTasksFailed'), {

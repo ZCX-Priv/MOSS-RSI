@@ -3,7 +3,7 @@
 // 说明：iLink 得到的是机器人身份，不是个人微信号；普通微信群通常无法邀请加入。
 // 协议：notifystart → getupdates（长轮询）→ sendmessage；notifystop 下线。
 
-import { createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import type {
   ImAdapterContext,
   ImChannelAdapter,
@@ -434,15 +434,24 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
         failures = 0;
         onStatus({ connected: true, lastError: null });
         const nextCursor = str(response?.get_updates_buf);
-        if (nextCursor) cursor?.set(nextCursor);
+        const previousCursor = cursor?.get() ?? '';
         const messages = Array.isArray(response?.msgs) ? response.msgs : [];
-        for (const raw of messages) {
-          const message = asRecord(raw);
+        for (let index = 0; index < messages.length; index += 1) {
+          const message = asRecord(messages[index]);
           if (!message) continue;
-          if (message.message_type === 2) continue; // 自己发出的消息回显
+          // 自己发出的消息回显：message_type 可能是数字或字符串，统一数值比较
+          if (Number(message.message_type) === 2) continue;
           const senderId = str(message.from_user_id);
-          const messageId = str(message.message_id) || str(message.msg_id) || str(message.client_id) || randomUUID();
           if (!senderId) continue;
+          // 机器人自身身份的消息绝不能再喂给 agent（否则会形成自问自答死循环）
+          if (senderId === bot.platformId || senderId === str(bot.credentials.botId)) continue;
+          const platformMessageId = str(message.message_id) || str(message.msg_id) || str(message.client_id);
+          // 平台未提供消息 id 时不能用 randomUUID（重投递会导致去重失效、同一条消息跑两次）；
+          // 用「上一游标 + 批次下标 + 原始消息哈希」生成稳定 id：同一批次重放得到同一个 id。
+          const messageId = platformMessageId || `wx_${previousCursor}_${index}_${createHash('sha1')
+            .update(JSON.stringify(message))
+            .digest('hex')
+            .slice(0, 12)}`;
           const segments = segmentsFromItems(message.item_list);
           if (segments.length === 0) continue;
           const text = segmentsToText(segments);
@@ -467,6 +476,8 @@ export function createAdapter(ctx: ImAdapterContext): ImChannelAdapter {
           };
           onMessage(inbound);
         }
+        // 游标必须在消息处理完成后再推进：异常/崩溃时宁可重放（稳定 id 可去重），也不丢消息
+        if (nextCursor) cursor?.set(nextCursor);
       } catch (error) {
         if (stopped || signal.aborted) return;
         if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {

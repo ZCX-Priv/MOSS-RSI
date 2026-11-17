@@ -92,6 +92,32 @@ describe('run_code runtime host', () => {
     expect(first.spec?.root.type).toBe('Text');
   });
 
+  test('严格模式：任意诊断都不推送渐进 UI 快照', async () => {
+    const snapshots: unknown[] = [];
+    const result = await runCodeProgram({
+      program: [
+        "const status = ui.state('status', 0);",
+        "ui.render(ui.box({}, [ui.button({ label: 'x', onClick: ui.apply('status', 'status.value') })]));",
+        'await sleep(100);',
+        "return 'ok';",
+      ].join('\n'),
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+      onProgress: (event) => {
+        if (event.phase === 'ui') snapshots.push(event.uiSpec);
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(snapshots.length).toBe(0);
+    const diagnostics = result.uiDiagnostics as Array<{ code?: string }> | undefined;
+    expect(diagnostics?.some((item) => item.code === 'invalid_expr')).toBe(true);
+  });
+
   test('injects Grid and local computation actions into the child namespace', async () => {
     const result = await runCodeProgram({
       program: [

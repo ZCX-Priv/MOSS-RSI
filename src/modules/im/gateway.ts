@@ -6,6 +6,7 @@ import { t } from '../../core/i18n';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { AgentEngine, AgentEvent } from '../contracts';
+import type { TaskGroup, TaskItem } from '../agent/task-store';
 import { SYSTEM_SCOPE } from '../filesys/roots';
 import type { ServerInstance } from '../server/types';
 import type { AgentRegistry } from '../subagent/types';
@@ -24,12 +25,14 @@ import {
 } from './interaction';
 import { formatSubagentProgress, formatToolProgress, parseToolArguments, type SubagentEntry } from './progress';
 import type { ImStateStore } from './state';
-import type { ImBotOptions, ImInboundMessage, ImReplyTarget, StoredImBot } from './types';
+import type { ImBotOptions, ImConversation, ImInboundMessage, ImReplyTarget, StoredImBot } from './types';
 import { prepareOutbound } from './render';
 import { buildPromptWithAttachments, stageAttachments } from './attachments';
 import { takeMedia } from './segments';
 
 const IM_GROUP_NAME = 'IM 连接';
+/** IM 分组固定 id：目录为 tasks/im，空组自动销毁 */
+const IM_GROUP_ID = 'im';
 
 /** 权限菜单序号 → 权限模式（首次选择后写回 bots.json） */
 const PERMISSION_MODES = ['auto', 'skip', 'ask'] as const;
@@ -98,6 +101,11 @@ function helpText(): string {
   ].join('\n');
 }
 
+/** IM 需要读取/修正任务归属：在契约基础上补充全量任务读取 */
+type TaskAwareEngine = AgentEngine & {
+  listTasks?: () => TaskItem[];
+};
+
 export class ImGateway {
   private readonly deps: ImGatewayDeps;
   private readonly running = new Map<string, AbortController>();
@@ -109,6 +117,8 @@ export class ImGateway {
   private readonly runEpochs = new Map<string, number>();
   /** 每个在跑任务的过程播报状态（key = botId:conversationKey） */
   private readonly progressStates = new Map<string, ProgressState>();
+  /** 每次 run 的 assistant 文本累积（messageId → 全文）：finalText 缺失时兜底回复 */
+  private readonly assistantTexts = new Map<string, { messageId: string; text: string }>();
   private groupId: string | null = null;
 
   constructor(deps: ImGatewayDeps) {
@@ -120,6 +130,7 @@ export class ImGateway {
     for (const controller of this.running.values()) controller.abort();
     this.running.clear();
     for (const key of [...this.progressStates.keys()]) this.discardProgress(key);
+    this.assistantTexts.clear();
   }
 
   /** 正在输入是表现层能力：失败只记录，不阻塞任务与消息投递 */
@@ -462,6 +473,7 @@ export class ImGateway {
     event: AgentEvent,
   ): void {
     if (event.sessionId !== sessionId) return;
+    if (event.type === 'assistant-text') this.accumulateAssistantText(key, event.messageId, event.text);
     this.trackProgress(key, bot, message.replyTarget, event);
     switch (event.type) {
       case 'ask': {
@@ -526,7 +538,7 @@ export class ImGateway {
   // ---------------------------------------------------------------- 执行
 
   private async runTask(bot: StoredImBot, message: ImInboundMessage, text: string): Promise<void> {
-    const engine = this.deps.services.tryResolve<AgentEngine>(ServiceNames.AGENT_ENGINE);
+    const engine = this.deps.services.tryResolve<TaskAwareEngine>(ServiceNames.AGENT_ENGINE);
     if (!engine) {
       await this.reply(bot, message.replyTarget, 'MOSS agent 引擎尚未就绪，请稍后再试。');
       return;
@@ -581,21 +593,13 @@ export class ImGateway {
         .filter(item => item.kind === 'image')
         .map(item => item.path);
 
-      let taskId = conversation?.taskId ?? '';
-      if (!conversation) {
-        const group = this.ensureGroup(engine);
-        const title = this.taskTitle(bot, message);
-        const task = engine.createTask(title, group?.id);
-        taskId = task.id;
-        sessionId = task.sessionId ?? task.id;
-        this.deps.state.setConversation(key, {
-          taskId,
-          sessionId,
-          title,
-          updatedAt: new Date().toISOString(),
-        });
-        this.deps.server?.broadcastWS({ type: 'task.created', payload: { task, group } });
-      }
+      // 每次 run 重新累积 assistant 文本（finalText 为空时兜底）
+      this.assistantTexts.delete(key);
+
+      // 一聊天一任务：会话映射可能指向已被删除的任务（旧版本/手动删任务），
+      // 此时必须补建任务并归入 tasks/im，而不是继续写入无归属的孤儿会话。
+      const ensured = this.ensureTask(engine, conversation, key, bot, message);
+      sessionId = ensured.sessionId;
 
       if (!sessionId) {
         await this.reply(bot, message.replyTarget, '任务创建失败：缺少会话 ID。');
@@ -626,7 +630,9 @@ export class ImGateway {
 
       this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
-      await this.deliverResult(bot, message.replyTarget, result.finishReason, result.finalText);
+      // finalText 缺失（异常收尾/被截断）时用流式累积文本兜底，避免「没有产生文本输出」
+      const streamed = this.assistantTexts.get(key)?.text ?? '';
+      await this.deliverResult(bot, message.replyTarget, result.finishReason, result.finalText || streamed);
     } catch (error) {
       this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
@@ -642,6 +648,7 @@ export class ImGateway {
       this.fireTyping(bot, message.replyTarget, false);
       await this.settleProgress(key, bot, message.replyTarget);
       this.discardProgress(key);
+      this.assistantTexts.delete(key);
       this.invalidateRunEpoch(key);
       if (sessionId) this.deps.server?.unregisterExternalRun(sessionId, controller);
       // run 结束后未应答的提问/确认已无意义，清理避免下一条普通消息被误当作回答
@@ -808,20 +815,135 @@ export class ImGateway {
 
   // ---------------------------------------------------------------- 辅助
 
-  private ensureGroup(engine: AgentEngine): { id: string; name: string } | null {
+  /** 累积当前 run 的 assistant 流式文本（按 messageId 取最后一条消息的全文） */
+  private accumulateAssistantText(key: string, messageId: string | undefined, text: string): void {
+    if (!text) return;
+    const id = messageId ?? '';
+    const current = this.assistantTexts.get(key);
+    if (!current || current.messageId !== id) {
+      this.assistantTexts.set(key, { messageId: id, text });
+      return;
+    }
+    current.text += text;
+  }
+
+  /**
+   * 一聊天一任务：确保 conversation 对应的任务真实存在且归属 tasks/im。
+   * 任务被删除时用原 sessionId 补建，保留对话历史；任务在其它分组时移入 im。
+   */
+  private ensureTask(
+    engine: TaskAwareEngine,
+    conversation: ImConversation | null,
+    key: string,
+    bot: StoredImBot,
+    message: ImInboundMessage,
+  ): { taskId: string; sessionId: string } {
+    const title = this.taskTitle(bot, message);
+    const group = this.ensureGroup(engine);
+    const groupId = group?.id;
+    const now = new Date().toISOString();
+
+    const existing = conversation ? engine.getTask?.(conversation.taskId) ?? null : null;
+    if (conversation && !existing) {
+      // 任务已不存在：沿用原 sessionId 补建任务（SessionStore.relocate 会把旧文件搬入 tasks/im）
+      let task = engine.createTask(title, groupId, conversation.sessionId || undefined);
+      if (groupId && task.groupId !== groupId) {
+        task = engine.updateTask?.(task.id, { groupId }) ?? task;
+      }
+      const ids = { taskId: task.id, sessionId: task.sessionId ?? task.id };
+      this.deps.state.setConversation(key, { ...ids, title, updatedAt: now });
+      this.deps.server?.broadcastWS({ type: 'task.created', payload: { task, group } });
+      this.broadcastTaskSnapshot(engine);
+      this.ensureGroupExpanded(engine, groupId);
+      return ids;
+    }
+
+    if (conversation && existing) {
+      let task = existing;
+      if (groupId && existing.groupId !== groupId) {
+        task = engine.updateTask?.(existing.id, { groupId }) ?? existing;
+        this.deps.server?.broadcastWS({ type: 'task.updated', payload: { taskId: task.id, task } });
+        this.broadcastTaskSnapshot(engine);
+      }
+      const ids = { taskId: task.id, sessionId: task.sessionId ?? task.id };
+      this.deps.state.setConversation(key, {
+        ...ids,
+        title: task.title || title,
+        updatedAt: now,
+      });
+      return ids;
+    }
+
+    // 首次对话：创建任务并广播（前端据此新增分组与任务行）
+    let task = engine.createTask(title, groupId);
+    if (groupId && task.groupId !== groupId) {
+      task = engine.updateTask?.(task.id, { groupId }) ?? task;
+    }
+    const ids = { taskId: task.id, sessionId: task.sessionId ?? task.id };
+    this.deps.state.setConversation(key, { ...ids, title, updatedAt: now });
+    this.deps.server?.broadcastWS({ type: 'task.created', payload: { task, group } });
+    this.ensureGroupExpanded(engine, groupId);
+    return ids;
+  }
+
+  /** 新建任务后展开 IM 分组：运行中的任务行必须立即可见 */
+  private ensureGroupExpanded(engine: TaskAwareEngine, groupId: string | undefined): void {
+    if (!groupId) return;
+    const group = engine.listTaskGroups().find(item => item.id === groupId);
+    if (!group || group.expanded === true) return;
+    const updated = engine.updateTaskGroup?.(groupId, { expanded: true });
+    if (updated) this.broadcastTaskSnapshot(engine);
+  }
+
+  /** 广播任务/分组权威快照（历史分组合并、移组、展开后同步所有客户端） */
+  private broadcastTaskSnapshot(engine: TaskAwareEngine): void {
+    try {
+      const groups = engine.listTaskGroups().filter(group => group.hidden !== true);
+      const visible = new Set(groups.map(group => group.id));
+      this.deps.server?.broadcastWS({
+        type: 'tasks.changed',
+        payload: {
+          groups,
+          // 隐藏分组（subagent 衍生会话）不进侧边栏，与 HTTP 列表口径一致
+          tasks: (engine.listTasks?.() ?? []).filter(task => visible.has(task.groupId)),
+        },
+      });
+    } catch {
+      // 广播失败不影响业务主流程
+    }
+  }
+
+  private ensureGroup(engine: TaskAwareEngine): TaskGroup | null {
     if (this.groupId) {
       const existing = engine.listTaskGroups().find(group => group.id === this.groupId);
       if (existing) return existing;
       this.groupId = null;
     }
-    const found = engine.listTaskGroups().find(group => group.name === IM_GROUP_NAME && !group.hidden);
-    if (found) {
-      this.groupId = found.id;
-      return found;
+    let found = engine.listTaskGroups().find(group => group.id === IM_GROUP_ID) ?? null;
+    if (!found) {
+      // source='folder'：空组随最后一个任务删除自动销毁；初始无任务时不会出现在侧边栏
+      found = engine.createTaskGroup(IM_GROUP_NAME, 'folder', {
+        id: IM_GROUP_ID,
+        dir: IM_GROUP_ID,
+      });
     }
-    const created = engine.createTaskGroup(IM_GROUP_NAME, 'manual');
-    this.groupId = created.id;
-    return created;
+    // 历史版本用随机 id + 同名分组：并入规范组，任务随 moveTasksTo 迁移
+    const legacy = engine.listTaskGroups().find(
+      group => group.id !== IM_GROUP_ID && group.hidden !== true && group.name === IM_GROUP_NAME,
+    );
+    if (legacy) {
+      try {
+        engine.deleteTaskGroup(legacy.id, { moveTasksTo: IM_GROUP_ID });
+        this.broadcastTaskSnapshot(engine);
+      } catch (error) {
+        this.deps.logger.warn('im: 历史 IM 分组合并失败', {
+          botId: legacy.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.groupId = found.id;
+    return found;
   }
 
   private taskTitle(bot: StoredImBot, message: ImInboundMessage): string {
@@ -846,13 +968,24 @@ export class ImGateway {
     );
     for (const chunk of chunks) {
       if (!chunk) continue;
-      try {
-        await this.deps.sendText(bot, target, chunk);
-      } catch (error) {
-        this.deps.logger.warn(t('im.replyFailed', {
-          error: error instanceof Error ? error.message : String(error),
-        }), { botId: bot.botId });
-        return;
+      // 单段失败重试一次；最终失败只记录并继续发送后续分段，避免整条回答被截断
+      let delivered = false;
+      for (let attempt = 1; attempt <= 2 && !delivered; attempt += 1) {
+        try {
+          await this.deps.sendText(bot, target, chunk);
+          delivered = true;
+        } catch (error) {
+          if (attempt >= 2) {
+            this.deps.logger.warn(t('im.replyFailed', {
+              error: error instanceof Error ? error.message : String(error),
+            }), { botId: bot.botId, chunkIndex: chunks.indexOf(chunk) });
+          } else {
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(resolve, 200);
+              (timer as { unref?: () => void }).unref?.();
+            });
+          }
+        }
       }
     }
   }

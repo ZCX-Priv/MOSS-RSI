@@ -240,7 +240,8 @@ export function useTask() {
           const st = useStore.getState();
           if (created) {
             if (created.group && !st.taskGroups.some((g) => g.id === created.group!.id)) {
-              st.addTaskGroup(created.group);
+              // 新分组展开：新建任务必须立即可见
+              st.addTaskGroup({ ...created.group, expanded: true });
             }
             if (st.tasks.some((t) => t.id === created.task.id)) {
               st.updateTask(created.task.id, created.task);
@@ -250,10 +251,20 @@ export function useTask() {
           } else if (!st.tasks.some((t) => t.id === pendingNewTask!.id)) {
             // 后端不可达：降级为本地占位会话（仍可正常对话），分组按同名分组兜底
             const nowIso = new Date().toISOString();
+            const fallbackGroupId =
+              st.taskGroups.find((g) => g.name === pendingNewTask!.groupName)?.id ?? 'default';
+            // 默认分组不再由后端常驻返回：本地降级时按需补一个分组，避免任务无组可挂
+            if (!st.taskGroups.some((g) => g.id === fallbackGroupId)) {
+              st.addTaskGroup({
+                id: fallbackGroupId,
+                name: i18n.t('sidebar.defaultGroup'),
+                expanded: true,
+              });
+            }
             st.addTask({
               id: pendingNewTask.id,
               title: pendingNewTask.title,
-              groupId: st.taskGroups.find((g) => g.name === pendingNewTask!.groupName)?.id ?? 'default',
+              groupId: fallbackGroupId,
               createdAt: nowIso,
               updatedAt: nowIso,
               sessionId: pendingNewTask.id,

@@ -311,11 +311,16 @@ export function createCreateTaskHandler(services: ServiceRegistry): RouteHandler
       groupId = group?.id;
     }
     const task = engine.createTask(body.title, groupId, body.id);
+    // 分组必须随任务一起下发：否则前端拿到 groupId 却没有对应分组，任务行不会渲染
+    // （默认分组 / 无 deriveGroupName 的创建路径尤其明显）。
+    const resolvedGroup =
+      group ??
+      engine.listTaskGroups?.().find((g) => g.id === task.groupId && g.hidden !== true);
     broadcastWS(services, {
       type: 'task.created',
-      payload: { task, ...(group ? { group } : {}) },
+      payload: { task, ...(resolvedGroup ? { group: resolvedGroup } : {}) },
     });
-    return { status: 201, body: { task, ...(group ? { group } : {}) } };
+    return { status: 201, body: { task, ...(resolvedGroup ? { group: resolvedGroup } : {}) } };
   };
 }
 

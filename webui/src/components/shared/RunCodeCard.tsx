@@ -358,13 +358,16 @@ function RunCodeResultPreview({
   const uiSpec = meta.uiSpec;
   const logs = meta.logs;
   const diagnostics = meta.uiDiagnostics ?? [];
+  const uiBuildFailed = meta.uiFailed === true;
+  // 严格模式失败：展开预览只展示诊断（而不是红色报错正文），避免与诊断重复
+  const showErrorText = isError && !(uiBuildFailed && diagnostics.length > 0);
   const valuePreview = meta.valuePreview;
   const showValuePreview = !!valuePreview;
   const hasTextOutput = isError || showValuePreview || logs.length > 0 || diagnostics.length > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-2 px-2.5 py-1.5">
-      {isError && (
+      {showErrorText && (
         <div className="flex min-w-0 items-start gap-1.5 text-[11px] text-destructive">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
           <pre className="max-h-[240px] min-w-0 overflow-auto whitespace-pre-wrap break-words font-sans leading-relaxed">
@@ -393,6 +396,7 @@ function RunCodeResultPreview({
       {diagnostics.length > 0 && (
         <div className="flex min-w-0 flex-col gap-0.5">
           <div className="text-[11px] text-warning">
+            {uiBuildFailed && `${t('task.runCode.uiNotRendered')} · `}
             {t('task.runCode.diagnostics', { count: diagnostics.length })}
           </div>
           <ul className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">

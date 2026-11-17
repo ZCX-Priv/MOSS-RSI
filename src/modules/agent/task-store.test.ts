@@ -4,7 +4,7 @@
 //   3. 未传 id 时生成随机 UUID（原有行为不变）
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger, Environment } from '../../core/types';
@@ -102,5 +102,76 @@ describe('TaskStore.listGroupTasks（分组内查询 / 分页）', () => {
     const { tasks, total } = store.listGroupTasks('no-such-group');
     expect(tasks).toEqual([]);
     expect(total).toBe(0);
+  });
+});
+
+describe('TaskStore v6 类别目录布局', () => {
+  it('v5 空默认分组迁移后不留下 tasks/default 或 tasks/main/default', () => {
+    mkdirSync(join(dataDir, 'tasks', 'default'), { recursive: true });
+    writeFileSync(join(dataDir, 'tasks', 'default', 'task.json'), '[]');
+    writeFileSync(
+      join(dataDir, 'task.json'),
+      JSON.stringify({
+        version: 5,
+        groups: [{ id: 'default', name: '默认任务', expanded: true }],
+        index: {},
+      }),
+    );
+
+    const store = makeStore();
+    expect(store.listGroups()).toEqual([]);
+    expect(existsSync(join(dataDir, 'tasks', 'default'))).toBe(false);
+    expect(existsSync(join(dataDir, 'tasks', 'main'))).toBe(false);
+  });
+
+  it('普通任务落在 main/<groupId>；默认分组按需创建且空时销毁', () => {
+    const store = makeStore();
+    const g = store.createGroup('G', 'folder');
+    store.createTask('T', g.id, 's1');
+
+    expect(existsSync(join(dataDir, 'tasks', 'main', g.id, 'task.json'))).toBe(true);
+    expect(store.listGroups().some((item) => item.id === g.id)).toBe(true);
+
+    const defTask = store.createTask('D');
+    expect(defTask.groupId).toBe('default');
+    expect(existsSync(join(dataDir, 'tasks', 'main', 'default', 'task.json'))).toBe(true);
+
+    store.deleteTask(defTask.id);
+    expect(store.listGroups().some((item) => item.id === 'default')).toBe(false);
+    expect(existsSync(join(dataDir, 'tasks', 'main', 'default'))).toBe(false);
+  });
+
+  it('v5 旧分组目录与会话文件迁入 main/<groupId>', () => {
+    const gid = 'old-group';
+    mkdirSync(join(dataDir, 'tasks', gid), { recursive: true });
+    writeFileSync(
+      join(dataDir, 'tasks', gid, 'task.json'),
+      JSON.stringify([
+        {
+          id: 's1',
+          title: 'T',
+          groupId: gid,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          sessionId: 's1',
+        },
+      ]),
+    );
+    writeFileSync(join(dataDir, 'tasks', gid, 's1.json'), '{}');
+    writeFileSync(
+      join(dataDir, 'task.json'),
+      JSON.stringify({
+        version: 5,
+        groups: [{ id: gid, name: 'Old', expanded: false }],
+        index: { s1: { groupId: gid, sessionId: 's1' } },
+      }),
+    );
+
+    const store = makeStore();
+    expect(store.getDirOf('s1')).toBe(`main/${gid}`);
+    expect(existsSync(join(dataDir, 'tasks', 'main', gid, 'task.json'))).toBe(true);
+    expect(existsSync(join(dataDir, 'tasks', 'main', gid, 's1.json'))).toBe(true);
+    expect(existsSync(join(dataDir, 'tasks', gid))).toBe(false);
+    expect(store.listGroups().some((item) => item.id === gid)).toBe(true);
   });
 });

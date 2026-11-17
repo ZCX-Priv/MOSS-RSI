@@ -6,6 +6,7 @@
 import { readFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { atomicWriteFile } from '../../utils/fs-atomic';
+import { markInternalWrite } from '../../utils/internal-writes';
 import type { Logger } from '../../core/types';
 
 /**
@@ -54,4 +55,5 @@ export function readJsonStore<T>(path: string, fallback: T, logger?: Logger): T 
 export function writeJsonStore(path: string, data: unknown, opts?: { fsync?: boolean }): void {
   mkdirSync(dirname(path), { recursive: true });
   atomicWriteFile(path, JSON.stringify(data, null, 2), { fsync: opts?.fsync ?? true });
+  markInternalWrite(path);
 }

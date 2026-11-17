@@ -6,7 +6,7 @@
 //   全量快照（WS tasks.changed / tasks.reordered、PUT reorder 响应、无参 GET /api/tasks）→ applyFullTaskSnapshot。
 // 重连后的兜底刷新由 useWebSocket 负责（restored 时全量快照）。
 
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { api } from '../api/http';
 import { withRetry } from '../lib/retry';
@@ -32,6 +32,8 @@ export function useTasks() {
   const loadedOnceRef = useRef(false);
   /** 全量分组请求 in-flight 单例 */
   const loadInFlightRef = useRef<Promise<void> | null>(null);
+  /** 首次分组加载是否已结束（区分「加载中」与「确实没有任何分组」，避免空状态闪烁） */
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
 
   /** 加载某分组第 1 页（已加载/加载中/in-flight/冷却中则跳过） */
   const ensureGroupLoaded = useCallback(
@@ -176,6 +178,7 @@ export function useTasks() {
       await runner;
     } finally {
       loadInFlightRef.current = null;
+      setGroupsLoaded(true);
     }
   }, [setTaskGroups, resetGroupTasks, ensureGroupLoaded, applyFullTaskSnapshot]);
 
@@ -293,6 +296,8 @@ export function useTasks() {
     tasks: useStore((s) => s.tasks),
     taskGroups: useStore((s) => s.taskGroups),
     activeTaskId: useStore((s) => s.activeTaskId),
+    /** 首次分组加载是否已完成（侧边栏空状态据此避免加载中闪烁） */
+    groupsLoaded,
     /** 各分组任务加载态（按需加载 + 组内分页） */
     groupTasksMeta: useStore((s) => s.groupTasksMeta),
     reload: load,

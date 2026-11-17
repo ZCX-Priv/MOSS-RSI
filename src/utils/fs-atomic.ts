@@ -30,6 +30,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, basename, join } from 'node:path';
 import { hasUtf8Bom } from './encoding';
+import { markInternalWrite } from './internal-writes';
 
 export interface AtomicWriteOptions {
   /** 是否 fsync 刷盘（默认 true，持久化保证） */
@@ -125,6 +126,8 @@ export function atomicWriteFile(
         throw err;
       }
     }
+    // 登记内部写入：任务目录 watcher 据此忽略自身写盘事件
+    markInternalWrite(realPath);
   } catch (err) {
     // 任何异常：清理 tmp 文件（best-effort），原文件保持不变
     try { unlinkSync(tmpPath); } catch { /* 静默 */ }
@@ -155,6 +158,8 @@ export async function atomicWriteFileAsync(
         throw err;
       }
     }
+    // 登记内部写入：任务目录 watcher 据此忽略自身写盘事件
+    markInternalWrite(realPath);
   } catch (err) {
     try { await unlinkAsync(tmpPath); } catch { /* 静默 */ }
     throw err;

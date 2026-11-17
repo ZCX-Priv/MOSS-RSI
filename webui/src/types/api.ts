@@ -69,6 +69,8 @@ export interface CodeRunMetadata {
   callsTruncated?: boolean;
   uiSpec?: GenUISpec;
   uiDiagnostics?: GenUIDiagnostic[];
+  /** 界面因诊断未渲染（严格模式：任意诊断都视为构建失败） */
+  uiFailed?: boolean;
   /** Embed TSX 编译产物（按节点 __embedId 索引） */
   uiEmbedScripts?: Record<string, string>;
   /** 完整返回值文本（供结果区展示，不按长度裁剪） */

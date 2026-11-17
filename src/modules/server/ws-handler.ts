@@ -222,6 +222,14 @@ export class WsHandler {
   private readonly guideMessageArrays = new Map<string, GuidanceMessage[]>();
   /** 引导消息对应的 runId 队列（前端为每条引导消息生成 runId，用于新 run 的事件隔离） */
   private readonly guideRunIds = new Map<string, string[]>();
+  /**
+   * task.stream 幂等：同一身份（clientMessageId 优先，其次 runId）在窗口内重复到达时忽略。
+   * 覆盖 WS 重复帧 / 重连补发 / 双击发送：旧实现会 abort 当前 run 后再跑一遍。
+   */
+  private readonly recentStreamIdentities = new Map<string, { key: string; at: number }>();
+  private static readonly STREAM_DEDUPE_WINDOW_MS = 15_000;
+  /** 引导消息幂等：同一 session 已受理的 clientMessageId（防重复追加） */
+  private readonly recentGuideIds = new Map<string, Set<string>>();
   private readonly batcher: EventBatcher;
   /** 语音会话宿主（每条连接一个流式识别会话） */
   private readonly voiceHost: VoiceSessionHost;
@@ -545,6 +553,28 @@ export class WsHandler {
   // 内置消息处理
   // ========================================================================
 
+  /**
+   * task.stream 幂等判定：同 session 的同一身份在窗口内重复到达 → 重复。
+   * 无身份（旧客户端）时不参与判定，保持兼容。
+   */
+  private isDuplicateStream(sessionId: string, identity: string): boolean {
+    if (!identity) return false;
+    const now = Date.now();
+    if (this.recentStreamIdentities.size > 256) {
+      for (const [sid, entry] of this.recentStreamIdentities) {
+        if (now - entry.at > WsHandler.STREAM_DEDUPE_WINDOW_MS) this.recentStreamIdentities.delete(sid);
+      }
+    }
+    const prev = this.recentStreamIdentities.get(sessionId);
+    const duplicate =
+      prev !== undefined &&
+      prev.key === identity &&
+      now - prev.at < WsHandler.STREAM_DEDUPE_WINDOW_MS;
+    // 无论是否重复都刷新时间戳：连续的重复帧不会在窗口边界后重新触发一轮
+    this.recentStreamIdentities.set(sessionId, { key: identity, at: now });
+    return duplicate;
+  }
+
   private async handleTaskStream(state: ConnectionState, msg: WSMessage): Promise<void> {
     const agent = this.services.tryResolve<AgentEngine>('agent.engine');
     if (!agent) {
@@ -575,6 +605,17 @@ export class WsHandler {
     state.sessionId = sessionId;
     // 发起连接自动订阅该 session（事件按 session 路由；断连后任务继续，重连可恢复接收）
     state.subscribedSessions.add(sessionId);
+
+    // 幂等：同一 clientMessageId/runId 的重复 task.stream 直接忽略（不 abort 当前 run、不重跑）
+    const streamIdentity = payload.clientMessageId
+      ? `c:${payload.clientMessageId}`
+      : payload.runId
+        ? `r:${payload.runId}`
+        : '';
+    if (this.isDuplicateStream(sessionId, streamIdentity)) {
+      this.logger.debug('server: 忽略重复的 task.stream', { sessionId, identity: streamIdentity });
+      return;
+    }
 
     // 引导消息：可变数组引用，传给 engine.run()；handleTaskGuide 在运行期间向其 push 消息。
     // engine 在工具调用完成后检查此数组，若有内容则返回 guideInterrupt。
@@ -771,6 +812,12 @@ export class WsHandler {
     };
     if (!payload.message) return;
 
+    // 幂等：同一 clientMessageId 的引导消息重复到达时忽略（避免续跑两次）
+    if (payload.clientMessageId && this.recentGuideIds.get(sessionId)?.has(payload.clientMessageId)) {
+      this.logger.debug('server: 忽略重复的 task.guide', { sessionId });
+      return;
+    }
+
     const guideArr = this.guideMessageArrays.get(sessionId);
     if (guideArr !== undefined) {
       guideArr.push({
@@ -778,6 +825,20 @@ export class WsHandler {
         attachments: payload.attachments,
         ...(payload.clientMessageId ? { clientMessageId: payload.clientMessageId } : {}),
       });
+      if (payload.clientMessageId) {
+        const seen = this.recentGuideIds.get(sessionId) ?? new Set<string>();
+        seen.add(payload.clientMessageId);
+        if (seen.size > 64) {
+          const oldest = seen.values().next().value;
+          if (oldest) seen.delete(oldest);
+        }
+        this.recentGuideIds.set(sessionId, seen);
+        // 会话数量上限治理：避免长期运行后 Map 无界增长
+        if (this.recentGuideIds.size > 512) {
+          const oldestSession = this.recentGuideIds.keys().next().value;
+          if (oldestSession) this.recentGuideIds.delete(oldestSession);
+        }
+      }
       if (payload.runId) {
         const runIds = this.guideRunIds.get(sessionId) ?? [];
         runIds.push(payload.runId);

@@ -421,15 +421,12 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           void settle(protocolError('ui frame before run'));
           return;
         }
-        // 渐进快照同样过宿主净化：非法/error 级规格直接丢弃，最终 result 帧仍给权威诊断
+        // 渐进快照同样过宿主净化：严格模式下任意诊断都丢弃快照，最终 result 帧仍给权威诊断
         const validation = validateUISpec(frame.ui);
         if (validation.fatal || !validation.spec) return;
-        if (validation.diagnostics.some((d) => d.severity === 'error')) return;
+        if (validation.diagnostics.length > 0) return;
         const rawDiagnostics = Array.isArray(frame.uiDiagnostics) ? frame.uiDiagnostics : [];
-        const hasBuilderError = rawDiagnostics.some(
-          (d) => !!d && typeof d === 'object' && (d as { severity?: unknown }).severity === 'error',
-        );
-        if (hasBuilderError) return;
+        if (rawDiagnostics.length > 0) return;
         emitProgress({ phase: 'ui', uiSpec: validation.spec });
         return;
       }

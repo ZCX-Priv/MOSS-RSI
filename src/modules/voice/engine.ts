@@ -715,6 +715,8 @@ export async function createLocalSessionInProcess(
 export type VoiceWorkerRequest =
   | {
       type: 'init';
+      /** 初始化身份：Worker 回传时携带，主线程据此丢弃过期响应 */
+      initId: number;
       engine: VoiceLocalEngine;
       mode: VoiceDecodeMode;
       modelDir: string;
@@ -729,8 +731,8 @@ export type VoiceWorkerRequest =
 
 /** Worker → 主线程事件 */
 export type VoiceWorkerEvent =
-  | { type: 'inited'; elapsedMs: number }
-  | { type: 'init-error'; error: string }
+  | { type: 'inited'; initId: number; elapsedMs: number }
+  | { type: 'init-error'; initId: number; error: string }
   | { type: 'started'; sessionId: string }
   | { type: 'start-error'; sessionId: string; error: string }
   | { type: 'result'; sessionId: string; result: VoiceResult }
@@ -752,11 +754,18 @@ function workerScriptPath(): string {
 interface WorkerHost {
   worker: Worker;
   key: string;
+  /** 当前等待中的 init 身份（0/null = 无） */
+  initId: number | null;
   ready: Promise<void>;
   initWaiter: { resolve: () => void; reject: (err: Error) => void } | null;
   sessions: Map<string, WorkerSession>;
   terminating: boolean;
 }
+
+/** Worker 模型初始化超时：实测本机加载 11~15s，机械盘/杀软/并发会进一步拉长 */
+const WORKER_INIT_TIMEOUT_MS = 60_000;
+/** init 身份自增序号：区分不同批次的初始化，避免旧 inited 误唤醒新等待者 */
+let workerInitSeq = 0;
 
 let workerHost: WorkerHost | null = null;
 /** 最近一次 Worker 初始化/运行失败原因（供服务层日志） */
@@ -867,6 +876,8 @@ class WorkerSession implements VoiceSession {
 function handleWorkerEvent(host: WorkerHost, event: VoiceWorkerEvent): void {
   switch (event.type) {
     case 'inited': {
+      // 过期响应（超时后重建/切换模型）：直接丢弃，绝不唤醒当前等待者
+      if (host.initId === null || event.initId !== host.initId) return;
       const waiter = host.initWaiter;
       host.initWaiter = null;
       workerError = null;
@@ -874,11 +885,13 @@ function handleWorkerEvent(host: WorkerHost, event: VoiceWorkerEvent): void {
       return;
     }
     case 'init-error': {
+      if (host.initId === null || event.initId !== host.initId) return;
       const waiter = host.initWaiter;
       host.initWaiter = null;
       workerError = event.error;
       // 清空键：允许下次会话重试 Worker（失败可能只是瞬时资源问题）
       host.key = '';
+      host.initId = null;
       waiter?.reject(new Error(event.error));
       return;
     }
@@ -907,7 +920,32 @@ function handleWorkerFailure(host: WorkerHost, err: Error): void {
   workerError = err.message;
   const waiter = host.initWaiter;
   host.initWaiter = null;
+  host.initId = null;
+  host.key = '';
   waiter?.reject(err);
+  for (const session of host.sessions.values()) session.onError();
+  host.sessions.clear();
+  if (workerHost === host) workerHost = null;
+}
+
+/**
+ * 终止 Worker 并释放一切等待者/会话。
+ * 超时或切换模型时必须走这里：仅清 key 会让后续 init 排队到卡死的线程，
+ * 旧 inited 还可能误唤醒新等待者。
+ */
+function terminateWorkerHost(host: WorkerHost, reason = 'voice worker terminated'): void {
+  host.terminating = true;
+  try {
+    void host.worker.terminate();
+  } catch {
+    // Worker 已退出：忽略
+  }
+  const waiter = host.initWaiter;
+  host.initWaiter = null;
+  host.initId = null;
+  host.key = '';
+  // 必须让在途等待者结算，否则调用方会永久挂起
+  waiter?.reject(new Error(reason));
   for (const session of host.sessions.values()) session.onError();
   host.sessions.clear();
   if (workerHost === host) workerHost = null;
@@ -919,6 +957,7 @@ function spawnWorkerHost(): WorkerHost {
   const host: WorkerHost = {
     worker,
     key: '',
+    initId: null,
     ready: Promise.resolve(),
     initWaiter: null,
     sessions: new Map(),
@@ -939,20 +978,33 @@ function spawnWorkerHost(): WorkerHost {
 /** 确保 Worker 已按指定模型完成初始化（模型加载在 Worker 线程内，不阻塞主线程） */
 async function ensureWorkerReady(init: LocalSessionInit): Promise<WorkerHost> {
   if (!workerHost) workerHost = spawnWorkerHost();
-  const host = workerHost;
+  let host = workerHost;
   const key = workerKey(init);
   if (host.key === key) {
     await host.ready;
     return host;
   }
 
+  // 上一次 init 仍在加载但目标模型不同：终止旧 Worker，避免新 init 排在卡死的同步加载之后
+  if (host.initWaiter) {
+    terminateWorkerHost(host);
+    host = workerHost = spawnWorkerHost();
+  }
+
+  const initId = ++workerInitSeq;
   host.key = key;
+  host.initId = initId;
   host.ready = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
+      if (host.initId !== initId) return;
       host.initWaiter = null;
+      host.initId = null;
       host.key = '';
+      workerError = 'voice worker init timeout';
+      // 卡死的 Worker 必须销毁：否则后续 init 会排在其同步加载之后，且旧 inited 会误唤醒
+      terminateWorkerHost(host);
       reject(new Error('voice worker init timeout'));
-    }, 20_000);
+    }, WORKER_INIT_TIMEOUT_MS);
     host.initWaiter = {
       resolve: () => {
         clearTimeout(timer);
@@ -966,6 +1018,7 @@ async function ensureWorkerReady(init: LocalSessionInit): Promise<WorkerHost> {
   });
   host.worker.postMessage({
     type: 'init',
+    initId,
     engine: init.engine,
     mode: init.mode,
     modelDir: init.modelDir,

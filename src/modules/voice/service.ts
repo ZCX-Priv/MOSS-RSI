@@ -93,6 +93,8 @@ export class VoiceServiceImpl implements VoiceService {
   private vadRetryAt = 0;
   /** 预热定时器（安装/启用/切换模型后触发一次） */
   private prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 预热单飞：并发触发共享同一轮（避免多份模型加载互相抢磁盘/CPU） */
+  private prewarmTask: Promise<void> | null = null;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.modelsRoot = join(deps.dataDir, 'models', 'asr');
@@ -419,31 +421,57 @@ export class VoiceServiceImpl implements VoiceService {
   /**
    * 预热当前默认模型：模型加载在 Worker 线程执行，主线程不阻塞。
    * 用户第一次按下麦克风时识别器已就绪。
+   * 失败最多重试 2 次（Worker 超时会被销毁并重建），避免一次瞬时卡顿导致整轮预热失效。
    */
   private async prewarm(): Promise<void> {
+    if (this.prewarmTask) return this.prewarmTask;
     const cfg = this.voiceCfg();
     if (!cfg.enabled) return;
     const id = this.activeModelId();
     const def = findModelDef(id);
     if (!def || !this.isInstalled(id)) return;
-    const startedAt = Date.now();
-    try {
-      await prewarmLocalEngine({
-        engine: def.engine,
-        mode: def.mode,
-        modelDir: this.modelDir(id),
-        language: cfg.language,
-        vadModel: this.vadModelPath,
-        numThreads: recognitionThreads(),
-      });
-      this.deps.logger.info('voice engine prewarmed', { id, elapsedMs: Date.now() - startedAt });
-    } catch (err) {
-      this.deps.logger.warn('voice engine prewarm failed', {
-        id,
-        error: err instanceof Error ? err.message : String(err),
-        workerError: getVoiceWorkerError() ?? undefined,
-      });
-    }
+    const init = {
+      engine: def.engine,
+      mode: def.mode,
+      modelDir: this.modelDir(id),
+      language: cfg.language,
+      vadModel: this.vadModelPath,
+      numThreads: recognitionThreads(),
+    };
+    this.prewarmTask = (async (): Promise<void> => {
+      const startedAt = Date.now();
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          await prewarmLocalEngine(init);
+          this.deps.logger.info('voice engine prewarmed', { id, elapsedMs: Date.now() - startedAt });
+          return;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (attempt >= 2) {
+            this.deps.logger.warn('voice engine prewarm failed', {
+              id,
+              error: message,
+              attempts: attempt,
+              workerError: getVoiceWorkerError() ?? undefined,
+            });
+            return;
+          }
+          this.deps.logger.warn('voice engine prewarm retry', {
+            id,
+            error: message,
+            workerError: getVoiceWorkerError() ?? undefined,
+          });
+          // 给被杀软/并发占用的磁盘留出恢复窗口；定时器不阻止进程退出
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 1500);
+            (timer as { unref?: () => void }).unref?.();
+          });
+        }
+      }
+    })().finally(() => {
+      this.prewarmTask = null;
+    });
+    return this.prewarmTask;
   }
 
   // ==========================================================================

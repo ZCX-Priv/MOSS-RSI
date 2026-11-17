@@ -3,10 +3,11 @@
 
 import { t } from '../../core/i18n';
 import { flattenModels } from '../../core/provider-utils';
-import { statSync } from 'node:fs';
-import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { statSync, watch, mkdirSync, existsSync, type FSWatcher } from 'node:fs';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { totalmem } from 'node:os';
 import { Semaphore } from '../../utils/semaphore';
+import { isRecentInternalWrite } from '../../utils/internal-writes';
 import { buildTools } from './context';
 import { SessionStore, type ContextFile, type Session, type ActiveSkill } from './session';
 import { TaskStore, type TaskItem, type TaskGroup } from './task-store';
@@ -199,6 +200,14 @@ export class AgentEngineImpl implements AgentEngine {
   private readonly liveDraft: LiveDraftStore;
   /** 会话/任务磁盘索引就绪 promise（惰性启动；路由与 warmup 共用） */
   private readiness: Promise<void> | null = null;
+  /** 任务目录热同步 watcher（外部修改 task.json / 会话 JSON 后静默刷新前端） */
+  private tasksWatcher: FSWatcher | null = null;
+  private dataDirWatcher: FSWatcher | null = null;
+  private fsWatchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 防抖窗口内待处理的相对路径（tasks/ 下） */
+  private readonly pendingFsPaths = new Set<string>();
+  /** 根 task.json 发生变化（分组定义/索引） */
+  private pendingRootTaskJson = false;
   private readonly services: ServiceRegistry;
   private readonly config: ConfigService;
   private readonly eventBus: EventBus;
@@ -303,18 +312,161 @@ export class AgentEngineImpl implements AgentEngine {
    */
   whenReady(): Promise<void> {
     if (!this.readiness) {
-      this.readiness = Promise.all([this.tasks.whenReady(), this.sessions.whenIndexed()]).then(() => undefined);
+      this.readiness = Promise.all([this.tasks.whenReady(), this.sessions.whenIndexed()]).then(() => {
+        // 索引就绪后启动磁盘热同步（外部修改无需重启后端即可静默生效）
+        this.startTaskWatcher();
+      });
     }
     return this.readiness;
   }
 
-  /** 释放资源（模块 destroy 时调用）：取消 filesys 事件订阅 + 强制刷盘脏 session（写盘降载兜底） */
+  /** 释放资源（模块 destroy 时调用）：取消 filesys 事件订阅 + 关闭热同步 watcher + 强制刷盘脏 session */
   dispose(): void {
     if (this.unsubFilesys) {
       this.unsubFilesys();
       this.unsubFilesys = null;
     }
+    if (this.fsWatchTimer) {
+      clearTimeout(this.fsWatchTimer);
+      this.fsWatchTimer = null;
+    }
+    this.tasksWatcher?.close();
+    this.tasksWatcher = null;
+    this.dataDirWatcher?.close();
+    this.dataDirWatcher = null;
+    this.pendingFsPaths.clear();
+    this.pendingRootTaskJson = false;
     this.sessions.dispose();
+  }
+
+  /** 启动任务目录热同步：监听 tasks/**（会话/组文件）与根 task.json */
+  private startTaskWatcher(): void {
+    if (this.tasksWatcher || this.dataDirWatcher) return;
+    const tasksDir = join(this.env.dataDir, 'tasks');
+    try {
+      mkdirSync(tasksDir, { recursive: true });
+    } catch {
+      // 目录创建失败由下方 watch 报错并降级
+    }
+    try {
+      this.tasksWatcher = watch(tasksDir, { recursive: true }, (_event, filename) => {
+        const rel = typeof filename === 'string' ? filename : filename ? String(filename) : '';
+        this.queueTaskFsChange(rel.replace(/\\/g, '/'));
+      });
+      this.tasksWatcher.on('error', (err) => {
+        this.logger.warn('agent: tasks watcher error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      this.logger.warn('agent: tasks watcher unavailable', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      this.dataDirWatcher = watch(this.env.dataDir, (_event, filename) => {
+        const name = typeof filename === 'string' ? filename : filename ? String(filename) : '';
+        if (name !== 'task.json') return;
+        this.pendingRootTaskJson = true;
+        this.scheduleFsFlush();
+      });
+    } catch (err) {
+      this.logger.warn('agent: task root watcher unavailable', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 只收 .json 事件（目录增删必然伴随 task.json 写入；忽略原子写临时文件） */
+  private queueTaskFsChange(rel: string): void {
+    const normalized = rel.replace(/^\/+/, '');
+    if (!normalized) return;
+    if (normalized.includes('.tmp.')) return;
+    const base = normalized.split('/').pop() ?? '';
+    if (!base || base.startsWith('.')) return;
+    if (!normalized.endsWith('.json')) return;
+    this.pendingFsPaths.add(normalized);
+    this.scheduleFsFlush();
+  }
+
+  /** 300ms 合并窗口：Windows 下一次写入常拆成多个 fs.watch 事件 */
+  private scheduleFsFlush(): void {
+    if (this.fsWatchTimer) return;
+    this.fsWatchTimer = setTimeout(() => {
+      this.fsWatchTimer = null;
+      void this.flushFsChanges();
+    }, 300);
+  }
+
+  /** 把外部文件变化静默同步到前端：任务/分组走重新拉取，会话走缓存失效 + 历史重载 */
+  private async flushFsChanges(): Promise<void> {
+    const rootChanged = this.pendingRootTaskJson;
+    this.pendingRootTaskJson = false;
+    const paths = [...this.pendingFsPaths];
+    this.pendingFsPaths.clear();
+    if (paths.length === 0 && !rootChanged) return;
+
+    const tasksDir = join(this.env.dataDir, 'tasks');
+    const rootTaskPath = join(this.env.dataDir, 'task.json');
+    const sessionIds = new Set<string>();
+    /** 外部删除的会话文件：其任务元信息也必须删除，否则侧边栏会残留不可打开的条目 */
+    const deletedSessionIds = new Set<string>();
+    let metaChanged = rootChanged && !isRecentInternalWrite(rootTaskPath);
+    for (const rel of paths) {
+      const abs = join(tasksDir, rel);
+      if (isRecentInternalWrite(abs)) continue;
+      const base = rel.split('/').pop() ?? rel;
+      if (base === 'task.json') {
+        metaChanged = true;
+        continue;
+      }
+      if (!base.endsWith('.json')) continue;
+      const sid = base.slice(0, -'.json'.length);
+      if (existsSync(abs)) sessionIds.add(sid);
+      else deletedSessionIds.add(sid);
+    }
+
+    const server = this.services.tryResolve<{
+      broadcastWS?: (message: unknown) => void;
+      isSessionRunning?: (sessionId: string) => boolean;
+    }>(ServiceNames.SERVER_INSTANCE);
+
+    if (metaChanged) {
+      try {
+        await this.tasks.reloadFromDisk();
+      } catch (err) {
+        this.logger.warn('agent: tasks reload failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      server?.broadcastWS?.({ type: 'tasks.file-changed' });
+    }
+
+    for (const sid of sessionIds) {
+      // 运行中的会话由流式事件维护；磁盘失效会与防抖落盘并发，跳过
+      if (server?.isSessionRunning?.(sid) === true) continue;
+      this.sessions.invalidate(sid);
+      server?.broadcastWS?.({ type: 'session.file-changed', payload: { sessionId: sid } });
+    }
+
+    // 外部删除 session JSON = 删除该任务（用户明确预期：侧边栏立即移除）
+    let removedTask = false;
+    for (const sid of deletedSessionIds) {
+      if (server?.isSessionRunning?.(sid) === true) continue;
+      this.sessions.invalidate(sid);
+      // 同一批次里出现的「新增」或磁盘其它目录仍有同名文件 → 内部移组/归位，不是删除
+      if (sessionIds.has(sid) || this.sessions.hasSessionFile(sid)) continue;
+      if (this.tasks.deleteTask(sid)) {
+        removedTask = true;
+        server?.broadcastWS?.({ type: 'task.deleted', payload: { taskId: sid } });
+      }
+    }
+    if (removedTask) {
+      server?.broadcastWS?.({
+        type: 'task-groups.changed',
+        payload: { groups: this.tasks.listGroups().filter(group => group.hidden !== true) },
+      });
+    }
   }
 
   /** filesys 变更事件 → WS 推送 + contextFiles 轨迹 */
@@ -712,15 +864,19 @@ export class AgentEngineImpl implements AgentEngine {
       input.clientMessageId && input.clientMessageId.trim()
         ? input.clientMessageId
         : `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    this.sessions.addUserMessage(session, userMessage, input.attachments, userClientMessageId);
+    const persistedUserMessage = this.sessions.addUserMessage(
+      session,
+      userMessage,
+      input.attachments,
+      userClientMessageId,
+    );
     // 用户消息实时通道：与 assistant 事件同一条 onEvent 链路（WebUI / IM / MCP / 自动化共用）。
     // 必须在 addUserMessage 之后发出：时间戳与持久化副本一致；钩子 deny 在上方提前返回、不会误发。
-    const persistedUserMessage = session.messages[session.messages.length - 1];
     emit({
       type: 'user-message',
       sessionId,
       content: userMessage,
-      timestamp: persistedUserMessage?.timestamp ?? new Date().toISOString(),
+      timestamp: persistedUserMessage.timestamp ?? new Date().toISOString(),
       ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
       clientMessageId: userClientMessageId,
       ...(input.runId ? { runId: input.runId } : {}),

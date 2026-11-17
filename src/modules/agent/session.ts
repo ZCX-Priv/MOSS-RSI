@@ -113,6 +113,9 @@ function safeRelDir(dir: string): string {
     .join('/');
 }
 
+/** 未知归属会话的兜底目录：保持在 main 类别内，不创建顶层 default */
+const FALLBACK_SESSION_DIR = 'main/default';
+
 export class SessionStore {
   private readonly sessions = new Map<string, Session>();
   /**
@@ -351,7 +354,7 @@ export class SessionStore {
     const indexedDir = this.resolveSessionDir(sessionId);
     if (!indexedDir) return false;
     const sid = safeSessionId(sessionId);
-    const rel = safeRelDir(indexedDir) || 'default';
+    const rel = safeRelDir(indexedDir) || FALLBACK_SESSION_DIR;
     const dest = join(this.tasksDir, rel, `${sid}.json`);
     if (existsSync(dest)) return true;
     const diskDir = this.findDirOnDisk(sid);
@@ -389,7 +392,7 @@ export class SessionStore {
     if (known && existsSync(known.filePath)) return known.filePath;
     const indexedDir = this.resolveSessionDir(sessionId);
     if (indexedDir) {
-      const rel = safeRelDir(indexedDir) || 'default';
+      const rel = safeRelDir(indexedDir) || FALLBACK_SESSION_DIR;
       const indexed = join(this.tasksDir, rel, `${sid}.json`);
       if (existsSync(indexed)) {
         this.sessionFiles.set(sid, { dir: rel, filePath: indexed });
@@ -400,8 +403,9 @@ export class SessionStore {
       return indexed;
     }
     const diskDir = this.findDirOnDisk(sid);
-    const filePath = join(this.tasksDir, diskDir ?? 'default', `${sid}.json`);
-    this.sessionFiles.set(sid, { dir: diskDir ?? 'default', filePath });
+    const fallbackDir = diskDir ?? FALLBACK_SESSION_DIR;
+    const filePath = join(this.tasksDir, fallbackDir, `${sid}.json`);
+    this.sessionFiles.set(sid, { dir: fallbackDir, filePath });
     return filePath;
   }
 
@@ -499,7 +503,7 @@ export class SessionStore {
           this.logger.warn(t('agent.healedDanglingToolCalls', { count: healedCount }), { sessionId });
         }
         this.sessionFiles.set(session.id, {
-          dir: this.sessionFiles.get(session.id)?.dir ?? 'default',
+          dir: this.sessionFiles.get(session.id)?.dir ?? FALLBACK_SESSION_DIR,
           filePath,
         });
         this.sessions.set(session.id, session);
@@ -548,6 +552,29 @@ export class SessionStore {
       this.touchSession(sessionId);
     }
     return session;
+  }
+
+  /**
+   * 外部文件变化：丢弃内存缓存与待刷盘标记，下次访问从磁盘重新加载。
+   * 只用于非运行中的会话（运行中由流式事件维护，避免与落盘并发冲突）。
+   */
+  invalidate(sessionId: string): void {
+    const sid = safeSessionId(sessionId);
+    this.sessions.delete(sid);
+    this.dirtySessions.delete(sid);
+    // 一并丢弃路径索引：文件可能已被外部删除，保留旧路径会在下次写入时把文件重新建出来
+    this.sessionFiles.delete(sid);
+  }
+
+  /**
+   * 会话文件是否仍存在于任务目录（外部删除判定用）。
+   * 覆盖「文件被内部移组/归位」：旧路径删除事件不代表任务消失，只要新路径仍有文件即为存在。
+   */
+  hasSessionFile(sessionId: string): boolean {
+    const sid = safeSessionId(sessionId);
+    const known = this.sessionFiles.get(sid);
+    if (known && existsSync(known.filePath)) return true;
+    return this.findDirOnDisk(sid) !== null;
   }
 
   /**
@@ -703,25 +730,36 @@ export class SessionStore {
   }
 
   /**
-   * 添加用户消息。
+   * 添加用户消息（clientMessageId 幂等：同一身份重复到达时不再追加）。
    * @param attachments 附件绝对路径（为空/缺省时不写该字段，保持旧数据紧凑）
    * @param clientMessageId 前端生成的消息 id（前端据此与本地乐观副本对齐去重；缺省不写）
+   * @returns 实际存在于会话中的用户消息（新建或已存在的同身份消息）
    */
   addUserMessage(
     session: Session,
     content: string,
     attachments?: string[],
     clientMessageId?: string,
-  ): void {
-    session.messages.push({
+  ): AgentMessage {
+    // 纵深防御：WS 重复帧/重连补发可能让同一条消息到达两次；
+    // 已有同身份用户消息时直接复用，避免历史出现两份相同提问（模型复读/上下文错乱）。
+    if (clientMessageId) {
+      const existing = session.messages.find(
+        m => m.role === 'user' && m.clientMessageId === clientMessageId,
+      );
+      if (existing) return existing;
+    }
+    const message: AgentMessage = {
       role: 'user',
       content,
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
       ...(clientMessageId ? { clientMessageId } : {}),
       timestamp: new Date().toISOString(),
-    });
-    session.updatedAt = new Date().toISOString();
+    };
+    session.messages.push(message);
+    session.updatedAt = message.timestamp ?? new Date().toISOString();
     this.markDirty(session);
+    return message;
   }
 
   /** 设置会话级权限模式（变化时持久化；引擎每次 run 解析后调用） */

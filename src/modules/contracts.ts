@@ -209,6 +209,21 @@ export interface AgentEngine {
   /** 列出全部分组（含隐藏分组，供内部按 id/名查找；HTTP 边界另行过滤） */
   listTaskGroups(): import('./agent/task-store').TaskGroup[];
 
+  /** 读取任务元信息；不存在返回 null（IM/自动化等外部 run 校验会话归属用） */
+  getTask?(id: string): import('./agent/task-store').TaskItem | null;
+
+  /** 更新任务标题/所属分组（移组会同步搬移 session 文件） */
+  updateTask?(
+    id: string,
+    patch: { title?: string; groupId?: string },
+  ): import('./agent/task-store').TaskItem | null;
+
+  /** 更新分组属性（名称 / 展开态） */
+  updateTaskGroup?(
+    id: string,
+    patch: { name?: string; expanded?: boolean },
+  ): import('./agent/task-store').TaskGroup | null;
+
   /** 会话级权限模式（子代理继承父会话模式 / 刷新恢复徽章用） */
   getPermissionMode?(sessionId: string): PermissionMode | undefined;
 
