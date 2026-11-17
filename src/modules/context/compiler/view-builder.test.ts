@@ -88,6 +88,29 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     expect(view.breakdown.memory).toBe(0);
   });
 
+  test('thinking：默认剥离历史 thinking；includeThinking=true 保留全部（DeepSeek 全量回传数据源）', () => {
+    const session = mkSession([
+      { role: 'user', content: '第一轮' },
+      {
+        role: 'assistant',
+        content: '',
+        thinking: '历史思考',
+        toolCalls: [{ id: 'tc1', name: 'read', arguments: '{}' }],
+      },
+      { role: 'tool', toolCallId: 'tc1', name: 'read', content: 'ok' },
+      { role: 'user', content: '第二轮' },
+      { role: 'assistant', content: '直接回答' },
+    ]);
+
+    const stripped = buildRequestView(session, 'SYSTEM', {});
+    expect(stripped.messages.every(m => m.thinking === undefined)).toBe(true);
+
+    const kept = buildRequestView(session, 'SYSTEM', { includeThinking: true });
+    expect(kept.messages.find(m => m.toolCalls)?.thinking).toBe('历史思考');
+    // 回传的 thinking 计入上下文估算（不可只保留不计量）
+    expect(kept.breakdown.history).toBeGreaterThan(stripped.breakdown.history);
+  });
+
   test('多模态：tool 消息的图片路径被实时读盘编码，且不落 session', () => {
     const dir = mkdtempSync(join(tmpdir(), 'moss-view-img-'));
     try {

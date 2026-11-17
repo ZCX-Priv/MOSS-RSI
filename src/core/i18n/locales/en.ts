@@ -96,7 +96,7 @@ export const en = {
     moderationBlocked:
       'Upstream moderation blocked the request (HTTP 400): the conversation contains text the provider flagged as risky, usually from web fetches, file contents, or command output. Retract the user message that pulled in that content and resend, or run a manual compaction first, then retry.',
     reasoningContentMissing:
-      'Thinking-mode tool turn is missing reasoning_content (DeepSeek requires assistant tool-call messages in the current turn to pass it back). If this repeats, check the thinking level and context pruning policy.',
+      'Thinking mode is missing reasoning_content (DeepSeek requires every tools-bearing request to pass back historical reasoning_content in full). Update to the fixed build; if it still occurs, check that the provider is recognized as DeepSeek (model name or endpoint must contain "deepseek").',
   },
   mcp: {
     managerInitializing: 'MCP manager initializing',

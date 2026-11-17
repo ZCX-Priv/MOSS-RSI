@@ -23,14 +23,14 @@ export class OpenAIChatProvider implements LLMProvider {
   transformRequest(req: UnifiedRequest, cfg: ModelConfig): unknown {
     // 思考控制：合并配置与请求级覆盖（消息转换需要知道是否开启思考）
     const thinking = mergeThinking(cfg.thinking, req.thinking);
+    // DeepSeek 官方契约：携带 tools 的请求，后续所有请求必须完整回传历史
+    // reasoning_content（即使该轮未实际调用工具）。因此这里与本地 thinking 开关无关——
+    // 只要请求带 tools，就全量回传（缺失补空串），否则工具轮第 2 轮必 400。
+    const deepseek = isReasoningContentProvider(cfg);
+    const replayAllReasoning = deepseek && (req.tools?.length ?? 0) > 0;
     const body: Record<string, unknown> = {
       model: req.model,
-      messages: toOpenAIMessages(
-        req.messages,
-        req.replayThinking === true,
-        // DeepSeek 思考模式：当前轮 assistant 工具调用消息必须回传 reasoning_content
-        thinking.enabled && isReasoningContentProvider(cfg),
-      ),
+      messages: toOpenAIMessages(req.messages, req.replayThinking === true, replayAllReasoning),
       stream: req.stream,
     };
     // 流式时显式请求 usage chunk（OpenAI 兼容 API 默认不在流中返回 usage；
@@ -60,7 +60,7 @@ export class OpenAIChatProvider implements LLMProvider {
     }
 
     // 思考参数（thinking 已在上方合并）
-    const thinkingParams = toOpenAIChatThinking(thinking);
+    const thinkingParams = toOpenAIChatThinking(thinking, deepseek);
     Object.assign(body, thinkingParams);
 
     return body;
@@ -161,9 +161,16 @@ export class OpenAIChatProvider implements LLMProvider {
 // 思考参数转换
 // ============================================================================
 
-export function toOpenAIChatThinking(t: ThinkingConfig): Record<string, unknown> {
-  if (!t.enabled) return { reasoning_effort: 'none' };
-  return { reasoning_effort: t.effort ?? 'medium' };
+export function toOpenAIChatThinking(t: ThinkingConfig, deepseek = false): Record<string, unknown> {
+  // effort 归一化：'off'（UI 档位哨兵）/ 'none'（API 语义）都视为关闭思考
+  const off = !t.enabled || t.effort === 'off' || t.effort === 'none';
+  if (off) {
+    // DeepSeek：官方关闭手段是 thinking.type（对象存在时优先于 reasoning_effort）
+    return deepseek ? { thinking: { type: 'disabled' } } : { reasoning_effort: 'none' };
+  }
+  const body: Record<string, unknown> = { reasoning_effort: t.effort ?? 'medium' };
+  if (deepseek) body.thinking = { type: 'enabled' };
+  return body;
 }
 
 // ============================================================================
@@ -194,7 +201,7 @@ function normalizeUsage(u: OpenAIChatUsage): UnifiedUsage {
 function toOpenAIMessages(
   msgs: UnifiedMessage[],
   replayThinking: boolean,
-  toolThinking: boolean,
+  replayAllReasoning: boolean,
 ): unknown[] {
   const out: unknown[] = [];
   let pendingImageMsgs: Array<Record<string, unknown>> = [];
@@ -204,12 +211,6 @@ function toOpenAIMessages(
       pendingImageMsgs = [];
     }
   };
-  // 当前轮起点：最后一条 user 消息。工具调用的 reasoning_content 只回传这一段，
-  // 避免把历史思考全部重发（上下文体积会成倍膨胀）。
-  let lastUserIndex = -1;
-  for (let i = 0; i < msgs.length; i += 1) {
-    if (msgs[i].role === 'user') lastUserIndex = i;
-  }
   for (let index = 0; index < msgs.length; index += 1) {
     const msg = msgs[index];
     // 非 tool 消息：工具块结束，先补发累积的图片承载消息
@@ -224,7 +225,7 @@ function toOpenAIMessages(
     ) {
       continue;
     }
-    out.push(toOpenAIMessage(msg, replayThinking, toolThinking && index > lastUserIndex));
+    out.push(toOpenAIMessage(msg, replayThinking, replayAllReasoning));
     if (msg.role === 'tool' && msg.images && msg.images.length > 0) {
       pendingImageMsgs.push({ role: 'user', content: contentWithImages('[图片]', msg.images) });
     }
@@ -236,7 +237,7 @@ function toOpenAIMessages(
 function toOpenAIMessage(
   msg: UnifiedMessage,
   replayThinking: boolean,
-  currentTurnToolThinking: boolean,
+  replayAllReasoning: boolean,
 ): unknown {
   const hasImages = !!msg.images && msg.images.length > 0;
   // 图片承载为多模态 content 数组；tool 消息除外（其 content 必须为字符串）
@@ -246,14 +247,15 @@ function toOpenAIMessage(
   if (msg.name) out.name = msg.name;
   if (msg.toolCallId) out.tool_call_id = msg.toolCallId;
   // 思考内容回传：
-  // - replayThinking=true：所有 assistant 消息回传（用户显式开启）
-  // - DeepSeek 思考模式：当前轮 assistant 工具调用消息必须回传，缺失时用空串兜底
+  // - replayAllReasoning（DeepSeek + tools）：所有 assistant 消息必须回传，
+  //   缺失时用空串兜底（历史轮次也要带，否则 API 返回 400）。
+  // - replayThinking=true：用户显式开启的 OpenAI 兼容回传（非 DeepSeek 场景）。
   if (msg.role === 'assistant') {
-    if (replayThinking) {
+    if (replayAllReasoning) {
+      out.reasoning_content = msg.thinking ?? '';
+    } else if (replayThinking) {
       if (msg.thinking) out.reasoning_content = msg.thinking;
       else if (msg.toolCalls && msg.toolCalls.length > 0) out.reasoning_content = '';
-    } else if (currentTurnToolThinking && msg.toolCalls && msg.toolCalls.length > 0) {
-      out.reasoning_content = msg.thinking ?? '';
     }
   }
   if (msg.toolCalls) {
@@ -306,8 +308,9 @@ function mergeThinking(
 /**
  * 是否为要求回传 reasoning_content 的思考模型（DeepSeek）。
  * 仅对 DeepSeek 生效，避免 OpenAI 官方等严格端点拒绝未知字段。
+ * 上下文引擎复用同一判定，保证「视图保留 thinking」与「provider 回传」口径一致。
  */
-function isReasoningContentProvider(cfg: ModelConfig): boolean {
+export function isReasoningContentProvider(cfg: ModelConfig): boolean {
   const target = `${cfg.model} ${cfg.endpoint}`.toLowerCase();
   return target.includes('deepseek');
 }

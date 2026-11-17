@@ -61,9 +61,10 @@ export interface ImageOptimizationConfig {
 /** 思考内容回传配置（计入估算对所有 provider 一律生效，回传按 provider 语义） */
 export interface ThinkingReplayConfig {
   /**
-   * OpenAI 兼容（含 DeepSeek）是否把历史 reasoning_content 回传给模型。
-   * 默认 false —— DeepSeek 官方规范：多轮回写 assistant 消息只需 content，
-   * 不应传入 reasoning_content。仅在自建代理确实接受时才开启。
+   * 非 DeepSeek 的 OpenAI 兼容端点是否把历史 reasoning_content 回传给模型。
+   * 默认 false —— 严格端点可能拒绝未知字段，仅在自建代理确实接受时才开启。
+   * DeepSeek 不由此开关控制：携带 tools 的请求必须完整回传历史 reasoning_content
+   * （官方契约），上下文引擎恒保留其 thinking 并计入估算。
    */
   replayOpenAICompat: boolean;
 }

@@ -45,6 +45,7 @@ import {
 } from '../governor';
 import { resolveSummaryModel } from '../compressor';
 import { ensureContextPrompts } from '../prompt-loader';
+import { isReasoningContentProvider } from '../../llm/providers/openai-chat';
 
 /** 本地自然日 key（YYYY-MM-DD；概览按日遥测的桶键） */
 function localDayKey(date: Date): string {
@@ -185,7 +186,6 @@ export class ContextEngineServiceImpl {
     const windowTokens = opts.windowTokens ?? this.resolveWindowTokens(opts.model);
     this.noteCwd(opts.cwd);
     const includeThinking = this.resolveIncludeThinking(opts.model);
-    const includeToolCallThinking = this.resolveIncludeToolCallThinking(opts.model);
     const deps = this.buildGovernorDeps();
     const prepared = await governorPrepare(deps, {
       session,
@@ -195,7 +195,6 @@ export class ContextEngineServiceImpl {
       windowTokens,
       promptExtras: opts.promptExtras ?? null,
       includeThinking,
-      includeToolCallThinking,
     });
 
     // 图片「只发一次」：缓存本轮内联发送的图片消息引用（等待调用方确认/丢弃）
@@ -231,7 +230,7 @@ export class ContextEngineServiceImpl {
             }
           : {}),
       })),
-      includeThinking || includeToolCallThinking,
+      includeThinking,
     );
     const t = this.ensureTelemetry(session.id);
     t.lastBreakdown = prepared.breakdown;
@@ -598,6 +597,9 @@ export class ContextEngineServiceImpl {
         let chars = 0;
         for (const m of messages) {
           chars += m.content.length;
+          // 视图按 provider 语义保留了 thinking（Anthropic / DeepSeek）时必须计入，
+          // 否则校准比例与上下文占用会被系统性低估。
+          if (m.thinking) chars += m.thinking.length;
           if (m.name) chars += m.name.length;
           if (m.toolCallId) chars += m.toolCallId.length;
           for (const tc of m.toolCalls ?? []) {
@@ -677,7 +679,6 @@ export class ContextEngineServiceImpl {
       );
       const view = buildRequestView(session, staticSystemPrompt, {
         includeThinking: this.resolveIncludeThinking(model),
-        includeToolCallThinking: this.resolveIncludeToolCallThinking(model),
         resolveSkillPrompt: name => this.resolveSkillPrompt(name),
       });
       t.lastBreakdown = view.breakdown;
@@ -729,11 +730,11 @@ export class ContextEngineServiceImpl {
   }
 
   /**
-   * provider 是否会把历史 thinking 回传给模型：
+   * provider 是否会回传 thinking（决定视图是否保留、估算是否计入）：
    * - anthropic：带 thinkingSignature 时回传；
-   * - openai-chat / openai-responses：仅 context.thinking.replayOpenAICompat=true；
-   * - 其他格式默认不回传。
-   * 该标记决定构建视图/估算是否计入 thinking（避免未发送内容造成假性上下文压力）。
+   * - DeepSeek（openai-chat）：携带 tools 的请求必须完整回传历史 reasoning_content
+   *   （官方契约），因此恒为 true，与本地 thinking 开关无关；
+   * - 其他 openai 兼容：仅 context.thinking.replayOpenAICompat=true。
    */
   private resolveIncludeThinking(model: string): boolean {
     try {
@@ -741,29 +742,11 @@ export class ContextEngineServiceImpl {
       const found = models.find(m => m.id === model || m.model === model);
       if (!found) return false;
       if (found.format === 'anthropic') return true;
+      if (found.format === 'openai-chat' && isReasoningContentProvider(found)) return true;
       const app = this.config.getAppConfig() as {
         context?: { thinking?: { replayOpenAICompat?: boolean } };
       };
       return app.context?.thinking?.replayOpenAICompat === true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * 是否需要保留「当前轮工具调用」的 thinking：
-   * DeepSeek 思考模式（openai-chat）要求 assistant 工具调用消息回传 reasoning_content，
-   * 否则工具轮次的下一轮请求会返回 400。其他 provider 保持默认（不回传）。
-   */
-  private resolveIncludeToolCallThinking(model: string): boolean {
-    try {
-      const models = flattenModels(this.config.getApiConfig());
-      const found = models.find(m => m.id === model || m.model === model);
-      if (!found) return false;
-      if (found.format !== 'openai-chat') return false;
-      if (found.thinking?.enabled !== true) return false;
-      const target = `${found.model} ${found.endpoint}`.toLowerCase();
-      return target.includes('deepseek');
     } catch {
       return false;
     }

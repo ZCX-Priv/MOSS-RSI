@@ -449,7 +449,8 @@ export class AgentEngineImpl implements AgentEngine {
 
     const appCfg = this.config.getAppConfig();
     const cfg = appCfg.agent;
-    // 思考回传（OpenAI 兼容 provider 消费；默认 false，按 DeepSeek 规范不回传 reasoning_content）
+    // 思考回传（仅非 DeepSeek 的 OpenAI 兼容 provider 消费；DeepSeek 带 tools 时
+    // 由 openai-chat provider 自动全量回传历史 reasoning_content）
     const replayThinking = appCfg.context?.thinking?.replayOpenAICompat ?? false;
     // Agent 模板配置：子代理/自定义 Agent 的 systemPrompt / tools / model / maxTurns / maxTokens
     const agentRegistry = this.services.tryResolve<AgentRegistryLike>(ServiceNames.AGENT_REGISTRY);
@@ -3398,8 +3399,8 @@ export class AgentEngineImpl implements AgentEngine {
     const systemContent = buildStaticSystemPrompt(this.env, skillPrompt, null, promptExtras ?? null);
     const view = buildRequestView(session, systemContent, {
       resolveSkillPrompt: name => this.resolveSkillPrompt(name),
-      // 降级路径同样保留当前轮工具调用 thinking：DeepSeek 思考模式缺 reasoning_content 会 400
-      includeToolCallThinking: true,
+      // 降级路径同样保留全部 thinking：DeepSeek 带 tools 时必须完整回传历史 reasoning_content
+      includeThinking: true,
     });
     return view.messages;
   }

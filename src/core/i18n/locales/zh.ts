@@ -94,7 +94,7 @@ export const zh = {
     moderationBlocked:
       '上游内容审核拦截（HTTP 400）：本会话上下文中存在被服务商判定为风险的文本，通常来自网页抓取、文件内容或命令输出。可撤回触发该内容的用户消息后重发，或先执行「手动压缩」清理上下文后重试。',
     reasoningContentMissing:
-      '思考模式工具轮缺少 reasoning_content（DeepSeek 要求当前轮 assistant 工具调用消息必须回传该字段）。若反复出现，请确认模型思考级别与上下文裁剪策略。',
+      '思考模式缺少 reasoning_content（DeepSeek 要求携带 tools 的请求完整回传历史所有轮次的 reasoning_content）。请升级到已修复版本；若仍出现，请检查模型服务商是否被识别为 DeepSeek（模型名/端点需含 deepseek）。',
   },
   mcp: {
     managerInitializing: 'MCP 管理器初始化中',

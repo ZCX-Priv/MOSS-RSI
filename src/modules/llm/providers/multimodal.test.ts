@@ -19,6 +19,21 @@ function req(messages: UnifiedMessage[]): UnifiedRequest {
   return { model: 'm', messages, stream: false };
 }
 
+/** 带 tools 的请求（DeepSeek reasoning_content 回传只在该场景生效） */
+function reqWithTools(messages: UnifiedMessage[]): UnifiedRequest {
+  return {
+    model: 'm',
+    messages,
+    stream: false,
+    tools: [
+      {
+        type: 'function',
+        function: { name: 'read', description: 'read', parameters: { type: 'object', properties: {} } },
+      },
+    ],
+  };
+}
+
 describe('多模态图片映射', () => {
   test('openai-chat：user 图片 → content parts；tool 图片 → 工具块之后追加 user 消息', () => {
     const body = new OpenAIChatProvider().transformRequest(
@@ -173,9 +188,9 @@ describe('多模态图片映射', () => {
     expect(body.messages[0].content).toBe('hi');
   });
 
-  test('DeepSeek 思考模式：当前轮工具调用回传 reasoning_content，空 assistant 被丢弃', () => {
+  test('DeepSeek + tools：工具轮回传 reasoning_content，空 assistant 被丢弃', () => {
     const body = new OpenAIChatProvider().transformRequest(
-      req([
+      reqWithTools([
         { role: 'user', content: '开始' },
         // 被中断的 assistant：只有 thinking，没有正文/工具调用 → 不应进入请求
         { role: 'assistant', content: '', thinking: '被中断的思考' },
@@ -205,9 +220,9 @@ describe('多模态图片映射', () => {
     expect(assistantTool?.reasoning_content).toBe('工具轮思考');
   });
 
-  test('DeepSeek 思考模式：历史轮工具调用不回传 reasoning_content（只回传最后一条 user 之后）', () => {
+  test('DeepSeek + tools：历史轮与当前轮均回传 reasoning_content（官方全量回传契约）', () => {
     const body = new OpenAIChatProvider().transformRequest(
-      req([
+      reqWithTools([
         { role: 'user', content: '第一轮' },
         {
           role: 'assistant',
@@ -235,13 +250,96 @@ describe('多模态图片映射', () => {
     ) as { messages: Array<Record<string, unknown>> };
 
     const tools = body.messages.filter(m => m.tool_calls);
-    expect(tools[0]?.reasoning_content).toBeUndefined();
+    expect(tools[0]?.reasoning_content).toBe('旧思考');
     expect(tools[1]?.reasoning_content).toBe('新思考');
+  });
+
+  test('DeepSeek + tools：无 thinking 的 assistant 回传空串（正文消息同样带字段）', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      reqWithTools([
+        { role: 'user', content: '第一轮' },
+        { role: 'assistant', content: '直接回答' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'k',
+        model: 'deepseek-flash',
+        thinking: { enabled: true, effort: 'max' },
+      },
+    ) as { messages: Array<Record<string, unknown>> };
+
+    const assistants = body.messages.filter(m => m.role === 'assistant');
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]?.reasoning_content).toBe('');
+    expect(assistants[1]?.reasoning_content).toBe('');
+  });
+
+  test('DeepSeek 本地 thinking=off 但带 tools：仍回传（API 可能强制思考，否则第 2 轮 400）', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      reqWithTools([
+        { role: 'user', content: '开始' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '模型实际产出的思考',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'k',
+        model: 'deepseek-flash',
+        thinking: { enabled: false, effort: 'max' },
+      },
+    ) as {
+      messages: Array<Record<string, unknown>>;
+      thinking?: { type?: string };
+      reasoning_effort?: string;
+    };
+
+    const assistantTool = body.messages.find(m => m.tool_calls);
+    expect(assistantTool?.reasoning_content).toBe('模型实际产出的思考');
+    // 关闭思考走官方 thinking.type，而不是仅 reasoning_effort
+    expect(body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  test('DeepSeek 无 tools：不回传 reasoning_content（API 会忽略且徒增体积）', () => {
+    const body = new OpenAIChatProvider().transformRequest(
+      req([
+        { role: 'user', content: '开始' },
+        {
+          role: 'assistant',
+          content: '',
+          thinking: '思考',
+          toolCalls: [{ id: 'tc1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'tc1' },
+      ]),
+      {
+        format: 'openai-chat',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'k',
+        model: 'deepseek-flash',
+        thinking: { enabled: true, effort: 'max' },
+      },
+    ) as { messages: Array<Record<string, unknown>> };
+
+    const assistantTool = body.messages.find(m => m.tool_calls);
+    expect(assistantTool?.reasoning_content).toBeUndefined();
   });
 
   test('非 DeepSeek 端点不回传 reasoning_content（避免严格 provider 拒绝未知字段）', () => {
     const body = new OpenAIChatProvider().transformRequest(
-      req([
+      reqWithTools([
         { role: 'user', content: '开始' },
         {
           role: 'assistant',
