@@ -535,6 +535,8 @@ export const ServiceNames = {
   LLM_ROUTER: 'llm.router',
   TOOL_REGISTRY: 'tool.registry',
   MCP_MANAGER: 'mcp.manager',
+  /** MCP 市场服务（搜索 / 详情 / 安装托管，由 mcp 模块注册） */
+  MCP_MARKET: 'mcp.market',
   AGENT_ENGINE: 'agent.engine',
   SERVER_INSTANCE: 'server.instance',
   /** 配置服务（由内核注册：运行时读取 config.json / api.json，如 web 工具解析搜索服务商） */

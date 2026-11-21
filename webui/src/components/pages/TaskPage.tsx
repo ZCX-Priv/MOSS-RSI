@@ -112,6 +112,7 @@ import { TERMINAL_SCRATCH_SCOPE } from '../../lib/terminal-scope';
 import { SubagentCard, type SubagentCallItem } from '../subagent/SubagentCard';
 import { isAgentCall, parseAgentArgs, buildToolResultIndex, toToolResultEntry, type ToolResultEntry } from '../subagent/agent-calls';
 import { MessageErrorBoundary } from '../shared/MessageErrorBoundary';
+import { LazyModuleSlot } from '../shared/LazyModuleSlot';
 import { ControlHub } from '../shared/ControlHub';
 import { StatsBar } from '../shared/StatsBar';
 import { CompactionCard } from '../shared/CompactionCard';
@@ -119,13 +120,7 @@ import { MaxTurnsNoticeCard } from '../shared/MaxTurnsNoticeCard';
 import { OutputLimitNoticeCard } from '../shared/OutputLimitNoticeCard';
 // 工具卡片/程序卡片按需加载：它们携带预览/源码/diff/高亮等重渲染链，
 // 拆出首屏 chunk 可显著降低 TaskPage 首包解析成本（打开会话更快可交互）。
-// 首次出现工具卡片时再下载（命中浏览器缓存后无额外成本），fallback 只占一行。
-const ToolCallDetails = lazy(() =>
-  import('../shared/ToolCallDetails').then((m) => ({ default: m.ToolCallDetails })),
-);
-const RunCodeCard = lazy(() =>
-  import('../shared/RunCodeCard').then((m) => ({ default: m.RunCodeCard })),
-);
+// 通过 LazyModuleSlot 加载：失败可退避重试，且只降级单个卡片。
 // 右侧面板（终端 xterm / 文件树 / 变更列表 / Computer）按需加载：
 // 它们各自携带大量子依赖，但只有打开对应标签页时才需要渲染。
 const TerminalPanel = lazy(() =>
@@ -1424,7 +1419,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
    * 不再先出「纯文本占位」再升级；overscan 区条目仍走占位→渐进水合（升级发生在视口外，不可见）。
    */
   const renderItem = useCallback(
-    (msg: TaskMessage, _index: number, inViewport: boolean) => {
+    (msg: TaskMessage, index: number, inViewport: boolean) => {
       // 空 assistant 占位整条不渲染（含外层 padding）：否则会在页脚「响应中」上方
       // 留下几 px 幽灵高度，表现为「响应中先出现、随后下移几 px 才出现正文」。
       if (isEmptyAssistantPlaceholder(msg)) return null;
@@ -1440,14 +1435,23 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       const needsTodos =
         msg.todoSnapshot !== undefined ||
         (msg.toolCalls?.some((tc) => tc.name === 'todo') ?? false);
+      // 稳定排序键：相同错误合并时，靠前的消息展示唯一一张完整错误卡。
+      // 历史消息优先用持久化下标（加载更早历史时不会整体位移，避免无谓重渲）。
+      const orderIndex = typeof msg.historyIndex === 'number' && msg.historyIndex >= 0
+        ? msg.historyIndex
+        : index;
+      const orderBase = `${String(orderIndex).padStart(6, '0')}:${msg.id}`;
       return (
         <div className={cn('min-w-0', isContinuation ? 'px-4 pb-1' : 'px-4 pb-4')}>
           <MessageErrorBoundary
+            scope="message"
+            orderKey={orderBase}
             resetKey={`${msg.id}|${msg.content.length}|${msg.streaming ? 1 : 0}|${msg.toolCalls?.length ?? 0}`}
           >
             <MessageBubble
               sessionId={taskId}
               message={msg}
+              orderBase={orderBase}
               todos={needsTodos ? todos : undefined}
               toolIconMap={toolIconMap}
               toolResults={toolResultIndex}
@@ -2534,6 +2538,8 @@ interface MessageBubbleProps {
   /** 当前会话 id（按需翻译 API 需要） */
   sessionId: string;
   message: TaskMessage;
+  /** 消息级稳定排序键：相同错误合并时决定哪条消息展示完整错误卡 */
+  orderBase: string;
   /** 仅含 todo 卡片的消息才传（避免 todos 更新导致所有消息重渲） */
   todos?: TodoItem[];
   toolIconMap: Record<string, string>;
@@ -2570,7 +2576,7 @@ interface MessageBubbleProps {
    */
   deferContent?: boolean;
 }
-const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBase, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
   const { t, i18n } = useTranslation();
   // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
   // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
@@ -2949,23 +2955,25 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
       {/* agent 工具调用 → 合并为一张 Subagent 大卡片（头部 + 每行一个子代理，行可展开过程/报告）：
           结果统一从全局索引取（长耗时工具的结果消息未必紧邻本消息） */}
       {agentCalls.length > 0 && (
-        <SubagentCard
-          calls={agentCalls.map((tc): SubagentCallItem => {
-            const matched = toolResults.get(tc.id);
-            const args = parseAgentArgs(tc) ?? {};
-            return {
-              toolCallId: tc.id,
-              template: args.template ?? '',
-              task: args.task ?? '',
-              ...(args.mode ? { mode: args.mode } : {}),
-              status: tc.status,
-              resultText: matched?.text,
-              isError: matched?.isError,
-              ...(matched?.lazy ? { lazy: true } : {}),
-              ...(matched?.agentName ? { name: matched.agentName } : {}),
-            };
-          })}
-        />
+        <MessageErrorBoundary scope="card" orderKey={`${orderBase}:agent`}>
+          <SubagentCard
+            calls={agentCalls.map((tc): SubagentCallItem => {
+              const matched = toolResults.get(tc.id);
+              const args = parseAgentArgs(tc) ?? {};
+              return {
+                toolCallId: tc.id,
+                template: args.template ?? '',
+                task: args.task ?? '',
+                ...(args.mode ? { mode: args.mode } : {}),
+                status: tc.status,
+                resultText: matched?.text,
+                isError: matched?.isError,
+                ...(matched?.lazy ? { lazy: true } : {}),
+                ...(matched?.agentName ? { name: matched.agentName } : {}),
+              };
+            })}
+          />
+        </MessageErrorBoundary>
       )}
       {/* todo 工具调用（含 run_code 嵌套 todo）→ 在任务流中渲染 TodoProgressCard。
           渲染条件基于消息自身快照（?? 回落到 store）：store 被清空不牵连历史卡片。 */}
@@ -3096,19 +3104,27 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
       {/* run_code 专属卡片：程序 / 日志 / 工具调用 / 界面 */}
       {runCodeCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">
-          {runCodeCalls.map((tc) => {
+          {runCodeCalls.map((tc, cardIndex) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             const indexed = toolResults.get(tc.id);
             return (
-              <Suspense key={tc.id} fallback={<div className="h-5" />}>
-                <RunCodeCard
-                  toolCall={tc}
-                  result={matchedResult?.result}
-                  fallbackText={indexed?.text}
-                  fallbackIsError={indexed?.isError}
-                  iconMap={toolIconMap}
-                />
-              </Suspense>
+              <LazyModuleSlot
+                key={tc.id}
+                moduleKey="shared/RunCodeCard"
+                importer={() => import('../shared/RunCodeCard')}
+                orderKey={`${orderBase}:run:${cardIndex}`}
+                fallback={<div className="h-5" />}
+              >
+                {(mod) => (
+                  <mod.RunCodeCard
+                    toolCall={tc}
+                    result={matchedResult?.result}
+                    fallbackText={indexed?.text}
+                    fallbackIsError={indexed?.isError}
+                    iconMap={toolIconMap}
+                  />
+                )}
+              </LazyModuleSlot>
             );
           })}
         </div>
@@ -3117,21 +3133,29 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
           agent 工具已由上方专属卡片渲染。 */}
       {otherCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">
-          {otherCalls.map((tc) => {
+          {otherCalls.map((tc, cardIndex) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
             // 结果文本/错误标记回退到全局索引：长耗时工具的结果消息可能不紧邻本消息
             const indexed = toolResults.get(tc.id);
             return (
-              <Suspense key={tc.id} fallback={<div className="h-5" />}>
-                <ToolCallDetails
-                  toolCall={tc}
-                  result={matchedResult?.result}
-                  fallbackText={indexed?.text}
-                  fallbackIsError={indexed?.isError}
-                  iconMap={toolIconMap}
-                  stateKey={`${message.id}:tool:${tc.id}`}
-                />
-              </Suspense>
+              <LazyModuleSlot
+                key={tc.id}
+                moduleKey="shared/ToolCallDetails"
+                importer={() => import('../shared/ToolCallDetails')}
+                orderKey={`${orderBase}:tool:${cardIndex}`}
+                fallback={<div className="h-5" />}
+              >
+                {(mod) => (
+                  <mod.ToolCallDetails
+                    toolCall={tc}
+                    result={matchedResult?.result}
+                    fallbackText={indexed?.text}
+                    fallbackIsError={indexed?.isError}
+                    iconMap={toolIconMap}
+                    stateKey={`${message.id}:tool:${tc.id}`}
+                  />
+                )}
+              </LazyModuleSlot>
             );
           })}
         </div>

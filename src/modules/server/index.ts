@@ -37,6 +37,11 @@ import {
   createDeleteMcpServerHandler,
 } from './routes/mcp';
 import {
+  createMcpMarketQueryHandler,
+  createMcpMarketDetailHandler,
+  createMcpMarketInstallHandler,
+} from './routes/mcp-market';
+import {
   createListSkillsHandler,
   createGetSkillHandler,
   createUpdateSkillHandler,
@@ -315,8 +320,11 @@ class ServerModule implements Module {
     ctx.eventBus.onAction('resources:changed', (data) => {
       this.wsHandler.broadcast({ type: 'resources.changed', payload: data });
     });
-    // MCP 连接状态变化（后台连接完成/断开/失败），转发为 WS mcp.status
+    // MCP 连接状态变化（后台连接开始/完成/断开/失败），转发为 WS mcp.status
     // 前端 useMcp 监听后自动刷新列表（启动后台连接完成时无需手动刷新）
+    ctx.eventBus.onAction('mcp:server:connecting', (data) => {
+      this.wsHandler.broadcast({ type: 'mcp.status', payload: data });
+    });
     ctx.eventBus.onAction('mcp:server:connected', (data) => {
       this.wsHandler.broadcast({ type: 'mcp.status', payload: data });
     });
@@ -325,6 +333,14 @@ class ServerModule implements Module {
     });
     ctx.eventBus.onAction('mcp:server:error', (data) => {
       this.wsHandler.broadcast({ type: 'mcp.status', payload: data });
+    });
+    // 服务器定义删除：前端立即从列表移除（无需等待手动刷新）
+    ctx.eventBus.onAction('mcp:server:deleted', (data) => {
+      this.wsHandler.broadcast({ type: 'mcp.status', payload: data });
+    });
+    // MCP 市场安装阶段（下载/安装/启动）：前端进度条
+    ctx.eventBus.onAction('mcp:install:progress', (data) => {
+      this.wsHandler.broadcast({ type: 'mcp.install-progress', payload: data });
     });
     // 子代理事件（子代理 run 的 agent 事件流；前端卡片展示实时过程）
     ctx.eventBus.onAction('subagent:event', (data) => {
@@ -397,6 +413,10 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'POST', pattern: '/api/mcp/call', handler: createCallMcpToolHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/mcp/connect', handler: createConnectMcpServerHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/mcp/disconnect', handler: createDisconnectMcpServerHandler(services), auth: true });
+    // MCP 市场（搜索 / 详情 / 安装托管；静态路由先于 /api/mcp/servers/:name 注册）
+    this.router.addRoute({ method: 'POST', pattern: '/api/mcp/market/query', handler: createMcpMarketQueryHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/mcp/market/detail', handler: createMcpMarketDetailHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/mcp/market/install', handler: createMcpMarketInstallHandler(services), auth: true });
     // MCP 服务器定义 CRUD（含 enabled 启停切换）
     this.router.addRoute({ method: 'POST', pattern: '/api/mcp/servers', handler: createCreateMcpServerHandler(services), auth: true });
     this.router.addRoute({ method: 'PUT', pattern: '/api/mcp/servers/:name', handler: createUpdateMcpServerHandler(services), auth: true });

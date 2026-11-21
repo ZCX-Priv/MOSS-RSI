@@ -1175,7 +1175,7 @@ export interface ApiConfig {
 
 export interface McpServer {
   name: string;
-  status: 'connected' | 'disconnected' | 'error';
+  status: 'connecting' | 'connected' | 'disconnected' | 'error';
   toolCount: number;
   /** 服务器定义（stdio=command+args+env；http/sse=url+headers） */
   transport?: 'stdio' | 'http' | 'sse';
@@ -1188,6 +1188,72 @@ export interface McpServer {
   enabled?: boolean;
   /** 最近一次错误信息（status=error 时） */
   lastError?: string;
+  /** 市场来源（仅通过 MCP 市场安装的服务器携带） */
+  market?: {
+    source: McpMarketSource;
+    id: string;
+    version?: string;
+  };
+}
+
+// ============================================================================
+// MCP 市场（POST /api/mcp/market/query | detail | install）
+// ============================================================================
+
+export type McpMarketSource = 'mcpmarket' | 'official' | 'modelscope';
+
+export interface McpMarketEnvField {
+  name: string;
+  label?: string;
+  description?: string;
+  required: boolean;
+  secret: boolean;
+  default?: string;
+  placeholder?: string;
+  choices?: string[];
+  format?: 'string' | 'number' | 'boolean' | 'filepath';
+  /** 固定值：来自配置中的常量 env，不在弹窗中编辑，但会写入最终配置 */
+  fixedValue?: string;
+}
+
+export interface McpMarketInstallOption {
+  index: number;
+  kind: 'stdio' | 'remote';
+  transport: 'stdio' | 'http' | 'sse';
+  label: string;
+  registryType?: string;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env: McpMarketEnvField[];
+  /** 远程传输的请求头模板（值可含 {VAR} 占位符） */
+  headerTemplates?: Record<string, string>;
+  supported: boolean;
+  unsupportedReason?: string;
+}
+
+export interface McpMarketItem {
+  source: McpMarketSource;
+  id: string;
+  name: string;
+  nameEn?: string;
+  slug: string;
+  installName: string;
+  description: string;
+  version?: string;
+  iconUrl?: string;
+  homepage?: string;
+  stars?: number;
+  views?: number;
+  verified?: boolean;
+  hosted?: boolean;
+  updatedAt?: string;
+}
+
+export interface McpMarketDetail extends McpMarketItem {
+  installOptions: McpMarketInstallOption[];
+  obtainUrl?: string;
+  readme?: string;
 }
 
 export interface McpTool {

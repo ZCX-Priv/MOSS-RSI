@@ -5,11 +5,14 @@ import { t } from '../../core/i18n';
 import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import { MCPManagerImpl } from './manager';
+import { McpMarketServiceImpl } from './market';
 import { McpTaskRegistry } from './task-registry';
 
 class McpModule implements Module {
 
   private manager: MCPManagerImpl | null = null;
+  /** MCP 市场服务（搜索 / 详情 / 安装托管） */
+  private market: McpMarketServiceImpl | null = null;
   /** 对外派发任务注册表（/mcp 与 `moss mcp` 的异步任务状态） */
   private taskRegistry: McpTaskRegistry | null = null;
 
@@ -22,6 +25,16 @@ class McpModule implements Module {
       services: ctx.services,
     });
     ctx.services.register(ServiceNames.MCP_MANAGER, this.manager, {
+      scope: 'mcp',
+    });
+
+    // MCP 市场服务：依赖 manager 写盘/连接；路由与 mcp 工具按服务名解析
+    this.market = new McpMarketServiceImpl({
+      manager: this.manager,
+      eventBus: ctx.eventBus,
+      logger: ctx.logger,
+    });
+    ctx.services.register(ServiceNames.MCP_MARKET, this.market, {
       scope: 'mcp',
     });
 

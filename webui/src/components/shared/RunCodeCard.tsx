@@ -7,22 +7,19 @@
 // - 执行中通过 toolCall.live 展示实时嵌套调用/日志与 ms/s/min 计时。
 // - 程序源码/大 JSON 只在展开时解析；轻量历史结果展开时按 toolCallId 拉取完整 metadata。
 
-import { lazy, memo, startTransition, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, CircleAlert, Loader2, X } from 'lucide-react';
 import { CodeBlock } from '../../render';
 import { PageFrame } from '../../render/genui/page/PageFrame';
 import { useDarkMode } from '../../render/core/use-dark-mode';
 import { ToolCallDetails } from './ToolCallDetails';
+import { MessageErrorBoundary } from './MessageErrorBoundary';
+import { LazyModuleSlot } from './LazyModuleSlot';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { useStore } from '../../store';
 import { formatDuration } from '../../lib/format-duration';
 import type { CodeRunCall, CodeRunMetadata, ToolCall, ToolResult } from '../../types/api';
-
-/** IntelligentUI 渲染器懒加载：只有程序卡片展开且确有 spec 时才拉 catalog/chart 等重模块 */
-const GenUIRenderer = lazy(() =>
-  import('../../render/genui/GenUIRenderer').then((m) => ({ default: m.GenUIRenderer })),
-);
 
 interface RunCodeCardProps {
   toolCall: ToolCall;
@@ -204,31 +201,36 @@ export const RunCodeCard = memo(function RunCodeCard({
   return (
     <div className="flex flex-col gap-1">
       {/* 程序卡片：预览 = 文本结果，源码 = 程序代码；页面调用同样保留这行标准工具行。 */}
-      <ToolCallDetails
-        toolCall={toolCall}
-        result={hydratedResult}
-        fallbackText={fallbackText}
-        fallbackIsError={fallbackIsError}
-        iconMap={iconMap}
-        sessionId={resultSessionId}
-        headerClassName="pl-1 pr-2"
-        titleOverride={t('task.runCode.code')}
-        expanded={open}
-        onExpandedChange={setOpen}
-        trailing={
-          <RunStatusText
-            status={status}
-            isError={isError}
-            durationMs={meta?.durationMs}
-            startedAtMs={running ? startedAtMs : undefined}
-            truncated={meta?.truncated === true}
-            hasUi={hasUi || !!pageInfo?.source}
-          />
-        }
-        previewOverride={preview}
-        sourceOverride={source}
-        copyTextOverride={open ? (hasCode ? parsed.code : pageSource) : undefined}
-      />
+      <MessageErrorBoundary
+        scope="card"
+        orderKey={`card:${toolCall.id}:main`}
+      >
+        <ToolCallDetails
+          toolCall={toolCall}
+          result={hydratedResult}
+          fallbackText={fallbackText}
+          fallbackIsError={fallbackIsError}
+          iconMap={iconMap}
+          sessionId={resultSessionId}
+          headerClassName="pl-1 pr-2"
+          titleOverride={t('task.runCode.code')}
+          expanded={open}
+          onExpandedChange={setOpen}
+          trailing={
+            <RunStatusText
+              status={status}
+              isError={isError}
+              durationMs={meta?.durationMs}
+              startedAtMs={running ? startedAtMs : undefined}
+              truncated={meta?.truncated === true}
+              hasUi={hasUi || !!pageInfo?.source}
+            />
+          }
+          previewOverride={preview}
+          sourceOverride={source}
+          copyTextOverride={open ? (hasCode ? parsed.code : pageSource) : undefined}
+        />
+      </MessageErrorBoundary>
 
       {/* 内嵌页面（page 参数）：html 生成期渐进渲染；tsx 完成后编译渲染 */}
       {hasPageToRender && pageInfo?.source && !isError && (
@@ -252,14 +254,19 @@ export const RunCodeCard = memo(function RunCodeCard({
             // 父程序结束后不再有「运行中」的嵌套调用（最终 metadata 才是权威）
             const view = nestedToolView(call, running);
             return (
-              <ToolCallDetails
+              <MessageErrorBoundary
                 key={call.id}
-                toolCall={view.toolCall}
-                result={view.result}
-                iconMap={iconMap}
-                sessionId={resultSessionId}
-                onExpandedChange={(expanded) => setNestedOpen(call.id, expanded)}
-              />
+                scope="card"
+                orderKey={`card:${toolCall.id}:nested:${call.id}`}
+              >
+                <ToolCallDetails
+                  toolCall={view.toolCall}
+                  result={view.result}
+                  iconMap={iconMap}
+                  sessionId={resultSessionId}
+                  onExpandedChange={(expanded) => setNestedOpen(call.id, expanded)}
+                />
+              </MessageErrorBoundary>
             );
           })}
           {meta?.callsTruncated && (
@@ -272,13 +279,18 @@ export const RunCodeCard = memo(function RunCodeCard({
           折叠代码卡也常显（历史投影 hasUi=true 时自动补拉 spec） */}
       {renderedUiSpec && !isError && (
         <div className="mt-0.5 ml-1 min-w-0">
-          <Suspense
+          <LazyModuleSlot
+            moduleKey="render/genui/GenUIRenderer"
+            importer={() => import('../../render/genui/GenUIRenderer')}
+            orderKey={`card:${toolCall.id}:ui`}
             fallback={
               <div className="text-[11px] text-muted-foreground">{t('task.runCode.loadingUi')}</div>
             }
           >
-            <GenUIRenderer spec={renderedUiSpec} embedScripts={meta?.uiEmbedScripts} />
-          </Suspense>
+            {(mod) => (
+              <mod.GenUIRenderer spec={renderedUiSpec} embedScripts={meta?.uiEmbedScripts} />
+            )}
+          </LazyModuleSlot>
         </div>
       )}
     </div>

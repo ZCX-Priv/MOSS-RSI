@@ -1208,7 +1208,13 @@ export function McpTab({
   }, [addMode, submitForm, submitJson]);
 
   const statusColor = (s: McpServer['status']): string =>
-    s === 'connected' ? 'bg-success' : s === 'error' ? 'bg-danger' : 'bg-muted-foreground/40';
+    s === 'connected'
+      ? 'bg-success'
+      : s === 'error'
+        ? 'bg-danger'
+        : s === 'connecting'
+          ? 'bg-warning animate-pulse'
+          : 'bg-muted-foreground/40';
 
   return (
     <div className="p-6 pt-2">
@@ -1242,7 +1248,11 @@ export function McpTab({
                         <Cable className="size-5" />
                         <span
                           className={statusColor(server.status)}
-                          title={server.status + (server.lastError ? `: ${server.lastError}` : '')}
+                          title={
+                            server.status === 'connecting'
+                              ? t('plugins.mcpStatusConnecting')
+                              : server.status + (server.lastError ? `: ${server.lastError}` : '')
+                          }
                           aria-label={server.status}
                         />
                       </div>
@@ -1259,7 +1269,7 @@ export function McpTab({
                             ? server.url
                             : [server.command, ...(server.args ?? [])].filter(Boolean).join(' ')}
                         </p>
-                        {server.status === 'error' && server.lastError && (
+                        {server.status !== 'connected' && server.lastError && (
                           <p className="truncate text-xs text-destructive" title={server.lastError}>
                             {server.lastError}
                           </p>

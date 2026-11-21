@@ -742,10 +742,25 @@ export interface MCPManager {
   /** 列出所有已定义 MCP 服务器（含未连接与禁用） */
   listServers(): Array<{
     name: string;
-    status: 'connected' | 'disconnected' | 'error';
+    /** connecting = 正在建立连接（启动/安装/重连中） */
+    status: 'connecting' | 'connected' | 'disconnected' | 'error';
     toolCount: number;
     enabled: boolean;
     transport?: string;
+    /** 服务器定义（供前端展示与诊断） */
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    headers?: Record<string, string>;
+    /** 最近一次连接失败/意外断开的原因 */
+    lastError?: string;
+    /** 市场来源（仅通过 MCP 市场安装的服务器携带） */
+    market?: {
+      source: 'mcpmarket' | 'official' | 'modelscope';
+      id: string;
+      version?: string;
+    };
   }>;
   /** 列出指定服务器的工具（仅已连接且启用的服务器；透传 annotations/title） */
   listTools(serverName?: string): Array<{
@@ -789,15 +804,15 @@ export interface MCPManager {
     structured?: unknown;
   }>;
   /** 启动/重启指定服务器 */
-  connect(serverName: string): Promise<void>;
+  connect(serverName: string, opts?: { timeoutMs?: number }): Promise<void>;
   /** 断开指定服务器 */
   disconnect(serverName: string): Promise<void>;
   /** 重载所有服务器（配置变更后） */
   reloadAll(): Promise<void>;
   /** 新建服务器定义（写 ~/.moss/mcps/<name>.json 并尝试连接） */
-  createServer(name: string, def: unknown): Promise<void>;
+  createServer(name: string, def: unknown, opts?: { connect?: boolean }): Promise<void>;
   /** 更新服务器定义（写回文件，目录 watch 自动 reload） */
-  updateServer(name: string, def: unknown): Promise<void>;
+  updateServer(name: string, def: unknown, opts?: { connect?: boolean }): Promise<void>;
   /** 删除服务器定义（先断开，再删 ~/.moss/mcps/<name>.json） */
   deleteServer(name: string): Promise<void>;
 }

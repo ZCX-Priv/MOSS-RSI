@@ -106,7 +106,11 @@ export function createCreateMcpServerHandler(services: ServiceRegistry): RouteHa
     }
     const { name, ...def } = body;
     try {
-      await mgr.createServer(name, def);
+      // 写盘成功即返回；后台连接（首次 npx/uvx 启动可能较慢，不能阻塞添加请求）
+      await mgr.createServer(name, def, { connect: false });
+      if ((def as { enabled?: boolean }).enabled !== false) {
+        void mgr.connect(name).catch(() => {});
+      }
       return { status: 201, body: { created: true, server: name } };
     } catch (err) {
       return {
@@ -129,7 +133,12 @@ export function createUpdateMcpServerHandler(services: ServiceRegistry): RouteHa
       return { status: 400, body: { error: ErrorCode.MCP_SERVER_REQUIRED } };
     }
     try {
-      await mgr.updateServer(name, req.body);
+      // 部分更新在 manager 内与现有定义合并（如仅切换 enabled）；写盘后立即返回
+      await mgr.updateServer(name, req.body, { connect: false });
+      const body = req.body as { enabled?: unknown } | undefined;
+      if (body?.enabled !== false) {
+        void mgr.connect(name).catch(() => {});
+      }
       return { status: 200, body: { updated: true, server: name } };
     } catch (err) {
       return {

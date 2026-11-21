@@ -7,7 +7,17 @@
 //   3. config.json.mcpServers   （已 deprecated，仅为向后兼容保留；非空时 warn）
 
 import { t } from '../../core/i18n';
-import { McpClient, type McpClientEntry, type McpClientHooks, type McpElicitOutcome, type McpElicitRequest, type McpToolInfo, type McpToolResult, type ServerConfig } from './client';
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  McpClient,
+  type McpClientEntry,
+  type McpClientHooks,
+  type McpElicitOutcome,
+  type McpElicitRequest,
+  type McpToolInfo,
+  type McpToolResult,
+  type ServerConfig,
+} from './client';
 import type { MCPManager, McpToolAnnotations, LLMRouter } from '../contracts';
 import type { ConfigService, EventBus, Environment, Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
@@ -16,8 +26,31 @@ import { readdir, readFile, stat, mkdir, copyFile } from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 
+/** 服务器运行状态（connecting 用于前端展示与安装反馈） */
+type ServerStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
+
+interface ServerState {
+  status: ServerStatus;
+  lastError?: string;
+  retryCount: number;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  /** 同一服务器的并发 connect 合并到该 Promise，避免重复 spawn 子进程 */
+  inFlight?: Promise<void>;
+  /** 正在连接中的 client：断开/删除时可立即中止，而不是等初始化超时 */
+  connectingClient?: McpClient;
+  /** 用户主动断开/禁用：阻止自动重连 */
+  manualStop?: boolean;
+}
+
+/** 自动重连退避序列（毫秒，之后固定 60s） */
+const RECONNECT_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
+
 export class MCPManagerImpl implements MCPManager {
   private readonly entries = new Map<string, McpClientEntry>();
+  /** 每台服务器的运行状态（连接中/已连接/失败/断开 + 重试定时器） */
+  private readonly states = new Map<string, ServerState>();
+  /** 正在删除的服务器：阻止重连调度与 reload 期间的重新连接 */
+  private readonly deleting = new Set<string>();
   private readonly config: ConfigService;
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
@@ -29,6 +62,8 @@ export class MCPManagerImpl implements MCPManager {
   private watchStarted = false;
   /** 重载代次：每次 reloadAll/shutdown 递增，用于作废重载前发起、重载后才完成的连接 */
   private epoch = 0;
+  /** 进程关闭中：阻止重连调度 */
+  private shuttingDown = false;
 
   constructor(deps: {
     config: ConfigService;
@@ -113,25 +148,82 @@ export class MCPManagerImpl implements MCPManager {
       this.logger.debug(t('mcp.managerInitializing'), { serverCount: 0, names: [] });
     }
 
-    // 后台连接（单服务器失败不影响其他；禁用的跳过）
+    // 后台连接（单服务器失败不影响其他；禁用的跳过）。
+    // connect 内部自带 180s 初始化超时与失败自动重连，启动阶段不阻塞模块初始化。
     for (const name of names) {
       if (this.serverDefs.get(name)?.enabled === false) {
         this.logger.info(t('mcp.serverDisabledSkip', { name }));
+        this.stateOf(name).status = 'disconnected';
         continue;
       }
-      void this.connect(name).catch(err => {
-        this.logger.error(t('mcp.connectFailed', { name }), {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        void this.eventBus.broadcast('mcp:server:error', {
-          server: name,
-          error: err instanceof Error ? err.message : String(err),
-        }).catch(() => {});
-      });
+      void this.connect(name).catch(() => {});
     }
 
     // 监听用户 mcps 目录配置变更，实现热重载（延迟启动，避免启动期 watcher 开销）
     setTimeout(() => this.startWatch(), 1000);
+  }
+
+  /** 读取/创建某台服务器的运行状态 */
+  private stateOf(name: string): ServerState {
+    let state = this.states.get(name);
+    if (!state) {
+      state = { status: 'disconnected', retryCount: 0 };
+      this.states.set(name, state);
+    }
+    return state;
+  }
+
+  /** 清除重连定时器 */
+  private clearRetryTimer(state: ServerState): void {
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer);
+      state.retryTimer = undefined;
+    }
+  }
+
+  /** 失败后按退避序列安排自动重连（持续重试，间隔封顶 60s） */
+  private scheduleReconnect(name: string): void {
+    if (this.shuttingDown || this.deleting.has(name)) return;
+    const def = this.serverDefs.get(name);
+    if (!def || def.enabled === false) return;
+    const state = this.stateOf(name);
+    if (state.manualStop || state.retryTimer) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(state.retryCount, RECONNECT_DELAYS_MS.length - 1)];
+    state.retryCount += 1;
+    this.logger.info(
+      t('mcp.serverReconnectScheduled', {
+        name,
+        delay,
+        attempt: state.retryCount,
+      }),
+    );
+    const timer = setTimeout(() => {
+      state.retryTimer = undefined;
+      if (this.shuttingDown || state.manualStop) return;
+      if (this.serverDefs.get(name)?.enabled === false) return;
+      void this.connect(name).catch(() => {});
+    }, delay);
+    // 重连定时器不应阻止进程退出
+    (timer as { unref?: () => void }).unref?.();
+    state.retryTimer = timer;
+  }
+
+  /** 已连接客户端意外关闭（子进程退出/远端断连）：更新状态并重连 */
+  private handleUnexpectedClose(name: string, client: McpClient): void {
+    if (this.deleting.has(name)) return;
+    const entry = this.entries.get(name);
+    // 仅处理当前登记在册的连接；连接失败阶段/已被替换的 client 不重复触发
+    if (!entry || entry.client !== client) return;
+    this.entries.delete(name);
+    const state = this.stateOf(name);
+    const message = t('mcp.serverUnexpectedClose', { name });
+    state.status = 'error';
+    state.lastError = message;
+    this.logger.warn(message);
+    void this.eventBus
+      .broadcast('mcp:server:disconnected', { server: name, error: message })
+      .catch(() => {});
+    this.scheduleReconnect(name);
   }
 
   /**
@@ -230,7 +322,7 @@ export class MCPManagerImpl implements MCPManager {
     }
   }
 
-  async connect(serverName: string): Promise<void> {
+  async connect(serverName: string, opts?: { timeoutMs?: number }): Promise<void> {
     const serverCfg = this.serverDefs.get(serverName);
     if (!serverCfg) {
       throw new Error(
@@ -240,6 +332,38 @@ export class MCPManagerImpl implements MCPManager {
     if (serverCfg.enabled === false) {
       throw new Error(t('mcp.serverDisabled', { name: serverName }));
     }
+    // 正在删除的服务器：拒绝任何连接请求（reload/watch 竞态兜底）
+    if (this.deleting.has(serverName)) {
+      throw new Error(t('mcp.serverNotFound', { name: serverName }));
+    }
+
+    const state = this.stateOf(serverName);
+    // 并发合并：同一服务器同时只跑一条连接链路（启动/安装/手动点击可能重叠）
+    if (state.inFlight) return state.inFlight;
+
+    this.clearRetryTimer(state);
+    state.manualStop = false;
+    state.status = 'connecting';
+    state.lastError = undefined;
+    this.logger.info(t('mcp.serverConnecting', { name: serverName }));
+    void this.eventBus
+      .broadcast('mcp:server:connecting', { server: serverName })
+      .catch(() => {});
+
+    const task = this.doConnect(serverName, opts).finally(() => {
+      state.inFlight = undefined;
+    });
+    state.inFlight = task;
+    return task;
+  }
+
+  /** connect 的实际执行体：失败时记录错误、广播并安排自动重连 */
+  private async doConnect(serverName: string, opts?: { timeoutMs?: number }): Promise<void> {
+    const serverCfg = this.serverDefs.get(serverName);
+    if (!serverCfg) {
+      throw new Error(`MCP server "${serverName}" definition is no longer available`);
+    }
+    const state = this.stateOf(serverName);
 
     // 若已存在，先断开
     const existing = this.entries.get(serverName);
@@ -251,32 +375,78 @@ export class MCPManagerImpl implements MCPManager {
     // sampling 钩子按配置注入（allowSampling=false 时不声明能力）
     const samplingEnabled = this.config.getAppConfig().mcp?.allowSampling !== false;
     const epoch = this.epoch;
-    const client = new McpClient(
-      serverName,
-      serverCfg,
-      this.logger,
-      this.eventBus,
-      samplingEnabled ? this.buildSamplingHook() : undefined,
-    );
-    await client.connect();
-    // 连接期间已发生重载/关闭：本次连接结果作废，避免旧连接在 entries 中"复活"出重复子进程
-    if (epoch !== this.epoch) {
-      await client.disconnect().catch(() => {});
-      return;
-    }
-    this.entries.set(serverName, {
-      client,
-      config: serverCfg,
-      status: 'connected',
-    });
+    let client: McpClient | null = null;
+    const hooks: McpClientHooks = samplingEnabled ? this.buildSamplingHook() : {};
+    hooks.onUnexpectedClose = () => {
+      if (client) this.handleUnexpectedClose(serverName, client);
+    };
+    client = new McpClient(serverName, serverCfg, this.logger, this.eventBus, hooks);
 
-    this.logger.info(t('mcp.serverConnected', { name: serverName }), {
-      effectiveTransport: client.getEffectiveTransport(),
-    });
-    await this.eventBus.broadcast('mcp:server:connected', { server: serverName });
+    // 记录连接中的 client：disconnect/delete 可立即中止，不必等待初始化超时
+    state.connectingClient = client;
+    try {
+      try {
+        await client.connect(opts?.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (state.manualStop || this.deleting.has(serverName)) {
+          // 用户中途断开/删除：不广播错误、不安排重连
+          state.status = 'disconnected';
+          state.lastError = undefined;
+          throw err;
+        }
+        state.status = 'error';
+        state.lastError = message;
+        this.logger.error(t('mcp.connectFailed', { name: serverName }), { error: message });
+        void this.eventBus
+          .broadcast('mcp:server:error', { server: serverName, error: message })
+          .catch(() => {});
+        this.scheduleReconnect(serverName);
+        throw err;
+      }
+
+      // 连接期间已发生重载/关闭/删除/手动断开：本次连接结果作废
+      if (epoch !== this.epoch || state.manualStop || this.deleting.has(serverName)) {
+        await client.disconnect().catch(() => {});
+        if (epoch !== this.epoch) {
+          throw new Error(`connect aborted by reload: ${serverName}`);
+        }
+        return;
+      }
+
+      this.entries.set(serverName, {
+        client,
+        config: serverCfg,
+        status: 'connected',
+      });
+      state.status = 'connected';
+      state.retryCount = 0;
+      state.lastError = undefined;
+
+      this.logger.info(t('mcp.serverConnected', { name: serverName }), {
+        effectiveTransport: client.getEffectiveTransport(),
+      });
+      await this.eventBus.broadcast('mcp:server:connected', { server: serverName });
+    } finally {
+      if (state.connectingClient === client) state.connectingClient = undefined;
+    }
   }
 
   async disconnect(serverName: string): Promise<void> {
+    const state = this.stateOf(serverName);
+    // 主动断开：停止重试，并阻止连接完成后的“复活”
+    state.manualStop = true;
+    this.clearRetryTimer(state);
+    state.status = 'disconnected';
+    state.lastError = undefined;
+
+    // 连接进行中：立即取消（关闭子进程/transport），不再等待初始化超时
+    const connecting = state.connectingClient;
+    if (connecting) {
+      state.connectingClient = undefined;
+      await connecting.abortConnect().catch(() => {});
+    }
+
     const entry = this.entries.get(serverName);
     if (!entry) {
       this.logger.warn(t('mcp.notConnected', { name: serverName }));
@@ -307,6 +477,18 @@ export class MCPManagerImpl implements MCPManager {
       // 断开所有
       const names = Array.from(this.entries.keys());
       await Promise.allSettled(names.map(n => this.disconnect(n).catch(() => {})));
+      // 取消仍在进行中的连接 + 清理旧周期的重试定时器，避免重载后旧连接“复活”
+      const aborts: Array<Promise<void>> = [];
+      for (const state of this.states.values()) {
+        this.clearRetryTimer(state);
+        const connecting = state.connectingClient;
+        if (connecting) {
+          state.connectingClient = undefined;
+          aborts.push(connecting.abortConnect().catch(() => {}));
+        }
+      }
+      await Promise.allSettled(aborts);
+      this.states.clear();
       // 重新加载定义并连接
       await this.initialize();
     } finally {
@@ -372,39 +554,50 @@ export class MCPManagerImpl implements MCPManager {
 
   listServers(): Array<{
     name: string;
-    status: 'connected' | 'disconnected' | 'error';
+    status: ServerStatus;
     toolCount: number;
     enabled: boolean;
     transport?: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    headers?: Record<string, string>;
+    lastError?: string;
+    market?: ServerConfig['market'];
   }> {
     const result: Array<{
       name: string;
-      status: 'connected' | 'disconnected' | 'error';
+      status: ServerStatus;
       toolCount: number;
       enabled: boolean;
       transport?: string;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+      lastError?: string;
+      market?: ServerConfig['market'];
     }> = [];
-    // 已连接的
-    for (const [name, entry] of this.entries) {
+    // 统一按定义顺序输出；连接状态/错误取自运行时状态表
+    for (const [name, def] of this.serverDefs.entries()) {
+      const entry = this.entries.get(name);
+      const state = this.states.get(name);
       result.push({
         name,
-        status: entry.status,
-        toolCount: entry.client.getToolCount(),
-        enabled: entry.config.enabled !== false,
-        transport: entry.config.transport,
+        status: entry ? 'connected' : state?.status ?? 'disconnected',
+        toolCount: entry?.client.getToolCount() ?? 0,
+        enabled: def.enabled !== false,
+        ...(def.transport ? { transport: def.transport } : {}),
+        ...(def.command ? { command: def.command } : {}),
+        ...(def.args && def.args.length > 0 ? { args: def.args } : {}),
+        ...(def.env && Object.keys(def.env).length > 0 ? { env: def.env } : {}),
+        ...(def.url ? { url: def.url } : {}),
+        ...(def.headers && Object.keys(def.headers).length > 0 ? { headers: def.headers } : {}),
+        ...(state?.lastError ? { lastError: state.lastError } : {}),
+        ...(def.market ? { market: def.market } : {}),
       });
-    }
-    // 已定义但未连接的
-    for (const [name, def] of this.serverDefs.entries()) {
-      if (!this.entries.has(name)) {
-        result.push({
-          name,
-          status: 'disconnected',
-          toolCount: 0,
-          enabled: def.enabled !== false,
-          transport: def.transport,
-        });
-      }
     }
     return result;
   }
@@ -511,7 +704,7 @@ export class MCPManagerImpl implements MCPManager {
     return join(this.env.dataDir, 'mcps', `${serverName}.json`);
   }
 
-  async createServer(name: string, def: unknown): Promise<void> {
+  async createServer(name: string, def: unknown, opts?: { connect?: boolean }): Promise<void> {
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
       throw new Error(t('mcp.invalidServerName', { name }));
     }
@@ -527,47 +720,67 @@ export class MCPManagerImpl implements MCPManager {
     await writeFile(this.serverDefPath(name), JSON.stringify(payload, null, 2), 'utf8');
     // watch 会自动 reload；此处同步本地定义并即时连接（disabled 的跳过）
     this.serverDefs.set(name, payload);
-    if (payload.enabled !== false) {
+    if (opts?.connect !== false && payload.enabled !== false) {
       await this.connect(name);
     }
   }
 
-  async updateServer(name: string, def: unknown): Promise<void> {
+  async updateServer(name: string, def: unknown, opts?: { connect?: boolean }): Promise<void> {
     const filePath = this.serverDefPath(name);
     if (!this.defFileExists(filePath)) {
       throw new Error(t('mcp.serverNotFound', { name }));
     }
-    if (!this.validateServerDef(def)) {
+    // 支持部分更新（如仅切换 enabled）：与现有定义合并后再校验，避免抹掉 command/url/env
+    const base = this.serverDefs.get(name) ?? ({} as ServerConfig);
+    const payload = { ...base, ...(def as ServerConfig), name };
+    if (!this.validateServerDef(payload)) {
       throw new Error(t('mcp.invalidServerDef'));
     }
     const { writeFile } = await import('node:fs/promises');
-    const payload = { ...(def as ServerConfig), name };
     await writeFile(filePath, JSON.stringify(payload, null, 2), 'utf8');
     // 写盘后立即同步内存定义（真相源）：修正已连接服务器 connect 用旧定义的 bug；
     // 且 watcher 触发时内容对比将发现与内存一致 → 跳过 reloadAll（消除 CRUD 双重重载）
     this.serverDefs.set(name, payload);
-    // 主动断开旧连接（若禁用），启用则立即连接
-    if (this.entries.has(name)) {
-      if (payload.enabled === false) {
-        await this.disconnect(name);
-      } else {
-        await this.connect(name).catch(() => {});
-      }
-    } else if (payload.enabled !== false) {
-      await this.connect(name).catch(() => {});
+    const state = this.stateOf(name);
+    state.manualStop = false;
+    if (payload.enabled === false) {
+      // 禁用：断开并停止重试
+      await this.disconnect(name);
+    } else if (opts?.connect !== false) {
+      // 启用/配置变更：重连（connect 内部处理超时与失败重试）
+      await this.connect(name);
     }
   }
 
   async deleteServer(name: string): Promise<void> {
     const filePath = this.serverDefPath(name);
-    if (!this.defFileExists(filePath)) {
+    const def = this.serverDefs.get(name);
+    if (!def && !this.defFileExists(filePath)) {
       throw new Error(t('mcp.serverNotFound', { name }));
     }
-    await this.disconnect(name).catch(() => {});
-    const { rm } = await import('node:fs/promises');
-    await rm(filePath, { force: true });
-    this.serverDefs.delete(name);
-    await this.eventBus.broadcast('mcp:server:deleted', { server: name });
+    // 标记删除中：阻止重连调度、连接完成后的“复活”，以及 watch/reload 期间的重新连接
+    this.deleting.add(name);
+    try {
+      // 先从内存定义移除：即使文件删除有延迟，reload 的 defsEqual 也会认为已删除
+      this.serverDefs.delete(name);
+      // 断开并立即取消进行中的连接
+      await this.disconnect(name).catch(() => {});
+      // 清理重试定时器与运行状态
+      const state = this.states.get(name);
+      if (state) this.clearRetryTimer(state);
+      this.states.delete(name);
+      const { rm } = await import('node:fs/promises');
+      if (this.defFileExists(filePath)) {
+        await rm(filePath, { force: true });
+      }
+      await this.eventBus.broadcast('mcp:server:deleted', { server: name });
+    } catch (err) {
+      // 删除失败（如 Windows 文件占用）：恢复定义，避免文件仍在但内存丢失
+      if (def) this.serverDefs.set(name, def);
+      throw err;
+    } finally {
+      this.deleting.delete(name);
+    }
   }
 
   private defFileExists(path: string): boolean {
@@ -582,10 +795,24 @@ export class MCPManagerImpl implements MCPManager {
 
   /** 关闭所有连接（模块销毁时调用） */
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
     this.epoch += 1;
     this.mcpsWatcher?.close();
     this.mcpsWatcher = undefined;
+    const aborts: Array<Promise<void>> = [];
+    for (const state of this.states.values()) {
+      this.clearRetryTimer(state);
+      const connecting = state.connectingClient;
+      if (connecting) {
+        state.connectingClient = undefined;
+        aborts.push(connecting.abortConnect().catch(() => {}));
+      }
+    }
+    this.states.clear();
     const names = Array.from(this.entries.keys());
-    await Promise.allSettled(names.map(n => this.disconnect(n).catch(() => {})));
+    await Promise.allSettled([
+      ...aborts,
+      ...names.map(n => this.disconnect(n).catch(() => {})),
+    ]);
   }
 }

@@ -11,7 +11,7 @@
 // 记忆注入等 user 角色内容），避免内部上下文泄露。
 // 工具行复用主对话的 ToolCallDetails（图标 + 可展开参数/结果，样式一致）。
 
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -31,20 +31,14 @@ import {
 import { usePersistentState } from '../../lib/ui-state';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
+import { MessageErrorBoundary } from '../shared/MessageErrorBoundary';
+import { LazyModuleSlot } from '../shared/LazyModuleSlot';
 import { TodoProgressCard } from '../shared/TodoProgressCard';
 import { ThinkingPreview } from '../shared/ThinkingPreview';
 import { ThinkingViewToggle, type ThinkingView } from '../shared/ThinkingViewToggle';
 import { buildToolResultIndex, isAgentCall, parseAgentArgs, type ToolResultEntry } from './agent-calls';
 import type { SubagentCallItem } from './SubagentCard';
 import type { TaskMessage, ToolCall } from '../../types/api';
-
-/**
- * 嵌套 Subagent 卡片懒加载：SubagentCard 反向懒加载 AgentTaskFlow（避免静态循环依赖），
- * 运行时递归仅受后端 MAX_SUBAGENT_DEPTH=2 限制。
- */
-const SubagentCard = lazy(() =>
-  import('./SubagentCard').then((m) => ({ default: m.SubagentCard })),
-);
 
 interface AgentTaskFlowProps {
   /** agent 自己的会话 id（= 其 taskId）；null 表示尚未派发 */
@@ -317,12 +311,15 @@ const ThinkingLine = memo(function ThinkingLine({
 /** 单条 assistant 消息：思考行 + 流式正文 + 工具折叠行（与主对话一致） */
 const FlowAssistantMessage = memo(function FlowAssistantMessage({
   message,
+  orderBase,
   iconMap,
   toolResultIndex,
   sessionId,
   onTranslated,
 }: {
   message: TaskMessage;
+  /** 子代理流内消息的稳定排序键：相同错误合并时决定哪张卡展示完整错误卡 */
+  orderBase: string;
   iconMap: Record<string, string>;
   toolResultIndex: Map<string, ToolResultEntry>;
   /** 按需翻译完成 → 刷新子代理历史 */
@@ -383,7 +380,7 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
           />
         </div>
       )}
-      {otherCalls.map((tc) => {
+      {otherCalls.map((tc, cardIndex) => {
         const matched = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         const indexed = toolResultIndex.get(tc.id);
         // 结果即完成：实时副本可能残留 executing，历史索引已拿到结果时按完成渲染
@@ -391,8 +388,29 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
           indexed && tc.status !== 'done' ? { ...tc, status: 'done' } : tc;
         if (tc.name === 'run_code') {
           return (
-            <RunCodeCard
+            <MessageErrorBoundary
               key={tc.id}
+              scope="card"
+              orderKey={`${orderBase}:run:${cardIndex}`}
+            >
+              <RunCodeCard
+                toolCall={resolved}
+                result={matched?.result}
+                fallbackText={indexed?.text}
+                fallbackIsError={indexed?.isError}
+                iconMap={iconMap}
+                sessionId={sessionId ?? undefined}
+              />
+            </MessageErrorBoundary>
+          );
+        }
+        return (
+          <MessageErrorBoundary
+            key={tc.id}
+            scope="card"
+            orderKey={`${orderBase}:tool:${cardIndex}`}
+          >
+            <ToolCallDetails
               toolCall={resolved}
               result={matched?.result}
               fallbackText={indexed?.text}
@@ -400,24 +418,18 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
               iconMap={iconMap}
               sessionId={sessionId ?? undefined}
             />
-          );
-        }
-        return (
-          <ToolCallDetails
-            key={tc.id}
-            toolCall={resolved}
-            result={matched?.result}
-            fallbackText={indexed?.text}
-            fallbackIsError={indexed?.isError}
-            iconMap={iconMap}
-            sessionId={sessionId ?? undefined}
-          />
+          </MessageErrorBoundary>
         );
       })}
       {agentItems.length > 0 && (
-        <Suspense fallback={<div className="text-[11px] text-muted-foreground">…</div>}>
-          <SubagentCard calls={agentItems} sessionId={sessionId ?? undefined} />
-        </Suspense>
+        <LazyModuleSlot
+          moduleKey="subagent/SubagentCard"
+          importer={() => import('./SubagentCard')}
+          orderKey={`${orderBase}:nested-agent`}
+          fallback={<div className="text-[11px] text-muted-foreground">…</div>}
+        >
+          {(mod) => <mod.SubagentCard calls={agentItems} sessionId={sessionId ?? undefined} />}
+        </LazyModuleSlot>
       )}
       {showTodoCard && <TodoProgressCard todos={todoSnapshot!} variant="inline" />}
     </div>
@@ -603,10 +615,11 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
                   : t('subagent.card.flowEmpty')}
             </div>
           )}
-          {visible.map((m) => (
+          {visible.map((m, index) => (
             <div key={m.id} className="flex flex-col gap-1">
               <FlowAssistantMessage
                 message={m}
+                orderBase={`sub:${String(index).padStart(6, '0')}`}
                 iconMap={toolIconMap}
                 toolResultIndex={toolResultIndex}
                 sessionId={sessionId}

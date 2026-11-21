@@ -1,7 +1,7 @@
 {
   "name": "mcp",
-  "description": "统一 MCP 工具（action 分派）。action=list 列出已连接的 MCP 服务器及其工具（可用 server 限定单个服务器）；action=call 调用指定 MCP 服务器上的工具（需 server + tool，arguments 传参）。",
-  "description_en": "Unified MCP tool (dispatched by action). action=list lists connected MCP servers and their tools (optionally limited to one server); action=call invokes a tool on the given MCP server (requires server + tool, pass params via arguments).",
+  "description": "统一 MCP 工具（action 分派）。action=list 列出已连接的 MCP 服务器及其工具（可用 server 限定单个服务器）；action=call 调用指定 MCP 服务器上的工具（需 server + tool，arguments 传参）；action=search 搜索/浏览 MCP 市场（默认数据源 mcpmarket，可切换 official / modelscope，keyword 可选）；action=info 查看市场条目详情（marketId，返回安装方式与必填 env）；action=install 按市场条目安装并托管（marketId + env，option 可选；缺少 env 时先向用户收集再重试）。",
+  "description_en": "Unified MCP tool (dispatched by action). action=list lists connected MCP servers and their tools (optionally limited to one server); action=call invokes a tool on the given MCP server (requires server + tool, pass params via arguments); action=search searches/browses the MCP market (default source mcpmarket, switchable to official / modelscope; keyword optional); action=info shows market entry details (marketId; install options and required env); action=install installs and hosts a market entry (marketId + env, optional option; if env is missing, collect it from the user first and retry).",
   "icon": "plug",
   "annotations": {
     "readOnlyHint": false,
@@ -12,7 +12,7 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["list", "call"],
+        "enum": ["list", "call", "search", "info", "install"],
         "description": "MCP 操作",
         "description_en": "MCP operation"
       },
@@ -31,6 +31,43 @@
         "description": "call：传递给工具的参数",
         "description_en": "call: arguments passed to the tool",
         "additionalProperties": true
+      },
+      "source": {
+        "type": "string",
+        "enum": ["mcpmarket", "official", "modelscope"],
+        "description": "search/info/install：市场数据源，缺省 mcpmarket",
+        "description_en": "search/info/install: market source, defaults to mcpmarket"
+      },
+      "keyword": {
+        "type": "string",
+        "description": "search：搜索关键词（留空表示浏览）",
+        "description_en": "search: keyword (empty means browse)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "search：返回条数（1-20，默认 12）",
+        "description_en": "search: number of results (1-20, default 12)"
+      },
+      "marketId": {
+        "type": "string",
+        "description": "info/install：市场条目 id（search 结果中 [source:id] 的 id 部分）",
+        "description_en": "info/install: market entry id (the id part of [source:id] in search results)"
+      },
+      "option": {
+        "type": "integer",
+        "description": "install：安装方式序号（info 结果中的 [index]，缺省取第一个可用方式）",
+        "description_en": "install: install option index (the [index] from info; defaults to the first supported option)"
+      },
+      "env": {
+        "type": "object",
+        "description": "install：环境变量键值对（info 结果中的 required env / optional env）",
+        "description_en": "install: environment variable key-value pairs (required env / optional env from info)",
+        "additionalProperties": { "type": "string" }
+      },
+      "name": {
+        "type": "string",
+        "description": "install：本地服务器名称（可选，需匹配 ^[a-zA-Z0-9_-]+$；缺省由市场条目推导）",
+        "description_en": "install: local server name (optional, must match ^[a-zA-Z0-9_-]+$; defaults to a derived name)"
       }
     },
     "required": ["action"],

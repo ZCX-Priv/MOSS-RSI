@@ -93,7 +93,10 @@ export function classifyRisk(
       ? 'L3'
       : 'L0';
   }
-  if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
+  if (toolName === 'mcp') {
+    // list/search/info 只读（市场检索与详情）→ L0；call/install 调用或写盘安装 → L3
+    return action === 'list' || action === 'search' || action === 'info' ? 'L0' : 'L3';
+  }
   // skill：list/use/search 只读（渐进式披露 / 市场检索）→ L0；create/update/delete/install
   // 写文件或下载安装 → L3。
   if (toolName === 'skill') {

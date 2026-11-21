@@ -32,6 +32,12 @@ export interface ServerConfig {
   url?: string;
   /** 自定义请求头（http / sse 传输） */
   headers?: Record<string, string>;
+  /** 市场来源（仅通过 MCP 市场安装的服务器携带，用于识别「已安装/重新配置」） */
+  market?: {
+    source: 'mcpmarket' | 'official' | 'modelscope';
+    id: string;
+    version?: string;
+  };
 }
 
 export interface McpToolInfo {
@@ -103,7 +109,7 @@ export interface McpSamplingResult {
 // ============================================================================
 
 interface McpSdkClient {
-  connect(transport: unknown): Promise<void>;
+  connect(transport: unknown, options?: { timeout?: number }): Promise<void>;
   close(): Promise<void>;
   onerror?: (error: Error) => void;
   onclose?: () => void;
@@ -141,6 +147,8 @@ interface McpSdkClient {
 interface McpSdkTransport {
   // 仅作占位，具体构造由 SDK 完成；close 用于超时/中止时清理子进程
   close?(): Promise<void>;
+  /** stdio 子进程 stderr（仅在 stderr: 'pipe' 时存在） */
+  stderr?: { on(event: 'data', listener: (chunk: unknown) => void): void } | null;
 }
 
 interface McpSdkModule {
@@ -149,6 +157,7 @@ interface McpSdkModule {
     command: string;
     args?: string[];
     env?: Record<string, string>;
+    stderr?: 'pipe' | 'inherit' | 'overlapped';
   }) => McpSdkTransport;
   StreamableHTTPClientTransport?: new (
     url: URL,
@@ -167,7 +176,12 @@ interface McpSdkModule {
 export interface McpClientHooks {
   /** sampling：MCP 服务器借用本地 LLM 生成（config.mcp.allowSampling 控制是否注入） */
   onSampling?: (req: McpSamplingRequest) => Promise<McpSamplingResult>;
+  /** 非主动断开导致的连接关闭（子进程退出 / 远端断连），供 manager 触发自动重连 */
+  onUnexpectedClose?: () => void;
 }
+
+/** 连接超时默认值：stdio 首次启动 npx/uvx 需要下载依赖，SDK 默认 60s 不够 */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 180_000;
 
 export class McpClient {
   private sdkClient: McpSdkClient | null = null;
@@ -186,6 +200,12 @@ export class McpClient {
   private readonly hooks?: McpClientHooks;
   /** 当前 callTool 的 elicitation 桥（动态槽位；callTool 开始设置、结束清理） */
   private elicitationBridge: ((req: McpElicitRequest) => Promise<McpElicitOutcome>) | null = null;
+  /** 主动断开标记：区分管理器断开与子进程/连接意外关闭 */
+  private manualClose = false;
+  /** stdio 子进程 stderr 尾部（连接失败时附加到错误信息，最多 4KB） */
+  private stderrTail = '';
+  /** 外部取消标记：断开/删除服务器时立即中止进行中的连接 */
+  private cancelled = false;
 
   constructor(name: string, config: ServerConfig, logger: Logger, eventBus: EventBus, hooks?: McpClientHooks) {
     this.name = name;
@@ -197,31 +217,63 @@ export class McpClient {
 
   /**
    * 连接 MCP 服务器。
-   * @param timeoutMs 连接超时（含 create/listTools）；超时会显式关闭 transport，避免孤儿进程
+   * @param timeoutMs 初始化请求超时（含 create/listTools）；缺省 180s，兼容 npx/uvx 首次下载依赖。
+   *   超时会显式关闭 transport，避免孤儿进程。
    */
   async connect(timeoutMs?: number): Promise<void> {
-    if (timeoutMs === undefined || timeoutMs <= 0) {
-      await this.connectInternal();
-      return;
-    }
+    this.cancelled = false;
+    const budget = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : DEFAULT_CONNECT_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`connect timeout after ${timeoutMs}ms`)), timeoutMs);
+      timer = setTimeout(
+        () => reject(new Error(t('mcp.connectTimeout', { name: this.name, timeout: budget }))),
+        // 外层只兜住 transport 创建等无超时步骤，让 SDK 的 initialize 超时先触发
+        budget + 60_000,
+      );
     });
     try {
-      await Promise.race([this.connectInternal(), timeout]);
+      await Promise.race([this.connectInternal(budget), timeout]);
     } catch (err) {
       // 让迟到的连接完成失效，并强制关闭 transport
       this.connectGeneration += 1;
       await this.disconnect().catch(() => {});
-      throw err;
+      throw this.decorateError(err);
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
 
-  private async connectInternal(): Promise<void> {
+  /**
+   * 取消进行中的连接（断开/删除服务器时调用）。
+   * 立即关闭 transport/client，让 connect() 尽快以错误结束，不再等待初始化超时。
+   */
+  async abortConnect(): Promise<void> {
+    this.cancelled = true;
+    this.connectGeneration += 1;
+    await this.disconnect().catch(() => {});
+  }
+
+  /** 把最近的 stderr 输出附加到连接错误上，便于定位启动失败原因 */
+  private decorateError(err: unknown): Error {
+    const message = err instanceof Error ? err.message : String(err);
+    const tail = this.stderrTail.trim();
+    return new Error(tail ? `${message}\n[stderr] ${tail}` : message);
+  }
+
+  /** 收集 stdio 子进程 stderr（仅保留尾部 4KB） */
+  private attachStderr(transport: McpSdkTransport): void {
+    const stream = transport.stderr;
+    if (!stream) return;
+    stream.on('data', (chunk: unknown) => {
+      this.stderrTail = (this.stderrTail + String(chunk)).slice(-4096);
+    });
+  }
+
+  private async connectInternal(timeoutMs: number): Promise<void> {
+    this.manualClose = false;
+    this.stderrTail = '';
     const generation = ++this.connectGeneration;
+    if (this.cancelled) throw new Error('connect cancelled');
     // 分别从子路径动态 import（SDK 不存在根 index.js）
     const clientMod = (await import('@modelcontextprotocol/sdk/client')) as McpSdkModule;
     const Client = clientMod.Client;
@@ -253,6 +305,12 @@ export class McpClient {
     }
     this.transport = transport;
 
+    // 取消可能发生在 import / transport 构造阶段：立即回收资源，不再发起连接
+    if (this.cancelled || generation !== this.connectGeneration) {
+      if (transport.close) await transport.close().catch(() => {});
+      throw new Error('connect cancelled');
+    }
+
     // 创建 client 实例（elicitation 始终声明——agent 通道支持，无桥时 decline；sampling 按钩子注入声明）
     this.sdkClient = new Client(
       { name: 'moss', version: '1.1.0' },
@@ -260,11 +318,11 @@ export class McpClient {
     );
     // 本次连接拥有的 client（超时后迟到的完成只允许关闭自己的 client，不能误关新连接）
     let ownedClient = this.sdkClient;
-    this.registerClientHandlers();
+    this.registerClientHandlers(ownedClient);
 
     // 连接（http 若失败也尝试回退 SSE）
     try {
-      await this.sdkClient.connect(transport);
+      await this.sdkClient.connect(transport, { timeout: timeoutMs });
     } catch (err) {
       if (this.config.transport === 'http' && this.effectiveTransport === 'http') {
         // http connect 失败，回退 SSE
@@ -281,15 +339,15 @@ export class McpClient {
           { capabilities: this.buildCapabilities() },
         );
         ownedClient = this.sdkClient;
-        this.registerClientHandlers();
-        await this.sdkClient.connect(transport);
+        this.registerClientHandlers(ownedClient);
+        await this.sdkClient.connect(transport, { timeout: timeoutMs });
       } else {
         throw err;
       }
     }
 
-    // 超时后迟到的连接：立刻关闭本次拥有的 client，避免“超时后客户端又悄悄连上”
-    if (generation !== this.connectGeneration) {
+    // 超时/取消后迟到的连接：立刻关闭本次拥有的 client，避免“超时后客户端又悄悄连上”
+    if (this.cancelled || generation !== this.connectGeneration) {
       await ownedClient.close().catch(() => {});
       if (this.sdkClient === ownedClient) this.sdkClient = null;
       throw new Error('connect aborted');
@@ -305,6 +363,8 @@ export class McpClient {
   }
 
   async disconnect(): Promise<void> {
+    // 主动断开：onclose 不再触发“意外关闭”重连
+    this.manualClose = true;
     const client = this.sdkClient;
     this.sdkClient = null;
     this.tools = [];
@@ -455,20 +515,21 @@ export class McpClient {
   }
 
   /** 在 SDK client 上注册 elicitation / sampling handler（每次 new Client 后调用） */
-  private registerClientHandlers(): void {
-    if (!this.sdkClient) return;
+  private registerClientHandlers(client: McpSdkClient): void {
     // 协议错误/连接关闭：必须兜底，否则 EventEmitter 的 error 事件可能逃逸成进程级异常
-    this.sdkClient.onerror = (error: Error) => {
+    client.onerror = (error: Error) => {
       this.logger.warn(t('mcp.clientError', { name: this.name }), {
         error: error.message,
       });
     };
-    this.sdkClient.onclose = () => {
+    client.onclose = () => {
       this.logger.warn(t('mcp.clientClosed', { name: this.name }));
+      // 非主动断开 → 子进程退出/远端断连，交给 manager 自动重连
+      if (!this.manualClose) this.hooks?.onUnexpectedClose?.();
     };
     // elicitation：动态桥（callTool 期间设置；无桥时 decline）
-    if (this.sdkClient.setElicitationHandler) {
-      this.sdkClient.setElicitationHandler(async req => {
+    if (client.setElicitationHandler) {
+      client.setElicitationHandler(async req => {
         if (this.elicitationBridge) {
           return await this.elicitationBridge(req);
         }
@@ -476,8 +537,8 @@ export class McpClient {
       });
     }
     // sampling：全局钩子（manager 注入；内部含 allowSampling 检查）
-    if (this.hooks?.onSampling && this.sdkClient.setSamplingHandler) {
-      this.sdkClient.setSamplingHandler(async req => {
+    if (this.hooks?.onSampling && client.setSamplingHandler) {
+      client.setSamplingHandler(async req => {
         try {
           return await this.hooks!.onSampling!(req);
         } catch (err) {
@@ -504,22 +565,27 @@ export class McpClient {
     const StdioTransport = stdioMod.StdioClientTransport;
     if (!StdioTransport) throw new Error(t('mcp.stdioTransportNotFound'));
     if (!this.config.command) throw new Error(t('mcp.stdioRequiresCommand'));
-    // 合并环境变量：继承当前进程 + 用户配置 + UTF-8 引导（避免子进程 GBK 输出乱码）
-    const env = {
-      ...process.env,
-      ...this.config.env,
-      PYTHONUTF8: '1',
-      PYTHONIOENCODING: 'utf-8',
-    } as Record<string, string>;
-    if (process.platform !== 'win32') {
-      env.LANG = env.LANG ?? 'zh_CN.UTF-8';
-      env.LC_ALL = env.LC_ALL ?? 'zh_CN.UTF-8';
+    // 合并环境变量：继承当前进程 + 用户配置 + UTF-8 引导（避免子进程 GBK 输出乱码）。
+    // process.env 的值可能含 undefined，spawn 前必须过滤，否则子进程创建会直接失败。
+    const merged: Record<string, string> = {};
+    for (const [key, value] of Object.entries({ ...process.env, ...this.config.env })) {
+      if (typeof value === 'string') merged[key] = value;
     }
-    return new StdioTransport({
+    merged.PYTHONUTF8 = '1';
+    merged.PYTHONIOENCODING = 'utf-8';
+    if (process.platform !== 'win32') {
+      merged.LANG = merged.LANG ?? 'zh_CN.UTF-8';
+      merged.LC_ALL = merged.LC_ALL ?? 'zh_CN.UTF-8';
+    }
+    const transport = new StdioTransport({
       command: this.config.command,
       args: this.config.args ?? [],
-      env,
+      env: merged,
+      // 捕获 stderr 用于连接失败诊断（默认 inherit 会直接打到 MOSS 输出，拿不到内容）
+      stderr: 'pipe',
     });
+    this.attachStderr(transport);
+    return transport;
   }
 
   private async createHttpTransport(): Promise<McpSdkTransport> {

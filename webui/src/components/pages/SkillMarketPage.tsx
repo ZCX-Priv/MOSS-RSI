@@ -5,15 +5,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { ArrowRight, Download, Loader2, Search, SlidersHorizontal, WandSparkles } from 'lucide-react';
+import { ArrowRight, Cable, Download, Loader2, Search, SlidersHorizontal, WandSparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkills } from '../../hooks/useSkills';
 import { useStore } from '../../store';
 import { api } from '../../api/http';
+import { RunningBar } from '../shared/RunningBar';
+import { McpMarketPage } from './McpMarketPage';
 import type { MarketCategoryItem, MarketSkillItem } from '../../types/api';
 
 const PAGE_SIZE = 24;
@@ -41,11 +44,25 @@ function SkillIcon({ item }: { item: MarketSkillItem }) {
 export function SkillMarketPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // 插件库主页双 Tab：技能市场（默认）/ MCP 市场；用 ?tab=mcp 支持外部入口跳转
+  const tab = searchParams.get('tab') === 'mcp' ? 'mcp' : 'skills';
+  const setTab = useCallback(
+    (next: 'skills' | 'mcp') => {
+      const params = new URLSearchParams(searchParams);
+      if (next === 'skills') params.delete('tab');
+      else params.set('tab', 'mcp');
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
   const { skills, reload: reloadSkills } = useSkills();
 
   const [categories, setCategories] = useState<MarketCategoryItem[]>([]);
   const [category, setCategory] = useState('');
   const [keyword, setKeyword] = useState('');
+  // MCP Tab 搜索词（与技能搜索词相互独立）
+  const [mcpKeyword, setMcpKeyword] = useState('');
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [items, setItems] = useState<MarketSkillItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -193,35 +210,52 @@ export function SkillMarketPage() {
           variant="outline"
           size="sm"
           className="h-8 gap-1"
-          onClick={() => navigate('/plugins/skills')}
+          onClick={() => navigate(tab === 'mcp' ? '/plugins/mcp' : '/plugins/skills')}
         >
           <SlidersHorizontal className="size-3.5" />
           {t('plugins.manage')}
         </Button>
       </div>
 
-      {/* 技能标签 + 搜索（不含“上传技能”） */}
-      <div className="flex flex-col gap-3 px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-lg bg-muted px-3 py-1.5 text-sm font-medium text-foreground">
-            <WandSparkles className="size-3.5" />
-            {t('plugins.marketSkillsTab')}
-          </span>
-        </div>
+      {/* 双 Tab + 搜索：技能市场 / MCP */}
+      <div className="flex flex-col gap-3 px-6 pb-1 sm:flex-row sm:items-center sm:justify-between">
+        <Tabs value={tab} onValueChange={(value) => setTab(value === 'mcp' ? 'mcp' : 'skills')}>
+          <TabsList>
+            <TabsTrigger value="skills" className="gap-1.5">
+              <WandSparkles className="size-3.5" />
+              {t('plugins.marketSkillsTab')}
+            </TabsTrigger>
+            <TabsTrigger value="mcp" className="gap-1.5">
+              <Cable className="size-3.5" />
+              {t('plugins.mcpMarketTab')}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
         <div className="relative w-full sm:w-80 sm:shrink-0">
           <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="text"
-            placeholder={t('plugins.marketSearchPlaceholder')}
+            placeholder={
+              tab === 'mcp'
+                ? t('plugins.mcpMarketSearchPlaceholder')
+                : t('plugins.marketSearchPlaceholder')
+            }
             className="pl-8"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+            value={tab === 'mcp' ? mcpKeyword : keyword}
+            onChange={(e) => {
+              if (tab === 'mcp') setMcpKeyword(e.target.value);
+              else setKeyword(e.target.value);
+            }}
           />
         </div>
       </div>
 
+      {tab === 'mcp' ? (
+        <McpMarketPage keyword={mcpKeyword} onKeywordChange={setMcpKeyword} />
+      ) : (
+        <>
       {/* 分类 Chips（SkillHub 场景分类） */}
-      <div className="flex flex-wrap items-center gap-2 px-6 pb-3">
+      <div className="flex flex-wrap items-center gap-2 px-6 pb-3 pt-2">
         <Button
           variant={category === '' ? 'secondary' : 'outline'}
           size="sm"
@@ -297,10 +331,11 @@ export function SkillMarketPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          className="shrink-0 gap-1"
+                          className="relative shrink-0 gap-1 overflow-hidden"
                           disabled={busy}
                           onClick={() => void install(item)}
                         >
+                          {busy && <RunningBar />}
                           {busy ? (
                             <Loader2 className="size-3.5 animate-spin" />
                           ) : (
@@ -323,6 +358,8 @@ export function SkillMarketPage() {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

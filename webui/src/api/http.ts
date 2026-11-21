@@ -7,6 +7,9 @@ import type {
   ApiConfig,
   McpServer,
   McpTool,
+  McpMarketDetail,
+  McpMarketItem,
+  McpMarketSource,
   Session,
   TaskItem,
   TaskGroup,
@@ -372,6 +375,40 @@ export const api = {
   /** Shanchu server definition */
   deleteMcpServer: (name: string) =>
     request<{ deleted: boolean; server: string }>('DELETE', `/api/mcp/servers/${encodeURIComponent(name)}`),
+
+  // MCP 市场
+  marketMcpQuery: (params: {
+    source?: McpMarketSource;
+    keyword?: string;
+    pageToken?: string;
+  }) =>
+    request<{
+      source: McpMarketSource;
+      items: McpMarketItem[];
+      nextPageToken?: string;
+      total?: number;
+    }>('POST', '/api/mcp/market/query', params),
+  marketMcpDetail: (source: McpMarketSource, id: string) =>
+    request<McpMarketDetail>('POST', '/api/mcp/market/detail', { source, id }),
+  marketMcpInstall: (data: {
+    source: McpMarketSource;
+    id: string;
+    optionIndex?: number;
+    env?: Record<string, string>;
+    name?: string;
+  }) =>
+    request<{
+      name: string;
+      installed: boolean;
+      updated?: boolean;
+      alreadyInstalled?: boolean;
+      connected?: boolean;
+      error?: string;
+    }>(
+      'POST',
+      '/api/mcp/market/install',
+      data,
+    ),
 
   // ==========================================================================
   // 工具（完整信息 + 启停）

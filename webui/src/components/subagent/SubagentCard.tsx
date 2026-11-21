@@ -5,7 +5,7 @@
 // 行可展开查看该子代理的「微缩任务流」与最终报告。
 // 同一条 assistant 消息内的多个 agent 调用合并到这一张卡片里。
 
-import { lazy, memo, Suspense, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { memo, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bot, ChevronRight, CircleCheck, CircleX, Loader2, Square } from 'lucide-react';
 import { toast } from 'sonner';
@@ -22,12 +22,8 @@ import {
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { fallbackAvatarSeed, templateAvatarSeed } from '../../lib/agent-avatars';
 import { HumationAvatar } from './HumationAvatar';
+import { LazyModuleSlot } from '../shared/LazyModuleSlot';
 import type { ToolCall, ToolResult } from '../../types/api';
-
-/** 子代理任务流懒加载：只有行展开时才引入（避免每个子代理卡都加载事件渲染图） */
-const AgentTaskFlow = lazy(() =>
-  import('./AgentTaskFlow').then((m) => ({ default: m.AgentTaskFlow })),
-);
 
 /** 单条 agent 调用（一条消息内可有多条） */
 export interface SubagentCallItem {
@@ -228,9 +224,15 @@ const SubagentRow = memo(function SubagentRow({
       </div>
       {flowMounted && (
         <div className={expanded ? 'mt-2 flex flex-col gap-2' : 'hidden'}>
-          <Suspense fallback={<div className="text-[11px] text-muted-foreground">…</div>}>
-            <AgentTaskFlow sessionId={flowSessionId} running={running} />
-          </Suspense>
+          {/* 任务流懒加载：失败只降级这一小块，不影响卡片头部、任务描述与最终报告 */}
+          <LazyModuleSlot
+            moduleKey="subagent/AgentTaskFlow"
+            importer={() => import('./AgentTaskFlow')}
+            orderKey={`${call.toolCallId}:flow`}
+            fallback={<div className="text-[11px] text-muted-foreground">…</div>}
+          >
+            {(mod) => <mod.AgentTaskFlow sessionId={flowSessionId} running={running} />}
+          </LazyModuleSlot>
           {!running && report && (
             <div className="flex flex-col gap-1">
               <span className={cn('text-[11px] text-muted-foreground', call.isError && 'text-destructive')}>

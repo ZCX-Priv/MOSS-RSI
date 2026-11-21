@@ -494,6 +494,17 @@ pre,
     stroke-dashoffset: -100;
   }
 }
+
+/* 安装按钮内的半透明跑动进度条（RunningBar 组件） */
+@keyframes moss-running-bar {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(320%);
+  }
+}
+
 .marquee-ring {
   position: absolute;
   inset: -6px; /* 与组件 RING_PAD 一致：为描边与辉光留出外扩空间 */
