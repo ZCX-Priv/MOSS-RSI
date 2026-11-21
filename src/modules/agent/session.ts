@@ -35,28 +35,16 @@ export interface ContextFile {
   missing?: boolean;
 }
 
-export interface ActiveSkill {
-  /** skill 名称（内容运行时从 skill 注册表按 name 解析，不持久化全文） */
-  name: string;
-  /**
-   * 注入位置：
-   *   - system：内容拼接在系统提示词后（首次激活）
-   *   - message：内容作为 skill-inject system 消息锚定在切换消息后（切换激活）
-   */
-  mode: 'system' | 'message';
-}
-
 /** 旧格式 session 记录（含已废弃的全量提示词字段），仅用于加载时的类型窄化与主动清理检测 */
 interface LegacySessionRecord {
   systemPrompt?: string;
-  activeSkill?: { name?: string; mode?: 'system' | 'message'; content?: string };
   /** 旧单槽撤回窗口（现用 lastTruncations 栈，加载时自动包装） */
   lastTruncation?: TruncationInfo;
 }
 
 export interface Session {
   id: string;
-  /** 任务历史（不含系统提示词，仅 user/assistant/tool；skill-inject 的 system 消息只存单行占位标题，全文运行时从注册表解析） */
+  /** 任务历史（不含系统提示词，仅 user/assistant/tool） */
   messages: AgentMessage[];
   /** 可见消息缓存版本：软删除/恢复时递增（避免每次分页全量 filter） */
   visibilityVersion?: number;
@@ -70,8 +58,6 @@ export interface Session {
   contextFiles: ContextFile[];
   /** 最近一次 run 的工作目录（相对路径的存在性校验与归一化匹配基准；旧记录无此字段时回退 process.cwd()） */
   lastCwd?: string;
-  /** 当前激活的 skill 模式（会话级持久；/ 菜单触发） */
-  activeSkill?: ActiveSkill;
   /** 会话级权限模式（ask/auto/skip；前端 PermissionModeSelector 切换，随 run 持久化，刷新恢复） */
   permissionMode?: PermissionMode;
   /** 环境上下文锚定信息（context 引擎：会话首条 env-context 消息的生成时间/日期快照） */
@@ -452,8 +438,8 @@ export class SessionStore {
 
   /**
    * 从磁盘按需加载单个 session（懒加载与运行时冗余加载共用）。
-   * 主动清理：检测到旧格式冗余（systemPrompt 字段 / activeSkill 固化全文 / skill-inject 全文消息）
-   * 时先瘦身再立即原子重写文件，磁盘即时去除全量提示词。
+   * 主动清理：检测到旧格式冗余（systemPrompt 字段 / 已废除的 skill-inject 消息）
+   * 时先移除再立即原子重写文件。
    */
   private loadFromDisk(sessionId: string): Session | null {
     try {
@@ -462,35 +448,21 @@ export class SessionStore {
       const raw = readFileSync(filePath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<Session> & LegacySessionRecord;
       if (typeof parsed.id === 'string' && Array.isArray(parsed.messages)) {
-        const legacySkill = parsed.activeSkill;
-        const hasLegacySkillContent = typeof legacySkill?.content === 'string';
-        // skill-inject 全文消息特征：含 `\n\n`（占位格式只有单行标题）
-        const hasFullSkillInject = parsed.messages.some(
-          m => m.role === 'system' && m.name === 'skill-inject' && m.content.includes('\n\n'),
+        // 旧数据一次性清理：删除已废除的 skill 模式锚定消息
+        const hasSkillInject = parsed.messages.some(
+          m => m.role === 'system' && m.name === 'skill-inject',
         );
-        const dirty =
-          parsed.systemPrompt !== undefined || hasLegacySkillContent || hasFullSkillInject;
-        // 瘦身：全文 → 单行占位标题 + metadata.skillName（全文运行时从注册表解析）
-        if (hasFullSkillInject) {
-          for (const m of parsed.messages) {
-            if (m.role === 'system' && m.name === 'skill-inject' && m.content.includes('\n\n')) {
-              const fallbackName = /^# Active Skill: (.+)$/.exec(m.content)?.[1];
-              const skillName = legacySkill?.name ?? fallbackName ?? 'unknown';
-              m.content = `# Active Skill: ${skillName}`;
-              m.metadata = { ...(m.metadata ?? {}), skillName };
-            }
-          }
-        }
+        const cleanMessages = hasSkillInject
+          ? parsed.messages.filter(m => !(m.role === 'system' && m.name === 'skill-inject'))
+          : parsed.messages;
+        const dirty = parsed.systemPrompt !== undefined || hasSkillInject;
         const session: Session = {
           id: parsed.id,
-          messages: parsed.messages,
+          messages: cleanMessages,
           createdAt: parsed.createdAt ?? new Date().toISOString(),
           updatedAt: parsed.updatedAt ?? new Date().toISOString(),
           totalTokens: parsed.totalTokens ?? 0,
           contextFiles: Array.isArray(parsed.contextFiles) ? parsed.contextFiles : [],
-          ...(legacySkill?.name && legacySkill.mode
-            ? { activeSkill: { name: legacySkill.name, mode: legacySkill.mode } }
-            : {}),
           ...(parsed.permissionMode ? { permissionMode: parsed.permissionMode } : {}),
           ...(parsed.envContext ? { envContext: parsed.envContext } : {}),
           ...(Array.isArray(parsed.compactions) ? { compactions: parsed.compactions } : {}),

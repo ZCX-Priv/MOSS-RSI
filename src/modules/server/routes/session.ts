@@ -24,7 +24,6 @@ type AgentEngineExt = AgentEngine & {
     hasMoreBefore: boolean;
   };
   getLiveDraft?: (id: string) => unknown;
-  getActiveSkill?: (id: string) => { name: string; mode: 'system' | 'message'; content: string } | undefined;
   getPermissionMode?: (id: string) => 'ask' | 'auto' | 'skip' | undefined;
   getLastRunStats?: (id: string) => unknown;
   getSessionLastError?: (id: string) => { message: string; at: string } | undefined;
@@ -182,8 +181,6 @@ export function createSessionHistoryHandler(services: ServiceRegistry): RouteHan
       messages = lightenHistoryMessages(messages);
     }
 
-    // 当前激活的 skill 模式（前端刷新后恢复 Badge）
-    const activeSkill = agent.getActiveSkill?.(sessionId) ?? undefined;
     // 会话级权限模式（前端刷新后恢复 PermissionModeSelector 徽章）
     const permissionMode = agent.getPermissionMode?.(sessionId) ?? undefined;
     // 最近一次 run 统计（前端刷新后恢复中控台指标栏）
@@ -194,7 +191,6 @@ export function createSessionHistoryHandler(services: ServiceRegistry): RouteHan
         sessionId,
         messages,
         ...(page ? { page } : {}),
-        ...(activeSkill ? { activeSkill } : {}),
         ...(permissionMode ? { permissionMode } : {}),
         ...(lastRunStats ? { lastRunStats } : {}),
       },

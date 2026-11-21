@@ -571,7 +571,7 @@ export class McpTaskRegistry {
           break;
         }
         default:
-          // 其余事件（thinking / skill-mode / tool-call-delta / tool-call-executing 等）只刷新活跃时间
+          // 其余事件（thinking / tool-call-delta / tool-call-executing 等）只刷新活跃时间
           break;
       }
     } catch (err) {

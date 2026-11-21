@@ -9,7 +9,7 @@ import { totalmem } from 'node:os';
 import { Semaphore } from '../../utils/semaphore';
 import { isRecentInternalWrite } from '../../utils/internal-writes';
 import { buildTools } from './context';
-import { SessionStore, type ContextFile, type Session, type ActiveSkill } from './session';
+import { SessionStore, type ContextFile, type Session } from './session';
 import { TaskStore, type TaskItem, type TaskGroup } from './task-store';
 import { LiveDraftStore, type LiveDraft } from './live-draft';
 import { ThinkingTranslator } from './thinking-translator';
@@ -44,10 +44,10 @@ import type { ConfigService, EventBus, Logger, ServiceRegistry, Environment, Api
 import { ServiceNames } from '../../core/types';
 import type { AskOutcome, AskPayload, AskQuestion, ToolResult } from '../tools/types';
 import { lightenToolResultForEvent } from '../server/routes/history-light';
-import type { SkillRegistry } from '../tools/shared/skill-registry';
 import { readSessionTodoStore, getSessionTodoPath } from '../tools/todo/shared/store';
 import { buildStaticSystemPrompt, buildRequestView, MAX_TURNS_NOTICE_MSG_NAME } from '../context/compiler';
 import type { PromptExtraSection } from '../context/compiler';
+import { loadPromptFileOrNull, renderTemplate } from '../context/prompt-loader';
 import { buildCodeModePromptExtras } from '../tools/run_code/sdk';
 import { isPtcForbiddenTool } from '../tools/run_code/forbidden';
 import type { RulesEngineServiceImpl } from '../rules/service';
@@ -1018,7 +1018,7 @@ export class AgentEngineImpl implements AgentEngine {
     contextEngine?.markBusy(sessionId);
 
     // 权限模式解析（副作用集中化）：前端显式传递 > 会话记忆 > 全局默认（config.safety.defaultMode）。
-    // 变化时写入 session 持久化（刷新恢复，对齐 activeSkill 先例）。
+    // 变化时写入 session 持久化（刷新恢复，对齐 permissionMode 先例）。
     const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
     const permissionMode: PermissionMode =
       input.permissionMode ?? session.permissionMode ?? safety?.getDefaultMode() ?? 'ask';
@@ -1080,12 +1080,14 @@ export class AgentEngineImpl implements AgentEngine {
     const promptExtras: PromptExtraSection[] = [];
     // Agent 模板角色提示词：叠加在主提示词之后（保留 MOSS 通用纪律）
     if (agentProfile?.systemPrompt?.trim()) {
+      const raw = agentProfile.systemPrompt.trim();
+      const wrapper = loadPromptFileOrNull(this.env, 'subagent/profile-wrapper.md');
       promptExtras.push({
         id: 'agent-profile',
         title: `Agent 模板：${agentProfile.name}`,
-        content:
-          `# 子代理角色（${agentProfile.name}）\n\n${agentProfile.systemPrompt.trim()}\n\n---\n` +
-          '你在本次运行中扮演上述角色；MOSS 主提示词的通用纪律仍然适用。',
+        content: wrapper
+          ? renderTemplate(wrapper, { NAME: agentProfile.name, PROMPT: raw }).trimEnd()
+          : raw,
       });
     }
     // 主代理：动态列出注册表中可派发的子代理（含用户自定义 Agent），
@@ -1096,17 +1098,21 @@ export class AgentEngineImpl implements AgentEngine {
           .list()
           .filter((item) => !item.default && item.id !== 'agent');
         if (available.length > 0) {
-          const lines = available.map(
-            (item) =>
-              `- ${item.id}：${item.name}${item.description ? ` — ${item.description}` : ''}${item.builtIn ? '（内置）' : '（自定义）'}`,
-          );
-          promptExtras.push({
-            id: 'available-agents',
-            title: '可用子代理',
-            content:
-              `# 可用子代理（agent 工具 template 参数）\n${lines.join('\n')}\n` +
-              `嵌套受设置中的最大层级限制（当前 ${maxSubagentDepth} 层）；自定义 Agent 可通过 agent(action="manage", ...) 创建/修改。`,
-          });
+          const availableTemplate = loadPromptFileOrNull(this.env, 'subagent/available.md');
+          if (availableTemplate) {
+            const lines = available.map(
+              (item) =>
+                `- ${item.id}：${item.name}${item.description ? ` — ${item.description}` : ''}${item.builtIn ? '（内置）' : '（自定义）'}`,
+            );
+            promptExtras.push({
+              id: 'available-agents',
+              title: '可用子代理',
+              content: renderTemplate(availableTemplate, {
+                AGENTS: lines.join('\n'),
+                MAX_DEPTH: String(maxSubagentDepth),
+              }).trimEnd(),
+            });
+          }
         }
       } catch {
         // 注册表不可用：跳过该提示段，不影响主流程
@@ -1129,11 +1135,13 @@ export class AgentEngineImpl implements AgentEngine {
         })),
       ];
       const section = buildCodeModePromptExtras({
+        env: this.env,
         uiEnabled: codeMode.uiEnabled,
         allowCdn: codeMode.allowCdn,
         tools: sdkTools,
       });
       if (section) promptExtras.push(section);
+      else this.logger.warn('agent: code mode prompt missing (agent/code-mode/ptc.md), skipped');
     }
 
     // ReAct 循环（maxTurns=0 表示不限制 → Infinity；while 条件与触顶判断天然兼容）
@@ -2160,11 +2168,6 @@ export class AgentEngineImpl implements AgentEngine {
     return this.sessions.get(sessionId)?.permissionMode ?? fallback;
   }
 
-  /** 获取会话当前激活的 skill 模式（供路由刷新恢复 Badge；内容运行时从注册表解析） */
-  getActiveSkill(sessionId: string): ActiveSkill | undefined {
-    return this.sessions.get(sessionId)?.activeSkill;
-  }
-
   /** context 引擎会话桥：获取会话（Session 结构兼容 ContextSessionLike） */
   getSessionForContext(sessionId: string): Session | null {
     return this.sessions.get(sessionId);
@@ -2839,7 +2842,7 @@ export class AgentEngineImpl implements AgentEngine {
     if (this.safetyReviewer) return this.safetyReviewer;
     const llm = this.services.tryResolve<LLMRouter>(ServiceNames.LLM_ROUTER);
     if (!llm) return null;
-    this.safetyReviewer = new SafetyReviewer({ config: this.config, logger: this.logger, llm });
+    this.safetyReviewer = new SafetyReviewer({ env: this.env, config: this.config, logger: this.logger, llm });
     return this.safetyReviewer;
   }
 
@@ -3952,14 +3955,6 @@ export class AgentEngineImpl implements AgentEngine {
     }
   }
 
-  /** 从 skill 注册表解析当前 prompt 全文（skill 被删/禁用时返回 null，注入自然为空） */
-  private resolveSkillPrompt(name: string): string | null {
-    const registry = this.services.tryResolve<SkillRegistry>(ServiceNames.SKILL_REGISTRY);
-    const skill = registry?.get(name);
-    if (!registry || !skill || !registry.isEnabled(name)) return null;
-    return skill.prompt;
-  }
-
   /**
    * 降级 fallback：context 引擎服务不可用/异常时的最小拼接逻辑。
    * 复用 context/compiler 纯函数（静态提示 + 视图构建），不含压缩/遥测——
@@ -3972,12 +3967,8 @@ export class AgentEngineImpl implements AgentEngine {
     modelDisplayName: string,
     promptExtras?: PromptExtraSection[] | null,
   ): UnifiedMessage[] {
-    const skillName =
-      session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
-    const skillPrompt = skillName ? this.resolveSkillPrompt(skillName) : null;
-    const systemContent = buildStaticSystemPrompt(this.env, skillPrompt, null, promptExtras ?? null);
+    const systemContent = buildStaticSystemPrompt(this.env, null, promptExtras ?? null);
     const view = buildRequestView(session, systemContent, {
-      resolveSkillPrompt: name => this.resolveSkillPrompt(name),
       // 降级路径同样保留全部 thinking：DeepSeek 带 tools 时必须完整回传历史 reasoning_content
       includeThinking: true,
     });

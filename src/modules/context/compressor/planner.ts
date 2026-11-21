@@ -123,12 +123,12 @@ export function planCompaction(
 
 /**
  * 判断消息是否为压缩保护区：
- * - 锚定消息：env-context / skill-inject；
+ * - 锚定消息：env-context；
  * - protectedTools：命中工具调用的 assistant 消息，以及命中工具名的 tool 结果。
  * 摘要消息不保护（多轮压缩时参与合并/分层蒸馏）。
  */
 export function isProtectedMessage(m: ContextMessage, protectedTools: readonly string[] = []): boolean {
-  if (m.name === ENV_CONTEXT_MSG_NAME || m.name === 'skill-inject') return true;
+  if (m.name === ENV_CONTEXT_MSG_NAME) return true;
   if (protectedTools.length === 0) return false;
   if (m.role === 'tool' && m.name && protectedTools.includes(m.name)) return true;
   if (m.role === 'assistant' && m.toolCalls?.some(tc => protectedTools.includes(tc.name))) return true;

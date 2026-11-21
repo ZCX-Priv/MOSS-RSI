@@ -178,12 +178,11 @@ export function loadSystemPromptSegments(env: Environment, rulesSection?: RulesS
 /**
  * 构建静态系统提示词（纯文本拼接，零变量替换）。
  * 环境信息全部由 env-context 消息承载 → 同一份文件跨会话/跨重启字节级一致（前缀缓存锚点）。
- * @param skillPrompt 可选的 skill system 模式注入内容（拼接在末尾；skill 切换=新缓存周期，低频可接受）
  * @param rulesSection rules 引擎注入的 always 规则段（规则集变更=新缓存周期，低频可接受）
+ * @param extras 动态附加段（代码模式 SDK、子代理角色等）
  */
 export function buildStaticSystemPrompt(
   env: Environment,
-  skillPrompt?: string | null,
   rulesSection?: RulesSectionInput | null,
   extras?: PromptExtraSection[] | null,
 ): string {
@@ -200,7 +199,6 @@ export function buildStaticSystemPrompt(
     loadSystemPromptSegments(env, rulesSection);
   }
   const parts = [promptCache?.joined ?? ''];
-  if (skillPrompt) parts.push(skillPrompt);
   if (extras) {
     for (const extra of extras) {
       if (extra && typeof extra.content === 'string' && extra.content.trim() !== '') {
@@ -213,33 +211,17 @@ export function buildStaticSystemPrompt(
 
 /**
  * 获取系统提示词分段（含 tokens 估算，WebUI 系统标签页数据源）。
- * @param skillName 当前活跃 skill 名（system 模式时追加该段）
- * @param resolveSkillPrompt skill 内容解析回调（从 SkillRegistry 实时解析）
  * @param rulesSection rules 引擎注入的 always 规则段
+ * @param extras 动态附加段（代码模式 SDK、子代理角色等）
  */
 export function getSystemSections(
   env: Environment,
-  skillName?: string,
-  resolveSkillPrompt?: (name: string) => string | null,
   rulesSection?: RulesSectionInput | null,
   extras?: PromptExtraSection[] | null,
 ): SystemSection[] {
   // 必须复制缓存数组：loadSystemPromptSegments 返回的是 mtime 缓存的同一个数组引用，
-  // 旧实现直接 push skill/代码模式段，导致每轮请求/每次面板刷新都往缓存里追加一份
-  // 「代码模式 (PTC)」，长会话下重复几十份（面板显示十几条 ~4064 tokens 的根因）。
+  // 旧实现直接 push 附加段，导致每轮请求/每次面板刷新都往缓存里追加一份。
   const segments = loadSystemPromptSegments(env, rulesSection).map((section) => ({ ...section }));
-  if (skillName && resolveSkillPrompt) {
-    const skillPrompt = resolveSkillPrompt(skillName);
-    if (skillPrompt) {
-      segments.push({
-        id: 'skill',
-        title: `活跃技能：${skillName}`,
-        tokens: 0,
-        content: `# Active Skill: ${skillName}\n\n${skillPrompt}`,
-        defaultOpen: true,
-      });
-    }
-  }
   if (extras) {
     for (const extra of extras) {
       if (!extra || typeof extra.content !== 'string' || extra.content.trim() === '') continue;

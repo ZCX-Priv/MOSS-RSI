@@ -1,0 +1,2 @@
+- `tools.web({ mode: 'search' })` → 结构化对象：`items`（当前页完整条目，含正文摘录）、`pool`（本轮已抓到的全部结果，最多 100 条）、`searchId`、`totalAvailable`、`hasMore`、`nextOffset`。需要更多时带 `searchId + offset` 翻页；`pageSize` 建议 20。
+- `tools.web({ mode: 'fetch' })` → `{ url, finalUrl, status, title?, text, truncated, links }`，`text` 为完整正文（受 maxFetchChars 限制）。

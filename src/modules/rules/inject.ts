@@ -6,6 +6,8 @@
 
 import { Glob } from 'bun';
 import { isAbsolute, relative, sep } from 'node:path';
+import type { Environment } from '../../core/types';
+import { loadPromptFileOrNull, renderTemplate } from '../context/prompt-loader';
 import type { ScopedRuleRecord } from './types';
 
 /** active-rules 锚定消息 name 标识（view-builder 恒保留锚定） */
@@ -14,14 +16,16 @@ export const ACTIVE_RULES_MSG_NAME = 'active-rules';
 /** 规则段标题（WebUI 系统标签页展示） */
 export const USER_RULES_SECTION_ID = 'user-rules';
 
-/** always 规则段文本（无规则返回 null——不注入空段） */
-export function buildRulesSection(alwaysRules: readonly ScopedRuleRecord[]): string | null {
+/** always 规则段文本（模板缺失或无规则返回 null——不注入空段） */
+export function buildRulesSection(env: Environment, alwaysRules: readonly ScopedRuleRecord[]): string | null {
   if (alwaysRules.length === 0) return null;
+  const template = loadPromptFileOrNull(env, 'rules/section.md');
+  if (!template) return null;
   const parts = alwaysRules.map(r => {
     const header = r.description ? `## ${r.name}（${r.description}）` : `## ${r.name}`;
     return `${header}\n\n${r.content.trim()}`;
   });
-  return `# 用户规则\n\n以下是用户自定义的行为规则，优先级高于默认行为约定：\n\n${parts.join('\n\n')}`;
+  return renderTemplate(template, { RULES: parts.join('\n\n') }).trimEnd();
 }
 
 /** 路径归一化：统一 / 分隔符 */

@@ -139,7 +139,4 @@ export function truncateToBytes(text: string, maxBytes: number): string {
   return text.slice(0, low);
 }
 
-/** 判断字符串是否可作为命名空间全局名（tools/ui；语言可移植标识符） */
-export function isPortableNamespaceName(name: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name !== 'console' && name !== '__proto__';
-}
+

@@ -33,8 +33,6 @@ import { ENV_CONTEXT_MSG_NAME } from './env-context';
 
 /** 摘要消息 name 标识（与 compressor 一致） */
 export const COMPACTION_SUMMARY_MSG_NAME = 'compaction-summary';
-/** skill message 模式占位消息 name（与 agent engine 一致） */
-export const SKILL_INJECT_MSG_NAME = 'skill-inject';
 /** 轮数触顶提示消息 name（agent engine 写入 session；纯 UI 展示，永不发给 LLM） */
 export const MAX_TURNS_NOTICE_MSG_NAME = 'max-turns-notice';
 /** 模型请求失败的错误消息 name（agent engine 写入 session；纯 UI 展示，永不发给 LLM） */
@@ -168,8 +166,6 @@ export interface BuildViewOptions {
    * - 其余 OpenAI 兼容：默认 false（仅 replayOpenAICompat 显式开启时为 true）。
    */
   includeThinking?: boolean;
-  /** skill 内容解析回调（message 模式占位替换 / system 模式由调用方拼进 staticSystemPrompt） */
-  resolveSkillPrompt?: (name: string) => string | null;
   /** 溢出兜底预算（窗口 token；undefined = 不做兜底裁剪） */
   budgetTokens?: number;
   /** 请求体字节预算（序列化后字节；undefined = 不做字节兜底裁剪） */
@@ -211,12 +207,11 @@ export interface BuiltView {
   imageMessagesToMark: ContextMessage[];
 }
 
-/** 是否为恒保留的锚定消息（env-context / 压缩摘要 / skill 注入占位 / 规则 / L1 记忆） */
+/** 是否为恒保留的锚定消息（env-context / 压缩摘要 / 规则 / L1 记忆） */
 function isAnchorMessage(m: ContextMessage): boolean {
   return (
     m.name === ENV_CONTEXT_MSG_NAME ||
     m.name === COMPACTION_SUMMARY_MSG_NAME ||
-    m.name === SKILL_INJECT_MSG_NAME ||
     m.name === ACTIVE_RULES_MSG_NAME ||
     m.name === MEMORY_L1_MSG_NAME
   );
@@ -225,7 +220,7 @@ function isAnchorMessage(m: ContextMessage): boolean {
 /**
  * 构建发送视图。
  * @param session 会话（鸭子类型；不被修改——视图对象全部新建）
- * @param staticSystemPrompt 静态系统提示词（可含 skill system 模式注入）
+ * @param staticSystemPrompt 静态系统提示词
  */
 export function buildRequestView(
   session: ContextSessionLike,
@@ -259,24 +254,12 @@ export function buildRequestView(
         !(m.images && m.images.length > 0)
       ),
   );
-  // ===== 2. 视图消息准备（skill 占位替换；全部新建对象不动原消息） =====
+  // ===== 2. 视图消息准备（全部新建对象不动原消息） =====
   // originalOf：视图对象 → 原始 session 消息。视图可能被复制（图片淘汰等），
   // 而标记 imagesSentAt 必须落在原始 session 对象上才能持久化生效。
   const originalOf = new WeakMap<ContextMessage, ContextMessage>();
   const prepared: ContextMessage[] = visible.map((raw) => {
     let next: ContextMessage = raw;
-
-    // 2b. skill message 模式占位消息 → 注册表全文
-    if (next.role === 'system' && next.name === SKILL_INJECT_MSG_NAME && opts.resolveSkillPrompt) {
-      const skillName =
-        (next.metadata as { skillName?: string } | undefined)?.skillName ??
-        /^# Active Skill: (.+)$/.exec(next.content)?.[1] ??
-        session.activeSkill?.name;
-      if (skillName) {
-        const prompt = opts.resolveSkillPrompt(skillName);
-        if (prompt) next = { ...next, content: `# Active Skill: ${skillName}\n\n${prompt}` };
-      }
-    }
 
     // 2c. provider 不回传 thinking 时，从发送视图彻底移除（不只估算排除）：
     // OpenAI 兼容默认不回传 reasoning_content，若仍留在视图里，

@@ -4,7 +4,6 @@
 // 规格才允许进入 ToolResult.metadata 并持久化到会话，前端再按规格安全渲染。
 
 import {
-  UI_COMPONENTS,
   UI_COMPONENT_MAP,
   type UIComponentSpec,
   type UIPropSpec,
@@ -12,11 +11,9 @@ import {
 import {
   asBinding,
   isSafeExprSource,
-  isSafeImageSrc,
   isUIAction,
   isValidStateKey,
   UI_LIMITS,
-  type UIAction,
   type UIBinding,
   type UIDiagnostic,
   type UINode,
@@ -683,11 +680,4 @@ function sanitizeTabs(
   return out.length > 0 ? out : undefined;
 }
 
-/** 组件目录完整性自检（测试用）：确保每个组件名唯一 */
-export function assertCatalogIntegrity(): void {
-  const seen = new Set<string>();
-  for (const component of UI_COMPONENTS) {
-    if (seen.has(component.name)) throw new Error(`duplicate UI component: ${component.name}`);
-    seen.add(component.name);
-  }
-}
+

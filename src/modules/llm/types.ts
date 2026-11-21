@@ -6,8 +6,6 @@
 // 思考控制
 // ============================================================================
 
-export type ThinkingEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
-
 export interface ThinkingConfig {
   enabled: boolean;
   /** 思考强度：预设枚举值或自定义字符串（直接透传给 provider） */

@@ -336,7 +336,6 @@
   messages: TaskMessage[];
   todos: TodoItem[];
   contextFiles: ContextFile[];
-  activeSkill?: string;
   permissionMode?: 'ask' | 'auto' | 'skip';
 }
 ```

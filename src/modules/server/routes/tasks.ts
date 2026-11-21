@@ -205,8 +205,6 @@ type AgentEngineWithTasks = AgentEngine & {
     opts?: { moveTasksTo?: string; deleteTasks?: boolean },
   ) => boolean;
   getHistory?: (id: string) => unknown[];
-  getActiveSkill?: (id: string) => { name: string; mode: 'system' | 'message'; content: string } | undefined;
-  /** 获取会话权限模式（前端刷新后恢复 PermissionModeSelector 徽章） */
   getPermissionMode?: (id: string) => 'ask' | 'auto' | 'skip' | undefined;
   deleteSession?: (id: string) => void;
 };
@@ -349,9 +347,6 @@ export function createGetTaskHandler(services: ServiceRegistry, env: Environment
     // contextFiles（暂为空，阶段 5.1 由工具执行轨迹回填）
     const contextFiles: Array<{ path: string; tokens?: number; reason?: string }> = [];
 
-    // 当前激活的 skill 模式（前端刷新后恢复 Badge）
-    const activeSkill = engine.getActiveSkill?.(id) ?? undefined;
-
     // 会话级权限模式（前端刷新后恢复 PermissionModeSelector 徽章）
     const permissionMode = engine.getPermissionMode?.(id) ?? undefined;
 
@@ -362,7 +357,6 @@ export function createGetTaskHandler(services: ServiceRegistry, env: Environment
         messages: history,
         todos,
         contextFiles,
-        ...(activeSkill ? { activeSkill } : {}),
         ...(permissionMode ? { permissionMode } : {}),
       },
     };

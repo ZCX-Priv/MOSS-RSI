@@ -5,18 +5,6 @@
 import { t } from '../../../core/i18n';
 import type { ComputerService } from '../../contracts';
 
-export const OBSERVE_ACTIONS = new Set([
-  'status',
-  'list_apps',
-  'list_windows',
-  'get_window_state',
-  'get_desktop_state',
-  'get_screen_size',
-  'get_cursor_position',
-  'zoom',
-  'wait',
-]);
-
 export type ComputerAction =
   | 'status'
   | 'list_apps'

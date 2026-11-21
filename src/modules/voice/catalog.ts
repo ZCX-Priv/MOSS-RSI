@@ -150,7 +150,4 @@ export function modelSizeBytes(def: VoiceModelDef): number {
   return def.sizeBytes;
 }
 
-/** 供 UI/日志使用的体积文案 */
-export function modelSizeMb(def: VoiceModelDef): number {
-  return Math.round(modelSizeBytes(def) / MB);
-}
+

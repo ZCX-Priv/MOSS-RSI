@@ -279,28 +279,6 @@ export function listNativeWindows(pid?: number): NativeWindowInfo[] | null {
   return rows;
 }
 
-/** 读取指定 HWND 的窗口信息（用于校验错误里出现的 actual foreground HWND） */
-export function getNativeWindow(hwnd: number): NativeWindowInfo | null {
-  const api = user32;
-  const ffiApi = ffi;
-  if (!api || !ffiApi) return null;
-  try {
-    const handle = BigInt(hwnd);
-    if (!api.IsWindow(handle)) return null;
-    return readWindow(
-      handle,
-      Buffer.alloc(4),
-      Buffer.alloc(2048),
-      Buffer.alloc(512),
-      Buffer.alloc(16),
-      0,
-      api.GetForegroundWindow(),
-    );
-  } catch {
-    return null;
-  }
-}
-
 /** 读取当前系统前台窗口（不可用/无前台时返回 null） */
 export function getForegroundWindowInfo(): NativeWindowInfo | null {
   const api = user32;

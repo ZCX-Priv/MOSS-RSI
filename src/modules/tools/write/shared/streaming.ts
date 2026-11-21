@@ -125,20 +125,6 @@ export async function atomicWriteFileStream(
 }
 
 /**
- * 流式计算 sha256（分块 update，避免多次全量扫描）。
- * 虽然 content 全量在内存，分块 update 不减少峰值内存，但避免重复扫描，且语义上与流式写入对称。
- */
-export function streamSha256(content: string): string {
-  const hash = createHash('sha256');
-  const buf = Buffer.from(content, 'utf8');
-  for (let i = 0; i < buf.length; i += STREAM_CHUNK_SIZE) {
-    const end = Math.min(i + STREAM_CHUNK_SIZE, buf.length);
-    hash.update(buf.subarray(i, end));
-  }
-  return hash.digest('hex');
-}
-
-/**
  * 将 Buffer 分块写入流，同时分块 update 哈希。
  * 当 stream.write 返回 false（缓冲满）时等待 drain 事件。
  */

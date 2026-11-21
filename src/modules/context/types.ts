@@ -464,8 +464,6 @@ export interface ContextSessionLike {
   compactions?: CompactionRecord[];
   /** 会话级持久化遥测（真实 usage + 命中样本；随 session 落盘，重启恢复） */
   contextTelemetry?: SessionContextTelemetry;
-  /** 会话级活跃 skill（system 模式拼系统提示后；message 模式替换 skill-inject 占位） */
-  activeSkill?: { name: string; mode: 'system' | 'message' };
   /** 规则引擎注入状态（paths 规则去重水位；随 session 落盘） */
   rulesState?: SessionRulesState;
   /** 记忆引擎状态（L1 注入标记 / 召回去重 / 蒸馏水位；随 session 落盘） */
@@ -715,32 +713,6 @@ export interface ContextStats {
 export const TELEMETRY_BUFFER_SIZE = 50;
 /** 缓存 miss 三分账环形缓冲容量 */
 export const CACHE_LEDGER_BUFFER_SIZE = 100;
-
-// ============================================================================
-// WS 事件 payload（api/events 推送）
-// context-stats-updated 的 payload 直接使用完整 ContextStats（见 getStats）
-// ============================================================================
-
-export interface CompactionEventPayload {
-  sessionId: string;
-  compaction: CompactionRecord;
-}
-
-export interface CompactionStartedEventPayload {
-  sessionId: string;
-  trigger: 'auto' | 'manual';
-}
-
-export interface HealedEventPayload {
-  sessionId: string;
-  toolCallId: string;
-  healLog: HealLogEntry[];
-}
-
-export interface ContextDegradedEventPayload {
-  sessionId: string;
-  reason: string;
-}
 
 // ============================================================================
 // 手动压缩结果

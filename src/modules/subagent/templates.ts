@@ -124,8 +124,3 @@ export function buildTemplateAgents(env: Environment): AgentDetail[] {
     default: false,
   }));
 }
-
-/** 判断 agent id 是否为内置模板 */
-export function isBuiltinTemplate(id: string): boolean {
-  return TEMPLATE_IDS.includes(id);
-}

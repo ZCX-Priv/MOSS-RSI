@@ -28,12 +28,12 @@ const extra = {
 
 describe('getSystemSections 缓存隔离', () => {
   test('连续调用不会重复追加动态段', () => {
-    const first = getSystemSections(env, undefined, undefined, null, [extra]);
+    const first = getSystemSections(env, null, [extra]);
     const firstCount = first.length;
     expect(first.filter((s) => s.id === extra.id)).toHaveLength(1);
 
     for (let i = 0; i < 10; i++) {
-      const sections = getSystemSections(env, undefined, undefined, null, [extra]);
+      const sections = getSystemSections(env, null, [extra]);
       expect(sections.length).toBe(firstCount);
       expect(sections.filter((s) => s.id === extra.id)).toHaveLength(1);
     }

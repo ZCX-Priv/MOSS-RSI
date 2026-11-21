@@ -26,7 +26,7 @@ const logger: Logger = {
 
 function makeEnv(): Environment {
   const missing = join(tmpdir(), 'moss-thinking-translator-nonexistent');
-  return { dataDir: missing, packageRoot: missing } as unknown as Environment;
+  return { dataDir: missing, packageRoot: process.cwd() } as unknown as Environment;
 }
 
 /** 构造流式 LLM mock：每次调用按 parts 依次产出 text delta */

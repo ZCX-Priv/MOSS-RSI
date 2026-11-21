@@ -75,17 +75,6 @@ export interface VoiceModelStatus {
   error?: string;
 }
 
-/** 解压后动态解析出的模型文件路径（相对模型目录，绝对路径由 service 拼接） */
-export interface ResolvedModelFiles {
-  tokens: string;
-  /** 流式 transducer 三件套 */
-  encoder?: string;
-  decoder?: string;
-  joiner?: string;
-  /** 单文件模型（SenseVoice） */
-  model?: string;
-}
-
 /** 单次识别结果 */
 export interface VoiceResult {
   text: string;

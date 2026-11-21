@@ -1,0 +1,2 @@
+- `tools.terminal({ raw: true })` → `{ stdout, stderr, exitCode, timedOut, aborted, truncated }`，原始输出不折行。需要解析 JSON/CSV/长行时必须用 `raw: true`。
+- 非 raw 的终端输出会按终端列宽硬折行，禁止用来解析 JSON/CSV；它只适合人看的命令输出。

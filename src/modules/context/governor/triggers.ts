@@ -14,14 +14,6 @@ export function needsHardCeiling(estimatedTokens: number, windowTokens: number):
   return estimatedTokens > windowTokens - 1024;
 }
 
-/** 手动压缩可用性检查（运行中禁用） */
-export function canManualCompact(busy: boolean): { ok: boolean; reason?: string } {
-  if (busy) {
-    return { ok: false, reason: 'session is running; manual compaction is only available when idle' };
-  }
-  return { ok: true };
-}
-
 /** 压缩是否启用（开关 + 窗口有效） */
 export function compactionActive(config: CompactionConfig, windowTokens: number): boolean {
   return config.enabled && windowTokens > 0;

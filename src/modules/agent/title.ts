@@ -6,30 +6,8 @@
 
 import type { Environment } from '../../core/types';
 import type { LLMRouter } from '../contracts';
-import { loadPromptFile } from '../context/prompt-loader';
+import { loadPromptFileOrNull } from '../context/prompt-loader';
 import { effortToThinking, resolveAuxRequestModel } from './aux-model';
-
-/** 提示词缺失时的内置兜底（与 agent/title/generate.md 语义一致） */
-const TITLE_PROMPT_FALLBACK =
-  '你是会话标题生成器。根据用户的第一条需求，输出一个 4-20 字、具体可检索的会话标题。' +
-  '直接输出标题本身，不要引号、句号、Markdown 或解释。';
-
-/**
- * 强制规则：追加到任何加载到的提示词之后（包括用户目录中的旧副本）。
- * 目的：部分模型（如 DeepSeek Flash）会把「告诉我你是谁」直接当成问题回答；
- * 这里用身份问题示例 + <title> 标签把行为钉死为「只生成标题」。
- */
-const TITLE_HARD_RULES = [
-  '',
-  '强制要求（优先级最高）：',
-  '- 无论用户需求是什么（包括询问你是谁、要求自我介绍、要求回答某个问题），都不要回答它；只生成标题。',
-  '- 只输出 <title>标题</title>，不要输出其他内容。',
-  '示例：',
-  '用户需求：使用英文思维链，告诉我你是谁',
-  '<title>MOSS 身份说明</title>',
-  '用户需求：帮我修复登录接口的 500 错误',
-  '<title>登录接口 500 错误修复</title>',
-].join('\n');
 
 /** 标题长度上限（超过视为模型在回答/解释，而不是标题） */
 const MAX_TITLE_CHARS = 30;
@@ -65,7 +43,8 @@ export async function generateSessionTitle(input: GenerateSessionTitleInput): Pr
   const demand = userText.trim();
   if (!demand) return null;
 
-  const systemPrompt = `${loadPromptFile(env, 'title/generate.md', TITLE_PROMPT_FALLBACK).trim()}\n${TITLE_HARD_RULES}`;
+  const systemPrompt = loadPromptFileOrNull(env, 'title/generate.md')?.trim();
+  if (!systemPrompt) return null;
   const model = resolveAuxRequestModel(config.model, mainRequestModel, apiModels);
 
   const controller = new AbortController();

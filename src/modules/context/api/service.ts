@@ -292,11 +292,8 @@ export class ContextEngineServiceImpl {
     }
 
     // 遥测：breakdown + systemSections + 发送字符数（校准口径）
-    const skillName = session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
     const sections = getSystemSections(
       this.env,
-      skillName,
-      name => this.resolveSkillPrompt(name),
       this.buildRulesSectionForTelemetry(opts.cwd),
       opts.promptExtras ?? null,
     );
@@ -633,7 +630,7 @@ export class ContextEngineServiceImpl {
         continue;
       }
       if (region.some(m => isProtectedMessage(m, protectedTools))) {
-        errors.push(`${label}: 区间包含受保护消息（env-context / skill-inject / 受保护工具）`);
+        errors.push(`${label}: 区间包含受保护消息（env-context / 受保护工具）`);
         continue;
       }
       if (latestUserIndex >= start && latestUserIndex <= end) {
@@ -1227,25 +1224,19 @@ export class ContextEngineServiceImpl {
     try {
       const model = this.resolveMainModel();
       const cwd = session.lastCwd ?? this.lastCwd ?? process.cwd();
-      const skillName =
-        session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
       const rulesSection = this.buildRulesSectionForTelemetry(cwd);
       const staticSystemPrompt = buildStaticSystemPrompt(
         this.env,
-        this.resolveSkillPrompt(skillName),
         rulesSection,
       );
       const view = buildRequestView(session, staticSystemPrompt, {
         includeThinking: this.resolveIncludeThinking(model),
-        resolveSkillPrompt: name => this.resolveSkillPrompt(name),
         renderRefs: this.getConfig().refs.enabled,
       });
       t.lastBreakdown = view.breakdown;
       t.lastWindowTokens = this.resolveWindowTokens(model);
       t.lastSystemSections = getSystemSections(
         this.env,
-        skillName,
-        name => this.resolveSkillPrompt(name),
         rulesSection,
       );
     } catch (err) {
@@ -1262,7 +1253,7 @@ export class ContextEngineServiceImpl {
       const rulesEngine = this.services.tryResolve<RulesEngineServiceImpl>(ServiceNames.RULES_ENGINE);
       if (!rulesEngine) return null;
       const compiled = rulesEngine.getCompiledSet(cwd);
-      const text = buildRulesSection(compiled.alwaysRules);
+      const text = buildRulesSection(this.env, compiled.alwaysRules);
       if (!text) return null;
       return { fingerprint: compiled.fingerprint, text };
     } catch {
@@ -1378,18 +1369,6 @@ export class ContextEngineServiceImpl {
     } catch {
       return parseContextWindow(undefined);
     }
-  }
-
-  private resolveSkillPrompt(name: string | undefined): string | null {
-    if (!name) return null;
-    const registry = this.services.tryResolve<{
-      get(n: string): { prompt: string } | null;
-      isEnabled(n: string): boolean;
-    }>(ServiceNames.SKILL_REGISTRY);
-    if (!registry) return null;
-    const skill = registry.get(name);
-    if (!skill || !registry.isEnabled(name)) return null;
-    return skill.prompt;
   }
 
   /** 摘要模型解析（设置页/调试） */

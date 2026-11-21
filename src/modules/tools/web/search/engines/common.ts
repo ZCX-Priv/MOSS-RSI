@@ -23,17 +23,6 @@ export function clip(value: string, max: number): string {
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`;
 }
 
-/** 引擎自指链接（搜索结果里混入的站内导航/广告跳板） */
-export function isEngineSelfUrl(url: string, engineHosts: readonly string[]): boolean {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return engineHosts.some((item) => host === item || host.endsWith(`.${item}`));
-  } catch {
-    return true;
-  }
-}
-
 /** 常见日期换算：1970-01-01 起的天数（Bing filters 使用） */
 export function epochDayNumber(date = new Date()): number {
   return Math.floor(date.getTime() / 86_400_000);

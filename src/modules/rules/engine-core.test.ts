@@ -145,9 +145,11 @@ describe('rules loader（双作用域合并编译）', () => {
 });
 
 describe('buildRulesSection（always 段文本）', () => {
+  const env = { dataDir: tmpdir(), packageRoot: process.cwd() } as Environment;
+
   test('无规则返回 null；有规则生成带标题的段落', () => {
-    expect(buildRulesSection([])).toBeNull();
-    const text = buildRulesSection([
+    expect(buildRulesSection(env, [])).toBeNull();
+    const text = buildRulesSection(env, [
       {
         id: 'a', name: 'R1', description: 'd1', content: 'BODY-1', paths: [], enabled: true,
         priority: 0, createdAt: '', updatedAt: '', scope: 'global',

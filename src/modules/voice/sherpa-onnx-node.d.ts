@@ -144,7 +144,5 @@ declare module 'sherpa-onnx-node' {
     flush(): void;
   }
 
-  export function readWave(filename: string): Waveform;
   export const version: string;
-  export const onnxruntimeVersion: string;
 }

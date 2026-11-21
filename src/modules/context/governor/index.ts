@@ -26,19 +26,13 @@ import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-p
 import { MEMORY_CONTEXT_MSG_NAME } from '../compiler/view-builder';
 import { compactSession, resolveSummaryModel } from '../compressor';
 import { planCompaction } from '../compressor/planner';
-import { loadPromptFile, renderTemplate } from '../prompt-loader';
+import { loadPromptFileOrNull, renderTemplate } from '../prompt-loader';
 import { estimateTextTokens, estimateMessagesTokens } from '../budgeter/estimator';
 import { shouldCompact, needsHardCeiling, compactionActive } from './triggers';
 import { decidePressureReminder } from './pressure';
 import { buildRulesSection } from '../../rules/inject';
 import type { RulesEngineServiceImpl } from '../../rules/service';
 import type { MemoryEngineServiceImpl } from '../../memory/service';
-
-/** SkillRegistry 鸭子类型（避免直接依赖 tools 模块类型） */
-interface SkillRegistryLike {
-  get(name: string): { prompt: string } | null;
-  isEnabled(name: string): boolean;
-}
 
 export interface GovernorDeps {
   env: Environment;
@@ -92,19 +86,6 @@ export interface PrepareRequestInput {
   includeThinking?: boolean;
 }
 
-/** 解析 skill prompt（SkillRegistry 运行时解析；禁用/缺失返回 null） */
-function resolveSkillPromptFromRegistry(
-  services: ServiceRegistry,
-  skillName: string | undefined,
-): string | null {
-  if (!skillName) return null;
-  const registry = services.tryResolve<SkillRegistryLike>(ServiceNames.SKILL_REGISTRY);
-  if (!registry) return null;
-  const skill = registry.get(skillName);
-  if (!skill || !registry.isEnabled(skillName)) return null;
-  return skill.prompt;
-}
-
 /** 构建 always 用户规则段（rules 引擎可用且启用时；失败返回 null） */
 function buildRulesSectionForRequest(
   deps: GovernorDeps,
@@ -116,7 +97,7 @@ function buildRulesSectionForRequest(
   if (!rulesEngine || !config.rules.enabled) return null;
   try {
     const compiled = rulesEngine.getCompiledSet(cwd);
-    const text = buildRulesSection(compiled.alwaysRules);
+    const text = buildRulesSection(deps.env, compiled.alwaysRules);
     if (!text) return null;
     const alwaysTokens = estimateTextTokens(text);
     if (alwaysTokens > config.rules.maxAlwaysTokens) {
@@ -140,26 +121,21 @@ function buildRulesSectionForRequest(
 /** 上下文过半提醒消息 name（ephemeral；仅本次请求视图、不持久化） */
 export const CONTEXT_PRESSURE_MSG_NAME = 'context-pressure';
 
-/** 提醒提示词缺失时的内置兜底文本（占位符由 renderTemplate 替换） */
-const PRESSURE_REMINDER_FALLBACK =
-  '当前上下文占用已达 {{PERCENT}}%（约 {{USED}} / {{MAX}} tokens 的模型上下文窗口）。\n\n' +
-  '处理建议：先写交接（关键结论、文件/路径、未完成事项与下一步），' +
-  '再调用 context 工具（action=compact）压缩较早消息。' +
-  '若压缩失败或不可用，不要反复重试，继续当前任务；上下文并未因失败而变满。';
-
 /**
  * 构造「上下文过半提醒」文本（纯函数，便于单测）。
  * @param usedTokens 当前上下文占用估算（token）
  * @param maxTokens 模型支持的上下文窗口（token）
  * @param ratio 占用比例（used/max）
+ * @returns 提醒文本；提示词文件缺失时返回 null（不注入提醒）
  */
 export function buildContextPressureReminder(
   env: Environment,
   usedTokens: number,
   maxTokens: number,
   ratio: number,
-): string {
-  const template = loadPromptFile(env, 'context/pressure.md', PRESSURE_REMINDER_FALLBACK);
+): string | null {
+  const template = loadPromptFileOrNull(env, 'context/pressure.md');
+  if (!template) return null;
   // PERCENT 仅数字（模板中自带 % 号，避免渲染出 "62%%"）
   return renderTemplate(template, {
     PERCENT: String(Math.round(ratio * 100)),
@@ -262,18 +238,12 @@ export async function prepareRequest(
   // ===== 1.8 always 用户规则段（rules 引擎；paths 规则由 agent 工具调用后追加锚定）=====
   const rulesSection = buildRulesSectionForRequest(deps, config, session.id, cwd);
 
-  // ===== 2. 静态系统提示（纯文本拼接；skill system 模式注入 + always 用户规则段）=====
-  const skillName = session.activeSkill?.mode === 'system' ? session.activeSkill.name : undefined;
-  const skillPrompt = resolveSkillPromptFromRegistry(deps.services, skillName);
+  // ===== 2. 静态系统提示（纯文本拼接；always 用户规则段）=====
   const staticSystemPrompt = buildStaticSystemPrompt(
     deps.env,
-    skillPrompt,
     rulesSection,
     input.promptExtras ?? null,
   );
-
-  const resolveSkill = (name: string): string | null =>
-    resolveSkillPromptFromRegistry(deps.services, name);
 
   // ===== 2.5 图片预优化（发送前压缩；失败回退原图，绝不阻断请求）=====
   let optimizedImages: Map<string, OptimizedImage> | undefined;
@@ -307,7 +277,6 @@ export async function prepareRequest(
   const buildView = (budgetTokens?: number, budgetBytes?: number, estimateOnly?: boolean) =>
     buildRequestView(session, staticSystemPrompt, {
       includeThinking,
-      resolveSkillPrompt: resolveSkill,
       budgetTokens,
       budgetBytes,
       imageEviction: { enabled: true, protectUnseen: true },
@@ -360,36 +329,39 @@ export async function prepareRequest(
       config.pressureReminder,
     );
     if (decision.inject) {
-      const reminder: ContextMessage = {
-        role: 'user',
-        name: CONTEXT_PRESSURE_MSG_NAME,
-        content: buildContextPressureReminder(
-          deps.env,
-          effectiveTotal,
-          windowTokens,
-          usedRatio,
-        ),
-        timestamp: new Date().toISOString(),
-      };
-      ephemeralMessages = [...(ephemeralMessages ?? []), reminder];
-      session.pressureState = {
-        lastAt: Date.now(),
-        lastTokens: effectiveTotal,
-        lastBand: decision.band,
-      };
-      try {
-        deps.persistSession(session);
-      } catch {
-        // 水位持久化失败不阻断请求；最坏结果是下次多提醒一次
-      }
-      deps.logger.debug('context: pressure reminder injected', {
-        sessionId: session.id,
-        usedTokens: effectiveTotal,
+      const reminderText = buildContextPressureReminder(
+        deps.env,
+        effectiveTotal,
         windowTokens,
-        ratio: Number(usedRatio.toFixed(3)),
-        band: decision.band,
-        calibrated: calibratedTotal != null,
-      });
+        usedRatio,
+      );
+      if (reminderText) {
+        const reminder: ContextMessage = {
+          role: 'user',
+          name: CONTEXT_PRESSURE_MSG_NAME,
+          content: reminderText,
+          timestamp: new Date().toISOString(),
+        };
+        ephemeralMessages = [...(ephemeralMessages ?? []), reminder];
+        session.pressureState = {
+          lastAt: Date.now(),
+          lastTokens: effectiveTotal,
+          lastBand: decision.band,
+        };
+        try {
+          deps.persistSession(session);
+        } catch {
+          // 水位持久化失败不阻断请求；最坏结果是下次多提醒一次
+        }
+        deps.logger.debug('context: pressure reminder injected', {
+          sessionId: session.id,
+          usedTokens: effectiveTotal,
+          windowTokens,
+          ratio: Number(usedRatio.toFixed(3)),
+          band: decision.band,
+          calibrated: calibratedTotal != null,
+        });
+      }
     }
   }
   // 图片 base64 对 token 估算不可见 → 字节维度独立判定，驱动最终视图的图片淘汰/字节兜底。
@@ -549,10 +521,8 @@ export async function manualCompact(
   );
 
   // 静态系统提示（cache-aligned 摘要前缀；含 always 用户规则段）
-  const skillName = input.session.activeSkill?.mode === 'system' ? input.session.activeSkill.name : undefined;
   const staticSystemPrompt = buildStaticSystemPrompt(
     deps.env,
-    resolveSkillPromptFromRegistry(deps.services, skillName),
     buildRulesSectionForRequest(deps, config, input.session.id, input.cwd),
   );
 

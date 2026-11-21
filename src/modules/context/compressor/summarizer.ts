@@ -12,11 +12,7 @@ import type { UnifiedMessage } from '../../llm/types';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
 import { sanitizeMessages } from '../healer/pair-sanitize';
 
-/** 手动压缩附加焦点的引导语前缀 */
-const FOCUS_PREFIX = '\n\n本次压缩的附加焦点（优先保留以下内容）：';
-
-/**
- * 加载压缩指令（分层：tier1=compaction.md，tier2/tier3 优先专用文件，缺失回退 base）。
+/** 加载压缩指令（分层：tier1=compaction.md，tier2/tier3 优先专用文件，缺失回退 base）。
  * 缺失 base 则抛错，调用方放弃本轮压缩。
  * @param focus 手动压缩时的附加焦点文本（可空）
  * @param tier 摘要层级（1/2/3）
@@ -31,7 +27,12 @@ export function loadCompactionInstruction(env: Environment, focus?: string, tier
   if (template.trim() === '') {
     throw new Error('compaction prompt missing (compaction.md)');
   }
-  const focusBlock = focus && focus.trim() !== '' ? `${FOCUS_PREFIX}${focus.trim()}` : '';
+  const focusText = focus?.trim() ?? '';
+  let focusBlock = '';
+  if (focusText) {
+    const prefix = loadPromptFile(env, 'compact/focus-prefix.md').trim();
+    focusBlock = prefix ? `\n\n${prefix}\n${focusText}` : `\n\n${focusText}`;
+  }
   return renderTemplate(template, { FOCUS: focusBlock });
 }
 

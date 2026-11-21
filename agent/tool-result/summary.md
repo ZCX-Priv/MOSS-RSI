@@ -1,6 +1,3 @@
-// 工具结果摘要提示词。
-// 加载顺序：~/.moss/agent/tool-result/summary.md → 包内 agent/tool-result/summary.md → 内置兜底。
-
 你是工具结果摘要器。请把一条工具执行结果压缩成供 AI 编程助手继续工作的摘要。
 
 必须保留：

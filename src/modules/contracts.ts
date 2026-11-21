@@ -584,7 +584,6 @@ export type AgentEvent =
   | { type: 'confirm-cancel'; sessionId: string; toolCallId: string; runId?: string }
   | { type: 'review-start'; sessionId: string; toolCallId: string; toolName: string; parentSessionId?: string; runId?: string }
   | { type: 'review-end'; sessionId: string; toolCallId: string; toolName: string; decision: 'allow' | 'deny' | 'uncertain'; reason?: string; riskLevel?: string; parentSessionId?: string; runId?: string }
-  | { type: 'skill-mode'; sessionId: string; action: 'enter' | 'switch' | 'exit' | 'error'; name?: string; icon?: string; message?: string; runId?: string }
   | { type: 'stats-updated'; sessionId: string; stats: RunStats; runId?: string }
   | { type: 'error'; sessionId: string; message: string; runId?: string; providerError?: string; messageId?: string }
   | { type: 'done'; sessionId: string; finishReason: string; runId?: string };

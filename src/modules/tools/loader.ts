@@ -312,53 +312,6 @@ export function localizeSchema(schema: JSONSchema): JSONSchema {
 }
 
 /**
- * 批量加载目录下所有工具（每个子目录一个工具）。
- * 错误隔离：单个工具加载失败不影响其他（loadToolFromDir 内部 catch 返回 null）。
- * 无 tool.json 的子目录（如 shared/ 共享模块）静默跳过。
- * 动态 import 并行执行（启动性能：串行 await 会让 Bun 逐个编译 TS 明显拖慢启动）；
- * 返回顺序按目录名排序稳定（与串行版 readdirSync 顺序一致）。
- */
-export async function loadToolsFromDir(
-  dir: string,
-  env: Environment,
-  logger: Logger,
-  source: 'builtin' | 'custom',
-): Promise<Tool[]> {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-
-  const toolDirs: string[] = [];
-  for (const entry of entries) {
-    const full = join(dir, entry);
-    try {
-      if (!statSync(full).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    // 非工具目录（无 tool.json），静默跳过
-    if (!existsSync(join(full, 'tool.json'))) continue;
-    toolDirs.push(full);
-  }
-  toolDirs.sort();
-
-  const loaded = await Promise.all(
-    toolDirs.map((full) =>
-      loadToolFromDir(full, env, logger, source).catch((err: unknown) => {
-        logger.warn(t('tools.skipImportFailed', { dir: full }), {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return null;
-      }),
-    ),
-  );
-  return loaded.filter((tool): tool is Tool => tool !== null);
-}
-
-/**
  * 探测内置工具目录：优先 src/modules/tools，回退 dist/modules/tools。
  * 双路径扫描（src 优先，dist 回退）。
  */

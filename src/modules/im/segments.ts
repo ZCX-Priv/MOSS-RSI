@@ -60,24 +60,6 @@ export function takeMedia(segments: ImSegment[]): ImMediaRef[] {
   return media;
 }
 
-export function hasMedia(segments: ImSegment[]): boolean {
-  return takeMedia(segments).length > 0;
-}
-
-export function countSegments(segments: ImSegment[]): number {
-  let count = 0;
-  const walk = (list: ImSegment[]): void => {
-    for (const segment of list) {
-      count += 1;
-      if (segment.type === 'forward') {
-        for (const node of segment.nodes) walk(node);
-      }
-    }
-  };
-  walk(segments);
-  return count;
-}
-
 /** 构造单个文本段的便捷函数（适配器常用） */
 export function textSegments(text: string): ImSegment[] {
   const trimmed = text.trim();

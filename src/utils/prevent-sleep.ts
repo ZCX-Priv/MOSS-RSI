@@ -22,11 +22,6 @@ let child: KeepAwakeChild | null = null;
 let activePlatform: string | null = null;
 let lastWarned = false;
 
-/** 当前是否已持有防休眠句柄 */
-export function isPreventSleepActive(): boolean {
-  return child !== null;
-}
-
 /** 构造各平台的常驻命令；不支持的平台返回 null */
 function buildCommand(): { cmd: string[]; label: string } | null {
   const pid = process.pid;

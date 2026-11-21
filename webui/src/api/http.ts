@@ -230,7 +230,6 @@ export const api = {
       sessionId: string;
       messages: unknown[];
       page?: HistoryPageMeta;
-      activeSkill?: { name: string; mode: 'system' | 'message' } | null;
       permissionMode?: 'ask' | 'auto' | 'skip';
       lastRunStats?: RunStats;
     }>('GET', `/api/session/${id}${q ? `?${q}` : ''}`);

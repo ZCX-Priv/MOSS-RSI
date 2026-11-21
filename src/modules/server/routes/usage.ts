@@ -238,15 +238,15 @@ function programOf(command: string): string | null {
   return null;
 }
 
-/** 技能名：metadata.skillName → '# Active Skill: x' → 会话当前 skill */
-function skillNameOf(msg: Record<string, unknown>, activeSkill: string | undefined): string {
+/** 技能名：metadata.skillName → '# Active Skill: x'（历史数据兼容） */
+function skillNameOf(msg: Record<string, unknown>): string {
   const meta = asRecord(msg.metadata);
   const fromMeta = asString(meta?.skillName);
   if (fromMeta) return fromMeta;
   const content = asString(msg.content) ?? '';
   const matched = /^# Active Skill: (.+)$/m.exec(content)?.[1]?.trim();
   if (matched) return matched;
-  return activeSkill ?? 'unknown';
+  return 'unknown';
 }
 
 /** 用户消息（排除锚定/系统类消息） */
@@ -327,7 +327,6 @@ function extractEntry(raw: unknown, dir: string, fallbackUpdatedAt: string): Usa
     outputTokens: Math.max(0, asNumber(lastRun?.outputTokens) ?? 0),
   };
 
-  const activeSkill = asString(asRecord(rec.activeSkill)?.name);
   const activeDays = new Set<string>();
   const bump = (map: Record<string, number>, key: string, delta = 1): void => {
     map[key] = (map[key] ?? 0) + delta;
@@ -351,7 +350,7 @@ function extractEntry(raw: unknown, dir: string, fallbackUpdatedAt: string): Usa
       if (text !== '') entry.lastUser = text.slice(0, LAST_USER_MAX);
     }
     if (msg.role === 'system' && msg.name === 'skill-inject') {
-      const name = skillNameOf(msg, activeSkill);
+      const name = skillNameOf(msg);
       bump(entry.skills, name);
       touch(entry.skillLastAt, name, at);
     }

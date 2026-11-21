@@ -16,11 +16,7 @@ import { stat } from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import type { ConfigService, Environment, EventBus, Logger } from '../../../core/types';
-import { ServiceNames } from '../../../core/types';
 import { splitFrontMatter } from './frontmatter';
-
-/** 旧常量保留，值等于 ServiceNames.SKILL_REGISTRY，向后兼容 */
-export const SKILL_REGISTRY_SERVICE = ServiceNames.SKILL_REGISTRY;
 
 export interface Skill {
   name: string;

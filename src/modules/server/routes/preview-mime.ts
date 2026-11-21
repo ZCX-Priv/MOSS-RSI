@@ -301,6 +301,3 @@ export const MEDIA_EXTS = new Set<string>([
   'mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba', 'wma', 'amr',
   'mid', 'midi', 'aiff', 'aif',
 ]);
-
-/** 文本类扩展名清单（供一致性脚本与文档使用） */
-export const TEXT_EXTENSIONS: readonly string[] = TEXT_EXTS;

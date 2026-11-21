@@ -9,17 +9,11 @@
 import type { Environment } from '../../core/types';
 import type { LLMRouter } from '../contracts';
 import type { ToolResultSummaryConfig } from '../context/types';
-import { loadPromptFile } from '../context/prompt-loader';
+import { loadPromptFileOrNull } from '../context/prompt-loader';
 import { effortToThinking, resolveAuxRequestModel } from './aux-model';
 
 /** 摘要过程中的工具结果模式 */
 export type ToolResultMode = 'summary' | 'original';
-
-/** 提示词缺失时的内置兜底 */
-const SUMMARY_PROMPT_FALLBACK =
-  '你是工具结果摘要器。把工具执行结果压缩成供 AI 编程助手继续工作的纯文本摘要：' +
-  '保留路径、命令、退出码、错误、关键数据、签名与结论；删除重复日志与噪声；' +
-  '不要 Markdown 代码围栏，不要解释。';
 
 /** 摘要请求超时（ms） */
 const SUMMARY_TIMEOUT_MS = 60_000;
@@ -62,7 +56,8 @@ export async function summarizeToolResult(
   if (!config.enabled || resultMode === 'original' || isError) return null;
   if (text.length < Math.max(0, config.minChars)) return null;
 
-  const systemPrompt = loadPromptFile(env, 'tool-result/summary.md', SUMMARY_PROMPT_FALLBACK);
+  const systemPrompt = loadPromptFileOrNull(env, 'tool-result/summary.md');
+  if (!systemPrompt) return null;
   const model = resolveAuxRequestModel(config.model, mainRequestModel, apiModels);
 
   const controller = new AbortController();

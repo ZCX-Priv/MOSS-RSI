@@ -29,11 +29,6 @@ export interface TodoStore {
 
 const DEFAULT_STORE: TodoStore = { nextId: 1, items: [] };
 
-/** todo 存储根目录（~/.moss/todo/） */
-export function getTodoDir(env: Environment): string {
-  return join(env.dataDir, 'todo');
-}
-
 /** 按数据目录拼会话 todo 路径（IM 等无 Environment 的调用方复用同一清洗规则）。 */
 export function getSessionTodoPathFromDir(dataDir: string, sessionId: string): string {
   const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');

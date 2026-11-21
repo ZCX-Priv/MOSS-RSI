@@ -2,8 +2,9 @@
 // 自动审查执行器：JSON 解析、只降级不升级、失败关闭、缓存与推理挡位映射。
 
 import { describe, it, expect } from 'bun:test';
+import { tmpdir } from 'node:os';
 import { SafetyReviewer } from './reviewer';
-import type { ConfigService, Logger } from '../../core/types';
+import type { ConfigService, Environment, Logger } from '../../core/types';
 import type { LLMRouter } from '../contracts';
 import type { UnifiedRequest, UnifiedResponse } from '../llm/types';
 
@@ -13,6 +14,8 @@ const logger = {
   warn: () => {},
   error: () => {},
 } as unknown as Logger;
+
+const env = { dataDir: tmpdir(), packageRoot: process.cwd() } as Environment;
 
 /** 构造带指定 review 配置的 ConfigService mock */
 function configWith(review: Record<string, unknown>): ConfigService {
@@ -52,6 +55,7 @@ const BASE_INPUT = {
 describe('SafetyReviewer', () => {
   it('解析合法 allow JSON', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith(['{"outcome":"allow","risk_level":"low","user_authorization":"high","rationale":"安装依赖符合请求"}']),
@@ -64,6 +68,7 @@ describe('SafetyReviewer', () => {
 
   it('容忍 Markdown 代码围栏与前后杂质', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith(['结果如下：\n```json\n{"outcome":"deny","rationale":"外发凭据"}\n```']),
@@ -75,6 +80,7 @@ describe('SafetyReviewer', () => {
 
   it('非法输出 → uncertain（失败关闭）', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith(['我觉得可以放行']),
@@ -86,6 +92,7 @@ describe('SafetyReviewer', () => {
 
   it('模型异常 → uncertain', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith([new Error('timeout')]),
@@ -97,6 +104,7 @@ describe('SafetyReviewer', () => {
 
   it('critical 风险的 allow 降级为 deny', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith(['{"outcome":"allow","risk_level":"critical","user_authorization":"high","rationale":"读密钥"}']),
@@ -107,6 +115,7 @@ describe('SafetyReviewer', () => {
 
   it('高风险 + 授权不足的 allow 降级为 deny', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({}),
       logger,
       llm: routerWith(['{"outcome":"allow","risk_level":"high","user_authorization":"low","rationale":"顺手清理"}']),
@@ -118,6 +127,7 @@ describe('SafetyReviewer', () => {
   it('相同指纹命中缓存，不重复调用模型', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ cacheTtlMs: 60000 }),
       logger,
       llm: routerWith(['{"outcome":"allow","risk_level":"low","user_authorization":"high","rationale":"ok"}'], captured),
@@ -132,6 +142,7 @@ describe('SafetyReviewer', () => {
   it('cacheTtlMs=0 时不缓存', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ cacheTtlMs: 0 }),
       logger,
       llm: routerWith([
@@ -147,6 +158,7 @@ describe('SafetyReviewer', () => {
   it('推理挡位映射到 thinking 配置', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ reasoningEffort: 'max', cacheTtlMs: 0 }),
       logger,
       llm: routerWith(['{"outcome":"allow","rationale":"ok"}'], captured),
@@ -158,6 +170,7 @@ describe('SafetyReviewer', () => {
   it('动态挡位（medium）原样透传给 thinking', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ reasoningEffort: 'medium', cacheTtlMs: 0 }),
       logger,
       llm: routerWith(['{"outcome":"allow","rationale":"ok"}'], captured),
@@ -168,6 +181,7 @@ describe('SafetyReviewer', () => {
 
   it('默认中灵敏度：危险系数达到阈值时 allow 降级为 deny', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ cacheTtlMs: 0 }),
       logger,
       llm: routerWith([
@@ -182,6 +196,7 @@ describe('SafetyReviewer', () => {
 
   it('低灵敏度更宽松：危险系数 60 仍放行', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ sensitivity: 'low', cacheTtlMs: 0 }),
       logger,
       llm: routerWith([
@@ -195,6 +210,7 @@ describe('SafetyReviewer', () => {
 
   it('高灵敏度更严格：危险系数 35 即拒绝', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ sensitivity: 'high', cacheTtlMs: 0 }),
       logger,
       llm: routerWith([
@@ -208,6 +224,7 @@ describe('SafetyReviewer', () => {
 
   it('缺少 danger_score 时按 risk_level 映射', async () => {
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ sensitivity: 'medium', cacheTtlMs: 0 }),
       logger,
       llm: routerWith([
@@ -222,6 +239,7 @@ describe('SafetyReviewer', () => {
   it('审查请求附带 context_digest（精华上下文）', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ cacheTtlMs: 0 }),
       logger,
       llm: routerWith(['{"outcome":"deny","rationale":"ok"}'], captured),
@@ -235,6 +253,7 @@ describe('SafetyReviewer', () => {
   it('off 挡位不启用思考', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ reasoningEffort: 'off', cacheTtlMs: 0 }),
       logger,
       llm: routerWith(['{"outcome":"allow","rationale":"ok"}'], captured),
@@ -246,6 +265,7 @@ describe('SafetyReviewer', () => {
   it('review.model 优先于会话模型', async () => {
     const captured: UnifiedRequest[] = [];
     const reviewer = new SafetyReviewer({
+      env,
       config: configWith({ model: 'cheap-model', cacheTtlMs: 0 }),
       logger,
       llm: routerWith(['{"outcome":"allow","rationale":"ok"}'], captured),

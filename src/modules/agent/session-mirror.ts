@@ -29,8 +29,7 @@ function openDb(dataDir: string): Database {
       compaction_count INTEGER NOT NULL DEFAULT 0,
       derived_from TEXT,
       ref_cursor INTEGER,
-      permission_mode TEXT,
-      active_skill TEXT
+      permission_mode TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 
@@ -46,6 +45,12 @@ function openDb(dataDir: string): Database {
     CREATE INDEX IF NOT EXISTS idx_compaction_index_session
       ON compaction_index(session_id, created_at DESC);
   `);
+  // 旧库遗留列清理：已废除的 skill 模式；不支持 DROP COLUMN 的旧 SQLite 忽略即可
+  try {
+    db.exec('ALTER TABLE sessions DROP COLUMN active_skill');
+  } catch {
+    // 列不存在或 SQLite 版本不支持：不影响功能（不再写入该列）
+  }
   dbCache.set(path, db);
   return db;
 }
@@ -57,8 +62,8 @@ export function mirrorSession(dataDir: string, session: Session): void {
     const compacted = session.compactions ?? [];
     db.query(
       `INSERT OR REPLACE INTO sessions
-        (id, updated_at, message_count, total_tokens, compaction_count, derived_from, ref_cursor, permission_mode, active_skill)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, updated_at, message_count, total_tokens, compaction_count, derived_from, ref_cursor, permission_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       session.id,
       session.updatedAt,
@@ -68,7 +73,6 @@ export function mirrorSession(dataDir: string, session: Session): void {
       session.derivedFrom ?? null,
       session.refCursor ?? null,
       session.permissionMode ?? null,
-      session.activeSkill ? `${session.activeSkill.name}:${session.activeSkill.mode}` : null,
     );
     const stmt = db.query(
       `INSERT OR REPLACE INTO compaction_index

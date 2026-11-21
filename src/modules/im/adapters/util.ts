@@ -11,13 +11,6 @@ export function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** 平台 ID 取值：数字 ID 也要转成字符串 */
-export function idText(value: unknown): string {
-  if (typeof value === 'string') return value.trim();
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return '';
-}
-
 /** 安全取数字 */
 export function num(value: unknown): number | null {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
