@@ -1,18 +1,18 @@
 {
   "name": "skill",
-  "description": "统一 skill 工具（action 分派）。action=list 列出所有可用 skill（渐进式披露第一级：仅 name + description，token 消耗极小）；action=use 激活指定 skill 并返回完整指令模板（第二级；目录式 skill 附带附属资源清单；args 替换模板中的 {{placeholder}} 占位符）。",
-  "description_en": "Unified skill tool (dispatched by action). action=list lists all available skills (progressive disclosure level 1: name + description only, minimal token cost); action=use activates a skill and returns its full instruction template (level 2; directory-based skills include companion resources; args fill {{placeholder}} tokens).",
+  "description": "统一 skill 工具（action 分派）。action=list 列出所有可用 skill（渐进式披露第一级：仅 name + description，token 消耗极小）；action=use 激活指定 skill 并返回完整指令模板（第二级；目录式 skill 附带附属资源清单；args 替换模板中的 {{placeholder}} 占位符）；action=create/update/delete 管理用户 skill（~/.moss/skills/<name>/SKILL.md，名称不可变）；action=search 按 keyword 搜索 SkillHub 技能市场；action=install 按 canonicalName（@owner/slug）从市场安装。skill 名称必须匹配 ^[a-z][a-z0-9-]*$。list/use/search 只读；create/update/delete/install 属于写操作，可能触发用户确认。",
+  "description_en": "Unified skill tool (dispatched by action). action=list lists all available skills (progressive disclosure level 1: name + description only); action=use activates a skill and returns its full instruction template (level 2; directory-based skills include companion resources; args fill {{placeholder}} tokens); action=create/update/delete manage user skills (~/.moss/skills/<name>/SKILL.md; name is immutable); action=search queries the SkillHub market by keyword; action=install installs from the market by canonicalName (@owner/slug). Skill names must match ^[a-z][a-z0-9-]*$. list/use/search are read-only; create/update/delete/install are write operations and may require user confirmation.",
   "icon": "sparkles",
   "annotations": {
-    "readOnlyHint": true,
-    "idempotentHint": true
+    "readOnlyHint": false,
+    "idempotentHint": false
   },
   "inputSchema": {
     "type": "object",
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["list", "use"],
+        "enum": ["list", "use", "create", "update", "delete", "search", "install"],
         "description": "skill 操作",
         "description_en": "Skill operation"
       },
@@ -26,6 +26,47 @@
         "description": "use：替换到技能提示词占位符中的参数（如 {topic: \"react hooks\"} 对应 {{topic}}）。",
         "description_en": "use: arguments substituted into the skill prompt placeholders (e.g. {topic: \"react hooks\"} fills {{topic}}).",
         "additionalProperties": true
+      },
+      "name": {
+        "type": "string",
+        "description": "create/update/delete：目标 skill 名称（必须匹配 ^[a-z][a-z0-9-]*$；update 时不可改名）",
+        "description_en": "create/update/delete: target skill name (must match ^[a-z][a-z0-9-]*$; immutable on update)"
+      },
+      "description": {
+        "type": "string",
+        "description": "create 必填：skill 的简短描述（展示在 list 中）",
+        "description_en": "Required for create: short skill description shown in list"
+      },
+      "content": {
+        "type": "string",
+        "description": "create/update：skill 的提示词正文",
+        "description_en": "create/update: skill prompt body"
+      },
+      "enabled": {
+        "type": "boolean",
+        "description": "create/update：启用状态（写入 config.skills[name].enabled）",
+        "description_en": "create/update: enabled state (written to config.skills[name].enabled)"
+      },
+      "icon": {
+        "type": "string",
+        "description": "create/update：图标（Lucide kebab-case 名，或 .svg 文件名）",
+        "description_en": "create/update: icon (Lucide kebab-case name or .svg filename)"
+      },
+      "allowedTools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "create/update：skill 激活时建议允许的工具列表（提示性约束）",
+        "description_en": "create/update: suggested allowed tools when the skill is active (advisory)"
+      },
+      "keyword": {
+        "type": "string",
+        "description": "search：技能市场搜索关键词",
+        "description_en": "search: skill market search keyword"
+      },
+      "canonicalName": {
+        "type": "string",
+        "description": "install：技能市场安装标识，格式 @owner/slug",
+        "description_en": "install: skill market install identifier, format @owner/slug"
       }
     },
     "required": ["action"],

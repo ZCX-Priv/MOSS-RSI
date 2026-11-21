@@ -29,7 +29,7 @@ export function systemRoot(): string {
  * ~/.moss 下允许 AI 访问的子目录（其余一律屏蔽，含 config/todo 等）。
  * analysis：read 工具对 office 文件的解析产物（图片/视频本体 + markdown），
  * 需对 agent（read 工具）与前端预览（/api/filesystem/raw）放行。
- * terminal-output：terminal 工具执行命令的完整输出（发给模型的是精简摘要，
+ * terminal/output：terminal 工具执行命令的完整输出（发给模型的是精简摘要，
  * 模型按 ref 用 read 读取全文）。内容即当前用户自己的命令输出，不构成提权。
  * computer：cua-driver 截图（Agent/面板看到的屏幕内容）与安装脚本；供 read 与前端预览访问。
  */
@@ -41,7 +41,7 @@ const MOSS_ALLOWED_SUBDIRS = [
   'mcps',
   'skills',
   'analysis',
-  'terminal-output',
+  'terminal/output',
   'computer',
   'browser',
   'im/inbound',

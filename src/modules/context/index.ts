@@ -29,6 +29,7 @@ class ContextModule implements Module {
   }
 
   async destroy(): Promise<void> {
+    this.engine?.dispose();
     this.engine = null;
   }
 }

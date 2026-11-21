@@ -217,6 +217,7 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.general.language', descriptionKey: 'settings.general.languageDesc', section: 'general' },
   { labelKey: 'settings.general.sendShortcut', descriptionKey: 'settings.general.sendShortcutDesc', section: 'general' },
   { labelKey: 'settings.general.followUpBehavior', descriptionKey: 'settings.general.followUpBehaviorDesc', section: 'general' },
+  { labelKey: 'settings.general.thinkingTranslation', descriptionKey: 'settings.general.thinkingTranslationDesc', section: 'general' },
   { labelKey: 'settings.general.preventSleep', descriptionKey: 'settings.general.preventSleepDesc', section: 'general' },
   { labelKey: 'settings.general.preventTabSleep', descriptionKey: 'settings.general.preventTabSleepDesc', section: 'general' },
 
@@ -1105,6 +1106,7 @@ const CONTEXT_FALLBACK: ContextEngineConfig = {
   },
   healer: { enabled: true, toolNameFuzzy: true, schemaFix: true },
   telemetry: { enabled: true },
+  toolResultSummary: { enabled: false, model: '', reasoningEffort: 'off', minChars: 400 },
   maxRequestBytes: DEFAULT_MAX_REQUEST_BYTES_MB * 1024 * 1024,
 };
 
@@ -1190,6 +1192,23 @@ export function ContextEngineSettings() {
   const { appConfig, apiConfig, updateAppConfig } = useConfig();
   const context = appConfig?.context ?? CONTEXT_FALLBACK;
   const models = apiConfig?.providers.flatMap((p) => p.models) ?? [];
+  // 工具结果摘要：模型与推理挡位动态取所选模型的 thinkingLevels（默认继承主模型）
+  const toolSummary = context.toolResultSummary ?? {
+    enabled: false,
+    model: '',
+    reasoningEffort: 'off',
+    minChars: 400,
+  };
+  const toolSummaryModel =
+    models.find((m) => m.id === toolSummary.model) ??
+    models.find((m) => m.id === appConfig?.agent.defaultModel);
+  const toolSummaryLevels =
+    toolSummaryModel?.thinkingLevels && toolSummaryModel.thinkingLevels.length > 0
+      ? toolSummaryModel.thinkingLevels
+      : DEFAULT_LEVELS;
+  const toolSummaryEffortInLevels = toolSummaryLevels.some(
+    (level) => level.effort === toolSummary.reasoningEffort,
+  );
 
   const patchContext = (patch: Partial<ContextEngineConfig>) => {
     void updateAppConfig({ context: { ...context, ...patch } }).catch(() => {
@@ -1198,6 +1217,9 @@ export function ContextEngineSettings() {
   };
   const patchCompaction = (patch: Partial<ContextEngineConfig['compaction']>) => {
     patchContext({ compaction: { ...context.compaction, ...patch } });
+  };
+  const patchToolSummary = (patch: Partial<typeof toolSummary>) => {
+    patchContext({ toolResultSummary: { ...toolSummary, ...patch } });
   };
 
   return (
@@ -1325,6 +1347,77 @@ export function ContextEngineSettings() {
               />
               <span className="text-xs text-muted-foreground">MiB</span>
             </div>
+          </ContextSettingRow>
+        </div>
+      </div>
+
+      {/* 工具结果摘要 */}
+      <div className="flex flex-col gap-1">
+        <div className="text-sm font-medium text-foreground">
+          {t('settings.context.toolResultSummaryTitle')}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {t('settings.context.toolResultSummaryDesc')}
+        </div>
+        <div className="mt-2 flex flex-col rounded-lg border border-border px-4">
+          <ContextSettingRow
+            title={t('settings.context.toolResultSummaryEnabled')}
+            desc={t('settings.context.toolResultSummaryEnabledDesc')}
+          >
+            <Switch
+              checked={toolSummary.enabled}
+              onCheckedChange={(v) => patchToolSummary({ enabled: v })}
+            />
+          </ContextSettingRow>
+          <ContextSettingRow
+            title={t('settings.context.toolResultSummaryModel')}
+            desc={t('settings.context.toolResultSummaryModelDesc')}
+          >
+            <Select
+              value={toolSummary.model || 'inherit'}
+              onValueChange={(v) => patchToolSummary({ model: v === 'inherit' ? '' : v })}
+              disabled={!toolSummary.enabled}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">
+                  {t('settings.context.toolResultSummaryModelInherit')}
+                </SelectItem>
+                {models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </ContextSettingRow>
+          <ContextSettingRow
+            title={t('settings.context.toolResultSummaryEffort')}
+            desc={t('settings.context.toolResultSummaryEffortDesc')}
+          >
+            <Select
+              value={toolSummary.reasoningEffort}
+              onValueChange={(v) => patchToolSummary({ reasoningEffort: v })}
+              disabled={!toolSummary.enabled}
+            >
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {!toolSummaryEffortInLevels && toolSummary.reasoningEffort && (
+                  <SelectItem value={toolSummary.reasoningEffort}>
+                    {`当前：${toolSummary.reasoningEffort}`}
+                  </SelectItem>
+                )}
+                {toolSummaryLevels.map((level) => (
+                  <SelectItem key={level.id} value={level.effort}>
+                    {level.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </ContextSettingRow>
         </div>
       </div>
@@ -1643,10 +1736,65 @@ export function GeneralSettings() {
   const followUpBehavior = useStore((s) => s.followUpBehavior);
   const setFollowUpBehavior = useStore((s) => s.setFollowUpBehavior);
   // 电源/后台策略：电脑休眠写入后端配置，标签页休眠走前端 Wake Lock
-  const { appConfig, updateAppConfig } = useConfig();
+  const { appConfig, apiConfig, updateAppConfig } = useConfig();
   const preventTabSleep = useStore((s) => s.preventTabSleep);
   const setPreventTabSleep = useStore((s) => s.setPreventTabSleep);
   const wakeLockSupported = isWakeLockSupported();
+  // 自动生成标题：模型与推理挡位从 provider 模型列表动态载入（默认继承主模型）
+  const autoTitle = appConfig?.general?.autoTitle ?? {
+    enabled: true,
+    model: '',
+    reasoningEffort: 'off',
+  };
+  const models = apiConfig?.providers.flatMap((p) => p.models) ?? [];
+  const autoTitleModel =
+    models.find((m) => m.id === autoTitle.model) ??
+    models.find((m) => m.id === appConfig?.agent.defaultModel);
+  const autoTitleLevels =
+    autoTitleModel?.thinkingLevels && autoTitleModel.thinkingLevels.length > 0
+      ? autoTitleModel.thinkingLevels
+      : DEFAULT_LEVELS;
+  const autoTitleEffortInLevels = autoTitleLevels.some(
+    (level) => level.effort === autoTitle.reasoningEffort,
+  );
+  // 思维链翻译：模型与推理挡位同样从 provider 模型列表动态载入（默认继承主模型）
+  const thinkingTranslation = appConfig?.general?.thinkingTranslation ?? {
+    enabled: false,
+    main: true,
+    subagent: true,
+    model: '',
+    reasoningEffort: 'off',
+  };
+  const thinkingTranslationModel =
+    models.find((m) => m.id === thinkingTranslation.model) ??
+    models.find((m) => m.id === appConfig?.agent.defaultModel);
+  const thinkingTranslationLevels =
+    thinkingTranslationModel?.thinkingLevels && thinkingTranslationModel.thinkingLevels.length > 0
+      ? thinkingTranslationModel.thinkingLevels
+      : DEFAULT_LEVELS;
+  const thinkingTranslationEffortInLevels = thinkingTranslationLevels.some(
+    (level) => level.effort === thinkingTranslation.reasoningEffort,
+  );
+  const patchAutoTitle = (patch: Partial<typeof autoTitle>) => {
+    void updateAppConfig({
+      general: {
+        autoTitle: { ...autoTitle, ...patch },
+        thinkingTranslation,
+      },
+    }).catch(() => {
+      // toast 已在 useConfig 内处理
+    });
+  };
+  const patchThinkingTranslation = (patch: Partial<typeof thinkingTranslation>) => {
+    void updateAppConfig({
+      general: {
+        autoTitle,
+        thinkingTranslation: { ...thinkingTranslation, ...patch },
+      },
+    }).catch(() => {
+      // toast 已在 useConfig 内处理
+    });
+  };
   // 自定义快捷键录制态：true 时捕获全局 keydown 录制组合键
   const [recordingShortcut, setRecordingShortcut] = useState(false);
   const isPresetShortcut = sendShortcut === 'enter' || sendShortcut === 'mod+enter';
@@ -1825,6 +1973,194 @@ export function GeneralSettings() {
               </SelectContent>
             </Select>
           </div>
+        </div>
+      </div>
+
+      {/* 自动生成标题：新会话首轮结束后用模型生成一次标题 */}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <div className="text-sm font-medium text-foreground">{t('settings.general.autoTitle')}</div>
+          <p className="text-xs text-muted-foreground">{t('settings.general.autoTitleDesc')}</p>
+        </div>
+        <div className="flex flex-col divide-y divide-border">
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex flex-col gap-0.5">
+              <div className="text-sm text-foreground">{t('settings.general.autoTitleEnabled')}</div>
+            </div>
+            <Switch
+              checked={autoTitle.enabled}
+              onCheckedChange={(v) => patchAutoTitle({ enabled: v })}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="text-sm text-foreground">{t('settings.general.autoTitleModel')}</div>
+              <div className="text-xs text-muted-foreground">
+                {t('settings.general.autoTitleModelDesc')}
+              </div>
+            </div>
+            <Select
+              value={autoTitle.model || 'inherit'}
+              onValueChange={(v) => patchAutoTitle({ model: v === 'inherit' ? '' : v })}
+              disabled={!autoTitle.enabled}
+            >
+              <SelectTrigger className="h-8 w-52 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="inherit">
+                  {t('settings.general.autoTitleModelInherit')}
+                </SelectItem>
+                {models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="text-sm text-foreground">{t('settings.general.autoTitleEffort')}</div>
+              <div className="text-xs text-muted-foreground">
+                {t('settings.general.autoTitleEffortDesc')}
+              </div>
+            </div>
+            <Select
+              value={autoTitle.reasoningEffort}
+              onValueChange={(v) => patchAutoTitle({ reasoningEffort: v })}
+              disabled={!autoTitle.enabled}
+            >
+              <SelectTrigger className="h-8 w-32 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                {!autoTitleEffortInLevels && autoTitle.reasoningEffort && (
+                  <SelectItem value={autoTitle.reasoningEffort}>
+                    {`当前：${autoTitle.reasoningEffort}`}
+                  </SelectItem>
+                )}
+                {autoTitleLevels.map((level) => (
+                  <SelectItem key={level.id} value={level.effort}>
+                    {level.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      </div>
+
+      {/* 思维链翻译：实时把模型思维链翻译为 WebUI 当前语言 */}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <div className="text-sm font-medium text-foreground">
+            {t('settings.general.thinkingTranslation')}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.general.thinkingTranslationDesc')}
+          </p>
+        </div>
+        <div className="flex flex-col divide-y divide-border">
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="text-sm text-foreground">
+              {t('settings.general.thinkingTranslationEnabled')}
+            </div>
+            <Switch
+              checked={thinkingTranslation.enabled}
+              onCheckedChange={(v) => patchThinkingTranslation({ enabled: v })}
+            />
+          </div>
+          {thinkingTranslation.enabled && (
+            <>
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="text-sm text-foreground">
+                    {t('settings.general.thinkingTranslationMain')}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('settings.general.thinkingTranslationMainDesc')}
+                  </div>
+                </div>
+                <Switch
+                  checked={thinkingTranslation.main}
+                  onCheckedChange={(v) => patchThinkingTranslation({ main: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="text-sm text-foreground">
+                    {t('settings.general.thinkingTranslationSubagent')}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('settings.general.thinkingTranslationSubagentDesc')}
+                  </div>
+                </div>
+                <Switch
+                  checked={thinkingTranslation.subagent}
+                  onCheckedChange={(v) => patchThinkingTranslation({ subagent: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="text-sm text-foreground">
+                    {t('settings.general.thinkingTranslationModel')}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('settings.general.thinkingTranslationModelDesc')}
+                  </div>
+                </div>
+                <Select
+                  value={thinkingTranslation.model || 'inherit'}
+                  onValueChange={(v) => patchThinkingTranslation({ model: v === 'inherit' ? '' : v })}
+                >
+                  <SelectTrigger className="h-8 w-52 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    <SelectItem value="inherit">
+                      {t('settings.general.thinkingTranslationModelInherit')}
+                    </SelectItem>
+                    {models.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="text-sm text-foreground">
+                    {t('settings.general.thinkingTranslationEffort')}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('settings.general.thinkingTranslationEffortDesc')}
+                  </div>
+                </div>
+                <Select
+                  value={thinkingTranslation.reasoningEffort}
+                  onValueChange={(v) => patchThinkingTranslation({ reasoningEffort: v })}
+                >
+                  <SelectTrigger className="h-8 w-32 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    {!thinkingTranslationEffortInLevels && thinkingTranslation.reasoningEffort && (
+                      <SelectItem value={thinkingTranslation.reasoningEffort}>
+                        {`当前：${thinkingTranslation.reasoningEffort}`}
+                      </SelectItem>
+                    )}
+                    {thinkingTranslationLevels.map((level) => (
+                      <SelectItem key={level.id} value={level.effort}>
+                        {level.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
         </div>
       </div>
 

@@ -50,6 +50,8 @@ export function planCompaction(
   tailKeepRatio: number,
   minFoldTokens: number,
   minCompactMessages: number = MIN_COMPACT_MESSAGES,
+  protectedTools: readonly string[] = [],
+  preserveRecentTokens = 0,
 ): CompactionPlan {
   // head：env-context 锚定之后的消息才可压缩（env-context 恒为第 0 条活跃消息）
   let head = 0;
@@ -71,8 +73,14 @@ export function planCompaction(
     return invalid('too few compactable messages');
   }
 
-  // 尾部逐字保留区：从末尾向前累积
-  const tailBudget = Math.max(1, Math.floor(windowTokens * tailKeepRatio));
+  // 尾部逐字保留区：从末尾向前累积。
+  // 额外保留 preserveRecentTokens，但最多占窗口 40%（防小窗口把可压缩区全部吃掉）。
+  const ratioBudget = Math.floor(windowTokens * tailKeepRatio);
+  const recentBudget =
+    preserveRecentTokens > 0
+      ? Math.min(preserveRecentTokens, Math.floor(windowTokens * 0.4))
+      : 0;
+  const tailBudget = Math.max(1, ratioBudget, recentBudget);
   let start = activeMsgs.length;
   let acc = 0;
   for (let i = activeMsgs.length - 1; i > head; i--) {
@@ -92,11 +100,13 @@ export function planCompaction(
   if (endIdx < head) {
     return invalid('tail retention covers all messages');
   }
-  const regionCount = start - head;
+  const region = activeMsgs
+    .slice(head, start)
+    .filter(m => !isProtectedMessage(m, protectedTools));
+  const regionCount = region.length;
   if (regionCount < minMsgs) {
     return invalid(`compactable region too small (${regionCount} messages)`);
   }
-  const region = activeMsgs.slice(head, start);
   // 反“摘要再摘要”死循环：可压缩区必须含至少一条非摘要消息
   // （否则只是在反复重写旧摘要，信息只减不增 → 越压越傻）
   const nonSummary = region.filter(m => !isCompactionSummaryMessage(m));
@@ -111,9 +121,18 @@ export function planCompaction(
   return { startIdx: head, endIdx, regionTokens, regionCount, ok: true };
 }
 
-/** 判断消息是否为压缩保护区（锚定消息：env-context / skill-inject；摘要消息参与合并压缩） */
-export function isProtectedMessage(m: ContextMessage): boolean {
-  return m.name === ENV_CONTEXT_MSG_NAME || m.name === 'skill-inject';
+/**
+ * 判断消息是否为压缩保护区：
+ * - 锚定消息：env-context / skill-inject；
+ * - protectedTools：命中工具调用的 assistant 消息，以及命中工具名的 tool 结果。
+ * 摘要消息不保护（多轮压缩时参与合并/分层蒸馏）。
+ */
+export function isProtectedMessage(m: ContextMessage, protectedTools: readonly string[] = []): boolean {
+  if (m.name === ENV_CONTEXT_MSG_NAME || m.name === 'skill-inject') return true;
+  if (protectedTools.length === 0) return false;
+  if (m.role === 'tool' && m.name && protectedTools.includes(m.name)) return true;
+  if (m.role === 'assistant' && m.toolCalls?.some(tc => protectedTools.includes(tc.name))) return true;
+  return false;
 }
 
 /** 判断是否为摘要消息（多轮压缩时并入新摘要） */

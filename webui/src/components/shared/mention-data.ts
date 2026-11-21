@@ -36,7 +36,8 @@ export interface MentionItem {
   data?: MentionChipData;
 }
 
-export type MentionTrigger = '/' | '@' | '#';
+/** 命令触发符支持英文斜杠、中文顿号、全角斜杠；@ 智能体；# 文件 */
+export type MentionTrigger = '/' | '、' | '／' | '@' | '#';
 
 export interface TriggerMatch {
   kind: MentionKind;
@@ -58,17 +59,22 @@ export interface MentionChipData {
 
 const TRIGGER_KIND: Record<MentionTrigger, MentionKind> = {
   '/': 'command',
+  '、': 'command',
+  '／': 'command',
   '@': 'agent',
   '#': 'file',
 };
 
+/** 全部触发符（同时用于排除 query 中的触发符） */
+const TRIGGER_CHARS = '/@#、／';
+
 /**
- * 解析光标前最近一个 token：以 / @ # 开头（前面是行首或空白）则命中。
+ * 解析光标前最近一个 token：以 / 、 ／ @ # 开头（前面是行首或空白）则命中。
  * 返回 null 表示未命中（菜单应关闭）。
  */
 export function detectTrigger(text: string, cursorPos: number): TriggerMatch | null {
   const before = text.slice(0, cursorPos);
-  const m = /(^|\s)([/@#])([^\s/@#]*)$/.exec(before);
+  const m = new RegExp(`(^|\\s)([${TRIGGER_CHARS}])([^\\s${TRIGGER_CHARS}]*)$`).exec(before);
   if (!m) return null;
   const trigger = m[2] as MentionTrigger;
   const query = m[3];
@@ -166,12 +172,13 @@ function escapeRe(s: string): string {
 }
 
 /** 触发符 + 名称的交替匹配：长名在前（避免 `co` 抢先匹配 `commit`） */
-function buildNameRe(names: string[], sigil: string): RegExp | null {
+function buildNameRe(names: string[], sigils: string[]): RegExp | null {
   const uniq = [...new Set(names.filter((n) => n.length > 0))].sort((a, b) => b.length - a.length);
   if (uniq.length === 0) return null;
   // 左边界 `^` 或空白（与 detectTrigger 的触发边界一致）；右边界不额外限定，
-  // 由「最长已知名优先」保证不会切碎名称。
-  return new RegExp(`(^|[\\s\\u00A0])${escapeRe(sigil)}(?:${uniq.map(escapeRe).join('|')})`, 'g');
+  // 由「最长已知名优先」保证不会切碎名称。命令类支持 / 、 ／ 三种触发符。
+  const sigilClass = `[${sigils.map(escapeRe).join('')}]`;
+  return new RegExp(`(^|[\\s\\u00A0])${sigilClass}(?:${uniq.map(escapeRe).join('|')})`, 'g');
 }
 
 /**
@@ -201,10 +208,10 @@ export function parseMentionText(text: string, lookups: MentionLookups): Mention
   // 第 2 步：在文件 token 之间的文本片段上匹配命令/技能与智能体
   const commandNames = lookups.commands.map((c) => c.name);
   const skillNames = lookups.skills.map((s) => s.name);
-  const commandRe = buildNameRe([...commandNames, ...skillNames], '/');
+  const commandRe = buildNameRe([...commandNames, ...skillNames], ['/', '、', '／']);
   const skillSet = new Set(skillNames);
   const commandSet = new Set(commandNames);
-  const agentRe = buildNameRe(lookups.agents.map((a) => a.name), '@');
+  const agentRe = buildNameRe(lookups.agents.map((a) => a.name), ['@']);
   const agentByName = new Map(lookups.agents.map((a) => [a.name, a] as const));
 
   const nameReSpans: Array<{ start: number; end: number; token: ComposerToken }> = [];

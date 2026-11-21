@@ -14,6 +14,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Atom, ChevronRight, ExternalLink, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/http';
@@ -22,10 +23,12 @@ import { MarkdownRenderer } from '../../render';
 import { useStore } from '../../store';
 import { stripInjectBlock } from '../../lib/inject-block';
 import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-preview';
+import { usePersistentState } from '../../lib/ui-state';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
 import { TodoProgressCard } from '../shared/TodoProgressCard';
 import { ThinkingPreview } from '../shared/ThinkingPreview';
+import { ThinkingViewToggle, type ThinkingView } from '../shared/ThinkingViewToggle';
 import { buildToolResultIndex, isAgentCall, parseAgentArgs, type ToolResultEntry } from './agent-calls';
 import type { SubagentCallItem } from './SubagentCard';
 import type { TaskMessage, ToolCall } from '../../types/api';
@@ -96,13 +99,30 @@ function mergeToolState(historyMsg: TaskMessage, liveMsg: TaskMessage): TaskMess
     ...(liveMsg.todoSnapshot === undefined && historyMsg.todoSnapshot !== undefined
       ? { todoSnapshot: historyMsg.todoSnapshot }
       : {}),
+    // 按需翻译的译文只写历史：实时副本没有译文时保留历史译文
+    ...(liveMsg.thinkingTranslation === undefined && historyMsg.thinkingTranslation !== undefined
+      ? { thinkingTranslation: historyMsg.thinkingTranslation }
+      : {}),
+    ...(liveMsg.thinkingTranslationLang === undefined &&
+    historyMsg.thinkingTranslationLang !== undefined
+      ? { thinkingTranslationLang: historyMsg.thinkingTranslationLang }
+      : {}),
     ...(toolCalls ? { toolCalls } : {}),
     ...(results.size > 0 ? { toolResults: [...results.values()] } : {}),
   };
 }
 
 /** 思考状态行：流式中实时计时 + 最新片段预览（与主对话 MessageBubble 同构，紧凑尺寸） */
-const ThinkingLine = memo(function ThinkingLine({ message }: { message: TaskMessage }) {
+const ThinkingLine = memo(function ThinkingLine({
+  message,
+  sessionId,
+  onTranslated,
+}: {
+  message: TaskMessage;
+  sessionId?: string | null;
+  /** 翻译完成/缓存命中后刷新历史（子代理消息可能不在 store 中） */
+  onTranslated?: () => void;
+}) {
   const { t } = useTranslation();
   // 流式思考期间每 100ms 刷新「当前时刻」，驱动状态行秒数递增
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -127,10 +147,103 @@ const ThinkingLine = memo(function ThinkingLine({ message }: { message: TaskMess
       }
     }
   }
-  const preview = message.thinkingStreaming ? thinkingPreview(message.thinking) : '';
+  // 原文/译文显示选择（按消息记住；默认原文，点击「译文」后才按需翻译）
+  const [thinkingView, setThinkingView] = usePersistentState<ThinkingView>(
+    `${sessionId ?? ''}:${message.id}:thinkingView`,
+    'original',
+  );
+  /** 思维链展开态：原文/译文胶囊仅在展开后显示 */
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  /** 本组件发起的按需翻译是否进行中（子代理消息可能不在 store 中，需本地维护） */
+  const [translating, setTranslating] = useState(false);
+  const hasThinkingTranslation = !!message.thinkingTranslation;
+  const translationPending = translating || !!message.thinkingTranslationPending;
+  const showingThinkingTranslation =
+    thinkingView === 'translation' && (hasThinkingTranslation || translationPending);
+  const thinkingText = showingThinkingTranslation
+    ? message.thinkingTranslation ?? ''
+    : message.thinking ?? '';
+  const thinkingPending = showingThinkingTranslation && !hasThinkingTranslation && translationPending;
+  const showThinkingPreview =
+    message.thinkingStreaming || (showingThinkingTranslation && translationPending);
+  const previewText = showThinkingPreview
+    ? showingThinkingTranslation && !hasThinkingTranslation
+      ? t('task.thinkingTranslating')
+      : thinkingPreview(showingThinkingTranslation ? message.thinkingTranslation ?? '' : message.thinking)
+    : '';
+  const messageKey = message.serverMessageId ?? message.id;
+  const requestTranslation = () => {
+    if (!sessionId || translating) return;
+    if (message.streaming || message.thinkingStreaming) {
+      toast.info(t('task.thinkingTranslateWait'));
+      return;
+    }
+    setTranslating(true);
+    void api
+      .translateThinking(sessionId, messageKey, message.historyIndex)
+      .then((resp) => {
+        if ('cached' in resp) {
+          setTranslating(false);
+          onTranslated?.();
+        }
+      })
+      .catch((err) => {
+        console.warn('translateThinking failed:', err);
+        setTranslating(false);
+        setThinkingView('original');
+        toast.error(t('task.thinkingTranslateFailed'));
+      });
+  };
+  const handleViewChange = (next: ThinkingView) => {
+    if (next === 'translation' && !hasThinkingTranslation && !translationPending) {
+      requestTranslation();
+    }
+    setThinkingView(next);
+  };
+  // 翻译结束（成功/失败/跳过）：结束本地 pending；失败/跳过回退原文
+  useEffect(() => {
+    if (!sessionId || !translating) return;
+    return wsClient.onMessage((msg) => {
+      if (msg.type !== 'assistant-thinking-translation-end') return;
+      const payload = (msg.payload ?? {}) as {
+        messageId?: string;
+        ok?: boolean;
+        skipped?: boolean;
+      };
+      if (payload.messageId !== messageKey) return;
+      setTranslating(false);
+      if (!payload.ok || payload.skipped) setThinkingView('original');
+      // 成功路径由 AgentTaskFlow 顶层统一 load() 刷新历史
+    });
+  }, [sessionId, translating, messageKey, setThinkingView]);
+  // 兼容旧持久化选择：之前选过「译文」的消息，加载后补触发一次按需翻译
+  useEffect(() => {
+    if (
+      thinkingView === 'translation' &&
+      !hasThinkingTranslation &&
+      !translationPending &&
+      !message.streaming &&
+      !message.thinkingStreaming &&
+      sessionId
+    ) {
+      requestTranslation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    thinkingView,
+    hasThinkingTranslation,
+    translationPending,
+    message.streaming,
+    message.thinkingStreaming,
+    sessionId,
+  ]);
 
   return (
-    <details className="group">
+    <details
+      className="group"
+      open={thinkingOpen}
+      onToggle={(e) => setThinkingOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
         <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" />
         {message.thinkingStreaming ? (
@@ -149,14 +262,36 @@ const ThinkingLine = memo(function ThinkingLine({ message }: { message: TaskMess
             </span>
           </>
         )}
-        {preview && <ThinkingPreview text={preview} />}
+        {previewText && <ThinkingPreview text={previewText} />}
+        {/* 原文/译文胶囊仅在思维链展开后显示 */}
+        {thinkingOpen && !!message.thinking && (
+          <span
+            className="ml-auto flex shrink-0 pl-2"
+            onClick={(e) => {
+              // 胶囊位于 summary 内：阻止点击触发 details 折叠
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+          >
+            <ThinkingViewToggle
+              view={thinkingView}
+              pending={thinkingPending}
+              onChange={handleViewChange}
+            />
+          </span>
+        )}
       </summary>
       <div className="mt-1">
-        <MarkdownRenderer
-          text={message.thinking ?? ''}
-          streaming={!!message.thinkingStreaming}
-          variant="compact"
-        />
+        {thinkingPending ? (
+          <div className="text-xs text-muted-foreground">{t('task.thinkingTranslating')}</div>
+        ) : (
+          <MarkdownRenderer
+            text={thinkingText}
+            // 译文流式生成期间同样按「未闭合」渲染
+            streaming={showingThinkingTranslation ? translationPending : !!message.thinkingStreaming}
+            variant="compact"
+          />
+        )}
       </div>
     </details>
   );
@@ -168,10 +303,13 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
   iconMap,
   toolResultIndex,
   sessionId,
+  onTranslated,
 }: {
   message: TaskMessage;
   iconMap: Record<string, string>;
   toolResultIndex: Map<string, ToolResultEntry>;
+  /** 按需翻译完成 → 刷新子代理历史 */
+  onTranslated?: () => void;
   /** 子代理自己的会话 id（工具卡懒加载必须按它取结果，而不是主会话） */
   sessionId?: string | null;
 }) {
@@ -213,7 +351,9 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
   });
   return (
     <div className="flex flex-col gap-1">
-      {message.thinking && <ThinkingLine message={message} />}
+      {message.thinking && (
+        <ThinkingLine message={message} sessionId={sessionId} onTranslated={onTranslated} />
+      )}
       {visibleContent && (
         <div className="text-sm text-foreground">
           <MarkdownRenderer
@@ -330,6 +470,16 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
     };
   }, [sessionId, load]);
 
+  // 按需翻译结束：子代理消息可能不在 store 中，重拉历史获取译文
+  useEffect(() => {
+    if (!sessionId) return;
+    return wsClient.onMessage((msg) => {
+      if (msg.type !== 'assistant-thinking-translation-end') return;
+      if (msg.sessionId !== sessionId) return;
+      void load();
+    });
+  }, [sessionId, load]);
+
   // WS 重连后补拉一次历史：睡眠/断网期间丢失的 subagent.event 不会自动重放，
   // 不补拉会让「执行过程」永久停在旧状态。
   const wsStatus = useStore((s) => s.wsStatus);
@@ -443,6 +593,7 @@ export function AgentTaskFlow({ sessionId, running, limit = 20, className, showO
                 iconMap={toolIconMap}
                 toolResultIndex={toolResultIndex}
                 sessionId={sessionId}
+                onTranslated={load}
               />
             </div>
           ))}

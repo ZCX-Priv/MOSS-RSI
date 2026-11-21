@@ -201,6 +201,30 @@ export interface AppConfig {
   daemon: {
     enabled: boolean;
   };
+  /** 通用设置（UI「通用」页后端项：自动生成标题、思维链翻译等） */
+  general?: {
+    autoTitle: {
+      /** 新会话首轮结束后自动生成标题（默认开） */
+      enabled: boolean;
+      /** 标题模型 id；'' = 继承主模型 */
+      model: string;
+      /** 推理挡位（off/none 关闭思考） */
+      reasoningEffort: string;
+    };
+    /** 思维链翻译：切换到译文时按需翻译为 WebUI 当前语言 */
+    thinkingTranslation: {
+      /** 主开关（默认关） */
+      enabled: boolean;
+      /** 主代理思维链翻译（主开关开启后生效） */
+      main: boolean;
+      /** 子代理思维链翻译（主开关开启后生效） */
+      subagent: boolean;
+      /** 翻译模型 id；'' = 继承主模型 */
+      model: string;
+      /** 推理挡位（off/none 关闭思考） */
+      reasoningEffort: string;
+    };
+  };
   /**
    * 运行期电源策略。
    * preventSleep=true 时后端持有系统级防休眠句柄（Windows SetThreadExecutionState /

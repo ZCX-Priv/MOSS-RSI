@@ -57,12 +57,6 @@ import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
 import { computeReplyEnds, isEmptyAssistantPlaceholder, isSystemCard } from '@/lib/reply-end';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
@@ -97,7 +91,9 @@ import { FileTypeIcon } from '../shared/FileTypeIcon';
 import { ScrollToBottomButton } from '../shared/ScrollToBottomButton';
 import { SessionArtifacts } from '../shared/SessionArtifacts';
 import { ThinkingPreview } from '../shared/ThinkingPreview';
+import { ThinkingViewToggle, type ThinkingView } from '../shared/ThinkingViewToggle';
 import { ConversationNodeRail, type ConversationNodeItem } from '../shared/ConversationNodeRail';
+import { TabShortcutRail, type ShortcutTabType } from '../shared/TabShortcutRail';
 import { ConnectionStatusTag } from '../shared/ConnectionStatusTag';
 import { VirtualList, type VirtualListApi } from '../../lib/virtual-list/VirtualList';
 import { useSessionHistory } from '../../hooks/useSessionHistory';
@@ -152,6 +148,7 @@ import {
 } from '../../store';
 import { useTask } from '../../hooks/useTask';
 import { api } from '../../api/http';
+import { wsClient } from '../../api/ws';
 import { hydrateAgentBus } from '../../lib/agent-bus';
 import { copyText } from '../../lib/clipboard';
 import { usePersistentState } from '../../lib/ui-state';
@@ -582,17 +579,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // 压缩包内层标签：稳定引用地构造其内容源（否则 effect 依赖抖动 → 反复重新提取）
   const archiveEntry = activeTab?.type === 'file' ? activeTab.archiveEntry : undefined;
   const fileTabSource = useMemo(() => (archiveEntry ? archiveEntrySource(archiveEntry) : undefined), [archiveEntry]);
-  // 下拉菜单只显示当前标签栏中未打开的类型；全部类型都已打开时禁用加号按钮
-  const hasSummaryTab = sidebarTabs.some((tab) => tab.type === 'summary');
+  // 终端标签存在时面板常驻保活（切到其它标签只隐藏、不卸载）
   const hasTerminalTab = sidebarTabs.some((tab) => tab.type === 'terminal');
-  const hasFilesTab = sidebarTabs.some((tab) => tab.type === 'files');
-  const hasChangesTab = sidebarTabs.some((tab) => tab.type === 'changes');
-  const hasComputerTab = sidebarTabs.some((tab) => tab.type === 'computer');
-  const hasAgentsTab = sidebarTabs.some((tab) => tab.type === 'agents');
-  const allTabTypesOpen =
-    hasSummaryTab && hasTerminalTab && hasFilesTab && hasChangesTab && hasComputerTab && hasAgentsTab;
 
-  // 「开始」面板：打开/切换到某类型标签；「开始」标签存在时原地变身，不再新开标签
+  // 「开始」面板：打开/切换到某类型标签；当前正在看的「开始」页原地变身，不再新开标签
   const openTabType = useCallback(
     (type: 'summary' | 'terminal' | 'files' | 'changes' | 'computer' | 'agents', titleKey: string) => {
       // 已开该类型 → 直接切换
@@ -601,12 +591,25 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         setActiveSidebarTab(taskId, existing.id);
         return;
       }
-      // 未开 → 若当前有「开始」标签则原地转换，否则新增
-      const startTab = sidebarTabs.find((tab) => tab.type === 'start');
-      if (startTab) convertSidebarTab(taskId, startTab.id, type, titleKey);
+      // 未开 → 当前是「开始」页则原地转换，否则新增（多开始页时不会误改其它页）
+      if (activeTab?.type === 'start') convertSidebarTab(taskId, activeTab.id, type, titleKey);
       else addSidebarTab(taskId, type, titleKey);
     },
-    [sidebarTabs, addSidebarTab, setActiveSidebarTab, convertSidebarTab, taskId],
+    [sidebarTabs, activeTab, addSidebarTab, setActiveSidebarTab, convertSidebarTab, taskId],
+  );
+
+  // 右侧快捷工具栏：先展开面板，再切换到已有标签或新建对应标签
+  const openShortcutTab = useCallback(
+    (type: ShortcutTabType, titleKey: string) => {
+      setRightPanelOpen(taskId, true);
+      const existing = sidebarTabs.find((tab) => tab.type === type);
+      if (existing) {
+        setActiveSidebarTab(taskId, existing.id);
+        return;
+      }
+      addSidebarTab(taskId, type, titleKey);
+    },
+    [sidebarTabs, addSidebarTab, setActiveSidebarTab, setRightPanelOpen, taskId],
   );
 
   // 标签栏单行横向滚动：按「一个标签页」滚动 + 新建/激活标签自动滚入视野（哪边还有内容才显示箭头）
@@ -1013,7 +1016,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // 右侧面板内容（移动端 Sheet 与桌面端 aside 共用，避免重复 JSX）
   const rightPanelContent = (
     <>
-      {/* Panel Header：标签页栏 + 加号下拉菜单 */}
+      {/* Panel Header：标签页栏 + 新建标签页按钮 */}
       <div className="flex h-12 items-center gap-2 border-b border-border px-3">
         {/* 标签页栏 */}
         {/* 左滚动箭头：仅当左侧还有未滚动到内容时显示（与附件栏同款规则） */}
@@ -1044,7 +1047,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                   key={tab.id}
                   tab={tab}
                   isActive={tab.id === activeTab?.id}
-                  canShowClose={tab.type !== 'start'}
+                  canShowClose={tab.type !== 'start' || sidebarTabs.length > 1}
                   onSelect={(id) => setActiveSidebarTab(taskId, id)}
                   onRemove={(id) => removeSidebarTab(taskId, id)}
                 />
@@ -1063,69 +1066,16 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             <ChevronRight className="size-4" />
           </button>
         )}
-        {/* 加号下拉菜单：新建标签页（仅显示当前标签栏中未打开的类型） */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              title={t('task.add')}
-              disabled={allTabTypesOpen}
-            >
-              <Plus />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" sideOffset={4} collisionPadding={8}>
-            {!hasSummaryTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'summary', 'task.taskSummary')}
-              >
-                <List className="size-4" />
-                {t('task.taskSummary')}
-              </DropdownMenuItem>
-            )}
-            {!hasTerminalTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'terminal', 'terminal.title')}
-              >
-                <Terminal className="size-4" />
-                {t('terminal.title')}
-              </DropdownMenuItem>
-            )}
-            {!hasFilesTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'files', 'task.files')}
-              >
-                <Folder className="size-4" />
-                {t('task.files')}
-              </DropdownMenuItem>
-            )}
-            {!hasChangesTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'changes', 'task.fileChanges')}
-              >
-                <FileDiff className="size-4" />
-                {t('task.fileChanges')}
-              </DropdownMenuItem>
-            )}
-            {!hasComputerTab && !computerUnavailable && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'computer', 'computer.title')}
-              >
-                <SquareMousePointer className="size-4" />
-                {t('computer.title')}
-              </DropdownMenuItem>
-            )}
-            {!hasAgentsTab && (
-              <DropdownMenuItem
-                onSelect={() => addSidebarTab(taskId, 'agents', 'task.agents')}
-              >
-                <Bot className="size-4" />
-                {t('task.agents')}
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* 新建标签页：每次点击新增一个「开始」页 */}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title={t('task.newTab')}
+          aria-label={t('task.newTab')}
+          onClick={() => addSidebarTab(taskId, 'start', 'start.title')}
+        >
+          <Plus />
+        </Button>
       </div>
 
       {/* 标签内容路由 */}
@@ -1491,6 +1441,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             resetKey={`${msg.id}|${msg.content.length}|${msg.streaming ? 1 : 0}|${msg.toolCalls?.length ?? 0}`}
           >
             <MessageBubble
+              sessionId={taskId}
               message={msg}
               todos={needsTodos ? todos : undefined}
               toolIconMap={toolIconMap}
@@ -1515,6 +1466,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       );
     },
     [
+      taskId,
       todos,
       toolIconMap,
       toolResultIndex,
@@ -1587,10 +1539,19 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           </Button>
         </div>
 
-        {/* 消息区行：左 = 对话列（最大宽度居中），右 = 刻度列（md+ 恒占位）。
-            刻度列与桌面端 header 的「展开/收起侧栏」按钮同一竖列，且预留 56px 空槽，
-            保证刻度与消息内容之间始终有间距、不遮挡正文。 */}
+        {/* 消息区行：左 = 节点刻度列，中 = 对话列（最大宽度居中），右 = 快捷工具栏列（md+ 恒占位）。
+            两侧各预留 56px 空槽，保证刻度/工具栏与消息内容之间始终有间距、不遮挡正文。 */}
         <div className="flex min-h-0 flex-1">
+        {/* 左侧刻度列：固定 56px 空槽（md+ 才占位），与右侧快捷工具栏列对称 */}
+        <div className="relative hidden w-14 shrink-0 md:block">
+          {/* 对话节点导航：左侧细刻度，当前节点蓝色高亮；悬停弹详情卡片，点击平滑跳到对应提问 */}
+          <ConversationNodeRail
+            scroller={scrollerEl}
+            nodes={conversationNodes}
+            getOffset={(id) => listApiRef.current?.getItemOffset(id) ?? null}
+            onJump={handleJumpNode}
+          />
+        </div>
         {/* 对话列：固定最大宽度（CHAT_MAX_WIDTH_PX）+ 水平居中；可用宽度不足时由 w-full 自动收缩。
             header 与消息区保持整宽，以保证桌面端 header 右侧的面板开关始终贴着右栏 */}
         <div
@@ -2082,16 +2043,9 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           <StatsBar stats={runStats} contextStats={contextStats} />
         </div>
         </div>
-        {/* 右侧刻度列：固定 56px 空槽（md+ 才占位），与 header 的侧栏开关同一竖列；
-            刻度列内 right-4 + 28px 刻度按钮 ⇒ 与 size-7、px-4 的 header 按钮中心逐像素对齐 */}
-        <div className="relative hidden w-14 shrink-0 md:block">
-          {/* 对话节点导航：右侧细刻度，当前节点蓝色高亮；悬停弹详情卡片，点击平滑跳到对应提问 */}
-          <ConversationNodeRail
-            scroller={scrollerEl}
-            nodes={conversationNodes}
-            getOffset={(id) => listApiRef.current?.getItemOffset(id) ?? null}
-            onJump={handleJumpNode}
-          />
+        {/* 右侧快捷工具栏列：固定 56px 空槽（md+ 才占位），与 header 的侧栏开关同一竖列 */}
+        <div className="relative hidden w-14 shrink-0 items-center justify-center md:flex">
+          <TabShortcutRail activeType={activeTab?.type} onOpen={openShortcutTab} />
         </div>
         </div>
       </div>
@@ -2569,6 +2523,8 @@ function SystemSectionItem({
 
 /** 渲染单条消息 */
 interface MessageBubbleProps {
+  /** 当前会话 id（按需翻译 API 需要） */
+  sessionId: string;
   message: TaskMessage;
   /** 仅含 todo 卡片的消息才传（避免 todos 更新导致所有消息重渲） */
   todos?: TodoItem[];
@@ -2606,11 +2562,128 @@ interface MessageBubbleProps {
    */
   deferContent?: boolean;
 }
-const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
   const { t } = useTranslation();
   // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
   // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
-  const [thinkingOpen, setThinkingOpen] = usePersistentState(`${message.id}:thinking`, false);
+  // key 带 sessionId：旧消息 id 可能是 `h<index>`，不带会话前缀会跨会话冲突
+  const [thinkingOpen, setThinkingOpen] = usePersistentState(
+    `${sessionId}:${message.id}:thinking`,
+    false,
+  );
+  // 原文/译文显示选择：按消息记住；默认原文，点击「译文」后才按需翻译
+  const [thinkingView, setThinkingView] = usePersistentState<ThinkingView>(
+    `${sessionId}:${message.id}:thinkingView`,
+    'original',
+  );
+  const hasThinkingTranslation = !!message.thinkingTranslation;
+  const translationPending = !!message.thinkingTranslationPending;
+  const showingThinkingTranslation =
+    thinkingView === 'translation' && (hasThinkingTranslation || translationPending);
+  const thinkingText = showingThinkingTranslation
+    ? message.thinkingTranslation ?? ''
+    : message.thinking ?? '';
+  // 已触发按需翻译但译文未到：显示「翻译中…」
+  const thinkingPending = showingThinkingTranslation && !hasThinkingTranslation && translationPending;
+  // 按需翻译：仅在用户切换到译文时调用（请求中/失败重试由 ref 与 pending 状态约束）
+  const translateRequestedRef = useRef(false);
+  /** 旧持久化视图只自动补触发一次，失败后不进入重试循环 */
+  const autoTranslateTriedRef = useRef(false);
+  const requestThinkingTranslation = useCallback(() => {
+    if (translateRequestedRef.current) return;
+    if (message.streaming || message.thinkingStreaming) return;
+    if (hasThinkingTranslation || translationPending) return;
+    translateRequestedRef.current = true;
+    autoTranslateTriedRef.current = true;
+    const store = useStore.getState();
+    // 清空可能存在的旧语言译文：译文分片 offset 从 0 开始，需与本地缓冲对齐
+    store.updateMessage(sessionId, message.id, {
+      thinkingTranslation: undefined,
+      thinkingTranslationPending: true,
+    });
+    void api
+      .translateThinking(sessionId, message.serverMessageId ?? message.id, message.historyIndex)
+      .then((resp) => {
+        if ('cached' in resp) {
+          store.updateMessage(sessionId, message.id, {
+            thinkingTranslation: resp.translation,
+            thinkingTranslationLang: resp.lang,
+            thinkingTranslationPending: false,
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn('translateThinking failed:', err);
+        store.updateMessage(sessionId, message.id, { thinkingTranslationPending: false });
+        setThinkingView('original');
+        toast.error(t('task.thinkingTranslateFailed'));
+      })
+      .finally(() => {
+        translateRequestedRef.current = false;
+      });
+  }, [
+    sessionId,
+    message.id,
+    message.serverMessageId,
+    message.historyIndex,
+    message.streaming,
+    message.thinkingStreaming,
+    hasThinkingTranslation,
+    translationPending,
+    setThinkingView,
+    t,
+  ]);
+  // 兼容旧持久化选择：之前选过「译文」的消息，加载后补触发一次按需翻译（只一次）
+  useEffect(() => {
+    if (autoTranslateTriedRef.current) return;
+    if (
+      thinkingView === 'translation' &&
+      !hasThinkingTranslation &&
+      !translationPending &&
+      !message.streaming &&
+      !message.thinkingStreaming
+    ) {
+      requestThinkingTranslation();
+    }
+  }, [
+    thinkingView,
+    hasThinkingTranslation,
+    translationPending,
+    message.streaming,
+    message.thinkingStreaming,
+    requestThinkingTranslation,
+  ]);
+  // 翻译结束：失败/跳过时回退原文并提示
+  useEffect(() => {
+    if (!message.thinking) return;
+    const key = message.serverMessageId ?? message.id;
+    return wsClient.onMessage((msg) => {
+      if (msg.type !== 'assistant-thinking-translation-end') return;
+      const payload = (msg.payload ?? {}) as {
+        messageId?: string;
+        ok?: boolean;
+        skipped?: boolean;
+      };
+      if (payload.messageId !== key) return;
+      if (!payload.ok || payload.skipped) {
+        setThinkingView('original');
+        if (payload.skipped) toast.info(t('task.thinkingTranslateSkipped'));
+        else toast.error(t('task.thinkingTranslateFailed'));
+      }
+    });
+  }, [message.thinking, message.id, message.serverMessageId, setThinkingView, t]);
+  const handleThinkingViewChange = (next: ThinkingView) => {
+    if (next === 'translation') {
+      if (!hasThinkingTranslation && !translationPending) {
+        if (message.streaming || message.thinkingStreaming) {
+          toast.info(t('task.thinkingTranslateWait'));
+          return;
+        }
+        requestThinkingTranslation();
+      }
+    }
+    setThinkingView(next);
+  };
   // 显式思考：流式思考期间每 100ms 刷新一次「当前时刻」，驱动状态行秒数递增（0.1s 分辨率；非思考消息不启动定时器）
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -2637,8 +2710,18 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
       }
     }
   }
-  // 思考预览：仅流式期间展示最新片段（单行截断交给 CSS）
-  const thinkPreview = message.thinkingStreaming ? thinkingPreview(message.thinking) : '';
+  // 思考预览：流式期间显示最新片段；翻译视图在译文仍在生成时保持可见并持续刷新
+  const showThinkingPreview =
+    message.thinkingStreaming || (showingThinkingTranslation && translationPending);
+  const thinkPreview = showThinkingPreview
+    ? showingThinkingTranslation
+      ? message.thinkingTranslation
+        ? thinkingPreview(message.thinkingTranslation)
+        : translationPending
+          ? t('task.thinkingTranslating')
+          : ''
+      : thinkingPreview(message.thinking)
+    : '';
   // 命令注入块（LLM 可见、UI 不可见）先剥离：气泡/附件解析/正文/复制都在「可见文本」上进行，
   // 刷新后从会话 JSON 重新加载同样走这里 → 不会突然显现模板正文
   const visibleContent = stripInjectBlock(message.content);
@@ -2794,17 +2877,39 @@ const MessageBubble = memo(function MessageBubble({ message, todos, toolIconMap,
             {/* 预览仅在折叠态展示：展开后全文可见，隐藏预览避免重复。
                 横向滚动发生在预览自身容器内，不撑宽会话布局。 */}
             <ThinkingPreview text={thinkPreview} />
+            {/* 原文/译文胶囊仅在思维链展开后显示，折叠态保持标题行简洁 */}
+            {thinkingOpen && !!message.thinking && (
+              <span
+                className="ml-auto flex shrink-0 pl-2"
+                onClick={(e) => {
+                  // 胶囊位于 summary 内：阻止点击触发 details 折叠
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+              >
+                <ThinkingViewToggle
+                  view={thinkingView}
+                  pending={thinkingPending}
+                  onChange={handleThinkingViewChange}
+                />
+              </span>
+            )}
           </summary>
           {thinkingOpen && (
             <div className="mt-1">
-              <MarkdownRenderer
-                text={message.thinking}
-                streaming={!!message.thinkingStreaming}
-                variant="compact"
-                // 展开后也强制渐进水合（不随 inViewport 关闭）：超长思考按块分帧解析，
-                // 避免展开瞬间同步解析整段导致长任务。
-                defer
-              />
+              {thinkingPending ? (
+                <div className="text-xs text-muted-foreground">{t('task.thinkingTranslating')}</div>
+              ) : (
+                <MarkdownRenderer
+                  text={thinkingText}
+                  // 译文流式生成期间同样按「未闭合」渲染，避免每个分片都整段解析
+                  streaming={showingThinkingTranslation ? translationPending : !!message.thinkingStreaming}
+                  variant="compact"
+                  // 展开后也强制渐进水合（不随 inViewport 关闭）：超长思考按块分帧解析，
+                  // 避免展开瞬间同步解析整段导致长任务。
+                  defer
+                />
+              )}
             </div>
           )}
         </details>

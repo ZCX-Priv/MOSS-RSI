@@ -1,7 +1,7 @@
 {
   "name": "set",
-  "description": "统一管理 MOSS 用户资源与权限模式（kind = skill / rule / hook / command / mode）。action：list 列出 rule/hook/command（只读；skill 列表请改用 skill 工具 action=list）；create 新建；update 修改现有项（名称不可变，未提供的字段保持原值）；delete 删除；kind=skill 额外支持 search（按 keyword 搜索 SkillHub 技能市场）与 install（按 canonicalName（@owner/slug）从市场安装）；kind=mode 仅支持 action=set，用 mode=ask/auto/skip 申请切换当前会话权限模式（提权会触发用户确认）。skill/command 名称必须匹配 ^[a-z][a-z0-9-]*$。rule 支持 scope=global/project、paths（空数组=始终注入，有值=访问匹配文件时注入）、priority；hook 支持 event / matcher / hookType / command / modulePath / timeout，terminal 钩子会执行任意命令，请谨慎使用；command 的 content 是斜杠命令提示词模板（可含 $ARGUMENTS）。list/search 只读放行；create/update/delete/install/set 属于写操作，可能触发用户确认。",
-  "description_en": "Unified management of MOSS user resources and permission mode (kind = skill / rule / hook / command / mode). action: list rule/hook/command (read-only; for skill listing use the skill tool with action=list); create; update an existing item (name is immutable; omitted fields keep their current values); delete; for kind=skill, search the SkillHub market by keyword or install by canonicalName (@owner/slug); kind=mode only supports action=set with mode=ask/auto/skip to request switching the current session permission mode (escalation requires user confirmation). skill/command names must match ^[a-z][a-z0-9-]*$. rule supports scope=global/project, paths (empty = always injected, non-empty = injected when matching files are accessed), and priority; hook supports event / matcher / hookType / command / modulePath / timeout — terminal hooks execute arbitrary commands, use with caution; command content is the slash-command prompt template (may contain $ARGUMENTS). list/search are read-only; create/update/delete/install/set are write operations and may require user confirmation.",
+  "description": "统一管理 MOSS 用户资源与权限模式（kind = rule / hook / command / mode）。action：list 列出 rule/hook/command；create 新建；update 修改现有项（名称不可变，未提供的字段保持原值）；delete 删除；kind=mode 仅支持 action=set，用 mode=ask/auto/skip 申请切换当前会话权限模式（提权会触发用户确认）。skill 的创建/更新/删除与市场搜索安装请改用 skill 工具。command 名称必须匹配 ^[a-z][a-z0-9-]*$。rule 支持 scope=global/project、paths（空数组=始终注入，有值=访问匹配文件时注入）、priority；hook 支持 event / matcher / hookType / command / modulePath / timeout，terminal 钩子会执行任意命令，请谨慎使用；command 的 content 是斜杠命令提示词模板（可含 $ARGUMENTS）。list 只读放行；create/update/delete/set 属于写操作，可能触发用户确认。",
+  "description_en": "Unified management of MOSS user resources and permission mode (kind = rule / hook / command / mode). action: list rule/hook/command; create; update an existing item (name is immutable; omitted fields keep their current values); delete; kind=mode only supports action=set with mode=ask/auto/skip to request switching the current session permission mode (escalation requires user confirmation). For skill creation/update/delete and market search/install, use the skill tool instead. Command names must match ^[a-z][a-z0-9-]*$. rule supports scope=global/project, paths (empty = always injected, non-empty = injected when matching files are accessed), and priority; hook supports event / matcher / hookType / command / modulePath / timeout — terminal hooks execute arbitrary commands, use with caution; command content is the slash-command prompt template (may contain $ARGUMENTS). list is read-only; create/update/delete/set are write operations and may require user confirmation.",
   "icon": "settings",
   "annotations": {
     "readOnlyHint": false,
@@ -13,15 +13,15 @@
     "properties": {
       "kind": {
         "type": "string",
-        "enum": ["skill", "rule", "hook", "command", "mode"],
+        "enum": ["rule", "hook", "command", "mode"],
         "description": "资源类型；mode 用于切换当前会话权限模式",
         "description_en": "Resource kind; mode switches the current session permission mode"
       },
       "action": {
         "type": "string",
-        "enum": ["list", "create", "update", "delete", "search", "install", "set"],
-        "description": "操作类型；search/install 仅用于 kind=skill，set 仅用于 kind=mode",
-        "description_en": "Operation; search/install are only valid for kind=skill, set is only valid for kind=mode"
+        "enum": ["list", "create", "update", "delete", "set"],
+        "description": "操作类型；set 仅用于 kind=mode",
+        "description_en": "Operation; set is only valid for kind=mode"
       },
       "mode": {
         "type": "string",
@@ -31,8 +31,8 @@
       },
       "name": {
         "type": "string",
-        "description": "目标名称（create/update/delete/list 过滤）。skill/command 必须匹配 ^[a-z][a-z0-9-]*$；update 时不可改名。",
-        "description_en": "Target name (create/update/delete/list filter). skill/command must match ^[a-z][a-z0-9-]*$; names are immutable on update."
+        "description": "目标名称（create/update/delete/list 过滤）。command 必须匹配 ^[a-z][a-z0-9-]*$；update 时不可改名。",
+        "description_en": "Target name (create/update/delete/list filter). command must match ^[a-z][a-z0-9-]*$; names are immutable on update."
       },
       "id": {
         "type": "string",
@@ -47,18 +47,18 @@
       },
       "description": {
         "type": "string",
-        "description": "描述（skill create 必填；其余可选）",
-        "description_en": "Description (required when creating a skill; optional otherwise)"
+        "description": "描述（可选）",
+        "description_en": "Description (optional)"
       },
       "content": {
         "type": "string",
-        "description": "正文内容：skill 的提示词 / rule 的规则正文 / command 的提示词模板",
-        "description_en": "Body content: skill prompt / rule body / command prompt template"
+        "description": "正文内容：rule 的规则正文 / command 的提示词模板",
+        "description_en": "Body content: rule body / command prompt template"
       },
       "enabled": {
         "type": "boolean",
-        "description": "启用状态（skill/command 写入 config；rule/hook 写入记录）",
-        "description_en": "Enabled state (skill/command written to config; rule/hook stored in the record)"
+        "description": "启用状态（command 写入 config；rule/hook 写入记录）",
+        "description_en": "Enabled state (command written to config; rule/hook stored in the record)"
       },
       "paths": {
         "type": "array",
@@ -105,29 +105,13 @@
       },
       "icon": {
         "type": "string",
-        "description": "skill/command 的图标（Lucide kebab-case 名，或 .svg 文件名）",
-        "description_en": "Icon for skill/command (Lucide kebab-case name or .svg filename)"
-      },
-      "allowedTools": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "skill 激活时建议允许的工具列表（提示性约束）",
-        "description_en": "Suggested allowed tools when the skill is active (advisory)"
+        "description": "command 的图标（Lucide kebab-case 名，或 .svg 文件名）",
+        "description_en": "Command icon (Lucide kebab-case name or .svg filename)"
       },
       "argumentHint": {
         "type": "string",
         "description": "command 的参数提示（菜单展示，如 [issue-number]）",
         "description_en": "Command argument hint shown in menus (e.g. [issue-number])"
-      },
-      "keyword": {
-        "type": "string",
-        "description": "skill 市场搜索关键词",
-        "description_en": "Skill market search keyword"
-      },
-      "canonicalName": {
-        "type": "string",
-        "description": "skill 市场安装标识，格式 @owner/slug",
-        "description_en": "Skill market install identifier, format @owner/slug"
       }
     },
     "required": ["kind", "action"],

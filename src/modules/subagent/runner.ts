@@ -242,6 +242,8 @@ export class SubagentRunner {
     const task = this.engine.createTask(`Subagent · ${input.template}`, group.id);
     const depth = parentDepth + 1;
     this.sessionDepth.set(task.id, depth);
+    // 出身血缘：子代理可沿父链只读检索父会话的压缩归档（不复制内容）
+    this.engine.setSessionLineage?.(task.id, input.parentSessionId);
 
     this.logger.info('subagent: run', {
       template: input.template,

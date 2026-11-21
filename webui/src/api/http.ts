@@ -273,6 +273,15 @@ export const api = {
       ...(resp.result.metadata ? { metadata: resp.result.metadata } : {}),
     };
   },
+  /** 按需思维链翻译：点击「译文」时触发；译文分片经 WS 推送 */
+  translateThinking: (sessionId: string, messageId: string, index?: number) =>
+    request<
+      { started: true } | { cached: true; translation: string; lang: string }
+    >(
+      'POST',
+      `/api/session/${encodeURIComponent(sessionId)}/thinking/translate`,
+      { messageId, ...(index !== undefined ? { index } : {}) },
+    ),
   deleteSession: (id: string) => request<{ deleted: boolean }>('DELETE', `/api/session/${id}`),
   getSessionContext: (id: string) =>
     request<{ files: ContextFile[]; totalTokens: number; maxTokens: number }>(

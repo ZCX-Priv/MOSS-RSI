@@ -16,11 +16,18 @@ import { sanitizeMessages } from '../healer/pair-sanitize';
 const FOCUS_PREFIX = '\n\n本次压缩的附加焦点（优先保留以下内容）：';
 
 /**
- * 加载压缩指令（agent/compact/compaction.md；缺失则抛错，调用方放弃本轮压缩）。
+ * 加载压缩指令（分层：tier1=compaction.md，tier2/tier3 优先专用文件，缺失回退 base）。
+ * 缺失 base 则抛错，调用方放弃本轮压缩。
  * @param focus 手动压缩时的附加焦点文本（可空）
+ * @param tier 摘要层级（1/2/3）
  */
-export function loadCompactionInstruction(env: Environment, focus?: string): string {
-  const template = loadPromptFile(env, 'compact/compaction.md');
+export function loadCompactionInstruction(env: Environment, focus?: string, tier: 1 | 2 | 3 = 1): string {
+  const file =
+    tier === 3 ? 'compact/compaction-tier3.md' : tier === 2 ? 'compact/compaction-tier2.md' : 'compact/compaction.md';
+  let template = loadPromptFile(env, file);
+  if (template.trim() === '') {
+    template = loadPromptFile(env, 'compact/compaction.md');
+  }
   if (template.trim() === '') {
     throw new Error('compaction prompt missing (compaction.md)');
   }
@@ -40,6 +47,8 @@ export interface SummarizeInput {
   focus?: string;
   /** 摘要模型（已解析的请求 model 名，如 'deepseek-chat'） */
   summaryModelId: string;
+  /** 摘要层级（1/2/3；决定使用哪份提示词） */
+  tier?: 1 | 2 | 3;
 }
 
 export class SummarizeError extends Error {
@@ -57,11 +66,11 @@ export function sanitizeCompactionRegion(region: readonly ContextMessage[]): Con
   return sanitizeMessages(region).messages;
 }
 
-/** 被压缩区消息 → UnifiedMessage（与视图构建相同的转换口径） */
+/** 被压缩区消息 → UnifiedMessage（与视图构建相同的转换口径；带 ref 便于摘要引用锚点） */
 function regionToUnifiedMessages(region: readonly ContextMessage[]): UnifiedMessage[] {
   return region.map(m => ({
     role: m.role,
-    content: m.content,
+    content: m.ref ? `[${m.ref}] ${m.content}` : m.content,
     toolCallId: m.toolCallId,
     toolCalls: m.toolCalls?.map(tc => ({
       id: tc.id,
@@ -77,12 +86,12 @@ function regionToUnifiedMessages(region: readonly ContextMessage[]): UnifiedMess
  * 返回纯文本摘要（不含 <compaction-summary> 标签，由调用方包裹）。
  */
 export async function summarizeRegion(input: SummarizeInput): Promise<string> {
-  const { env, config, llm, staticSystemPrompt, region, focus, summaryModelId } = input;
+  const { env, config, llm, staticSystemPrompt, region, focus, summaryModelId, tier = 1 } = input;
   if (region.length === 0) {
     throw new SummarizeError('empty compaction region');
   }
 
-  const instruction = loadCompactionInstruction(env, focus);
+  const instruction = loadCompactionInstruction(env, focus, tier);
   // 摘要请求必须与主请求同一配对净化口径：用户中断工具会留下
   // assistant(tool_calls) → user → tool 的错位，直接原样发送会被 provider 以
   // “insufficient tool messages following tool_calls message” 拒绝（HTTP 400）。

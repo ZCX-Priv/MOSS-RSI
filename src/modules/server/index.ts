@@ -24,6 +24,7 @@ import {
   createSessionStateHandler,
   createSessionNodesHandler,
   createSessionToolResultHandler,
+  createTranslateThinkingHandler,
 } from './routes/session';
 import {
   createListMcpServersHandler,
@@ -159,6 +160,7 @@ import {
   createContextCompactionsHandler,
   createCompactPreviewHandler,
   createManualCompactHandler,
+  createContextGcHandler,
   createSummaryModelsHandler,
 } from './routes/context';
 import {
@@ -379,6 +381,8 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/nodes', handler: createSessionNodesHandler(services), auth: true });
     // 工具结果按需加载（分页历史只返回轻量投影，展开卡片时才取完整正文/metadata）
     this.router.addRoute({ method: 'GET', pattern: '/api/session/:id/tool-result', handler: createSessionToolResultHandler(services), auth: true });
+    // 按需思维链翻译（用户点击「译文」时触发；译文经 WS 流式推送）
+    this.router.addRoute({ method: 'POST', pattern: '/api/session/:id/thinking/translate', handler: createTranslateThinkingHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/sessions/:id/context', handler: createSessionContextHandler(services, config), auth: true });
 
     // 消息撤回（截断）：预览 + 执行 + 恢复（redo）
@@ -556,6 +560,7 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compactions', handler: createContextCompactionsHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compact-preview', handler: createCompactPreviewHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/context/:sessionId/compact', handler: createManualCompactHandler(services), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/context/gc', handler: createContextGcHandler(services), auth: true });
 
     // rules（规则引擎：双作用域 CRUD）
     this.router.addRoute({ method: 'GET', pattern: '/api/rules', handler: createListRulesHandler(services), auth: true });

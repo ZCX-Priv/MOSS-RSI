@@ -28,6 +28,7 @@ import {
   estimateMessageBytes,
 } from '../budgeter/estimator';
 import { sanitizeMessages, alignWindowBoundaries } from '../healer/pair-sanitize';
+import { renderRefTag, stripOwnRefTag } from '../refs';
 import { ENV_CONTEXT_MSG_NAME } from './env-context';
 
 /** 摘要消息 name 标识（与 compressor 一致） */
@@ -112,6 +113,7 @@ function messageBytes(
   includeThinking = false,
 ): number {
   let total = estimateMessageBytes(m, includeThinking);
+  if (m.metadata?.imageEvicted === true) return total;
   for (const p of messageImagePaths(m)) total += imagePathBytes(p, optimized);
   return total;
 }
@@ -180,6 +182,16 @@ export interface BuildViewOptions {
   imageEviction?: { enabled: boolean; protectUnseen: boolean };
   /** 图片内联字节总量上限（0/undefined=不限制；超限也触发淘汰） */
   maxTotalImageBytes?: number;
+  /**
+   * 仅估算：跳过图片读盘与 base64 编码（图片字节仍按文件大小计入预算）。
+   * 用于 governor 的预览视图——预览只需要 breakdown/bytes，不应付出两次图片编码成本。
+   */
+  skipImageEncoding?: boolean;
+  /**
+   * 是否给消息正文加 <acp tokens type>ref</acp> 标签（模型可见）。
+   * 关闭时模型无法按 ref 指定压缩区间；工具调用参数永不加标签。
+   */
+  renderRefs?: boolean;
 }
 
 export interface BuiltView {
@@ -370,9 +382,11 @@ export function buildRequestView(
             ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
             ...(m.name ? { name: m.name } : {}),
             ...(m.isError !== undefined ? { isError: m.isError } : {}),
-            ...(m.metadata ? { metadata: m.metadata } : {}),
+            // 用元数据标记“图片已淘汰”，这样后续 sanitize/加 ref 标签产生副本时不会丢失状态
+            metadata: { ...(m.metadata ?? {}), imageEvicted: true },
             ...(m.timestamp ? { timestamp: m.timestamp } : {}),
             ...(m.thinking ? { thinking: m.thinking } : {}),
+            ...(m.ref ? { ref: m.ref } : {}),
           };
         });
       }
@@ -405,22 +419,33 @@ export function buildRequestView(
 
   // ===== 4. 发送前自愈：tool_use/tool_result 配对完整性 =====
   const sanitized = sanitizeMessages(windowed);
+  // 4.5 消息引用标签（模型可见）：只加在正文前面，工具调用参数保持字节不变。
+  // 标签是渲染态，不落盘；旧标签先剥离，保证重复渲染幂等。
+  const tagged = sanitized.messages.map(m => {
+    if (!opts.renderRefs || !m.ref) return m;
+    const next: ContextMessage = {
+      ...m,
+      content: `${renderRefTag(m)}${stripOwnRefTag(m.content, m.ref)}`,
+    };
+    originalOf.set(next, originalOf.get(m) ?? m);
+    return next;
+  });
   // ephemeral 注入位置：最后一条「真实用户消息」之前。
   // 不能追加到消息流末尾——那样记忆/提醒会成为模型看到的最后一条 user 指令，
   // 模型会只回复「收到/明白」而不执行任务（长会话中的高频复现问题）。
   // 工具循环中最后一条消息是 tool 结果，插入到用户请求之前同样不会破坏 tool 配对。
-  let insertAt = sanitized.messages.length;
-  for (let i = sanitized.messages.length - 1; i >= 0; i -= 1) {
-    const m = sanitized.messages[i];
+  let insertAt = tagged.length;
+  for (let i = tagged.length - 1; i >= 0; i -= 1) {
+    const m = tagged[i];
     if (m.role === 'user' && !m.name) {
       insertAt = i;
       break;
     }
   }
   const full = [
-    ...sanitized.messages.slice(0, insertAt),
+    ...tagged.slice(0, insertAt),
     ...ephemeral,
-    ...sanitized.messages.slice(insertAt),
+    ...tagged.slice(insertAt),
   ];
 
   // ===== 5. 转 UnifiedMessage =====
@@ -428,8 +453,12 @@ export function buildRequestView(
   // 优化结果优先（governor 预计算）；仅「尚未被淘汰」的消息真正内联图片。
   const imageMessagesToMark: ContextMessage[] = [];
   const conversation: UnifiedMessage[] = full.map(m => {
-    const paths = evictedImagePaths.has(m) ? [] : messageImagePaths(m);
-    const { images, skipped } = readImages(paths, optimized);
+    const evicted = m.metadata?.imageEvicted === true;
+    const paths = evicted ? [] : messageImagePaths(m);
+    // 预览视图只估算：不读盘、不 base64；图片字节已由 messageBytes/stat 计入预算。
+    const { images, skipped } = opts.skipImageEncoding
+      ? { images: [] as UnifiedImage[], skipped: [] as string[] }
+      : readImages(paths, optimized);
     if (images.length > 0) {
       // 回填原始 session 消息（视图对象可能被复制，标记必须落在原始对象上）
       imageMessagesToMark.push(originalOf.get(m) ?? m);

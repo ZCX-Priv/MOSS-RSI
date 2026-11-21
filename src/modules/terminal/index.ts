@@ -10,13 +10,16 @@ import type { Module, ModuleContext } from '../../core/types';
 import { ServiceNames } from '../../core/types';
 import type { ServerInstance } from '../server/types';
 import { TerminalManager } from './service';
+import { migrateLegacyTerminalLayout } from './persistence';
 
 class TerminalModule implements Module {
   async initialize(ctx: ModuleContext): Promise<void> {
+    // 旧目录（terminal-output/terminal-cmds/terminals）一次性归并到 ~/.moss/terminal/
+    migrateLegacyTerminalLayout(ctx.env.dataDir, ctx.logger);
     const manager = new TerminalManager({
       logger: ctx.logger,
       isWindows: ctx.env.isWindows,
-      // 终端元数据 + 输出缓冲落盘目录（~/.moss/terminals）：进程重启后仍可还原标签与历史
+      // 终端元数据 + 输出缓冲落盘目录（~/.moss/terminal）：进程重启后仍可还原标签与历史
       dataDir: ctx.env.dataDir,
       // 惰性解析 SERVER_INSTANCE：模块初始化顺序无关；未注册时静默丢弃（无 WS 场景）
       emitter: (sessionId, message) => {

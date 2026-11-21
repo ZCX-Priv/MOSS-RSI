@@ -14,8 +14,17 @@ import type { AgentMessage, RunStats } from '../contracts';
 import type { TodoItem } from '../tools/todo/shared/store';
 import type { PermissionMode } from '../safety/types';
 import type { Environment, Logger } from '../../core/types';
-import type { CompactionRecord, EnvContextInfo, SessionContextTelemetry, SessionMemoryState, SessionRulesState } from '../context/types';
+import type {
+  CompactionGuard,
+  CompactionRecord,
+  ContextPressureState,
+  EnvContextInfo,
+  SessionContextTelemetry,
+  SessionMemoryState,
+  SessionRulesState,
+} from '../context/types';
 import { SYSTEM_ERROR_MSG_NAME } from '../context/compiler/view-builder';
+import { mirrorSession, removeSessionMirror } from './session-mirror';
 
 /** 上下文文件轨迹（与前端 ContextFile 对齐） */
 export interface ContextFile {
@@ -75,6 +84,14 @@ export interface Session {
   rulesState?: SessionRulesState;
   /** 记忆引擎状态（L1 注入标记 / 召回去重 / 蒸馏水位；随 session 落盘） */
   memoryState?: SessionMemoryState;
+  /** 压力提醒水位（context 引擎：避免占用 ≥ 阈值后每轮重复注入） */
+  pressureState?: ContextPressureState;
+  /** 压缩冷却水位（context 引擎：重启后仍生效） */
+  compactionGuard?: CompactionGuard;
+  /** 消息引用游标（mNNNNN 单调递增；物理折叠后绝不回退） */
+  refCursor?: number;
+  /** 派生会话的父会话 id（子代理出生时记录；归档检索沿父链只读回退） */
+  derivedFrom?: string;
   /** 最近一次 run 的运行统计（run 级口径：每次发送消息重置；中控台指标栏刷新恢复用） */
   lastRunStats?: RunStats;
   /**
@@ -127,6 +144,8 @@ export class SessionStore {
   private readonly logger: Logger;
   /** session 持久化根目录：~/.moss/tasks（session 文件按分组相对目录存于 tasks/<dir>/） */
   private readonly tasksDir: string;
+  /** 用户数据根（SQLite 会话元数据镜像用） */
+  private readonly dataDir: string;
   /** sessionId → 存储相对目录解析器（TaskStore 总管索引；未注入/未知返回 null → 兜底扫描/默认组） */
   private readonly resolveSessionDir: (sessionId: string) => string | null;
 
@@ -164,6 +183,7 @@ export class SessionStore {
   ) {
     this.logger = logger;
     this.tasksDir = join(env.dataDir, 'tasks');
+    this.dataDir = env.dataDir;
     this.resolveSessionDir = opts?.resolveSessionDir ?? (() => null);
     // 启动路径不再扫描目录：索引延迟到 whenIndexed()（warmup / 会话列表路由触发）
   }
@@ -622,6 +642,7 @@ export class SessionStore {
     this.sessions.delete(sessionId);
     this.dirtySessions.delete(sessionId);
     this.sessionFiles.delete(safeSessionId(sessionId));
+    removeSessionMirror(this.dataDir, sessionId);
     try {
       const filePath = this.sessionFilePath(sessionId);
       if (existsSync(filePath)) {
@@ -1023,6 +1044,8 @@ export class SessionStore {
    */
   persistSession(session: Session): void {
     this.saveSessionNow(session);
+    // 元数据镜像（best-effort；失败静默，不影响 JSON 主存储）
+    mirrorSession(this.dataDir, session);
   }
 
   /**

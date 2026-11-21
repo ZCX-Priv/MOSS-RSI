@@ -237,6 +237,13 @@ const contextSchema = z.object({
       minCompactMessages: z.number().int().min(2).max(100).default(4),
       cooldownGrowthTokens: z.number().int().min(0).default(2000),
       cooldownMs: z.number().int().min(0).default(60000),
+      cooldownGrowthMinTokens: z.number().int().min(0).default(8000),
+      cooldownGrowthWindowRatio: z.number().min(0).max(0.5).default(0.02),
+      protectedTools: z.array(z.string()).default(['context']),
+      preserveRecentTokens: z.number().int().min(0).default(5000),
+      minCompressRange: z.number().int().min(0).default(1200),
+      minSummaryLength: z.number().int().min(0).default(50),
+      maxSummaryLength: z.number().int().min(0).default(20000),
     })
     .prefault({}),
   healer: z
@@ -249,6 +256,29 @@ const contextSchema = z.object({
   telemetry: z
     .object({
       enabled: z.boolean().default(true),
+    })
+    .prefault({}),
+  // 消息引用标签（模型可见的 <acp> 标签）
+  refs: z
+    .object({
+      enabled: z.boolean().default(true),
+    })
+    .prefault({}),
+  // 大工具结果外置（超阈值原文落盘，视图只留头尾预览 + ref）
+  toolResultStorage: z
+    .object({
+      enabled: z.boolean().default(true),
+      minTokens: z.number().int().min(0).default(4000),
+      headChars: z.number().int().min(0).default(2000),
+      tailChars: z.number().int().min(0).default(2000),
+    })
+    .prefault({}),
+  // 空闲后台预压缩
+  backgroundCompact: z
+    .object({
+      enabled: z.boolean().default(true),
+      ratio: z.number().min(0.1).max(0.95).default(0.7),
+      delayMs: z.number().int().min(0).default(3000),
     })
     .prefault({}),
   rules: z
@@ -304,6 +334,17 @@ const contextSchema = z.object({
     .object({
       enabled: z.boolean().default(true),
       ratio: z.number().min(0.1).max(0.95).default(0.5),
+      growthTokens: z.number().int().min(0).default(8000),
+      bandStep: z.number().min(0.01).max(1).default(0.1),
+    })
+    .prefault({}),
+  // 工具结果摘要（默认关闭）：开启后工具结果先由摘要模型压缩，再写入会话供主模型使用
+  toolResultSummary: z
+    .object({
+      enabled: z.boolean().default(false),
+      model: z.string().default(''),
+      reasoningEffort: z.string().default('off'),
+      minChars: z.number().int().min(0).max(100_000).default(400),
     })
     .prefault({}),
   maxRequestBytes: z
@@ -325,6 +366,35 @@ const codeModeSchema = z.object({
   maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
 });
 
+/** 通用设置（UI「通用」页的后端项） */
+const generalSchema = z.object({
+  // 自动生成标题：新会话首轮结束后用模型生成一次标题
+  autoTitle: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** 标题模型 id；'' = 继承主模型 */
+      model: z.string().default(''),
+      /** 推理挡位：off/none 关闭思考，其余 effort 透传 provider */
+      reasoningEffort: z.string().default('off'),
+    })
+    .prefault({}),
+  // 思维链翻译：切换到译文时按需翻译为 WebUI 当前语言
+  thinkingTranslation: z
+    .object({
+      /** 主开关（默认关） */
+      enabled: z.boolean().default(false),
+      /** 主代理思维链翻译（主开关开启后生效） */
+      main: z.boolean().default(true),
+      /** 子代理思维链翻译（主开关开启后生效） */
+      subagent: z.boolean().default(true),
+      /** 翻译模型 id；'' = 继承主模型 */
+      model: z.string().default(''),
+      /** 推理挡位：off/none 关闭思考，其余 effort 透传 provider */
+      reasoningEffort: z.string().default('off'),
+    })
+    .prefault({}),
+}).prefault({});
+
 export const appConfigSchema = z.object({
   version: z.number().int().positive(),
   server: z.object({
@@ -336,6 +406,8 @@ export const appConfigSchema = z.object({
   daemon: z.object({
     enabled: z.boolean(),
   }),
+  /** 通用设置（自动生成标题等） */
+  general: generalSchema,
   /** 电源策略：preventSleep=true 阻止系统睡眠（缺省关闭；旧配置缺此段时按默认值补齐） */
   power: z
     .object({

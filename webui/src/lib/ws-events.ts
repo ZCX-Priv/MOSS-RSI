@@ -23,6 +23,7 @@ import {
   flushPending,
   noteStreamReceived,
   noteStreamRunIdDrop,
+  nextChunkSlice,
   replayPendingAfterResync,
   requestStreamResync,
   seedStreamLength,
@@ -67,7 +68,8 @@ function genId(): string {
  * 故终态事件必须无条件处理（见 applyWsMessage 顶部注释）。
  */
 const AGENT_STREAM_EVENT_TYPES = new Set([
-  'assistant-text', 'assistant-thinking',
+  'assistant-text', 'assistant-thinking', 'assistant-thinking-translation',
+  'assistant-thinking-translation-start', 'assistant-thinking-translation-end',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
   'run-code-progress',
   'ask', 'stats-updated',
@@ -80,7 +82,7 @@ const AGENT_TERMINAL_EVENT_TYPES = new Set([
 
 /** 高频流式分片类型：仅这些计入前端分片账本的 received 计数 */
 const STREAM_CHUNK_TYPES = new Set([
-  'assistant-text', 'assistant-thinking', 'tool-call-delta',
+  'assistant-text', 'assistant-thinking', 'assistant-thinking-translation', 'tool-call-delta',
 ]);
 
 /**
@@ -89,7 +91,8 @@ const STREAM_CHUNK_TYPES = new Set([
  * 这里只放行可渲染的事件类型，避免未知类型进入 switch 的 default / 误触终端分支。
  */
 const SUBAGENT_DISPLAY_EVENT_TYPES = new Set([
-  'assistant-text', 'assistant-thinking',
+  'assistant-text', 'assistant-thinking', 'assistant-thinking-translation',
+  'assistant-thinking-translation-start', 'assistant-thinking-translation-end',
   'tool-call-start', 'tool-call-delta', 'tool-call-executing', 'tool-call-end',
   'run-code-progress',
   'ask', 'ask-timeout', 'confirm-required', 'review-start', 'review-end',
@@ -464,6 +467,70 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         offset: event.offset,
         text: event.text,
       });
+      break;
+    }
+    case 'assistant-thinking-translation-start': {
+      if (!sessionId) return;
+      // 先把此前缓冲的 thinking 分片写入 store：start 事件紧随 thinking 到达，
+      // 不冲刷会因消息尚未创建而丢失「翻译中…」状态。
+      flushPending();
+      const event = msg.payload as Extract<
+        AgentEvent,
+        { type: 'assistant-thinking-translation-start' }
+      > & { messageId?: string };
+      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id;
+      if (!messageId) break;
+      const list = useStore.getState().messagesBySession[sessionId] ?? [];
+      // 消息尚未创建（理论上 thinking 分片已先行）时忽略；译文分片到达后仍会正常显示
+      if (!list.some((m) => m.id === messageId)) break;
+      useStore
+        .getState()
+        .updateMessage(sessionId, messageId, { thinkingTranslationPending: true });
+      break;
+    }
+    case 'assistant-thinking-translation': {
+      if (!sessionId) return;
+      const event = msg.payload as Extract<AgentEvent, { type: 'assistant-thinking-translation' }> & {
+        messageId?: string;
+        offset?: number;
+      };
+      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id;
+      if (!messageId) break;
+      // 译文发生在回复结束后，消息已定稿（streamEndedAt），不能走 stream-buffer 屏障；
+      // 直接在既有消息上按 offset 追加（消息不在当前列表时等 end 全量落库）。
+      const target = (useStore.getState().messagesBySession[sessionId] ?? []).find(
+        (m) => m.id === messageId,
+      );
+      if (!target) break;
+      const { slice } = nextChunkSlice(
+        (target.thinkingTranslation ?? '').length,
+        event.offset,
+        event.text,
+      );
+      if (slice) {
+        useStore.getState().appendToMessage(sessionId, messageId, 'thinkingTranslation', slice);
+      }
+      break;
+    }
+    case 'assistant-thinking-translation-end': {
+      if (!sessionId) return;
+      const event = msg.payload as Extract<
+        AgentEvent,
+        { type: 'assistant-thinking-translation-end' }
+      >;
+      const messageId = event.messageId ?? pendingAssistant.get(sessionId)?.id;
+      if (!messageId) break;
+      // 先冲刷缓存中的译文分片，再结算（失败/跳过时才能把已到达的部分译文一并清空）
+      flushPending();
+      const patch: Partial<TaskMessage> = { thinkingTranslationPending: false };
+      if (event.ok && !event.skipped && event.translation) {
+        patch.thinkingTranslation = event.translation;
+        if (event.lang) patch.thinkingTranslationLang = event.lang;
+      } else {
+        // 失败/跳过：丢弃可能已到达的部分译文，前端据此回退原文
+        patch.thinkingTranslation = undefined;
+      }
+      useStore.getState().updateMessage(sessionId, messageId, patch);
       break;
     }
     case 'tool-call-start': {

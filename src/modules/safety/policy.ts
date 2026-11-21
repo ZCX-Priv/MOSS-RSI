@@ -65,10 +65,11 @@ const BROWSER_OBSERVE_ACTIONS = new Set([
 
 /**
  * 风险分级：按工具名 + 注解综合判定。
- * 合并工具（memory/mcp/skill）按 params.action 分级，保持合并前的风险语义：
+ * 合并工具（memory/mcp/skill/set）按 params.action 分级，保持合并前的风险语义：
  *   memory: save|update|delete|pin=L3 / search|list_rooms=L0
  *   mcp:    list=L0 / call=L3（未标注 MCP 工具 fail-closed，保持合并前调用工具的风险等级）
- *   skill:  list|use=L0
+ *   skill:  list|use|search=L0 / create|update|delete|install=L3
+ *   set:    list=L0 / create|update|delete|set=L3
  */
 export function classifyRisk(
   req: Pick<SafetyRequest, 'toolName' | 'params' | 'annotations' | 'mcpAnnotations'>,
@@ -93,10 +94,14 @@ export function classifyRisk(
       : 'L0';
   }
   if (toolName === 'mcp') return action === 'list' ? 'L0' : 'L3';
-  if (toolName === 'skill') return 'L0';
-  // set：资源管理合并工具。list/search 只读（L0）；create/update/delete/install 写文件/下载（L3）。
+  // skill：list/use/search 只读（渐进式披露 / 市场检索）→ L0；create/update/delete/install
+  // 写文件或下载安装 → L3。
+  if (toolName === 'skill') {
+    return action === 'list' || action === 'use' || action === 'search' ? 'L0' : 'L3';
+  }
+  // set：资源管理合并工具。list 只读（L0）；create/update/delete 写文件、mode 的 set 切权限（L3）。
   if (toolName === 'set') {
-    return action === 'list' || action === 'search' ? 'L0' : 'L3';
+    return action === 'list' ? 'L0' : 'L3';
   }
   // agent：统一多智能体工具，按 action 分级：
   //   manage（创建/修改/删除 Agent 定义 → 写文件）L3；status/message（会话协作）L1；

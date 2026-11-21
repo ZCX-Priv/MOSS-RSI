@@ -187,6 +187,7 @@ function mergeServerMessage(local: TaskMessage, server: TaskMessage): TaskMessag
     ...(mergedResults ? { toolResults: mergedResults } : {}),
     streaming: false,
     thinkingStreaming: false,
+    thinkingTranslationPending: false,
   };
 }
 
@@ -500,14 +501,14 @@ interface UIActions {
   appendToMessage: (
     sessionId: string,
     messageId: string,
-    field: 'content' | 'thinking',
+    field: 'content' | 'thinking' | 'thinkingTranslation',
     text: string,
   ) => void;
   /** 合并 appendToMessage + updateMessage(thinkingStreaming) 为单次 set，降低高频流式更新的渲染压力 */
   appendTextAndMarkThinking: (
     sessionId: string,
     messageId: string,
-    field: 'content' | 'thinking',
+    field: 'content' | 'thinking' | 'thinkingTranslation',
     text: string,
     thinkingStreaming: boolean,
   ) => void;
@@ -2140,6 +2141,10 @@ export const useStore = create<Store>((set, get) => ({
           slice = tasks;
         }
       }
+      // 组内分页载荷同样携带后端权威运行态（running）：running=true 置位、
+      // running=false 在「本地无刚发起的活轮次」时熄灭（与 setTasks 口径一致）。
+      // 缺失该应用会导致刷新后/懒加载分组内的运行中任务永远不显示转圈。
+      const run = applyListRunning(state, tasks);
       const err = applyListError(state, tasks);
       return {
         tasks: [...others, ...slice],
@@ -2150,6 +2155,7 @@ export const useStore = create<Store>((set, get) => ({
             ...meta,
           },
         },
+        ...(run.changed ? { generatingBySession: run.generatingBySession } : {}),
         ...(err.changed ? { errorBySession: err.errorBySession } : {}),
       };
     }),
@@ -2704,7 +2710,10 @@ export const useStore = create<Store>((set, get) => ({
       if (existing) {
         activeId = existing.id;
       } else {
-        const startTab = cur.tabs.find((t) => t.type === 'start');
+        // 优先把「当前正在看的开始页」原地转成终端；多开始页时避免误改其它页
+        const startTab =
+          cur.tabs.find((t) => t.id === cur.activeId && t.type === 'start') ??
+          cur.tabs.find((t) => t.type === 'start');
         if (startTab) {
           activeId = startTab.id;
           tabs = cur.tabs.map((t) =>

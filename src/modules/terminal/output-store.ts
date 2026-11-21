@@ -1,10 +1,10 @@
 // src/modules/terminal/output-store.ts
 // 命令完整输出落盘：发给模型的是精简摘要，完整原文保存在这里，模型可按 ref 用 read 工具读取。
-// 目录：<dataDir>/terminal-output/<sessionId>/<terminalId>/*.log
+// 目录：<dataDir>/terminal/output/<sessionId>/<terminalId>/*.log
 // - 单终端保留最近 MAX_FILES 个文件（每个命令一个），避免无限增长；
 // - 任何失败都静默降级（不返回路径，不影响命令执行/结果返回）。
 
-import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** 单终端保留的完整输出文件数上限（每个文件对应一次命令） */
@@ -20,13 +20,20 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
-/** 清理目录中最旧的文件，只保留最近 MAX_FILES 个 */
+/** 清理目录中最旧的文件，只保留最近 MAX_FILES 个；目录清空后一并删除（避免空目录堆积） */
 async function prune(dir: string): Promise<void> {
   try {
     const names = (await readdir(dir)).filter((n) => n.endsWith('.log')).sort();
-    if (names.length <= MAX_FILES) return;
-    for (const name of names.slice(0, names.length - MAX_FILES)) {
-      await unlink(join(dir, name)).catch(() => undefined);
+    if (names.length > MAX_FILES) {
+      for (const name of names.slice(0, names.length - MAX_FILES)) {
+        await unlink(join(dir, name)).catch(() => undefined);
+      }
+    }
+    // 目录已无文件 → 删除 <terminalId> 目录；其父 <sessionId> 目录为空时一并删除
+    const remaining = await readdir(dir).catch(() => ['']);
+    if (remaining.length === 0) {
+      await rmdir(dir).catch(() => undefined);
+      await rmdir(join(dir, '..')).catch(() => undefined);
     }
   } catch {
     /* 清理失败不影响保存 */
@@ -44,7 +51,7 @@ export async function saveTerminalOutput(
   text: string,
 ): Promise<string | null> {
   try {
-    const dir = join(dataDir, 'terminal-output', safeName(sessionId), safeName(terminalId));
+    const dir = join(dataDir, 'terminal', 'output', safeName(sessionId), safeName(terminalId));
     await mkdir(dir, { recursive: true });
     const file = join(dir, `${timestamp()}-${Math.random().toString(36).slice(2, 8)}.log`);
     await writeFile(file, text, 'utf8');

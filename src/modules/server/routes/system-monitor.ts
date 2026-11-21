@@ -393,7 +393,7 @@ const DISK_CATEGORIES: Array<{ key: string; rel: string }> = [
   { key: 'live', rel: 'live' },
   { key: 'tasks', rel: 'tasks' },
   { key: 'todo', rel: 'todo' },
-  { key: 'terminals', rel: 'terminals' },
+  { key: 'terminals', rel: 'terminal' },
 ];
 
 async function sampleDisk(env: Environment): Promise<ResourceSnapshot['disk']> {

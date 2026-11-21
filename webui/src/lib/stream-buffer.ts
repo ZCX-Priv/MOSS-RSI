@@ -40,7 +40,7 @@ export function nextChunkSlice(
 interface PendingText {
   sessionId: string;
   messageId: string;
-  field: 'content' | 'thinking';
+  field: 'content' | 'thinking' | 'thinkingTranslation';
   offset: number | undefined;
   text: string;
   /** 下一次追加的起始下标（用于判断连续性） */
@@ -329,7 +329,7 @@ export function resetStreamBuffer(
 export function seedStreamLength(
   sessionId: string,
   messageId: string,
-  field: 'content' | 'thinking' | 'toolArgs',
+  field: 'content' | 'thinking' | 'thinkingTranslation' | 'toolArgs',
   length: number,
 ): void {
   lengthCache.set(lengthKey(sessionId, messageId, field), Math.max(0, length));
@@ -392,14 +392,19 @@ function adoptOrCreateStreamingMessage(sessionId: string, messageId: string): Ta
 function currentLength(
   sessionId: string,
   messageId: string,
-  field: 'content' | 'thinking',
+  field: 'content' | 'thinking' | 'thinkingTranslation',
 ): number | null {
   const key = lengthKey(sessionId, messageId, field);
   const cached = lengthCache.get(key);
   if (cached !== undefined) return cached;
   const msg = (useStore.getState().messagesBySession[sessionId] ?? []).find((m) => m.id === messageId);
   if (!msg) return null;
-  const len = field === 'content' ? msg.content.length : (msg.thinking ?? '').length;
+  const len =
+    field === 'content'
+      ? msg.content.length
+      : field === 'thinking'
+        ? (msg.thinking ?? '').length
+        : (msg.thinkingTranslation ?? '').length;
   lengthCache.set(key, len);
   return len;
 }
@@ -411,7 +416,7 @@ function currentLength(
 export function enqueueTextChunk(opts: {
   sessionId: string;
   messageId: string;
-  field: 'content' | 'thinking';
+  field: 'content' | 'thinking' | 'thinkingTranslation';
   offset: number | undefined;
   text: string;
 }): void {
@@ -543,8 +548,17 @@ export function flushPending(opts?: { budgetMs?: number }): void {
   }
 }
 
-function applyText(op: PendingText): void {
+/** 追加流式文本：译文只追加文本，不影响 thinkingStreaming 计时/状态 */
+function appendStreamText(op: PendingText, text: string): void {
   const st = useStore.getState();
+  if (op.field === 'thinkingTranslation') {
+    st.appendToMessage(op.sessionId, op.messageId, 'thinkingTranslation', text);
+    return;
+  }
+  st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, text, op.thinkingStreaming);
+}
+
+function applyText(op: PendingText): void {
   // 先按「已知长度」判定重复/缺口，再决定是否创建消息：
   // 完全重复的分片（重放）不会平白创建一条空消息。
   const known = currentLength(op.sessionId, op.messageId, op.field);
@@ -565,12 +579,12 @@ function applyText(op: PendingText): void {
       });
       const forced = adoptOrCreateStreamingMessage(op.sessionId, op.messageId);
       if (!forced) return;
-      st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, op.text, op.thinkingStreaming);
+      appendStreamText(op, op.text);
       lengthCache.set(rk, (known ?? 0) + op.text.length);
       accountOf(op.sessionId).applied++;
       noteStreamApplied(op.sessionId);
       const pendingForced = pendingAssistant.get(op.sessionId);
-      if (pendingForced && pendingForced.id === op.messageId) {
+      if (op.field !== 'thinkingTranslation' && pendingForced && pendingForced.id === op.messageId) {
         pendingAssistant.set(op.sessionId, {
           ...pendingForced,
           [op.field]: (pendingForced[op.field] ?? '') + op.text,
@@ -593,12 +607,12 @@ function applyText(op: PendingText): void {
   }
   const msg = adoptOrCreateStreamingMessage(op.sessionId, op.messageId);
   if (!msg) return;
-  st.appendTextAndMarkThinking(op.sessionId, op.messageId, op.field, slice, op.thinkingStreaming);
+  appendStreamText(op, slice);
   lengthCache.set(rk, (known ?? 0) + slice.length);
   accountOf(op.sessionId).applied++;
   noteStreamApplied(op.sessionId);
   const pending = pendingAssistant.get(op.sessionId);
-  if (pending && pending.id === op.messageId) {
+  if (op.field !== 'thinkingTranslation' && pending && pending.id === op.messageId) {
     pendingAssistant.set(op.sessionId, {
       ...pending,
       [op.field]: (pending[op.field] ?? '') + slice,

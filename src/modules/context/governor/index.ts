@@ -20,6 +20,7 @@ import type {
   PreparedRequest,
 } from '../types';
 import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSessionImagePaths } from '../compiler';
+import { externalizeLargeToolResults } from '../compiler/tool-result-store';
 import type { OptimizedImage, ImageOptimizer } from '../compiler';
 import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
 import { MEMORY_CONTEXT_MSG_NAME } from '../compiler/view-builder';
@@ -28,6 +29,7 @@ import { planCompaction } from '../compressor/planner';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
 import { estimateTextTokens, estimateMessagesTokens } from '../budgeter/estimator';
 import { shouldCompact, needsHardCeiling, compactionActive } from './triggers';
+import { decidePressureReminder } from './pressure';
 import { buildRulesSection } from '../../rules/inject';
 import type { RulesEngineServiceImpl } from '../../rules/service';
 import type { MemoryEngineServiceImpl } from '../../memory/service';
@@ -60,10 +62,13 @@ export interface GovernorDeps {
   onDegraded(sessionId: string, reason: string): void;
   /** 图片优化器（发送前压缩；模块未就绪返回 null → 发送原图） */
   getImageOptimizer?(): ImageOptimizer | null;
-  /** 上次自动压缩水位（冷却判定）：{ at: 时间戳ms, tokens: 压缩后估算 }；无则 undefined */
-  getCompactionGuard?(sessionId: string): { at: number; tokens: number } | undefined;
-  /** 记录本次自动压缩水位（供冷却判定） */
-  setCompactionGuard?(sessionId: string, guard: { at: number; tokens: number }): void;
+  /** 上次自动压缩水位（冷却判定）：{ at: 时间戳ms, tokens: 压缩后估算, windowTokens }；无则 undefined */
+  getCompactionGuard?(sessionId: string): { at: number; tokens: number; windowTokens?: number } | undefined;
+  /** 记录本次自动压缩水位（供冷却判定；持久化到 session） */
+  setCompactionGuard?(
+    sessionId: string,
+    guard: { at: number; tokens: number; windowTokens: number },
+  ): void;
   /** 按真实 usage/char 校准后的 token 估算（未校准时返回 null，回退 breakdown 估算） */
   estimateTokensForMessages?(messages: readonly import('../../llm/types').UnifiedMessage[]): number | null;
   /** 最近一次压缩失败（用于抑制压力提醒，防止模型反复重试） */
@@ -186,6 +191,22 @@ export async function prepareRequest(
     });
   }
 
+  // ===== 1.5 大工具结果外置（CCR 式）：超阈值原文落盘，视图留头尾预览 + ref =====
+  // 工具结果摘要开启时跳过外置：摘要模式已在落库前压缩；original 模式要求原文完整，
+  // 不能再被头尾预览截断（避免同一结果被二次处理）。
+  if (!config.toolResultSummary?.enabled) {
+    try {
+      if (externalizeLargeToolResults(session, deps.env, config.toolResultStorage)) {
+        deps.persistSession(session);
+      }
+    } catch (err) {
+      deps.logger.warn('context: externalize tool results failed', {
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // ===== 1.7 记忆注入（memory 引擎；模块未启用/未注册时跳过）=====
   const memoryEngine = deps.services.tryResolve<MemoryEngineServiceImpl>(ServiceNames.MEMORY_ENGINE);
   let ephemeralMessages: Array<import('../types').ContextMessage> | undefined;
@@ -283,7 +304,7 @@ export async function prepareRequest(
     }
   }
 
-  const buildView = (budgetTokens?: number, budgetBytes?: number) =>
+  const buildView = (budgetTokens?: number, budgetBytes?: number, estimateOnly?: boolean) =>
     buildRequestView(session, staticSystemPrompt, {
       includeThinking,
       resolveSkillPrompt: resolveSkill,
@@ -291,6 +312,8 @@ export async function prepareRequest(
       budgetBytes,
       imageEviction: { enabled: true, protectUnseen: true },
       maxTotalImageBytes: config.imageOptimization.maxTotalImageBytes,
+      renderRefs: config.refs.enabled,
+      ...(estimateOnly ? { skipImageEncoding: true } : {}),
       ...(ephemeralMessages ? { ephemeralMessages } : {}),
       ...(optimizedImages ? { optimizedImages } : {}),
     });
@@ -299,7 +322,8 @@ export async function prepareRequest(
   let compactionTriggered = false;
   let degradedReason: string | undefined;
 
-  const preview = buildView();
+  // 预览只做估算：图片不读盘/不编码，避免每轮为同一批图片付两次编码成本。
+  const preview = buildView(undefined, undefined, true);
   const byteBudget = config.maxRequestBytes;
 
   // 真实 usage/char 校准后的有效占用：估算器（字节启发式）在混合中文+代码场景会偏差 1.5~2x；
@@ -328,7 +352,14 @@ export async function prepareRequest(
     windowTokens > 0
   ) {
     const usedRatio = effectiveTotal / windowTokens;
-    if (usedRatio >= config.pressureReminder.ratio) {
+    // 增长/档位驱动：旧实现只要占用 ≥ 阈值就每轮注入，长会话每轮多一条提醒。
+    const decision = decidePressureReminder(
+      session.pressureState,
+      effectiveTotal,
+      windowTokens,
+      config.pressureReminder,
+    );
+    if (decision.inject) {
       const reminder: ContextMessage = {
         role: 'user',
         name: CONTEXT_PRESSURE_MSG_NAME,
@@ -341,11 +372,22 @@ export async function prepareRequest(
         timestamp: new Date().toISOString(),
       };
       ephemeralMessages = [...(ephemeralMessages ?? []), reminder];
+      session.pressureState = {
+        lastAt: Date.now(),
+        lastTokens: effectiveTotal,
+        lastBand: decision.band,
+      };
+      try {
+        deps.persistSession(session);
+      } catch {
+        // 水位持久化失败不阻断请求；最坏结果是下次多提醒一次
+      }
       deps.logger.debug('context: pressure reminder injected', {
         sessionId: session.id,
         usedTokens: effectiveTotal,
         windowTokens,
         ratio: Number(usedRatio.toFixed(3)),
+        band: decision.band,
         calibrated: calibratedTotal != null,
       });
     }
@@ -366,11 +408,21 @@ export async function prepareRequest(
       config.compaction.tailKeepRatio,
       config.compaction.minFoldTokens,
       config.compaction.minCompactMessages,
+      config.compaction.protectedTools,
+      config.compaction.preserveRecentTokens,
     );
     const guard = deps.getCompactionGuard?.(session.id);
-    const withinCooldown = guard
+    // 换模型/换窗口后旧水位失效：否则小窗口的“压缩后 token”会在大窗口里误判冷却。
+    const guardValid =
+      guard !== undefined &&
+      (guard.windowTokens === undefined || guard.windowTokens === windowTokens);
+    const cooldownGrowth = Math.max(
+      config.compaction.cooldownGrowthMinTokens,
+      Math.floor(windowTokens * config.compaction.cooldownGrowthWindowRatio),
+    );
+    const withinCooldown = guardValid
       ? Date.now() - guard.at < config.compaction.cooldownMs &&
-        preview.breakdown.total < guard.tokens + config.compaction.cooldownGrowthTokens
+        preview.breakdown.total < guard.tokens + cooldownGrowth
       : false;
 
     if (!plan.ok) {
@@ -407,11 +459,14 @@ export async function prepareRequest(
           });
           if (outcome.record) {
             compactionTriggered = true;
+            // 压缩成功后重置压力提醒水位：下一轮从新占用重新计增长。
+            delete session.pressureState;
             deps.persistSession(session);
             deps.onCompaction(session.id, outcome.record);
             deps.setCompactionGuard?.(session.id, {
               at: Date.now(),
               tokens: outcome.record.afterTokens,
+              windowTokens,
             });
             deps.emitWs(session.id, {
               type: 'compaction-completed',
@@ -521,6 +576,7 @@ export async function manualCompact(
   });
 
   if (outcome.record) {
+    delete input.session.pressureState;
     deps.persistSession(input.session);
     deps.onCompaction(input.session.id, outcome.record);
     deps.emitWs(input.session.id, {

@@ -215,6 +215,12 @@ export interface TaskMessage {
    */
   clientMessageId?: string;
   thinking?: string;
+  /** 思维链译文（原文保存在 thinking；开启「思维链翻译」时由后端写入） */
+  thinkingTranslation?: string;
+  /** 思维链译文语言标签（'zh' | 'en'） */
+  thinkingTranslationLang?: string;
+  /** 后端已开始翻译、但首个译文分片尚未到达（前端显示「翻译中…」） */
+  thinkingTranslationPending?: boolean;
   toolCalls?: ToolCall[];
   toolResults?: Array<{ toolCallId: string; result: ToolResult }>;
   timestamp: string;
@@ -509,6 +515,30 @@ export interface AppConfig {
   version: number;
   server: { host: string; port: number; autoPort: boolean; locale?: string };
   daemon: { enabled: boolean };
+  /** 通用设置（可选，旧 config 无此段时按默认处理） */
+  general?: {
+    autoTitle: {
+      /** 新会话首轮结束后自动生成标题（默认开） */
+      enabled: boolean;
+      /** 标题模型 id；'' = 继承主模型 */
+      model: string;
+      /** 推理挡位（off/none 关闭思考） */
+      reasoningEffort: string;
+    };
+    /** 思维链翻译：实时把模型思维链翻译为 WebUI 当前语言 */
+    thinkingTranslation: {
+      /** 主开关（默认关） */
+      enabled: boolean;
+      /** 主代理思维链翻译（主开关开启后生效） */
+      main: boolean;
+      /** 子代理思维链翻译（主开关开启后生效） */
+      subagent: boolean;
+      /** 翻译模型 id；'' = 继承主模型 */
+      model: string;
+      /** 推理挡位（off/none 关闭思考） */
+      reasoningEffort: string;
+    };
+  };
   /** 电源策略（可选，旧 config 无此段时按默认关闭处理） */
   power?: { preventSleep: boolean };
   /** 日志系统配置（级别 / 保留天数 / 单文件大小上限） */
@@ -638,6 +668,8 @@ export interface ContextEngineConfig {
   compaction: CompactionConfig;
   healer: HealerConfig;
   telemetry: { enabled: boolean };
+  /** 工具结果摘要（可选，旧 config 无此段时默认关闭） */
+  toolResultSummary?: ToolResultSummaryConfig;
   /** 用户规则引擎（可选，旧 config 无此段时用默认值） */
   rules?: RulesEngineConfig;
   /** 生命周期钩子引擎（可选，旧 config 无此段时用默认值） */
@@ -646,6 +678,17 @@ export interface ContextEngineConfig {
   memory?: MemoryEngineConfig;
   /** 单次 LLM 请求体字节上限（可选；旧 config 无此字段时后端按默认 8 MiB） */
   maxRequestBytes?: number;
+}
+
+/** config.context.toolResultSummary 段（工具结果摘要） */
+export interface ToolResultSummaryConfig {
+  enabled: boolean;
+  /** 摘要模型 id；'' / 'inherit' = 继承主模型 */
+  model: string;
+  /** 推理挡位（off/none 关闭思考） */
+  reasoningEffort: string;
+  /** 低于该字符数的结果不摘要 */
+  minChars: number;
 }
 
 /** config.context.rules 段（规则引擎） */
@@ -1020,10 +1063,17 @@ export interface ImProvisioningSnapshot {
 export interface CompactionRecord {
   id: string;
   at: string;
-  trigger: 'auto' | 'manual';
+  trigger: 'auto' | 'manual' | 'model';
   beforeTokens: number;
   afterTokens: number;
   compactedCount: number;
+  /** 摘要层级（1=消息摘要，2=蒸馏，3=事实索引）；旧记录无此字段 */
+  tier?: 1 | 2 | 3;
+  /** 归档块 id（decompress 用） */
+  blockId?: string;
+  archiveId?: string;
+  /** 被折叠区间覆盖的消息 refs */
+  refs?: string[];
   /** 物理折叠的消息条数（新实现 = compactedCount；旧记录仅标记未折叠时缺省） */
   foldedMessageCount?: number;
   summary: string;
@@ -1730,6 +1780,29 @@ export type AgentEvent =
     }
   | { type: 'assistant-text'; sessionId: string; text: string; runId?: string }
   | { type: 'assistant-thinking'; sessionId: string; text: string; runId?: string }
+  | { type: 'assistant-thinking-translation-start'; sessionId: string; runId?: string }
+  | {
+      type: 'assistant-thinking-translation';
+      sessionId: string;
+      text: string;
+      /** 译文语言标签（'zh' | 'en'） */
+      lang?: string;
+      runId?: string;
+    }
+  | {
+      type: 'assistant-thinking-translation-end';
+      sessionId: string;
+      /** 翻译成功；skipped=true 表示思维链已是目标语言（无译文） */
+      ok: boolean;
+      /** 完整译文（流式增量后的最终校准值） */
+      translation?: string;
+      /** 译文语言标签（'zh' | 'en'） */
+      lang?: string;
+      skipped?: boolean;
+      error?: string;
+      messageId?: string;
+      runId?: string;
+    }
   | { type: 'tool-call-start'; sessionId: string; toolName: string; toolCallId: string; args: unknown; runId?: string }
   | { type: 'tool-call-delta'; sessionId: string; toolCallId: string; argumentsDelta: string; runId?: string }
   | { type: 'tool-call-executing'; sessionId: string; toolName: string; toolCallId: string; runId?: string }

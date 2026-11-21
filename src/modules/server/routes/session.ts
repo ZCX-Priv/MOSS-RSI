@@ -70,6 +70,49 @@ export function createListSessionsHandler(services: ServiceRegistry): RouteHandl
   };
 }
 
+/** 按需思维链翻译：POST /api/session/:id/thinking/translate */
+export function createTranslateThinkingHandler(services: ServiceRegistry): RouteHandler {
+  return async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
+    const sessionId = params?.id;
+    if (!sessionId) {
+      return { status: 400, body: { error: ErrorCode.SESSION_ID_REQUIRED } };
+    }
+    const body = (req.body ?? {}) as { messageId?: unknown; index?: unknown };
+    const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
+    if (!messageId) {
+      return { status: 400, body: { error: 'messageId is required' } };
+    }
+    const engine = services.tryResolve<
+      AgentEngine & {
+        translateThinking?: (
+          sid: string,
+          key: string,
+          index?: number,
+        ) => Promise<unknown>;
+      }
+    >('agent.engine');
+    if (!engine?.translateThinking) {
+      return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
+    }
+    const index =
+      typeof body.index === 'number' && Number.isFinite(body.index) && body.index >= 0
+        ? Math.floor(body.index)
+        : undefined;
+    const result = (await engine.translateThinking(sessionId, messageId, index)) as
+      | { started: true }
+      | { cached: true; translation: string; lang: string }
+      | { error: string };
+    if ('error' in result) {
+      const status = result.error === 'not-found' ? 404 : 400;
+      return { status, body: { error: result.error } };
+    }
+    if ('cached' in result) {
+      return { status: 200, body: result };
+    }
+    return { status: 202, body: result };
+  };
+}
+
 export function createDeleteSessionHandler(services: ServiceRegistry): RouteHandler {
   return async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
     const sessionId = params?.id ?? (req.body as { sessionId?: string } | null)?.sessionId;

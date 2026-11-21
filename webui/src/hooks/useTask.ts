@@ -122,12 +122,15 @@ export function useTask() {
           createdNew = true;
           const lookups = buildMentionLookups(state.commands, state.skills, state.agents);
           const visible = stripInjectBlock(stripAttachmentBlock(content));
-          const title = (
+          const derivedTitle = (
             stripMentionTokens(visible, lookups) ||
             (attachments?.[0] ? fileNameOf(attachments[0]) : '') ||
             stripMentionTokens(stripInjectBlock(content), lookups) ||
             visible
           ).slice(0, 50);
+          // 自动生成标题开启时，新任务先统一命名为「新任务」，实际标题由后端按首条问题即时生成
+          const autoTitleEnabled = state.appConfig?.general?.autoTitle?.enabled === true;
+          const title = autoTitleEnabled ? i18n.t('sidebar.newTask') : derivedTitle;
           const groupName = deriveGroupName(state.workingDirectory);
           // 不在此处乐观插入 default：先由后端（deriveGroupName）解析/创建分组，
           // 拿到权威条目后再写入 store —— 新会话第一次出现就在正确分组里。

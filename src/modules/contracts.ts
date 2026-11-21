@@ -127,13 +127,19 @@ export interface ToolRegistry {
 // ============================================================================
 
 import type {
+  ArchiveSearchResult,
   CompactPreview,
   CompactionRecord,
   ContextSessionLike,
+  ContextStatusReport,
   ContextStats,
+  DecompressResult,
   HealResult,
   ManualCompactResult,
+  ModelCompressRange,
+  ModelCompressResult,
   PreparedRequest,
+  RetrieveResult,
   SessionStoreBridge,
 } from './context/types';
 
@@ -179,6 +185,22 @@ export interface ContextEngine {
   getStats(sessionId: string): ContextStats | null;
   /** 压缩历史 */
   getCompactions(sessionId: string): CompactionRecord[];
+  /** 上下文自省（context 工具 action=status） */
+  getStatusReport?(sessionId: string): ContextStatusReport | null;
+  /** 模型主导压缩：按 ref 区间折叠并写入模型自写摘要（全有或全无） */
+  compressRanges?(sessionId: string, ranges: ModelCompressRange[], focus?: string): Promise<ModelCompressResult>;
+  /** 解压归档原文（context 工具 action=decompress；按 blockId 或消息 ref） */
+  decompressCompaction?(sessionId: string, blockIdOrRef: string, limit?: number): DecompressResult;
+  /** 取回被外置的大工具结果（context 工具 action=retrieve） */
+  retrieveExternalized?(sessionId: string, ref: string): RetrieveResult;
+  /** 归档检索（context 工具 action=search 的归档分支） */
+  searchContextArchive?(
+    sessionId: string,
+    query: string,
+    scope: 'current' | 'all',
+    topK?: number,
+    includeTool?: boolean,
+  ): ArchiveSearchResult[];
   /**
    * 确认「本轮请求已成功送达」→ 把本轮内联发送过图片的消息标记为已发送（落盘）。
    * 之后这些图片在发送视图中降级为占位符（避免历史 base64 每轮重发撑爆请求体）。
@@ -246,6 +268,8 @@ export interface AgentEngine {
    * headless 会话的权限确认不再等满默认超时，而是快速失败并给出明确文案。
    */
   markSessionHeadless?(sessionId: string, headless: boolean): void;
+  /** 记录派生会话的父会话（归档检索沿父链只读回退） */
+  setSessionLineage?(sessionId: string, parentSessionId?: string): void;
 
   /** 删除分组（清理隐藏分组与衍生会话用） */
   deleteTaskGroup(
@@ -326,10 +350,11 @@ export interface AgentEngine {
   getLiveDraft?(sessionId: string): import('./agent/live-draft').LiveDraft | null;
 
   /**
-   * 历史智能检索（BM25）：检索「本对话原始上下文」或「跨 session 全量历史」。
-   * 原始消息始终保存在 session JSON 中；压缩折叠只是从发送视图移除，检索仍可命中。
+   * 历史智能检索（BM25）：检索当前仍存在于 session 的消息。
+   * 压缩折叠会物理移除原文；折叠内容由 context 引擎的 SQLite 归档检索覆盖
+   * （context 工具 action=search 会同时查当前消息与归档）。
    * @param input.scope 'current'=仅 sessionId 指定会话；'all'=全部会话
-   * @param input.includeCompacted 是否纳入已压缩（compacted）消息（默认 true）
+   * @param input.includeCompacted 兼容字段（物理折叠后 session 内不再有 compacted 消息）
    */
   searchMessages(input: HistorySearchInput): HistorySearchResult[];
 }
@@ -514,6 +539,32 @@ export type AgentEvent =
   }
   | ({ type: 'assistant-text'; sessionId: string; text: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'assistant-thinking'; sessionId: string; text: string; runId?: string } & StreamChunkMeta)
+  | ({
+      type: 'assistant-thinking-translation-start';
+      sessionId: string;
+      runId?: string;
+    } & StreamChunkMeta)
+  | ({
+      type: 'assistant-thinking-translation';
+      sessionId: string;
+      text: string;
+      /** 译文语言标签（'zh' | 'en'） */
+      lang?: string;
+      runId?: string;
+    } & StreamChunkMeta)
+  | ({
+      type: 'assistant-thinking-translation-end';
+      sessionId: string;
+      /** 翻译成功；skipped=true 表示思维链已是目标语言（无译文） */
+      ok: boolean;
+      /** 完整译文（流式增量后的最终校准值；失败/跳过时缺省） */
+      translation?: string;
+      /** 译文语言标签（'zh' | 'en'） */
+      lang?: string;
+      skipped?: boolean;
+      error?: string;
+      runId?: string;
+    } & StreamChunkMeta)
   | ({ type: 'tool-call-start'; sessionId: string; toolName: string; toolCallId: string; args: unknown; runId?: string } & StreamChunkMeta)
   | ({ type: 'tool-call-delta'; sessionId: string; toolCallId: string; argumentsDelta: string; runId?: string } & StreamChunkMeta)
   | ({ type: 'tool-call-executing'; sessionId: string; toolName: string; toolCallId: string; runId?: string } & StreamChunkMeta)
@@ -599,6 +650,17 @@ export interface AgentMessage {
   }>;
   toolCallId?: string;
   thinking?: string;
+  /**
+   * 思维链译文（原文仍保存在 thinking；仅开启「思维链翻译」时写入）。
+   * 与 thinking 用字段 + thinkingTranslationLang 标签区分，供前端「原文/翻译」切换与回传选择。
+   */
+  thinkingTranslation?: string;
+  /** 思维链译文语言标签（'zh' | 'en'） */
+  thinkingTranslationLang?: string;
+  /**
+   * 译文生成器版本：2 = 当前流式解析器；旧会话无此字段，前端不展示旧译文。
+   */
+  thinkingTranslationVersion?: number;
   /**
    * 思考签名（Anthropic thinking block 的 signature；流式 signature_delta 采集）。
    * 回传给 Anthropic 时须与 thinking 一同原样携带；其他 provider 不使用。

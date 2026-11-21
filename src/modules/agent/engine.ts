@@ -12,6 +12,7 @@ import { buildTools } from './context';
 import { SessionStore, type ContextFile, type Session, type ActiveSkill } from './session';
 import { TaskStore, type TaskItem, type TaskGroup } from './task-store';
 import { LiveDraftStore, type LiveDraft } from './live-draft';
+import { ThinkingTranslator } from './thinking-translator';
 import { computeHistorySlice, describeSlice } from './history-page';
 import { searchHistoryDocs, type HistorySearchDoc } from './history-search';
 import { LLMError, type UnifiedRequest, type UnifiedMessage } from '../llm/types';
@@ -52,6 +53,8 @@ import { isPtcForbiddenTool } from '../tools/run_code/forbidden';
 import type { RulesEngineServiceImpl } from '../rules/service';
 import type { HooksEngineServiceImpl } from '../hooks/service';
 import type { MemoryEngineServiceImpl } from '../memory/service';
+import { generateSessionTitle } from './title';
+import { summarizeToolResult, type ToolResultMode } from './tool-result-summary';
 
 /** 规则引擎关注的文件访问类工具（recordFileAccess 触发源） */
 const FILE_ACCESS_TOOLS = new Set(['read', 'write', 'edit', 'glob', 'grep']);
@@ -143,11 +146,40 @@ interface PreparedToolCall {
   healedName: string;
   args: unknown;
   healLogText: string;
+  /** 工具结果返回方式（工具结果摘要开启时默认 summary；关闭时恒为 original） */
+  resultMode?: ToolResultMode;
   mcpMatch: RegExpMatchArray | null;
   outcome:
     | { kind: 'ready' }
     | { kind: 'denied'; text: string }
     | { kind: 'confirm'; meta: ConfirmMetaInfo; promise?: Promise<boolean> };
+}
+
+/**
+ * 从工具参数 JSON 中提取并剥离 resultMode 控制参数。
+ * 工具 schema 不包含该参数，必须在 heal / schema 校验之前剥离，否则会被当作未知字段删除。
+ * 关闭工具结果摘要时 fallback=original，模型传入的值同样被忽略。
+ */
+function extractResultMode(
+  raw: string | undefined,
+  fallback: ToolResultMode,
+): { mode: ToolResultMode; argumentsText: string } {
+  const text = raw ?? '';
+  if (!text.trim()) return { mode: fallback, argumentsText: text };
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { mode: fallback, argumentsText: text };
+    }
+    const record = parsed as Record<string, unknown>;
+    const value = record.resultMode;
+    const mode: ToolResultMode = value === 'original' || value === 'summary' ? value : fallback;
+    if ('resultMode' in record) delete record.resultMode;
+    return { mode, argumentsText: JSON.stringify(record) };
+  } catch {
+    // JSON 非法：交给 healer 修复，无法提取控制参数（使用默认值）
+    return { mode: fallback, argumentsText: text };
+  }
 }
 
 /** 并发执行（上限 limit），保持每个任务的错误隔离由调用方 runOne 负责 */
@@ -252,6 +284,9 @@ export class AgentEngineImpl implements AgentEngine {
    */
   private readonly headlessSessions = new Set<string>();
 
+  /** 按需思维链翻译进行中的任务（键：sessionId#messageKey，防重复触发） */
+  private readonly thinkingTranslations = new Map<string, Promise<void>>();
+
   /** 代码模式嵌套调用的本地序号（仅用于生成稳定、可读的嵌套 toolCallId） */
   private nestedCodeCallSeq = 0;
 
@@ -263,6 +298,18 @@ export class AgentEngineImpl implements AgentEngine {
     if (!sessionId) return;
     if (headless) this.headlessSessions.add(sessionId);
     else this.headlessSessions.delete(sessionId);
+  }
+
+  /**
+   * 记录派生会话的父会话（子代理/分叉出生时调用）。
+   * 归档检索沿父链只读回退，不复制父会话内容。
+   */
+  setSessionLineage(sessionId: string, parentSessionId?: string): void {
+    if (!parentSessionId || sessionId === parentSessionId) return;
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.derivedFrom = parentSessionId;
+    this.sessions.persistSession(session);
   }
 
   constructor(deps: {
@@ -581,6 +628,67 @@ export class AgentEngineImpl implements AgentEngine {
     }
   }
 
+  /**
+   * 自动生成会话标题：首条用户消息落盘后立即按问题生成（不等待首轮回复结束）。
+   * fire-and-forget：失败仅日志，不阻塞主 run；不覆盖子代理/自动化/无任务会话。
+   */
+  private async maybeGenerateTitleFromPrompt(
+    input: AgentRunInput,
+    session: Session,
+    llm: LLMRouter,
+  ): Promise<void> {
+    try {
+      if (input.bus?.parentSessionId) return;
+      const cfg = this.config.getAppConfig().general?.autoTitle;
+      if (!cfg?.enabled) return;
+
+      const userMessages = session.messages.filter(
+        (m) => m.role === 'user' && !m.name && !m.deletedAt,
+      );
+      // 仅首条问题：后续轮次不再覆盖标题
+      if (userMessages.length !== 1) return;
+
+      const task = this.tasks.getTask(input.sessionId);
+      if (!task) return;
+      if (task.title.startsWith('[自动化]') || task.title.startsWith('Subagent · ')) return;
+      const originalTitle = task.title;
+
+      const models = flattenModels(this.config.getApiConfig()).map((m) => ({
+        id: m.id,
+        model: m.model,
+      }));
+      const mainModelId = input.model ?? this.config.getAppConfig().agent.defaultModel;
+      const mainRequestModel = models.find((m) => m.id === mainModelId)?.model ?? mainModelId;
+
+      const title = await generateSessionTitle({
+        env: this.env,
+        llm,
+        apiModels: models,
+        config: cfg,
+        mainRequestModel,
+        userText: userMessages[0].content,
+      });
+      if (!title) return;
+
+      // 生成期间用户手动改过标题：放弃本次自动标题，避免覆盖用户输入
+      const latest = this.tasks.getTask(input.sessionId);
+      if (!latest || latest.title !== originalTitle) return;
+
+      const updated = this.tasks.updateTask(input.sessionId, { title });
+      if (!updated) return;
+      const server = this.services.tryResolve<{ broadcastWS?: (message: unknown) => void }>(
+        ServiceNames.SERVER_INSTANCE,
+      );
+      server?.broadcastWS?.({ type: 'task.updated', payload: { taskId: updated.id, task: updated } });
+      this.logger.info('agent: auto title generated', { sessionId: input.sessionId, title });
+    } catch (err) {
+      this.logger.warn('agent: auto title generation failed', {
+        sessionId: input.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   /** run 的实际实现（由 run() 包一层并发闸门；内部逻辑保持原样） */
   private async runUnlocked(input: AgentRunInput): Promise<AgentRunResult> {
     const { sessionId, userMessage, cwd, onEvent, signal } = input;
@@ -610,6 +718,8 @@ export class AgentEngineImpl implements AgentEngine {
       ? agentRegistry?.get(input.agentId) ?? null
       : null;
     const model = input.model ?? agentProfile?.model ?? cfg.defaultModel;
+
+
 
     this.logger.info(t('agent.runStart'), {
       sessionId,
@@ -712,6 +822,14 @@ export class AgentEngineImpl implements AgentEngine {
             total: offset + event.text.length,
           });
           this.liveDraft.appendThinking(event.sessionId, event.text);
+          return;
+        }
+        case 'assistant-thinking-translation-end': {
+          onEvent(event);
+          return;
+        }
+        case 'assistant-thinking-translation': {
+          onEvent(event);
           return;
         }
         case 'tool-call-delta': {
@@ -881,6 +999,8 @@ export class AgentEngineImpl implements AgentEngine {
       clientMessageId: userClientMessageId,
       ...(input.runId ? { runId: input.runId } : {}),
     });
+    // 首条用户消息落盘后立即按问题生成标题（并发执行，不等待首轮回复结束）
+    void this.maybeGenerateTitleFromPrompt(input, session, llm);
     // messageId 由会话级单调序号生成（`<sessionId>#<msgSeq>`，每 turn 消耗一个，持久化在
     // session.msgSeq）—— 严格递增且不受 messages.length 波动（压缩折叠 / 撤回恢复 /
     // healDanglingToolCalls 都会中部 splice 使 length 回落，用 length 派生 id 会与历史已落盘的
@@ -951,7 +1071,10 @@ export class AgentEngineImpl implements AgentEngine {
       ...(exclude.size > 0 ? { exclude } : {}),
       ...(includeOnly ? { includeOnly } : {}),
     };
-    const tools = buildTools(toolRegistry, mcpTools, wireOptions);
+    const tools = buildTools(toolRegistry, mcpTools, {
+      ...wireOptions,
+      injectResultMode: appCfg.context?.toolResultSummary?.enabled === true,
+    });
 
     // 系统提示 SDK 附加段：工具/配置不变时字节稳定（前缀缓存友好）。
     const promptExtras: PromptExtraSection[] = [];
@@ -1679,6 +1802,244 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   /**
+   * 按需翻译某条 assistant 消息的思维链（用户点击「译文」时触发）。
+   * 不再在生成过程中实时翻译；完成后写入消息并持久化，译文分片通过 WS 推送。
+   */
+  async translateThinking(
+    sessionId: string,
+    messageKey: string,
+    index?: number,
+  ): Promise<
+    | { started: true }
+    | { cached: true; translation: string; lang: string }
+    | { error: 'disabled' | 'not-found' | 'no-thinking' | 'no-locale' }
+  > {
+    const appCfg = this.config.getAppConfig();
+    const targetLang: 'zh' | 'en' | '' =
+      appCfg.server.locale === 'en' ? 'en' : appCfg.server.locale === 'zh' ? 'zh' : '';
+    if (!targetLang) return { error: 'no-locale' };
+    const translateCfg = appCfg.general?.thinkingTranslation;
+    if (!translateCfg?.enabled) return { error: 'disabled' };
+    const session = this.sessions.get(sessionId);
+    if (!session) return { error: 'not-found' };
+    const isSubagent = !!session.derivedFrom;
+    if (isSubagent ? translateCfg.subagent === false : translateCfg.main === false) {
+      return { error: 'disabled' };
+    }
+    const message = this.findThinkingMessage(session, messageKey, index);
+    if (!message) return { error: 'not-found' };
+    if (!message.thinking) return { error: 'no-thinking' };
+    if (
+      message.thinkingTranslation &&
+      message.thinkingTranslationLang === targetLang &&
+      message.thinkingTranslationVersion === 2
+    ) {
+      return { cached: true, translation: message.thinkingTranslation, lang: targetLang };
+    }
+    const key = `${sessionId}#${messageKey}`;
+    if (this.thinkingTranslations.has(key)) return { started: true };
+    const task = this.runThinkingTranslation(session, message, messageKey, targetLang, {
+      model: translateCfg.model,
+      reasoningEffort: translateCfg.reasoningEffort,
+    }, index)
+      .catch((err) => {
+        this.logger.warn('agent: thinking translation task failed', {
+          sessionId,
+          messageId: messageKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        this.thinkingTranslations.delete(key);
+      });
+    this.thinkingTranslations.set(key, task);
+    return { started: true };
+  }
+
+  /** 定位待翻译消息：优先 messageId，其次可见消息下标（兼容无 messageId 的旧会话） */
+  private findThinkingMessage(
+    session: Session,
+    messageKey: string,
+    index?: number,
+  ): AgentMessage | null {
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const m = session.messages[i];
+      if (m.role === 'assistant' && m.messageId === messageKey) return m;
+    }
+    if (typeof index === 'number') {
+      const visible = this.sessions.getVisibleMessages(session);
+      const m = visible[index];
+      if (m && m.role === 'assistant') return m;
+    }
+    return null;
+  }
+
+  /** 执行按需翻译：分段并发翻译全文，流式广播译文，完成后持久化 */
+  private async runThinkingTranslation(
+    session: Session,
+    message: AgentMessage,
+    messageKey: string,
+    targetLang: 'zh' | 'en',
+    cfg: { model: string; reasoningEffort: string },
+    index?: number,
+  ): Promise<void> {
+    const sessionId = session.id;
+    const llm = this.services.tryResolve<LLMRouter>(ServiceNames.LLM_ROUTER);
+    const server = this.services.tryResolve<{
+      sendAgentEvent?: (sid: string, event: AgentEvent) => void;
+      broadcastWS?: (message: unknown) => void;
+    }>(ServiceNames.SERVER_INSTANCE);
+    const send = (event: AgentEvent): void => {
+      try {
+        // 全局广播：子代理会话的订阅者不在主页面连接上，按 sessionId 路由由前端完成
+        if (server?.broadcastWS) server.broadcastWS({ type: event.type, sessionId, payload: { ...event } });
+        else server?.sendAgentEvent?.(sessionId, event);
+      } catch (err) {
+        this.logger.warn('agent: thinking translation broadcast failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
+    if (!llm) {
+      send({
+        type: 'assistant-thinking-translation-end',
+        sessionId,
+        messageId: messageKey,
+        ok: false,
+        error: 'LLM router not available',
+      });
+      return;
+    }
+    const apiModels = flattenModels(this.config.getApiConfig()).map((m) => ({
+      id: m.id,
+      model: m.model,
+    }));
+    const mainModelId = this.config.getAppConfig().agent.defaultModel;
+    const mainRequestModel =
+      apiModels.find((m) => m.id === mainModelId)?.model ?? apiModels[0]?.model ?? mainModelId;
+    let translation = '';
+    // 流式译文：按 120 字符 / 50ms 节流广播增量；结束事件仍携带全量译文做最终校准
+    let pendingDelta = '';
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 立即把缓冲译文作为增量事件发出（offset/total 供前端去重与续接） */
+    const flushTranslation = (): void => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (!pendingDelta) return;
+      const text = pendingDelta;
+      pendingDelta = '';
+      const offset = translation.length;
+      translation += text;
+      send({
+        type: 'assistant-thinking-translation',
+        sessionId,
+        messageId: messageKey,
+        text,
+        lang: targetLang,
+        offset,
+        total: translation.length,
+      });
+    };
+    /** 增量入口：≥120 字符立即发；否则 50ms 合并发送（避免逐 token 广播，也兼容极快本地流） */
+    const onTranslationDelta = (text: string): void => {
+      pendingDelta += text;
+      if (pendingDelta.length >= 120) {
+        flushTranslation();
+        return;
+      }
+      if (flushTimer === null) {
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flushTranslation();
+        }, 50);
+      }
+    };
+    const translator = new ThinkingTranslator({
+      env: this.env,
+      llm,
+      logger: this.logger,
+      apiModels,
+      config: cfg,
+      mainRequestModel,
+      targetLang,
+      onStart: () => {
+        send({ type: 'assistant-thinking-translation-start', sessionId, messageId: messageKey });
+      },
+      // 译文按 120 字符 / 50ms 节流流式广播；结束事件仍携带全量译文做最终校准
+      onDelta: onTranslationDelta,
+    });
+    try {
+      translator.push(message.thinking ?? '');
+      translator.endInput();
+      await translator.drain(180_000);
+      // 冲刷最后一个节流窗口内的译文，保证「增量 → 结束」顺序且不丢尾段
+      flushTranslation();
+      if (!translation) {
+        // 思维链已是目标语言或未产出译文：不写库，前端回退原文
+        send({
+          type: 'assistant-thinking-translation-end',
+          sessionId,
+          messageId: messageKey,
+          ok: true,
+          skipped: true,
+        });
+        return;
+      }
+      // 翻译期间会话可能被删除（get 返回 null）或被 LRU 淘汰后重载（返回新对象）：
+      // 删除 → 丢弃；重载 → 在新对象上按同一身份重新定位消息后写入。
+      const latest = this.sessions.get(sessionId);
+      const target =
+        latest === null
+          ? null
+          : latest === session
+            ? message
+            : this.findThinkingMessage(latest, messageKey, index);
+      if (!latest || !target) {
+        send({
+          type: 'assistant-thinking-translation-end',
+          sessionId,
+          messageId: messageKey,
+          ok: false,
+          error: 'session removed',
+        });
+        return;
+      }
+      target.thinkingTranslation = translation;
+      target.thinkingTranslationLang = targetLang;
+      target.thinkingTranslationVersion = 2;
+      latest.updatedAt = new Date().toISOString();
+      this.sessions.persistSession(latest);
+      send({
+        type: 'assistant-thinking-translation-end',
+        sessionId,
+        messageId: messageKey,
+        ok: true,
+        translation,
+        lang: targetLang,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 清理节流定时器：失败路径同样先冲刷已产出的增量，再发结束事件
+      flushTranslation();
+      this.logger.warn('agent: thinking translation failed', {
+        sessionId,
+        messageId: messageKey,
+        error: msg,
+      });
+      send({
+        type: 'assistant-thinking-translation-end',
+        sessionId,
+        messageId: messageKey,
+        ok: false,
+        error: msg,
+      });
+    }
+  }
+
+  /**
    * 最近一条「真实用户消息」→「重新生成」的重跑起点。
    * 由服务端在**完整历史**上定位，避免前端只加载最后一页时找不到触发本轮回复的 user 消息。
    */
@@ -2178,9 +2539,9 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   /**
-   * 历史智能检索（BM25）：检索「本对话原始上下文」或「跨 session 全量历史」。
-   * 原始消息始终保存在 session JSON 中；压缩折叠只是从发送视图移除，检索仍可命中
-   * （includeCompacted 默认 true）。供 context 工具 action=search 调用。
+   * 历史智能检索（BM25）：检索当前仍存在于 session 的消息（本对话或跨 session）。
+   * 注意：压缩会物理移除被折叠消息，本方法不覆盖已折叠原文——
+   * 归档检索由 context 引擎的 SQLite 归档分支提供（context action=search）。
    */
   searchMessages(input: HistorySearchInput): HistorySearchResult[] {
     const topK = Math.max(1, Math.min(50, input.topK ?? 10));
@@ -2293,17 +2654,24 @@ export class AgentEngineImpl implements AgentEngine {
     let healedName = tc.name;
     let healLogText = '';
 
+    // 工具结果摘要控制参数：开启摘要时默认 summary，关闭时默认 original；
+    // 无论开关如何都在 heal 前剥离（工具 schema 不含该参数）。
+    const summaryConfig = this.config.getAppConfig().context?.toolResultSummary;
+    const fallbackMode: ToolResultMode = summaryConfig?.enabled === true ? 'summary' : 'original';
+    const control = extractResultMode(tc.arguments, fallbackMode);
+    const resultMode = control.mode;
+
     // 参数解析 + 自愈（context 引擎：JSON 修复/工具名纠正/schema 修正）
     const contextEngine = this.services.tryResolve<ContextEngine>(ServiceNames.CONTEXT_ENGINE);
     if (contextEngine) {
-      const heal = contextEngine.healToolCall(tc.name, tc.arguments || '');
+      const heal = contextEngine.healToolCall(tc.name, control.argumentsText);
       healedName = heal.toolName;
       args = heal.args;
       this.notifyHealed(sessionId, ctx.toolCallId, heal.healLog);
       if (!heal.executable) {
         const errorText = heal.errorText ?? `Error: tool call "${tc.name}" could not be repaired`;
         return {
-          tc, healedName, args, healLogText, mcpMatch: null,
+          tc, healedName, args, healLogText, resultMode, mcpMatch: null,
           outcome: { kind: 'denied', text: errorText },
         };
       }
@@ -2312,10 +2680,17 @@ export class AgentEngineImpl implements AgentEngine {
       }
     } else {
       try {
-        args = JSON.parse(tc.arguments || '{}');
+        args = JSON.parse(control.argumentsText || '{}');
       } catch {
         args = {};
       }
+    }
+
+    // healer 修复 JSON 时可能把 resultMode 重新带回参数（MCP 工具允许额外字段），
+    // 这里再剥离一次，保证控制参数永不传入工具实现。
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      const record = args as Record<string, unknown>;
+      if ('resultMode' in record) delete record.resultMode;
     }
 
     // 判断是否是 MCP 工具（mcp__server__tool 前缀；用自愈纠正后的名字）
@@ -2341,7 +2716,7 @@ export class AgentEngineImpl implements AgentEngine {
             reason: pre.reason,
           });
           return {
-            tc, healedName, args, healLogText, mcpMatch,
+            tc, healedName, args, healLogText, resultMode, mcpMatch,
             outcome: { kind: 'denied', text: `Blocked by hook: ${pre.reason ?? 'tool call denied'}` },
           };
         }
@@ -2356,7 +2731,7 @@ export class AgentEngineImpl implements AgentEngine {
 
     if (signal?.aborted) {
       return {
-        tc, healedName, args, healLogText, mcpMatch,
+        tc, healedName, args, healLogText, resultMode, mcpMatch,
         outcome: { kind: 'denied', text: 'Error: aborted by user' },
       };
     }
@@ -2364,7 +2739,7 @@ export class AgentEngineImpl implements AgentEngine {
     // ===== 统一权限决策（safety 模块）：本预检取代工具内部权限检查 =====
     const safety = this.services.tryResolve<SafetyService>(ServiceNames.SAFETY);
     if (!safety) {
-      return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+      return { tc, healedName, args, healLogText, resultMode, mcpMatch, outcome: { kind: 'ready' } };
     }
 
     let decision: SafetyDecision;
@@ -2376,13 +2751,13 @@ export class AgentEngineImpl implements AgentEngine {
       const mcpManager = this.services.tryResolve<MCPManager>(ServiceNames.MCP_MANAGER);
       if (!mcpManager) {
         return {
-          tc, healedName, args, healLogText, mcpMatch,
+          tc, healedName, args, healLogText, resultMode, mcpMatch,
           outcome: { kind: 'denied', text: 'Error: MCP manager not available' },
         };
       }
       if (mcpManager.isServerEnabled(serverName) !== true) {
         return {
-          tc, healedName, args, healLogText, mcpMatch,
+          tc, healedName, args, healLogText, resultMode, mcpMatch,
           outcome: { kind: 'denied', text: `Error: MCP server "${serverName}" is disabled or not found` },
         };
       }
@@ -2406,7 +2781,7 @@ export class AgentEngineImpl implements AgentEngine {
       const toolRegistry = this.services.tryResolve<ToolRegistry>(ServiceNames.TOOL_REGISTRY);
       if (!toolRegistry) {
         return {
-          tc, healedName, args, healLogText, mcpMatch,
+          tc, healedName, args, healLogText, resultMode, mcpMatch,
           outcome: { kind: 'denied', text: 'Error: tool registry not available' },
         };
       }
@@ -2429,23 +2804,23 @@ export class AgentEngineImpl implements AgentEngine {
 
     if (decision.action === 'deny') {
       return {
-        tc, healedName, args, healLogText, mcpMatch,
+        tc, healedName, args, healLogText, resultMode, mcpMatch,
         outcome: { kind: 'denied', text: this.formatDenyReason(confirmMeta.toolName, decision.reason) },
       };
     }
     if (decision.action === 'allow') {
-      return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+      return { tc, healedName, args, healLogText, resultMode, mcpMatch, outcome: { kind: 'ready' } };
     }
 
     // ask / review
     if (decision.action === 'review') {
       const verdict = await this.reviewToolCall(healedName, args, ctx);
       if (verdict.decision === 'allow') {
-        return { tc, healedName, args, healLogText, mcpMatch, outcome: { kind: 'ready' } };
+        return { tc, healedName, args, healLogText, resultMode, mcpMatch, outcome: { kind: 'ready' } };
       }
       if (safety.getReviewConfig().onReviewFailure === 'deny') {
         return {
-          tc, healedName, args, healLogText, mcpMatch,
+          tc, healedName, args, healLogText, resultMode, mcpMatch,
           outcome: { kind: 'denied', text: `Error: [safety][auto-review] ${verdict.reason}` },
         };
       }
@@ -2454,7 +2829,7 @@ export class AgentEngineImpl implements AgentEngine {
     }
 
     return {
-      tc, healedName, args, healLogText, mcpMatch,
+      tc, healedName, args, healLogText, resultMode, mcpMatch,
       outcome: { kind: 'confirm', meta: confirmMeta },
     };
   }
@@ -2585,7 +2960,7 @@ export class AgentEngineImpl implements AgentEngine {
     ctx: ToolCallContext,
   ): Promise<void> {
     const { sessionId, cwd, toolCallId, onEvent, signal } = ctx;
-    const { tc, healedName, args, healLogText, mcpMatch } = prepared;
+    const { tc, healedName, args, healLogText, resultMode, mcpMatch } = prepared;
     const hooksEngine = this.services.tryResolve<HooksEngineServiceImpl>(ServiceNames.HOOKS_ENGINE);
 
     // 工具执行前再次检查 abort（防止在确认等待期间被 abort）
@@ -2698,14 +3073,62 @@ export class AgentEngineImpl implements AgentEngine {
         error: resultText.slice(0, 500),
       });
     }
+
+    // 工具结果摘要（上下文设置开启时）：完整结果先交给摘要模型压缩，再把摘要写入会话。
+    // WS 事件仍推送原始 result（WebUI 展示完整结果）；摘要失败/超时回退原文。
+    let storedResultText = resultText;
+    let summaryMeta: { originalChars: number; summarized: boolean } | undefined;
+    const summaryConfig = this.config.getAppConfig().context?.toolResultSummary;
+    const effectiveMode: ToolResultMode =
+      resultMode ?? (summaryConfig?.enabled === true ? 'summary' : 'original');
+    if (summaryConfig?.enabled && !result.isError && effectiveMode === 'summary') {
+      const summaryLlm = this.services.tryResolve<LLMRouter>(ServiceNames.LLM_ROUTER);
+      if (summaryLlm) {
+        try {
+          const apiModels = flattenModels(this.config.getApiConfig()).map(m => ({
+            id: m.id,
+            model: m.model,
+          }));
+          // ctx.model 是模型 id；LLM 请求需要 provider 请求名
+          const mainRequestModel = apiModels.find(m => m.id === ctx.model)?.model ?? ctx.model;
+          const summary = await summarizeToolResult({
+            env: this.env,
+            llm: summaryLlm,
+            apiModels,
+            config: summaryConfig,
+            mainRequestModel,
+            toolName: healedName,
+            args,
+            text: resultText,
+            isError: result.isError,
+            resultMode: effectiveMode,
+            signal,
+          });
+          if (summary) {
+            storedResultText = `[工具结果摘要]\n${summary}`;
+            summaryMeta = { originalChars: resultText.length, summarized: true };
+          }
+        } catch (err) {
+          this.logger.warn('agent: tool result summarization failed (fallback to original)', {
+            sessionId,
+            toolName: healedName,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     this.sessions.addToolMessage(
       this.sessions.get(sessionId)!,
       toolCallId,
-      resultText + healLogText,
+      storedResultText + healLogText,
       healedName,
       {
         isError: result.isError,
-        metadata: result.metadata,
+        metadata: {
+          ...(result.metadata ?? {}),
+          ...(summaryMeta ? { toolResultSummary: summaryMeta } : {}),
+        },
         ...(imagePaths.length > 0 ? { images: imagePaths } : {}),
       },
     );

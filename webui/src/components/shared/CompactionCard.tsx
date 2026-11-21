@@ -47,7 +47,12 @@ export const CompactionCard = memo(function CompactionCard({
             {t('context.compactionCardTitle')}
           </span>
           <span className="ml-1">
-            {compaction.trigger === 'manual' ? t('context.triggerManual') : t('context.triggerAuto')}
+            {compaction.trigger === 'manual'
+              ? t('context.triggerManual')
+              : compaction.trigger === 'model'
+                ? t('context.triggerModel')
+                : t('context.triggerAuto')}
+            {compaction.tier ? ` · T${compaction.tier}` : ''}
           </span>
           <span className="ml-auto flex items-center gap-2 tabular-nums">
             <span>

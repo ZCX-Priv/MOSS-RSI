@@ -11,6 +11,46 @@ export interface BuildToolsOptions {
   includeOnly?: ReadonlySet<string>;
   /** 排除这些工具（代码模式关闭时排除 run_code） */
   exclude?: ReadonlySet<string>;
+  /**
+   * 工具结果摘要开启时，为每个工具注入 resultMode 公共参数
+   * （summary=先摘要后给模型（默认）/ original=原文完整返回）。
+   * 关闭时不注入，模型无法选择。
+   */
+  injectResultMode?: boolean;
+}
+
+/** resultMode 参数 schema（注入到每个工具的 parameters.properties） */
+const RESULT_MODE_PROPERTY = {
+  type: 'string',
+  enum: ['summary', 'original'],
+  default: 'summary',
+  description:
+    '工具结果返回方式：summary = 先由摘要模型压缩后返回（默认）；original = 返回完整原文。' +
+    '仅当上下文设置开启「工具结果摘要」时生效。',
+};
+
+/**
+ * 克隆 schema 并注入 resultMode 参数（不修改注册表原对象）。
+ * 原 schema 非对象或缺失时，构造一个只含 resultMode 的对象 schema。
+ */
+function withResultMode(schema: unknown): unknown {
+  if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
+    const base = schema as Record<string, unknown>;
+    const rawProps = base.properties;
+    const properties =
+      rawProps && typeof rawProps === 'object' && !Array.isArray(rawProps)
+        ? { ...(rawProps as Record<string, unknown>) }
+        : {};
+    if (!('resultMode' in properties)) {
+      properties.resultMode = { ...RESULT_MODE_PROPERTY };
+    }
+    return {
+      ...base,
+      type: typeof base.type === 'string' ? base.type : 'object',
+      properties,
+    };
+  }
+  return { type: 'object', properties: { resultMode: { ...RESULT_MODE_PROPERTY } } };
 }
 
 /**
@@ -41,7 +81,7 @@ export function buildTools(
         function: {
           name: t.name,
           description: t.description,
-          parameters: t.inputSchema,
+          parameters: opts.injectResultMode ? withResultMode(t.inputSchema) : t.inputSchema,
         },
       });
     }
@@ -53,12 +93,13 @@ export function buildTools(
       const toolName = `mcp__${t.server}__${t.name}`;
       if (!allowed(toolName)) continue;
       const titleSuffix = t.title && t.title !== t.name ? ` "${t.title}"` : '';
+      const parameters = t.inputSchema ?? { type: 'object', properties: {}, additionalProperties: true };
       tools.push({
         type: 'function',
         function: {
           name: toolName,
           description: `[MCP:${t.server}${titleSuffix}] ${t.description ?? t.name}`,
-          parameters: t.inputSchema ?? { type: 'object', properties: {}, additionalProperties: true },
+          parameters: opts.injectResultMode ? withResultMode(parameters) : parameters,
         },
       });
     }

@@ -43,7 +43,7 @@ const BATCH_INTERVAL_MS = 30;
 const BATCH_MAX_CHARS = 256 * 1024;
 
 interface BatchedEvent {
-  type: 'assistant-text' | 'assistant-thinking' | 'tool-call-delta';
+  type: 'assistant-text' | 'assistant-thinking' | 'assistant-thinking-translation' | 'tool-call-delta';
   sessionId: string;
   runId?: string;
   /** 本轮流式消息 id：合帧只能在「同一轮」内进行（跨轮 offset 空间重置，禁止合并） */
@@ -69,7 +69,12 @@ class EventBatcher {
   }
 
   isBatchable(type: string): boolean {
-    return type === 'assistant-text' || type === 'assistant-thinking' || type === 'tool-call-delta';
+    return (
+      type === 'assistant-text' ||
+      type === 'assistant-thinking' ||
+      type === 'assistant-thinking-translation' ||
+      type === 'tool-call-delta'
+    );
   }
 
   /** 缓冲一条高频事件（同 key 且同轮拼接 text / argumentsDelta，保留首尾 offset） */
@@ -98,8 +103,14 @@ class EventBatcher {
         });
       }
     } else {
-      // 't' = text, 'k' = thinking（同轮 text 与 thinking 交替时不互相污染）
-      const kind = msg.type === 'assistant-text' ? 't' : 'k';
+      // 't' = text, 'k' = thinking, 'tr' = thinking translation
+      // （同轮三类文本交替时不互相污染；译文单独成 key，避免与原文混流）
+      const kind =
+        msg.type === 'assistant-text'
+          ? 't'
+          : msg.type === 'assistant-thinking'
+            ? 'k'
+            : 'tr';
       const key = `${msg.sessionId}|${kind}`;
       const text = String(p.text ?? '');
       const existing = this.buffer.get(key);
@@ -472,6 +483,7 @@ export class WsHandler {
     const isStreamChunk =
       (message as { type?: string }).type === 'assistant-text' ||
       (message as { type?: string }).type === 'assistant-thinking' ||
+      (message as { type?: string }).type === 'assistant-thinking-translation' ||
       (message as { type?: string }).type === 'tool-call-delta';
     for (const state of this.states.values()) {
       if (!state.subscribedSessions.has(sessionId)) continue;

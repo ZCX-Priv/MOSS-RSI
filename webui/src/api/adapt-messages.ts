@@ -42,6 +42,12 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
       toolCallId?: string;
       name?: string;
       thinking?: string;
+      /** 思维链译文（后端持久化；仅当前翻译器版本展示） */
+      thinkingTranslation?: string;
+      /** 译文语言标签 */
+      thinkingTranslationLang?: string;
+      /** 译文生成器版本：2 = 当前流式解析器；旧会话无此字段 */
+      thinkingTranslationVersion?: number;
       /** 后端持久化的思考耗时（ms） */
       thinkingMs?: number;
       todoSnapshot?: TaskMessage['todoSnapshot'];
@@ -155,6 +161,15 @@ export function adaptAgentMessages(raw: unknown[]): TaskMessage[] {
         ? { serverMessageId: m.messageId }
         : {}),
       thinking: m.thinking,
+      // 旧版本译文可能被模型回答污染：只有当前翻译器版本（2）才展示
+      ...(typeof m.thinkingTranslation === 'string' &&
+      m.thinkingTranslation &&
+      m.thinkingTranslationVersion === 2
+        ? { thinkingTranslation: m.thinkingTranslation }
+        : {}),
+      ...(typeof m.thinkingTranslationLang === 'string' && m.thinkingTranslationLang
+        ? { thinkingTranslationLang: m.thinkingTranslationLang }
+        : {}),
       ...(typeof m.thinkingMs === 'number' ? { thinkingMs: m.thinkingMs } : {}),
       toolCalls: m.toolCalls,
       todoSnapshot: m.todoSnapshot,

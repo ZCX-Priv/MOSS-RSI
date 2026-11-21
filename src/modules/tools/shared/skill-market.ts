@@ -1,5 +1,5 @@
 // src/modules/tools/shared/skill-market.ts
-// SkillHub 技能市场共享逻辑（HTTP 路由与 set 工具共用）。
+// SkillHub 技能市场共享逻辑（HTTP 路由与 skill 工具共用）。
 //
 // 职责：
 //  - 查询市场技能列表（代理 https://api.skillhub.cn/api/skills，按内容指纹去重）

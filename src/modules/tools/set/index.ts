@@ -1,20 +1,20 @@
 // src/modules/tools/set/index.ts
-// set 工具 execute 逻辑：统一管理 skill / rule / hook / command。
-//   action: list | create | update | delete；kind=skill 额外支持 search / install（SkillHub 市场）。
+// set 工具 execute 逻辑：统一管理 rule / hook / command 与会话权限模式。
+//   action: list | create | update | delete；kind=mode 额外支持 action=set。
+//   skill 的创建/更新/删除/市场安装已全部归入 skill 工具，本工具不再接受 kind=skill。
 //
 // 设计要点：
-//  - 名称是稳定标识：skill/command 更新不允许改名；rule/hook 优先按 id 精确定位。
-//  - 写文件后立即刷新对应注册表（skill rescan / command reloadBySourceFile），不依赖 watch 防抖。
+//  - 名称是稳定标识：command 更新不允许改名；rule/hook 优先按 id 精确定位。
+//  - 写文件后立即刷新对应注册表（command reloadBySourceFile），不依赖 watch 防抖。
 //  - 所有错误以 ToolResult.isError 返回；写操作的权限分级在 safety/policy.ts 中按 action 判定。
 // 元数据见同目录 tool.json。
 
 import { t } from '../../../core/i18n';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ConfigService, Environment } from '../../../core/types';
 import { ServiceNames } from '../../../core/types';
 import type { ToolContext, ToolResult } from '../types';
-import type { SkillRegistry } from '../shared/skill-registry';
 import type { CommandRegistry } from '../use_command/registry';
 import { COMMAND_NAME_RE, parseCommandFile } from '../use_command/registry';
 import type { RulesEngineServiceImpl } from '../../rules/service';
@@ -22,12 +22,11 @@ import type { HooksEngineServiceImpl } from '../../hooks/service';
 import type { RuleScope, ScopedRuleRecord } from '../../rules/types';
 import type { HookEvent, HookScope, ScopedHookRecord } from '../../hooks/types';
 import { HOOK_EVENTS } from '../../hooks/types';
-import { installMarketSkill, queryMarketSkills, SkillMarketError } from '../shared/skill-market';
 import type { AgentEngine } from '../../contracts';
 import type { PermissionMode } from '../../safety/types';
 
-type SetKind = 'skill' | 'rule' | 'hook' | 'command' | 'mode';
-type SetAction = 'list' | 'create' | 'update' | 'delete' | 'search' | 'install' | 'set';
+type SetKind = 'rule' | 'hook' | 'command' | 'mode';
+type SetAction = 'list' | 'create' | 'update' | 'delete' | 'set';
 
 const PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set<PermissionMode>(['ask', 'auto', 'skip']);
 
@@ -49,10 +48,7 @@ interface SetParams {
   modulePath?: string;
   timeout?: unknown;
   icon?: string;
-  allowedTools?: unknown;
   argumentHint?: string;
-  keyword?: string;
-  canonicalName?: string;
   mode?: string;
 }
 
@@ -63,9 +59,6 @@ class SetError extends Error {
     this.name = 'SetError';
   }
 }
-
-/** skill / command 名称规则（与 SkillRegistry / CommandRegistry 保持一致） */
-const SKILL_NAME_RE = /^[a-z][a-z0-9-]*$/;
 
 // ============================================================================
 // 通用 helper
@@ -83,28 +76,14 @@ function failResult(message: string): ToolResult {
 }
 
 function parseKind(value: unknown): SetKind {
-  if (
-    value === 'skill' ||
-    value === 'rule' ||
-    value === 'hook' ||
-    value === 'command' ||
-    value === 'mode'
-  ) {
+  if (value === 'rule' || value === 'hook' || value === 'command' || value === 'mode') {
     return value;
   }
   throw new SetError(t('tools.setKindInvalid'));
 }
 
 function parseAction(value: unknown): SetAction {
-  if (
-    value === 'list' ||
-    value === 'create' ||
-    value === 'update' ||
-    value === 'delete' ||
-    value === 'search' ||
-    value === 'install' ||
-    value === 'set'
-  ) {
+  if (value === 'list' || value === 'create' || value === 'update' || value === 'delete' || value === 'set') {
     return value;
   }
   throw new SetError(t('tools.setActionInvalid'));
@@ -129,12 +108,6 @@ function yamlString(v: string): string {
   return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
 }
 
-function resolveSkillRegistry(ctx: ToolContext): SkillRegistry {
-  const registry = ctx.services.tryResolve<SkillRegistry>(ServiceNames.SKILL_REGISTRY);
-  if (!registry) throw new SetError(t('tools.setRegistryUnavailable', { registry: 'skill' }));
-  return registry;
-}
-
 function resolveCommandRegistry(ctx: ToolContext): CommandRegistry {
   const registry = ctx.services.tryResolve<CommandRegistry>(ServiceNames.COMMAND_REGISTRY);
   if (!registry) throw new SetError(t('tools.setRegistryUnavailable', { registry: 'command' }));
@@ -153,44 +126,19 @@ function resolveHooksEngine(ctx: ToolContext): HooksEngineServiceImpl {
   return engine;
 }
 
-/** skill/command 启停写入 config（缺省即启用；这里只处理显式 enabled） */
+/** command 启停写入 config（缺省即启用；这里只处理显式 enabled） */
 async function applyEnabled(
   ctx: ToolContext,
-  kind: 'skill' | 'command',
   name: string,
   enabled: boolean,
 ): Promise<void> {
   const config = ctx.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
   if (!config) throw new SetError(t('tools.setConfigUnavailable'));
-  const patch =
-    kind === 'skill'
-      ? { skills: { [name]: { enabled } } }
-      : { commands: { [name]: { enabled } } };
-  await config.updateAppConfig(patch);
+  await config.updateAppConfig({ commands: { [name]: { enabled } } });
 }
 
 function parseScope(value: unknown): RuleScope & HookScope {
   return value === 'project' ? 'project' : 'global';
-}
-
-function isBuiltinSkill(env: Environment, name: string): boolean {
-  return existsSync(join(env.packageRoot, 'skills', name, 'SKILL.md'));
-}
-
-function buildSkillMarkdown(data: {
-  name: string;
-  description: string;
-  prompt: string;
-  icon?: string;
-  allowedTools?: string[];
-}): string {
-  const lines: string[] = ['---', `name: ${data.name}`, `description: ${yamlString(data.description)}`];
-  if (data.icon) lines.push(`icon: ${data.icon}`);
-  if (data.allowedTools && data.allowedTools.length > 0) {
-    lines.push(`allowed-tools: ${yamlString(data.allowedTools.join(', '))}`);
-  }
-  lines.push('---', '', data.prompt.trim(), '');
-  return lines.join('\n');
 }
 
 function buildCommandMarkdown(data: {
@@ -205,160 +153,6 @@ function buildCommandMarkdown(data: {
   if (data.icon) lines.push(`icon: ${data.icon}`);
   lines.push('---', '', data.prompt.trim(), '');
   return lines.join('\n');
-}
-
-// ============================================================================
-// skill
-// ============================================================================
-
-function createSkill(p: SetParams, ctx: ToolContext, env: Environment): ToolResult {
-  const registry = resolveSkillRegistry(ctx);
-  const name = requireName(p);
-  if (!SKILL_NAME_RE.test(name)) {
-    throw new SetError(t('tools.setResourceNameInvalid', { name }));
-  }
-  const description = typeof p.description === 'string' ? p.description.trim() : '';
-  if (!description) throw new SetError(t('tools.setDescriptionRequired'));
-  if (registry.get(name)) throw new SetError(t('tools.setTargetExists', { kind: 'skill', name }));
-
-  const skillDir = join(env.dataDir, 'skills', name);
-  const file = join(skillDir, 'SKILL.md');
-  const allowedTools = toStringArray(p.allowedTools);
-  mkdirSync(skillDir, { recursive: true });
-  writeFileSync(
-    file,
-    buildSkillMarkdown({
-      name,
-      description,
-      prompt: typeof p.content === 'string' ? p.content : '',
-      ...(typeof p.icon === 'string' && p.icon.trim() ? { icon: p.icon.trim() } : {}),
-      ...(allowedTools ? { allowedTools } : {}),
-    }),
-    'utf8',
-  );
-  registry.rescan();
-  return textResult(t('tools.setCreated', { kind: 'skill', name }), { kind: 'skill', action: 'create', name });
-}
-
-function updateSkill(p: SetParams, ctx: ToolContext, env: Environment): ToolResult {
-  const registry = resolveSkillRegistry(ctx);
-  const name = requireName(p);
-  const existing = registry.get(name);
-  if (!existing) throw new SetError(t('tools.setTargetNotFound', { kind: 'skill', name }));
-
-  const target = existing.dir ? join(existing.dir, 'SKILL.md') : existing.sourceFile;
-  if (!target) throw new SetError(t('tools.setTargetNotFound', { kind: 'skill', name }));
-
-  const allowedTools = toStringArray(p.allowedTools) ?? existing.allowedTools;
-  writeFileSync(
-    target,
-    buildSkillMarkdown({
-      name,
-      description: typeof p.description === 'string' ? p.description.trim() : existing.description,
-      prompt: typeof p.content === 'string' ? p.content : existing.prompt,
-      icon: typeof p.icon === 'string' ? p.icon.trim() : existing.icon,
-      ...(allowedTools ? { allowedTools } : {}),
-    }),
-    'utf8',
-  );
-  registry.rescan();
-  return textResult(t('tools.setUpdated', { kind: 'skill', name }), { kind: 'skill', action: 'update', name });
-}
-
-function deleteSkill(p: SetParams, ctx: ToolContext, env: Environment): ToolResult {
-  const registry = resolveSkillRegistry(ctx);
-  const name = requireName(p);
-  const existing = registry.get(name);
-  if (!existing) throw new SetError(t('tools.setTargetNotFound', { kind: 'skill', name }));
-  if (isBuiltinSkill(env, name)) {
-    throw new SetError(t('tools.setBuiltinUndeletable', { name }));
-  }
-  const target = existing.dir ?? existing.sourceFile;
-  if (!target) throw new SetError(t('tools.setTargetNotFound', { kind: 'skill', name }));
-  rmSync(target, { recursive: true, force: true });
-  registry.unregister(name);
-  return textResult(t('tools.setDeleted', { kind: 'skill', name }), { kind: 'skill', action: 'delete', name });
-}
-
-async function searchMarket(p: SetParams): Promise<ToolResult> {
-  const keyword = typeof p.keyword === 'string' ? p.keyword.trim() : '';
-  if (!keyword) throw new SetError(t('tools.setMarketKeywordRequired'));
-  try {
-    const { skills } = await queryMarketSkills({ keyword, pageSize: 12 });
-    if (skills.length === 0) return textResult(t('tools.setMarketNoResults'));
-    const lines = skills.map((s) => {
-      const canonical = s.canonicalName || s.slug;
-      return `- ${s.name} (${canonical}): ${s.description || '-'}`;
-    });
-    return textResult(
-      `${t('tools.setMarketResultHeader', { count: skills.length })}\n${lines.join('\n')}`,
-      { count: skills.length },
-    );
-  } catch (err) {
-    throw new SetError(
-      t('tools.setMarketUnavailable', {
-        message: err instanceof Error ? err.message : String(err),
-      }),
-    );
-  }
-}
-
-async function installFromMarket(
-  p: SetParams,
-  ctx: ToolContext,
-  env: Environment,
-): Promise<ToolResult> {
-  const canonicalName = typeof p.canonicalName === 'string' ? p.canonicalName.trim() : '';
-  if (!canonicalName) throw new SetError(t('tools.setMarketCanonicalRequired'));
-  const registry = resolveSkillRegistry(ctx);
-  const config = ctx.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
-  try {
-    const result = await installMarketSkill({
-      canonicalName,
-      env,
-      registry,
-      ...(config ? { config } : {}),
-    });
-    return textResult(
-      result.installed
-        ? t('tools.setInstalled', { name: result.name })
-        : t('tools.setAlreadyInstalled', { name: result.name }),
-      { kind: 'skill', action: 'install', name: result.name, installed: result.installed },
-    );
-  } catch (err) {
-    const message =
-      err instanceof SkillMarketError
-        ? `${err.code}: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    throw new SetError(t('tools.setInstallFailed', { message }));
-  }
-}
-
-async function dispatchSkill(
-  action: SetAction,
-  p: SetParams,
-  ctx: ToolContext,
-  env: Environment,
-): Promise<ToolResult> {
-  switch (action) {
-    case 'list':
-      // skill 列表统一由 skill(action=list) 提供（渐进式披露入口），此处不再重复实现
-      throw new SetError(t('tools.setSkillListMoved'));
-    case 'create':
-      return createSkill(p, ctx, env);
-    case 'update':
-      return updateSkill(p, ctx, env);
-    case 'delete':
-      return deleteSkill(p, ctx, env);
-    case 'search':
-      return searchMarket(p);
-    case 'install':
-      return installFromMarket(p, ctx, env);
-    default:
-      throw new SetError(t('tools.setModeActionOnly'));
-  }
 }
 
 // ============================================================================
@@ -743,17 +537,12 @@ async function dispatch(p: SetParams, ctx: ToolContext, env: Environment): Promi
     return setSessionMode(p, ctx);
   }
 
-  if (kind !== 'skill' && (action === 'search' || action === 'install')) {
-    throw new SetError(t('tools.setMarketSkillOnly'));
-  }
   if (action === 'set') {
     // set 仅用于 kind=mode
     throw new SetError(t('tools.setModeActionOnly'));
   }
 
   switch (kind) {
-    case 'skill':
-      return dispatchSkill(action, p, ctx, env);
     case 'rule':
       switch (action) {
         case 'list':
@@ -765,7 +554,7 @@ async function dispatch(p: SetParams, ctx: ToolContext, env: Environment): Promi
         case 'delete':
           return deleteRule(p, ctx);
         default:
-          throw new SetError(t('tools.setMarketSkillOnly'));
+          throw new SetError(t('tools.setActionInvalid'));
       }
     case 'hook':
       switch (action) {
@@ -778,7 +567,7 @@ async function dispatch(p: SetParams, ctx: ToolContext, env: Environment): Promi
         case 'delete':
           return deleteHook(p, ctx);
         default:
-          throw new SetError(t('tools.setMarketSkillOnly'));
+          throw new SetError(t('tools.setActionInvalid'));
       }
     case 'command':
       switch (action) {
@@ -791,7 +580,7 @@ async function dispatch(p: SetParams, ctx: ToolContext, env: Environment): Promi
         case 'delete':
           return deleteCommand(p, ctx);
         default:
-          throw new SetError(t('tools.setMarketSkillOnly'));
+          throw new SetError(t('tools.setActionInvalid'));
       }
   }
 }
@@ -806,16 +595,15 @@ export default function createExecute(env: Environment): { execute: (params: unk
       const p = (params ?? {}) as SetParams;
       try {
         const result = await dispatch(p, ctx, env);
-        // skill/command 的显式启停（create/update 都可携带）
-        const kind = p.kind;
+        // command 的显式启停（create/update 都可携带）
         if (
           typeof p.enabled === 'boolean' &&
-          (kind === 'skill' || kind === 'command') &&
+          p.kind === 'command' &&
           (p.action === 'create' || p.action === 'update') &&
           typeof p.name === 'string' &&
           p.name.trim()
         ) {
-          await applyEnabled(ctx, kind, p.name.trim(), p.enabled);
+          await applyEnabled(ctx, p.name.trim(), p.enabled);
         }
         return result;
       } catch (err) {

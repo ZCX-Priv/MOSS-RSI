@@ -1175,7 +1175,7 @@ export class TerminalManager implements TerminalService {
    */
   private prepareScriptFile(rt: Runtime, command: string): { command: string; file: string } | null {
     try {
-      const dir = join(this.dataDir, 'terminal-cmds', rt.info.id);
+      const dir = join(this.dataDir, 'terminal', 'cmds', rt.info.id);
       mkdirSync(dir, { recursive: true });
       const shell = rt.interpreter.shell;
       const ext = shell === 'powershell' ? 'ps1' : shell === 'cmd' ? 'cmd' : 'sh';
@@ -1214,7 +1214,7 @@ export class TerminalManager implements TerminalService {
     const files = integration.rcFiles;
     if (files && files.length > 0) {
       try {
-        const dir = join(this.dataDir, 'terminals', 'rc', id);
+        const dir = join(this.dataDir, 'terminal', 'rc', id);
         mkdirSync(dir, { recursive: true });
         for (const f of files) writeFileSync(join(dir, f.name), f.body, 'utf8');
         const firstPath = join(dir, files[0].name);
@@ -1259,7 +1259,7 @@ export class TerminalManager implements TerminalService {
     }
     // 长命令临时脚本目录（正常会在每条命令后删单文件；这里兜底清理残留）
     try {
-      rmSync(join(this.dataDir, 'terminal-cmds', rt.info.id), { recursive: true, force: true });
+      rmSync(join(this.dataDir, 'terminal', 'cmds', rt.info.id), { recursive: true, force: true });
     } catch {
       /* 静默 */
     }

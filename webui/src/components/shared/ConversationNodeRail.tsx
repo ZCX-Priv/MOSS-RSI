@@ -1,5 +1,5 @@
 // webui/src/components/shared/ConversationNodeRail.tsx
-// 对话节点导航：Task Area 最右缘的一列细刻度（与桌面端 header 的「展开/收起侧栏」按钮同列）。
+// 对话节点导航：Task Area 最左缘的一列细刻度（消息区左侧，右侧留作快捷工具栏）。
 // 一个用户提问 + 其后整段模型回复 = 一个节点（节点 id 即该用户消息 id）。
 //
 // 交互：
@@ -203,9 +203,9 @@ export function ConversationNodeRail({
       ref={navRef}
       aria-label={t('task.nodesAria')}
       className={cn(
-        // right-4 + 28px 刻度按钮 ⇒ 与 header 的 size-7 + px-4 侧栏按钮同列（中心对齐）
+        // left-4 + 28px 刻度按钮：与左侧 56px 刻度槽居中对齐
         // inset-y-0：刻度列占满任务区高度，节点很多时内部可滚动，不再被裁切
-        'pointer-events-none absolute inset-y-0 right-4 z-10 hidden flex-col justify-center py-2 md:flex',
+        'pointer-events-none absolute inset-y-0 left-4 z-10 hidden flex-col justify-center py-2 md:flex',
       )}
       onMouseEnter={cancelHide}
       onMouseLeave={scheduleHide}
@@ -250,7 +250,7 @@ export function ConversationNodeRail({
           aria-label={t('task.nodesAria')}
           onMouseEnter={cancelHide}
           style={{ top: cardTop }}
-          className="pointer-events-auto absolute right-full z-20 mr-2 w-56 rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-xl"
+          className="pointer-events-auto absolute left-full z-20 ml-2 w-56 rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-xl"
         >
           <div
             ref={scrollRef}
@@ -272,7 +272,7 @@ export function ConversationNodeRail({
                   }}
                   // 行内不更新 hoverIndex：否则指针落在卡片上会让锚点跟着变，列表在指针下抖动
                   className={cn(
-                    'flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-right transition-colors hover:bg-muted/60',
+                    'flex w-full cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted/60',
                     hovered && 'bg-muted/40',
                   )}
                 >
@@ -284,12 +284,6 @@ export function ConversationNodeRail({
                   >
                     {node.label}
                   </span>
-                  <span
-                    className={cn(
-                      'h-[3px] shrink-0 rounded-full',
-                      active ? 'w-4 bg-primary-strong' : 'w-2 bg-muted-foreground/40',
-                    )}
-                  />
                 </button>
               );
             })}

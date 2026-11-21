@@ -1,5 +1,5 @@
 // src/modules/terminal/persistence.ts
-// 终端持久化：把「终端元数据 + 输出缓冲」落盘到 ~/.moss/terminals/<session>.json。
+// 终端持久化：把「终端元数据 + 输出缓冲」落盘到 ~/.moss/terminal/sessions/<session>.json。
 // 目的：终端本体在后端进程内存，进程重启即丢失；落盘后 terminal.list / terminal.snapshot
 // 仍能还原标签与历史（还原项标记为 offline 只读）。
 // - 高频输出走 scheduleSave（去抖）；创建/退出/关闭/删除会话走 save。
@@ -8,10 +8,11 @@
 // - 单会话最多保留 MAX_PERSISTED_PER_SESSION 条；单条缓冲截断到 MAX_PERSIST_CHARS。
 // - 任何读写/解析失败均静默降级（不阻塞终端运行）。
 
-import { readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, rmdirSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWriteFileAsync } from '../../utils/fs-atomic';
+import type { Logger } from '../../core/types';
 import { type TerminalInfo } from './types';
 
 /** 单个持久化终端条目 */
@@ -46,7 +47,7 @@ function clipHistory(s: string): string {
 }
 
 export class TerminalPersistence {
-  /** 终端持久化目录：<dataDir>/terminals */
+  /** 终端持久化目录：<dataDir>/terminal/sessions */
   private readonly dir: string;
   /** sessionId → (terminalId → 条目) */
   private readonly cache = new Map<string, Map<string, PersistedTerminal>>();
@@ -60,7 +61,7 @@ export class TerminalPersistence {
   private loadedAll = false;
 
   constructor(dataDir: string) {
-    this.dir = join(dataDir, 'terminals');
+    this.dir = join(dataDir, 'terminal', 'sessions');
   }
 
   /** 会话文件路径（sessionId 编码为文件名安全形式） */
@@ -249,5 +250,88 @@ export class TerminalPersistence {
       });
     this.writes.set(sessionId, next);
     return next;
+  }
+}
+
+// ============================================================================
+// 旧目录布局迁移（terminal-output/ + terminal-cmds/ + terminals/ → terminal/）
+// ============================================================================
+
+/**
+ * 递归移动目录内容：目标已存在同名文件时保留源文件（不覆盖），
+ * 搬空后尝试删除源目录（非空/被占用则保留，下次启动重试）。
+ */
+function moveTree(from: string, to: string, logger?: Logger): void {
+  try {
+    mkdirSync(to, { recursive: true });
+    for (const entry of readdirSync(from, { withFileTypes: true })) {
+      const src = join(from, entry.name);
+      const dest = join(to, entry.name);
+      if (entry.isDirectory()) {
+        moveTree(src, dest, logger);
+      } else if (!existsSync(dest)) {
+        try {
+          renameSync(src, dest);
+        } catch (err) {
+          logger?.warn('terminal: legacy layout move failed', {
+            src,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  } catch {
+    // 目录不可读：保留旧目录，下次启动重试
+  }
+  // 空目录删除用 rmdirSync（规避 Bun on Windows 的 rmSync 空目录 EFAULT 先例）
+  try {
+    rmdirSync(from);
+  } catch {
+    // 非空/被占用：保留
+  }
+}
+
+/**
+ * 一次性迁移旧终端目录到统一的 ~/.moss/terminal/ 布局（幂等、失败不阻断启动）：
+ *   terminal-output/**  → terminal/output/**
+ *   terminal-cmds/**    → terminal/cmds/**
+ *   terminals/rc/**     → terminal/rc/**
+ *   terminals/*.json    → terminal/sessions/*.json
+ * 迁移完成搬空的旧目录即删除；有失败时保留旧目录，下次启动续迁。
+ */
+export function migrateLegacyTerminalLayout(dataDir: string, logger?: Logger): void {
+  const root = join(dataDir, 'terminal');
+
+  const legacyOutput = join(dataDir, 'terminal-output');
+  if (existsSync(legacyOutput)) moveTree(legacyOutput, join(root, 'output'), logger);
+
+  const legacyCmds = join(dataDir, 'terminal-cmds');
+  if (existsSync(legacyCmds)) moveTree(legacyCmds, join(root, 'cmds'), logger);
+
+  const legacyTerminals = join(dataDir, 'terminals');
+  if (!existsSync(legacyTerminals)) return;
+  // rc 子目录先搬（避免与 *.json 文件处理交错）
+  const legacyRc = join(legacyTerminals, 'rc');
+  if (existsSync(legacyRc)) moveTree(legacyRc, join(root, 'rc'), logger);
+  try {
+    const sessionsDir = join(root, 'sessions');
+    for (const name of readdirSync(legacyTerminals)) {
+      if (!name.endsWith('.json')) continue;
+      const src = join(legacyTerminals, name);
+      const dest = join(sessionsDir, name);
+      if (existsSync(dest)) continue;
+      mkdirSync(sessionsDir, { recursive: true });
+      renameSync(src, dest);
+    }
+  } catch (err) {
+    logger?.warn('terminal: legacy sessions move failed', {
+      dir: legacyTerminals,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    rmdirSync(legacyTerminals);
+  } catch {
+    // 非空/被占用：保留，下次启动重试
   }
 }

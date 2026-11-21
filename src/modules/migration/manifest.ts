@@ -5,7 +5,7 @@
 //   - 跨机器不可复用：browser/（浏览器二进制+扩展）、models/（语音模型权重）、
 //     remote/bin（cloudflared）、agent/attachments（本机绝对路径引用）、computer/（截图）
 //   - 运行时可再生：file-index/（旧版索引缓存，功能已移除）、logs/、live/（流式草稿）、
-//     terminals/、terminal-output/、terminal-cmds/、moss.pid、ui-state.json
+//     terminal/（终端会话/临时脚本/完整输出）、moss.pid、ui-state.json
 //   - 绑定本机状态：file-history/（备份文件按绝对路径索引）、extensions.json（插件启停）、
 //     automations-history.json（执行历史）
 //   - 单列为「不支持的插件」一并剔除。
@@ -20,7 +20,6 @@ export const BACKUP_DIRS = [
   'skills',
   'mcps',
   'memory',
-  'agenteam',
 ] as const;
 
 /** 文件型条目（相对 dataDir）：单文件收集 */
