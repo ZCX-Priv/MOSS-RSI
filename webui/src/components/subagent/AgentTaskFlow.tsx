@@ -23,6 +23,11 @@ import { MarkdownRenderer } from '../../render';
 import { useStore } from '../../store';
 import { stripInjectBlock } from '../../lib/inject-block';
 import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-preview';
+import {
+  looksLikeLanguage,
+  resolveThinkingLang,
+  THINKING_LANGUAGE_SAMPLE_CHARS,
+} from '../../lib/thinking-language';
 import { usePersistentState } from '../../lib/ui-state';
 import { ToolCallDetails } from '../shared/ToolCallDetails';
 import { RunCodeCard } from '../shared/RunCodeCard';
@@ -123,7 +128,7 @@ const ThinkingLine = memo(function ThinkingLine({
   /** 翻译完成/缓存命中后刷新历史（子代理消息可能不在 store 中） */
   onTranslated?: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // 流式思考期间每 100ms 刷新「当前时刻」，驱动状态行秒数递增
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -154,6 +159,12 @@ const ThinkingLine = memo(function ThinkingLine({
   );
   /** 思维链展开态：原文/译文胶囊仅在展开后显示 */
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  // 思维链已是当前界面语言时，无需「原文/译文」切换（只取首段采样，避免流式期间全量扫描）
+  const thinkingLangSample = (message.thinking ?? '').slice(0, THINKING_LANGUAGE_SAMPLE_CHARS);
+  const thinkingInUiLanguage = useMemo(
+    () => looksLikeLanguage(thinkingLangSample, resolveThinkingLang(i18n.language)),
+    [thinkingLangSample, i18n.language],
+  );
   /** 本组件发起的按需翻译是否进行中（子代理消息可能不在 store 中，需本地维护） */
   const [translating, setTranslating] = useState(false);
   const hasThinkingTranslation = !!message.thinkingTranslation;
@@ -216,10 +227,15 @@ const ThinkingLine = memo(function ThinkingLine({
       // 成功路径由 AgentTaskFlow 顶层统一 load() 刷新历史
     });
   }, [sessionId, translating, messageKey, setThinkingView]);
+  // 当前语言思维链无需译文视图：若持久化视图仍是 translation，复位为原文
+  useEffect(() => {
+    if (thinkingInUiLanguage && thinkingView === 'translation') setThinkingView('original');
+  }, [thinkingInUiLanguage, thinkingView, setThinkingView]);
   // 兼容旧持久化选择：之前选过「译文」的消息，加载后补触发一次按需翻译
   useEffect(() => {
     if (
       thinkingView === 'translation' &&
+      !thinkingInUiLanguage &&
       !hasThinkingTranslation &&
       !translationPending &&
       !message.streaming &&
@@ -231,6 +247,7 @@ const ThinkingLine = memo(function ThinkingLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     thinkingView,
+    thinkingInUiLanguage,
     hasThinkingTranslation,
     translationPending,
     message.streaming,
@@ -263,8 +280,8 @@ const ThinkingLine = memo(function ThinkingLine({
           </>
         )}
         {previewText && <ThinkingPreview text={previewText} />}
-        {/* 原文/译文胶囊仅在思维链展开后显示 */}
-        {thinkingOpen && !!message.thinking && (
+        {/* 原文/译文胶囊仅在思维链展开且不是当前界面语言时显示 */}
+        {thinkingOpen && !!message.thinking && !thinkingInUiLanguage && (
           <span
             className="ml-auto flex shrink-0 pl-2"
             onClick={(e) => {

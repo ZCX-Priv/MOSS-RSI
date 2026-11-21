@@ -50,6 +50,11 @@ import { FilePreviewPane, archiveEntrySource, fileNameOf, MarkdownRenderer } fro
 import { setHydrationPaused } from '../../render/core/hydration-scheduler';
 import type { OverlayType } from '../../types';
 import { cn } from '@/lib/utils';
+import {
+  looksLikeLanguage,
+  resolveThinkingLang,
+  THINKING_LANGUAGE_SAMPLE_CHARS,
+} from '@/lib/thinking-language';
 import { parseAttachmentBlock, stripAttachmentBlock } from '@/lib/attachment-block';
 import { stripInjectBlock } from '@/lib/inject-block';
 import { onSessionTruncated } from '@/lib/ws-events';
@@ -2043,9 +2048,12 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
           <StatsBar stats={runStats} contextStats={contextStats} />
         </div>
         </div>
-        {/* 右侧快捷工具栏列：固定 56px 空槽（md+ 才占位），与 header 的侧栏开关同一竖列 */}
-        <div className="relative hidden w-14 shrink-0 items-center justify-center md:flex">
-          <TabShortcutRail activeType={activeTab?.type} onOpen={openShortcutTab} />
+        {/* 右侧快捷工具栏列：固定 56px 空槽（md+ 才占位），与 header 的侧栏开关同一竖列；
+            内容靠上；新任务空白页（taskId 为空）不渲染工具栏 */}
+        <div className="relative hidden w-14 shrink-0 items-start justify-center pt-2 md:flex">
+          {taskId ? (
+            <TabShortcutRail activeType={activeTab?.type} onOpen={openShortcutTab} />
+          ) : null}
         </div>
         </div>
       </div>
@@ -2563,7 +2571,7 @@ interface MessageBubbleProps {
   deferContent?: boolean;
 }
 const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
   // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
   // key 带 sessionId：旧消息 id 可能是 `h<index>`，不带会话前缀会跨会话冲突
@@ -2575,6 +2583,12 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
   const [thinkingView, setThinkingView] = usePersistentState<ThinkingView>(
     `${sessionId}:${message.id}:thinkingView`,
     'original',
+  );
+  // 思维链已是当前界面语言时，无需「原文/译文」切换（只取首段采样，避免流式期间全量扫描）
+  const thinkingLangSample = (message.thinking ?? '').slice(0, THINKING_LANGUAGE_SAMPLE_CHARS);
+  const thinkingInUiLanguage = useMemo(
+    () => looksLikeLanguage(thinkingLangSample, resolveThinkingLang(i18n.language)),
+    [thinkingLangSample, i18n.language],
   );
   const hasThinkingTranslation = !!message.thinkingTranslation;
   const translationPending = !!message.thinkingTranslationPending;
@@ -2633,11 +2647,16 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
     setThinkingView,
     t,
   ]);
+  // 当前语言思维链无需译文视图：若持久化视图仍是 translation，复位为原文
+  useEffect(() => {
+    if (thinkingInUiLanguage && thinkingView === 'translation') setThinkingView('original');
+  }, [thinkingInUiLanguage, thinkingView, setThinkingView]);
   // 兼容旧持久化选择：之前选过「译文」的消息，加载后补触发一次按需翻译（只一次）
   useEffect(() => {
     if (autoTranslateTriedRef.current) return;
     if (
       thinkingView === 'translation' &&
+      !thinkingInUiLanguage &&
       !hasThinkingTranslation &&
       !translationPending &&
       !message.streaming &&
@@ -2647,6 +2666,7 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
     }
   }, [
     thinkingView,
+    thinkingInUiLanguage,
     hasThinkingTranslation,
     translationPending,
     message.streaming,
@@ -2877,8 +2897,8 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, todos, t
             {/* 预览仅在折叠态展示：展开后全文可见，隐藏预览避免重复。
                 横向滚动发生在预览自身容器内，不撑宽会话布局。 */}
             <ThinkingPreview text={thinkPreview} />
-            {/* 原文/译文胶囊仅在思维链展开后显示，折叠态保持标题行简洁 */}
-            {thinkingOpen && !!message.thinking && (
+            {/* 原文/译文胶囊仅在思维链展开且不是当前界面语言时显示 */}
+            {thinkingOpen && !!message.thinking && !thinkingInUiLanguage && (
               <span
                 className="ml-auto flex shrink-0 pl-2"
                 onClick={(e) => {
