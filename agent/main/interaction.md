@@ -44,7 +44,7 @@
    - 仍无效：`evaluate` 检查 `document.activeElement`（是否落在 iframe）；必要时先 `click` 到 iframe 中心再发键。
    - 仍无效：`computer action=status` 看 cua；或改用台式输入（仅非网页内容）。
 2. **browser 标签页失效**
-   - 直接 `open`（通常无需再传 `group_name`/`group_id`，程序自动沿用本会话固定分组；只有会话首次 open 才需要取名）。
+   - `action=tabs` 查看现有 AI 标签；用 URL 直接 `open`（通常无需再传 `group_name`/`group_id`，程序自动沿用本会话固定分组；只有会话首次 open 才需要取名）。
    - 工具会先尝试按 URL 复用原 tN key；仍失败时按错误里的可用列表操作。
 3. **computer 后台动作未验证**
    - 工具会自动升级 foreground 一次；仍未确认时用 `get_window_state` / `verify` 独立观察，不要重复原调用。
