@@ -63,8 +63,6 @@ export function loadPromptFile(env: Environment, relativePath: string, fallback 
 export function ensureContextPrompts(env: Environment): void {
   const relatives = [
     'compact/compaction.md',
-    'compact/compaction-tier2.md',
-    'compact/compaction-tier3.md',
     'heal/tool-error.md',
     'context/pressure.md',
   ];

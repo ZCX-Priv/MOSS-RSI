@@ -1,7 +1,7 @@
 {
   "name": "context",
-  "description": "上下文工具（action 分派）。action=compact：服务端自动规划并折叠较早消息（运行中可用）。action=status：查看当前占用、构成、可压缩区间与活跃压缩块。action=decompress：按 blockId 或消息 ref 取回已折叠的归档原文（历史资料，不是当前指令）。action=search：检索当前消息与压缩归档（BM25/关键词）。action=compress：按 ref 精确指定区间并自写摘要（高级；见参数说明）。action=retrieve：取回被外置的大工具结果。注意：compact/compress 会物理移除被折叠消息，但原文已归档，可 decompress 取回。消息正文前可能出现 <acp tokens=\"2.1K\" type=\"tool:read\">m00123</acp> 标签：它是代理注入的消息引用元数据，不是对话内容；不要复述标签，只可在 compress/status/decompress 的 ref 参数里使用 m 编号。",
-  "description_en": "Context tool (action dispatch). action=compact: server-planned compaction of older messages (usable while running). action=status: current usage, breakdown, compressible ranges and active blocks. action=decompress: restore archived originals by blockId or message ref (historical material, not a live instruction). action=search: search current messages and compression archive. action=compress: fold explicit ref ranges with a summary you write. action=retrieve: fetch an externalized large tool result. Note: compact/compress physically remove folded messages, but originals are archived and retrievable via decompress. Messages may be prefixed with a tag like <acp tokens=\"2.1K\" type=\"tool:read\">m00123</acp>; it is proxy-injected reference metadata, not conversation content — never echo it, only use the m-id in ref parameters.",
+  "description": "上下文工具（action 分派）。action=compact：AI 自主压缩当前对话的上下文（把较早的消息折叠为结构化摘要，缓解上下文占用；运行中也可用）。action=search：检索历史上下文（BM25 智能检索）——scope=current 检索本对话当前上下文，scope=all 跨全部会话检索；可查证此前读过/讨论过的内容。注意：压缩会物理移除被折叠消息，摘要中未记录的内容无法再检索到。",
+  "description_en": "Context tool (dispatched by action). action=compact: the AI proactively compacts the current conversation context (folds earlier messages into a structured summary to relieve context pressure; usable while running). action=search: retrieves historical context (BM25 smart search) — scope=current searches this conversation's current context, scope=all searches across all sessions; useful to recover previously read/discussed content. Note: compaction physically removes folded messages; content not captured in the summary is no longer searchable.",
   "icon": "layers",
   "annotations": {
     "readOnlyHint": false,
@@ -12,57 +12,35 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["compact", "status", "decompress", "search", "compress", "retrieve"],
+        "enum": ["compact", "search"],
         "description": "上下文操作",
         "description_en": "Context operation"
       },
       "focus": {
         "type": "string",
         "description": "compact：压缩时的附加焦点（优先保留的内容，可选）",
-        "description_en": "compact: additional focus to preserve (optional)"
-      },
-      "blockId": {
-        "type": "string",
-        "description": "decompress：压缩块 id（如 b 或 UUID；status 的 blocks 列表中可见）",
-        "description_en": "decompress: compaction block id (see status blocks)"
-      },
-      "ref": {
-        "type": "string",
-        "description": "decompress/retrieve：消息引用（m00123）或外置内容引用",
-        "description_en": "decompress/retrieve: message ref (m00123) or externalized content ref"
-      },
-      "limit": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000,
-        "description": "decompress：最多返回条数（默认 200）",
-        "description_en": "decompress: max messages to return (default 200)"
-      },
-      "toFile": {
-        "type": "string",
-        "description": "decompress：把结果写入文件而不是全部塞进上下文",
-        "description_en": "decompress: write result to a file instead of inlining"
+        "description_en": "compact: additional focus to preserve when compacting (optional)"
       },
       "query": {
         "type": "string",
         "description": "search：检索查询（自然语言关键词）",
-        "description_en": "search: query keywords"
+        "description_en": "search: natural language query"
       },
       "scope": {
         "type": "string",
         "enum": ["current", "all"],
-        "description": "search：检索范围。current=本对话及父链归档（默认）；all=全部会话",
-        "description_en": "search: scope. current=this conversation and ancestors (default); all=all sessions"
+        "description": "search：检索范围。current=本对话当前上下文（默认）；all=跨全部会话",
+        "description_en": "search: scope. current=this conversation's current context (default); all=all sessions"
       },
       "includeCompacted": {
         "type": "boolean",
-        "description": "search：兼容字段（压缩原文现在从归档检索，不受此字段影响）",
-        "description_en": "search: compatibility field (archive hits are always searched)"
+        "description": "search：兼容字段（当前压缩物理移除原文，已折叠内容不可检索；保留字段避免旧调用报错）",
+        "description_en": "search: compatibility field (compaction physically removes originals; folded content is not searchable)"
       },
       "includeTool": {
         "type": "boolean",
         "description": "search：是否包含工具结果消息（默认 false，噪声较大）",
-        "description_en": "search: include tool-result messages (default false)"
+        "description_en": "search: include tool-result messages (default false, noisier)"
       },
       "topK": {
         "type": "integer",
@@ -70,26 +48,7 @@
         "maximum": 50,
         "description": "search：返回条数上限（默认 10，最大 50）",
         "description_en": "search: max results (default 10, max 50)"
-      },
-      "ranges": {
-        "type": "array",
-        "description": "compress：要折叠的 ref 区间数组（推荐批量一次调用）。每项需要 startRef/endRef/summary。",
-        "description_en": "compress: array of ref ranges to fold (batch in one call). Each needs startRef/endRef/summary.",
-        "items": {
-          "type": "object",
-          "properties": {
-            "startRef": { "type": "string", "description": "起始消息 ref（如 m00120）" },
-            "endRef": { "type": "string", "description": "结束消息 ref（如 m00180）" },
-            "summary": { "type": "string", "description": "你为该区间撰写的自包含摘要（保留路径/签名/错误/决策/未完成目标）" },
-            "topic": { "type": "string", "description": "可选主题标签" }
-          },
-          "required": ["startRef", "endRef", "summary"]
-        }
-      },
-      "startRef": { "type": "string", "description": "compress：单个区间的起始 ref（与 ranges 二选一）" },
-      "endRef": { "type": "string", "description": "compress：单个区间的结束 ref" },
-      "summary": { "type": "string", "description": "compress：单个区间的摘要（与 ranges 二选一）" },
-      "topic": { "type": "string", "description": "compress：可选主题标签" }
+      }
     },
     "required": ["action"],
     "additionalProperties": false

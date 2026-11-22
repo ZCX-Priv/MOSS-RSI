@@ -1,8 +1,9 @@
 // src/modules/context/compressor/index.ts
 // 压缩执行主流程：
-//   plan（planner）→ summarize（summarizer，cache-aligned）→ applyFold（归档 + 折叠）→ 写入 compactions 历史
-// 被折叠原文先写入 SQLite 归档，再从 session.messages 物理移除，由摘要消息替代。
-// 多轮压缩：旧摘要消息一并进入可压缩区，由新摘要指令要求合并（T1→T2→T3）。
+//   plan（planner）→ summarize（summarizer，cache-aligned）→ 标记 compacted →
+//   插入摘要消息 → 写入 compactions 历史
+// 被压缩消息保留原文 + compacted=true 标记（发送视图排除，前端历史完整）；
+// 多轮压缩：旧摘要消息一并进入可压缩区，由新摘要指令要求合并。
 
 import { randomUUID } from 'node:crypto';
 import type { Environment, Logger } from '../../../core/types';
@@ -14,12 +15,9 @@ import type {
 } from '../types';
 import type { LLMRouter } from '../../contracts';
 import { estimateMessagesTokens, estimateTextTokens } from '../budgeter/estimator';
-import { planCompaction, isProtectedMessage, isCompactionSummaryMessage } from './planner';
+import { planCompaction, isProtectedMessage } from './planner';
 import { summarizeRegion, SummarizeError } from './summarizer';
-import { rebaseDistillWatermark } from './watermark';
 import { COMPACTION_SUMMARY_MSG_NAME } from '../compiler/view-builder';
-import { archiveCompaction } from '../store/context-store';
-import { ensureSessionRefs } from '../refs';
 
 /** 摘要消息包裹标签 */
 export const SUMMARY_TAG_OPEN = '<compaction-summary>';
@@ -70,19 +68,8 @@ export function resolveSummaryModel(
   return { requestModel: mainModel, resolved: false };
 }
 
-/** 根据被压缩区内容判断层级：包含旧摘要则提升一层。 */
-export function resolveFoldTier(region: readonly ContextMessage[]): 1 | 2 | 3 {
-  const summaries = region.filter(m => isCompactionSummaryMessage(m));
-  if (summaries.length === 0) return 1;
-  const priorTier = summaries.reduce((max, m) => {
-    const t = typeof m.metadata?.tier === 'number' ? m.metadata.tier : 1;
-    return Math.max(max, t >= 3 ? 3 : t === 2 ? 2 : 1);
-  }, 1);
-  return Math.min(3, priorTier + 1) as 1 | 2 | 3;
-}
-
 /**
- * 对会话执行一次服务端规划压缩（原地修改 session）。
+ * 对会话执行一次压缩（原地修改 session：标记 compacted、插入摘要消息、追加历史记录）。
  * 调用方负责持久化与 WS 推送。
  */
 export async function compactSession(
@@ -102,22 +89,19 @@ export async function compactSession(
     config.tailKeepRatio,
     config.minFoldTokens,
     config.minCompactMessages,
-    config.protectedTools,
-    config.preserveRecentTokens,
   );
   if (!plan.ok) {
     return { record: null, reason: plan.reason };
   }
 
-  // 3. 可压缩区（保护锚定消息 / protectedTools）
+  // 3. 可压缩区（保护 skill-inject；env-context 已被 head 排除）
   const region = active
     .slice(plan.startIdx, plan.endIdx + 1)
-    .filter(m => !isProtectedMessage(m, config.protectedTools));
+    .filter(m => !isProtectedMessage(m));
   if (region.length === 0) {
     return { record: null, reason: 'no compactable messages (all protected)' };
   }
-
-  const tier = resolveFoldTier(region);
+  const beforeTokens = estimateMessagesTokens(active);
 
   // 4. 生成摘要（单次失败即放弃本轮）
   let summary: string;
@@ -130,7 +114,6 @@ export async function compactSession(
       region,
       focus,
       summaryModelId: input.summaryModelId,
-      tier,
     });
   } catch (err) {
     const msg = err instanceof SummarizeError ? err.message : err instanceof Error ? err.message : String(err);
@@ -139,7 +122,8 @@ export async function compactSession(
   }
 
   // 4.5 收缩比检查（DSH shrink check）：摘要必须显著小于被压缩区，否则放弃本轮。
-  const summaryTokens = estimateTextTokens(summary) + 8;
+  // 目的：杜绝“摘要≈原文”的空转——这正是“越压越傻 / 反复压缩”的直接成因。
+  const summaryTokens = estimateTextTokens(summary) + 8; // +8 结构/包装开销
   if (summaryTokens > plan.regionTokens * config.maxShrinkRatio) {
     logger.warn('context: compaction aborted (shrink check failed)', {
       sessionId: session.id,
@@ -152,89 +136,19 @@ export async function compactSession(
       reason: `shrink check failed: summary ${summaryTokens} > region ${plan.regionTokens} × ${config.maxShrinkRatio}`,
     };
   }
-
-  try {
-    const record = applyFold({
-      env,
-      session,
-      region,
-      summary,
-      summaryModel: input.summaryModelConfigured,
-      trigger,
-      tier,
-      durationMs: Date.now() - startedAt,
-    });
-    logger.info('context: compaction completed', {
-      sessionId: session.id,
-      trigger,
-      compactedCount: record.compactedCount,
-      beforeTokens: record.beforeTokens,
-      afterTokens: record.afterTokens,
-      durationMs: record.durationMs,
-      tier: record.tier,
-    });
-    return { record };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn('context: compaction apply failed', { sessionId: session.id, error: msg });
-    return { record: null, reason: msg };
+  const projectedAfter = beforeTokens - plan.regionTokens + summaryTokens;
+  if (projectedAfter >= beforeTokens) {
+    return { record: null, reason: `compaction would not reduce tokens (${projectedAfter} >= ${beforeTokens})` };
   }
-}
 
-export interface ApplyFoldInput {
-  env: Environment;
-  session: ContextSessionLike;
-  /** 已被调用方筛选/净化过的待折叠消息（保持 session.messages 对象身份） */
-  region: ContextMessage[];
-  /** 模型自写或服务端生成的摘要正文（不含标签） */
-  summary: string;
-  summaryModel: string;
-  trigger: 'auto' | 'manual' | 'model';
-  /** 摘要层级；缺省按 region 内旧摘要推断 */
-  tier?: 1 | 2 | 3;
-  /** 块 id；缺省生成 UUID */
-  blockId?: string;
-  /** 已耗时（手动/模型压缩记录用） */
-  durationMs?: number;
-}
-
-/**
- * 折叠落地：归档原文 → 插入摘要 → 物理删除 → 记录历史 → 重算蒸馏水位。
- * 归档失败会抛错，调用方必须整体放弃（“可逆”是硬承诺）。
- */
-export function applyFold(input: ApplyFoldInput): CompactionRecord {
-  const { env, session, region, summary, summaryModel, trigger } = input;
-  if (region.length === 0) throw new Error('empty compaction region');
-
-  const startedAt = Date.now();
-  ensureSessionRefs(session);
-  const blockId = input.blockId ?? randomUUID();
-  const tier = input.tier ?? resolveFoldTier(region);
-  const refs = region.map(m => m.ref).filter((r): r is string => typeof r === 'string');
-  const activeBefore = session.messages.filter(m => !m.deletedAt && !m.compacted);
-  const beforeTokens = estimateMessagesTokens(activeBefore);
-  const regionTokens = estimateMessagesTokens(region);
-  const summaryTokens = estimateTextTokens(summary) + 8;
-  const projectedAfter = beforeTokens - regionTokens + summaryTokens;
-
-  // 归档必须先于任何变更
-  archiveCompaction(env, {
-    id: blockId,
-    sessionId: session.id,
-    tier,
-    refs,
-    summary,
-    beforeTokens,
-    afterTokens: projectedAfter,
-    trigger,
-    messages: region,
-  });
-
-  // 记忆蒸馏水位是数组下标，物理删除后必须按旧下标重算。
-  const memoryWatermark = session.memoryState?.lastDistilledIndex;
-  const beforeFoldMessages = memoryWatermark === undefined ? null : [...session.messages];
+  // 5. 物理折叠被压缩区间（体积治理：原文不再保留，session 文件与内存有界）。
+  // 原实现仅标记 compacted=true，原文永久驻留内存与磁盘，小时级长任务下只增不减；
+  // 现直接从 session.messages 移除被压缩消息，由摘要消息替代（业界 /compact 标准做法）。
+  // 工具结果保持全文（用户要求：利好 LLM 读大文件）——折叠的只是已退出请求视图的旧消息。
   const compactedSet = new Set(region);
 
+  // 6. 摘要消息插入：紧跟被压缩区间最后一条消息之后（保持消息流时序）。
+  // 插入点必须在物理删除前计算（lastRegionMsg 定位）
   const lastRegionMsg = region[region.length - 1];
   const insertAt = session.messages.lastIndexOf(lastRegionMsg) + 1;
   const summaryMessage: ContextMessage = {
@@ -242,21 +156,19 @@ export function applyFold(input: ApplyFoldInput): CompactionRecord {
     name: COMPACTION_SUMMARY_MSG_NAME,
     content: `${SUMMARY_TAG_OPEN}\n${summary}\n${SUMMARY_TAG_CLOSE}`,
     timestamp: new Date().toISOString(),
-    metadata: { tier, blockId, refs },
   };
   session.messages.splice(insertAt, 0, summaryMessage);
+  // 按对象身份移除被压缩消息（保护消息 skill-inject/env-context 与已删除死消息不受影响；
+  // 摘要消息不在 removeSet 中自然保留，落在被折叠区间原位）
   session.messages = session.messages.filter(m => !compactedSet.has(m));
 
-  if (session.memoryState && beforeFoldMessages) {
-    session.memoryState.lastDistilledIndex =
-      rebaseDistillWatermark(beforeFoldMessages, session.messages, memoryWatermark) ?? 0;
-  }
-
+  // 7. 压缩后估算（env-context + 新摘要 + 尾部）
   const afterActive = session.messages.filter(m => !m.deletedAt && !m.compacted);
   const afterTokens = estimateMessagesTokens(afterActive);
 
+  // 8. 历史记录
   const record: CompactionRecord = {
-    id: blockId,
+    id: randomUUID(),
     at: new Date().toISOString(),
     trigger,
     beforeTokens,
@@ -265,37 +177,20 @@ export function applyFold(input: ApplyFoldInput): CompactionRecord {
     foldedMessageCount: compactedSet.size,
     summary,
     boundaryTimestamp: lastRegionMsg.timestamp,
-    summaryModel,
-    durationMs: input.durationMs ?? Date.now() - startedAt,
-    tier,
-    blockId,
-    archiveId: blockId,
-    refs,
+    summaryModel: input.summaryModelConfigured,
+    durationMs: Date.now() - startedAt,
   };
   if (!session.compactions) session.compactions = [];
   session.compactions.push(record);
-  trimCompactionHistory(session);
-  // 新摘要立即获得 ref（同一轮视图即可被模型引用；编号仍单调不回退）
-  ensureSessionRefs(session);
-  return record;
-}
 
-/** 会话内保留全文的压缩记录条数；更早记录截断摘要正文（原文已在 SQLite 归档）。 */
-const COMPACTION_HISTORY_KEEP_FULL = 20;
-const COMPACTION_HISTORY_TRUNCATED_CHARS = 240;
+  logger.info('context: compaction completed', {
+    sessionId: session.id,
+    trigger,
+    compactedCount: record.compactedCount,
+    beforeTokens,
+    afterTokens,
+    durationMs: record.durationMs,
+  });
 
-/**
- * 压缩记录治理：session.compactions 会随会话长期累积摘要全文，
- * 这里只保留最近 N 条全文，更早记录保留统计字段 + 截断摘要。
- */
-export function trimCompactionHistory(session: ContextSessionLike): void {
-  const list = session.compactions;
-  if (!list || list.length <= COMPACTION_HISTORY_KEEP_FULL) return;
-  const cut = list.length - COMPACTION_HISTORY_KEEP_FULL;
-  for (let i = 0; i < cut; i++) {
-    const r = list[i];
-    if (r.summary.length > COMPACTION_HISTORY_TRUNCATED_CHARS) {
-      r.summary = `${r.summary.slice(0, COMPACTION_HISTORY_TRUNCATED_CHARS)}…[已截断，原文见 block ${r.blockId ?? r.id}]`;
-    }
-  }
+  return { record };
 }
