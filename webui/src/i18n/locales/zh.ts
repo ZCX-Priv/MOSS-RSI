@@ -268,7 +268,7 @@ export const zh = {
       defaultSet: '已设为默认智能体',
       subagentExecTitle: '子代理执行策略',
       maxSubagentDepthLabel: '子代理嵌套最大层级',
-      maxSubagentDepthDesc: '子代理可继续派发子代理的层数（1=只能派发一层；2=主→子→孙）；默认 2',
+      maxSubagentDepthDesc: '子代理可继续派发子代理的层数（0=不限制；1=只能派发一层；2=主→子→孙）；范围 0-32，默认 2',
       maxConcurrentSubagentsLabel: '同轮并行子代理上限',
       maxConcurrentSubagentsDesc: '同一轮最多同时启动的子代理数量（1-32；0=不限制）；默认 4，超出的调用会排队',
     },

@@ -4,7 +4,7 @@
 //   - 默认关闭；开启后模型可在工具调用参数中用 resultMode 选择 summary（默认）或 original；
 //   - 短结果（< minChars）、错误结果、original 模式一律保留原文；
 //   - 摘要失败/超时/空输出返回 null，调用方回退原文（不阻断工具链路）；
-//   - 提示词外部化为 agent/tool-result/summary.md，用户可覆盖。
+//   - 提示词外部化为 agent/prompt/tool-result/summary.md，用户可覆盖。
 
 import type { Environment } from '../../core/types';
 import type { LLMRouter } from '../contracts';

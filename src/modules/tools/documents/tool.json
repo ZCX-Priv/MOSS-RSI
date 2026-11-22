@@ -1,0 +1,45 @@
+{
+  "name": "documents",
+  "parallelSafe": true,
+  "description": "能力文档库检索工具（只读）。action=list 列出 ~/.moss/agent/documents 下的主题与文档；action=search 按关键词全文检索（返回 路径:行号）；action=read 读取指定文档（path 相对文档库根，如 browser/best-practices.md）。覆盖 browser / computer / ptc / terminal / subagent / memory / mcp / skills / context / safety 十个主题。遇到这些能力的具体接口、推荐流程、失败恢复与验收标准问题时，先检索再执行；文档以当轮工具 schema、用户指令与安全策略为准。",
+  "description_en": "Read-only capability document library. action=list lists topics and documents under ~/.moss/agent/documents; action=search full-text searches by keyword (returns path:line); action=read reads a document (path relative to the library root, e.g. browser/best-practices.md). Covers ten topics: browser / computer / ptc / terminal / subagent / memory / mcp / skills / context / safety. Search these docs before acting on capability details, recommended flows, failure recovery, or acceptance criteria; the current tool schema, user instructions, and safety policy take precedence.",
+  "icon": "book-open",
+  "annotations": {
+    "readOnlyHint": true,
+    "idempotentHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["list", "search", "read"],
+        "description": "操作类型：list=列出主题与文档；search=关键词检索；read=读取文档",
+        "description_en": "Operation: list = list topics/documents; search = keyword search; read = read a document"
+      },
+      "topic": {
+        "type": "string",
+        "description": "list：可选，仅列出指定主题（如 browser / computer / ptc）",
+        "description_en": "list: optional topic filter (e.g. browser / computer / ptc)"
+      },
+      "query": {
+        "type": "string",
+        "description": "search：检索关键词（不区分大小写）",
+        "description_en": "search: keyword (case-insensitive)"
+      },
+      "path": {
+        "type": "string",
+        "description": "read：文档相对路径（如 browser/best-practices.md 或 INDEX.md）",
+        "description_en": "read: document path relative to the library root (e.g. browser/best-practices.md or INDEX.md)"
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "config": {
+    "defaults": {
+      "enabled": true
+    },
+    "schema": {}
+  }
+}

@@ -1,11 +1,14 @@
 // src/modules/context/prompt-loader.ts
-// 上下文引擎提示词文件加载：所有 LLM 提示词外部化为 agent/ 下的 md 文件。
-// 加载顺序：~/.moss/agent/<relative>（用户可改）→ 包内种子源 → 内置兜底文本。
+// 上下文引擎提示词文件加载：所有 LLM 提示词外部化为 agent/prompt/ 下的 md 文件。
+// 加载顺序：~/.moss/agent/prompt/<relative>（用户可改）→ 包内种子源 → 内置兜底文本。
 // ensureContextPrompts：为已初始化用户补充播种 compact/ 与 heal/ 目录（幂等，不覆盖用户修改）。
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Environment } from '../../core/types';
+
+/** 提示词子目录（相对 ~/.moss/agent 与包内 agent/） */
+const PROMPT_SUBDIR = 'prompt';
 
 /** 剥离 UTF-8 BOM（避免 \uFEFF 混入提示词） */
 function stripBom(text: string): string {
@@ -16,11 +19,11 @@ function stripBom(text: string): string {
  * 加载提示词文件（缺失或为空时返回 null）。
  * 查找顺序：用户目录 → 包内种子源；均缺失/为空时返回 null，由调用方决定降级行为。
  * @param env 环境信息
- * @param relativePath 相对 ~/.moss/agent/ 的路径（如 'compact/compaction.md'）
+ * @param relativePath 相对 ~/.moss/agent/prompt/ 的路径（如 'compact/compaction.md'）
  */
 export function loadPromptFileOrNull(env: Environment, relativePath: string): string | null {
-  // 1. 用户目录（~/.moss/agent/...）
-  const userFile = join(env.dataDir, 'agent', relativePath);
+  // 1. 用户目录（~/.moss/agent/prompt/...）
+  const userFile = join(env.dataDir, 'agent', PROMPT_SUBDIR, relativePath);
   try {
     if (existsSync(userFile)) {
       const text = readFileSync(userFile, 'utf8');
@@ -30,12 +33,12 @@ export function loadPromptFileOrNull(env: Environment, relativePath: string): st
     // 读取失败落回种子源
   }
 
-  // 2. 包内种子源（<packageRoot>/agent/...）
+  // 2. 包内种子源（<packageRoot>/agent/prompt/...）
   // packageRoot 在异常构造/测试桩里可能缺失：join(undefined) 会直接抛 TypeError，
   // 这里显式跳过，让调用方走兜底文本而不是被路径错误打断。
   const pkgRoot = env.packageRoot;
   if (typeof pkgRoot === 'string' && pkgRoot !== '') {
-    const pkgFile = join(pkgRoot, 'agent', relativePath);
+    const pkgFile = join(pkgRoot, 'agent', PROMPT_SUBDIR, relativePath);
     try {
       if (existsSync(pkgFile)) {
         const text = readFileSync(pkgFile, 'utf8');
@@ -52,7 +55,7 @@ export function loadPromptFileOrNull(env: Environment, relativePath: string): st
 /**
  * 加载提示词文件（缺失时返回兜底文本，默认空串）。
  * @param env 环境信息
- * @param relativePath 相对 ~/.moss/agent/ 的路径（如 'compact/compaction.md'）
+ * @param relativePath 相对 ~/.moss/agent/prompt/ 的路径（如 'compact/compaction.md'）
  * @param fallback 兜底文本（用户文件与包内种子均缺失时使用；默认空串）
  */
 export function loadPromptFile(env: Environment, relativePath: string, fallback = ''): string {
@@ -72,9 +75,9 @@ export function ensureContextPrompts(env: Environment): void {
     'context/pressure.md',
   ];
   for (const rel of relatives) {
-    const dest = join(env.dataDir, 'agent', rel);
+    const dest = join(env.dataDir, 'agent', PROMPT_SUBDIR, rel);
     if (existsSync(dest)) continue;
-    const src = join(env.packageRoot, 'agent', rel);
+    const src = join(env.packageRoot, 'agent', PROMPT_SUBDIR, rel);
     try {
       if (!existsSync(src)) continue;
       mkdirSync(join(dest, '..'), { recursive: true });

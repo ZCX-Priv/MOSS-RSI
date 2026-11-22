@@ -2232,15 +2232,15 @@ export function AgentSettings() {
     }
   };
 
-  /** 子代理嵌套层级：clamp 到 [1,5]；非法回退当前值 */
+  /** 子代理嵌套层级：clamp 到 [0,32]（0=不限制）；非法回退当前值 */
   const commitMaxSubagentDepthDraft = () => {
     const raw = maxSubagentDepthDraft.trim();
     const n = Math.round(Number(raw));
-    if (!Number.isFinite(n) || n <= 0) {
+    if (!Number.isFinite(n) || n < 0) {
       setMaxSubagentDepthDraft(String(maxSubagentDepth));
       return;
     }
-    const clamped = Math.max(1, Math.min(5, n));
+    const clamped = Math.max(0, Math.min(32, n));
     setMaxSubagentDepthDraft(String(clamped));
     void patchMaxSubagentDepth(clamped);
   };
@@ -2391,8 +2391,8 @@ export function AgentSettings() {
           </div>
           <Input
             type="number"
-            min={1}
-            max={5}
+            min={0}
+            max={32}
             value={maxSubagentDepthDraft}
             onChange={(e) => setMaxSubagentDepthDraft(e.target.value)}
             onBlur={commitMaxSubagentDepthDraft}
@@ -2564,7 +2564,7 @@ export function AboutSettings() {
     };
   }, []);
 
-  const versionText = versionInfo ? `v${versionInfo.version}` : '—';
+  const versionText = versionInfo?.version ? `v${versionInfo.version}` : '—';
   const channelText = versionInfo?.channel ?? '—';
   const runtimeText = versionInfo?.buildDate ?? '—';
 

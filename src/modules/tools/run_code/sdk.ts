@@ -1,4 +1,4 @@
-// 代码模式的系统提示附加段：静态指令从 agent/code-mode/ 加载，运行时只拼接工具签名与条件片段。
+// 代码模式的系统提示附加段：静态指令从 agent/prompt/code-mode/ 加载，运行时只拼接工具签名与条件片段。
 // 输出必须字节稳定（工具按名字排序、固定格式），否则会破坏前缀缓存。
 
 import type { Environment } from '../../../core/types';

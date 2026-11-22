@@ -162,13 +162,13 @@ function resolveSelf(ctx: ToolContext): AgentBusMember | null {
   return bus?.get(ctx.sessionId) ?? null;
 }
 
-/** 子代理嵌套上限（config.agent.maxSubagentDepth，与引擎保持同一收窄口径） */
+/** 子代理嵌套上限（config.agent.maxSubagentDepth，与引擎保持同一收窄口径；0=不限制） */
 function resolveMaxSubagentDepth(ctx: ToolContext): number {
   try {
     const config = ctx.services
       .tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE)
       ?.getAppConfig();
-    return Math.min(5, Math.max(1, config?.agent.maxSubagentDepth ?? 2));
+    return Math.min(32, Math.max(0, config?.agent.maxSubagentDepth ?? 2));
   } catch {
     return 2;
   }
@@ -192,7 +192,7 @@ async function runDelegate(
   const self = resolveSelf(ctx);
   if (self?.kind === 'subagent') {
     const maxDepth = resolveMaxSubagentDepth(ctx);
-    if (self.depth >= maxDepth) {
+    if (maxDepth > 0 && self.depth >= maxDepth) {
       return errorResult(
         `已达到子代理嵌套层级上限（当前 ${self.depth} 层，上限 ${maxDepth} 层）；请直接完成当前任务或使用 action=status/message 协作。`,
       );
@@ -530,7 +530,7 @@ function createAgentTool(
   registry: AgentRegistry | null,
   services: ServiceRegistry,
 ): Tool {
-  // 用法文案从 agent/subagent/usage.md 加载；缺失时为空串降级
+  // 用法文案从 agent/prompt/subagent/usage.md 加载；缺失时为空串降级
   const usage = loadPromptFileOrNull(env, 'subagent/usage.md') ?? '';
   return {
     name: 'agent',
@@ -539,7 +539,7 @@ function createAgentTool(
     get description(): string {
       return (
         '多智能体统一工具（action 分派）。delegate（缺省）：把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns），多个独立任务应在同一轮发起多个 async 调用并行执行；status：列出/查看/取消当前任务树中的智能体；message：向主代理/兄弟代理点对点私聊；board：共享白板（主代理设定规则，所有成员可读/讨论）；manage：管理内置与自定义 Agent（list/get/create/update/delete/tools）。' +
-        `${agentCatalogText(registry)}${concurrentSubagentText(services)}嵌套层级受设置中的 maxSubagentDepth 限制；子代理不可使用 manage。${usage}`
+        `${agentCatalogText(registry)}${concurrentSubagentText(services)}嵌套层级受设置中的 maxSubagentDepth 限制（0=不限制）；子代理不可使用 manage。${usage}`
       );
     },
     inputSchema: {

@@ -12,7 +12,7 @@
 
 ## 嵌套规则
 
-- 子代理可以继续调用 `agent(action="delegate", ...)` 派发下一层，层级上限由设置中的 `agent.maxSubagentDepth` 控制（默认 2：主 → 子 → 孙）。
+- 子代理可以继续调用 `agent(action="delegate", ...)` 派发下一层，层级上限由设置中的 `agent.maxSubagentDepth` 控制（0=不限制；1=主→子；2=主→子→孙；默认 2，范围 0-32）。
 - 达到上限后仍可调用 `agent` 的 status / message，但 delegate 会被运行时拒绝并给出明确错误。
 - 子代理不可使用 `agent(action="manage", ...)`；自定义 Agent 的持久创建/修改由主代理负责。
 

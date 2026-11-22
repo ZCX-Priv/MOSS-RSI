@@ -269,7 +269,7 @@ export const en = {
       subagentExecTitle: 'Subagent execution policy',
       maxSubagentDepthLabel: 'Max subagent nesting depth',
       maxSubagentDepthDesc:
-        'How many subagent layers may be spawned (1 = one layer; 2 = main → child → grandchild); default 2',
+        'How many subagent layers may be spawned (0 = unlimited; 1 = one layer; 2 = main → child → grandchild); range 0-32, default 2',
       maxConcurrentSubagentsLabel: 'Max parallel subagents per round',
       maxConcurrentSubagentsDesc:
         'How many subagents may start in the same round (1-32; 0 = unlimited); default 4, extra calls queue',

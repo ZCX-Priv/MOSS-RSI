@@ -1,7 +1,8 @@
 // src/modules/tools/shared/agent-seed.ts
 // agent/ 提示词目录播种 + 内容指纹自动迁移。
-// 首次运行：从 <packageRoot>/agent/ 递归复制到 ~/.moss/agent/。
-// 已初始化：逐文件内容指纹对比同步——用户未修改的文件自动升级到新版，
+// 首次运行：从 <packageRoot>/agent/ 递归复制到 ~/.moss/agent/（含 prompt/ 与 documents/）。
+// 已初始化：先清理废弃路径，再把旧布局（根级模块目录 / prompts/）迁入 prompt/，
+// 最后逐文件内容指纹对比同步——用户未修改的文件自动升级到新版，
 // 用户修改过的文件保留不动（内容哈希不匹配任何已知播种指纹）。
 // 指纹记录：~/.moss/agent/.seed-manifest.json（path → 上次播种内容 sha256）。
 // 失败不阻断启动（静默降级，调用方各自处理目录缺失场景）。
@@ -15,25 +16,34 @@ import type { Environment } from '../../../core/types';
 /** 是否已执行过本次进程内的播种检查（幂等加速；stat 代价低，但避免重复日志/IO） */
 let seeded = false;
 
+/** 已知旧版种子内容指纹（relpath → sha256 列表）。 */
+const LEGACY_MAIN_SYSTEM_HASHES: ReadonlyArray<string> = [
+  '61a92fc6c815da130d26a3f17ebe0d87d954bb897f9eda175b6fd901659d64f0',
+  'd56794dff898e11fe8fdaafbc8c6e196a8b62e5a99a939cb7cb4b31745b06bf8',
+  // 二期版本（环境变量注入版）：rules 并入 system、环境信息迁往 env-context 前的形态
+  '5008ed358b2239ceeab49d6ec42a31c8aec809e9f3ab08b6fcc402c1fe69bf54',
+  // 二期落地版（rules 并入 + 环境信息迁 env-context）：三期新增语言思考/输出渲染段前的形态
+  '83a6f4069fe6ca3c1849a29f3c171e13366204b842d4b0f022ab9af614c47169',
+];
+
+/** main/rules.md 历史种子哈希（内容已并入 system.md，仅用于迁移识别） */
+const LEGACY_MAIN_RULES_HASHES: ReadonlyArray<string> = [
+  '9a80c5af645cf3feffacf6cfe936349424c19085fa0cfff09c1659c799b91928',
+  'afecb8d831bd60b5c9254def1e9baac7974989fa3481079c1d2e8c2114d8e48a',
+  '166d069be3dd54329e74fd53a04e302b3de075cd0a7088f8970ab4bee3e3c5f7',
+];
+
 /**
  * 已知旧版种子内容指纹（relpath → sha256 列表）。
  * 用于 manifest 缺失时的首次迁移：目标内容命中任一旧指纹 = 用户未修改的旧版 → 升级。
  * 后续版本演进由 manifest 机制接管，新迁移时在此追加旧指纹即可。
+ * 同时登记旧布局键与新布局键（prompt/...），覆盖「manifest 缺失 + 已完成目录迁移」场景。
  */
 const LEGACY_SEED_HASHES: Readonly<Record<string, ReadonlyArray<string>>> = {
-  'main/system.md': [
-    '61a92fc6c815da130d26a3f17ebe0d87d954bb897f9eda175b6fd901659d64f0',
-    'd56794dff898e11fe8fdaafbc8c6e196a8b62e5a99a939cb7cb4b31745b06bf8',
-    // 二期版本（环境变量注入版）：rules 并入 system、环境信息迁往 env-context 前的形态
-    '5008ed358b2239ceeab49d6ec42a31c8aec809e9f3ab08b6fcc402c1fe69bf54',
-    // 二期落地版（rules 并入 + 环境信息迁 env-context）：三期新增语言思考/输出渲染段前的形态
-    '83a6f4069fe6ca3c1849a29f3c171e13366204b842d4b0f022ab9af614c47169',
-  ],
-  'main/rules.md': [
-    '9a80c5af645cf3feffacf6cfe936349424c19085fa0cfff09c1659c799b91928',
-    'afecb8d831bd60b5c9254def1e9baac7974989fa3481079c1d2e8c2114d8e48a',
-    '166d069be3dd54329e74fd53a04e302b3de075cd0a7088f8970ab4bee3e3c5f7',
-  ],
+  'main/system.md': LEGACY_MAIN_SYSTEM_HASHES,
+  'main/rules.md': LEGACY_MAIN_RULES_HASHES,
+  'prompt/main/system.md': LEGACY_MAIN_SYSTEM_HASHES,
+  'prompt/main/rules.md': LEGACY_MAIN_RULES_HASHES,
 };
 
 /** manifest 文件名（~/.moss/agent/ 下） */
@@ -61,6 +71,24 @@ const DEPRECATED_SEED_PATHS: ReadonlyArray<string> = [
   'agenteam',
   'fallback',
   'memory/distill-system.md',
+];
+
+/** 旧版提示词模块目录（相对 ~/.moss/agent/）：整体迁入 prompt/ 下 */
+const LEGACY_PROMPT_DIRS: ReadonlyArray<string> = [
+  'main',
+  'subagent',
+  'code-mode',
+  'compact',
+  'context',
+  'heal',
+  'insight',
+  'mcp',
+  'memory',
+  'rules',
+  'safety',
+  'title',
+  'tool-result',
+  'translate',
 ];
 
 interface SeedManifest {
@@ -101,27 +129,51 @@ function listFilesRecursive(root: string): string[] {
 }
 
 /**
- * 旧目录布局迁移：~/.moss/agent/prompts/** → ~/.moss/agent/**（保留用户改动）。
- * - 目标文件已存在 → 跳过（新布局优先，不覆盖用户现有文件）；
- * - 迁移完成后删除旧的 prompts 目录；
- * - 幂等：prompts 不存在时直接返回；单项失败静默（下次启动重试）。
+ * 单目录迁移：from/** → to/**（只复制目标不存在的文件，不覆盖新布局）。
+ * 任一文件复制失败返回 false，调用方保留旧目录，下次启动重试。
  */
-function migrateLegacyPromptLayout(dest: string): void {
-  const legacy = join(dest, 'prompts');
-  if (!existsSync(legacy)) return;
-  for (const file of listFilesRecursive(legacy)) {
-    const rel = relative(legacy, file).split(sep).join('/');
-    const target = join(dest, ...rel.split('/'));
+function migrateDirIfPossible(from: string, to: string): boolean {
+  let ok = true;
+  for (const file of listFilesRecursive(from)) {
+    const rel = relative(from, file).split(sep).join('/');
+    const target = join(to, ...rel.split('/'));
     try {
       if (existsSync(target)) continue;
       mkdirSync(join(target, '..'), { recursive: true });
       copyFileSync(file, target);
     } catch {
-      // 单项失败忽略：保留旧目录，下次启动重试
+      ok = false;
     }
   }
+  return ok;
+}
+
+/**
+ * 旧目录布局迁移：~/.moss/agent/{<module>,prompts}/** → ~/.moss/agent/prompt/**（保留用户改动）。
+ * - 先迁根级旧模块目录（较新），再用历史 prompts/ 补缺；
+ * - 目标文件已存在 → 跳过（新布局优先，不覆盖用户现有文件）；
+ * - 全部复制成功后才删除旧目录；失败则保留，下次启动重试；
+ * - 幂等：旧目录不存在时直接返回。
+ */
+function migrateLegacyPromptLayout(dest: string): void {
+  const promptRoot = join(dest, 'prompt');
+
+  for (const name of LEGACY_PROMPT_DIRS) {
+    const legacy = join(dest, name);
+    if (!existsSync(legacy) || !statSync(legacy).isDirectory()) continue;
+    if (!migrateDirIfPossible(legacy, join(promptRoot, name))) continue;
+    try {
+      rmSync(legacy, { recursive: true, force: true });
+    } catch {
+      // 删除失败忽略（文件已迁移，下次启动重试清理）
+    }
+  }
+
+  const legacyPrompts = join(dest, 'prompts');
+  if (!existsSync(legacyPrompts)) return;
+  if (!migrateDirIfPossible(legacyPrompts, promptRoot)) return;
   try {
-    rmSync(legacy, { recursive: true, force: true });
+    rmSync(legacyPrompts, { recursive: true, force: true });
   } catch {
     // 删除失败忽略（已迁移文件不受影响）
   }
@@ -138,6 +190,30 @@ function readManifest(manifestPath: string): SeedManifest {
     // 缺失/损坏：视为无记录
   }
   return { version: 1, files: {} };
+}
+
+/**
+ * manifest 旧键重映射：旧模块键与历史 prompts/ 键 → prompt/ 前缀键。
+ * 根模块键优先，prompts/ 只补缺，避免旧目录覆盖较新的根目录版本。
+ */
+function remapLegacyManifest(files: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [rel, hash] of Object.entries(files)) {
+    const legacyModule = LEGACY_PROMPT_DIRS.some((name) => rel.startsWith(`${name}/`));
+    if (legacyModule) {
+      const mapped = `prompt/${rel}`;
+      if (!(mapped in out)) out[mapped] = hash;
+      continue;
+    }
+    if (rel.startsWith('prompts/')) continue;
+    out[rel] = hash;
+  }
+  for (const [rel, hash] of Object.entries(files)) {
+    if (!rel.startsWith('prompts/')) continue;
+    const mapped = `prompt/${rel.slice('prompts/'.length)}`;
+    if (!(mapped in out)) out[mapped] = hash;
+  }
+  return out;
 }
 
 function writeManifest(manifestPath: string, manifest: SeedManifest): void {
@@ -174,14 +250,13 @@ export function seedBuiltinAgentPrompts(env: Environment): boolean {
       seeded = true;
       return false;
     }
-    // 旧布局迁移：~/.moss/agent/prompts/** → ~/.moss/agent/**（幂等；全新安装为 no-op）
-    migrateLegacyPromptLayout(dest);
+    // 旧布局迁移在清理废弃路径之后执行，避免把历史误放入 main 子目录的内容搬进新布局
     if (!existsSync(dest)) {
       // 首次初始化：全量复制 + 记录 manifest
       cpSync(src, dest, { recursive: true });
-      // 复制源可能是历史构建产物：旧 prompts/ 层先归位再清理废弃路径
-      migrateLegacyPromptLayout(dest);
+      // 复制源可能是历史构建产物：先清理废弃路径，再把旧 prompts/ 层归位
       cleanupDeprecatedSeedPaths(dest);
+      migrateLegacyPromptLayout(dest);
       const files: Record<string, string> = {};
       for (const file of listFilesRecursive(src)) {
         const rel = relative(src, file).split(sep).join('/');
@@ -192,10 +267,12 @@ export function seedBuiltinAgentPrompts(env: Environment): boolean {
       return true;
     }
 
-    // 已初始化：先清理历史遗留的废弃路径，再做逐文件内容指纹同步
+    // 已初始化：先清理历史遗留的废弃路径，再把旧布局迁入 prompt/，最后做逐文件内容指纹同步
     cleanupDeprecatedSeedPaths(dest);
+    migrateLegacyPromptLayout(dest);
     const manifestPath = join(dest, MANIFEST_FILE);
     const oldManifest = readManifest(manifestPath);
+    const previousFiles = remapLegacyManifest(oldManifest.files);
     const newFiles: Record<string, string> = {};
     for (const file of listFilesRecursive(src)) {
       const rel = relative(src, file).split(sep).join('/');
@@ -222,7 +299,7 @@ export function seedBuiltinAgentPrompts(env: Environment): boolean {
         newFiles[rel] = srcHash;
         continue;
       }
-      const seededHash = oldManifest.files[rel];
+      const seededHash = previousFiles[rel];
       const legacyHashes = LEGACY_SEED_HASHES[rel];
       if (targetHash === seededHash || (legacyHashes && legacyHashes.includes(targetHash))) {
         // 目标 == 上次播种内容 / 已知旧版种子 → 用户未修改 → 升级为新版

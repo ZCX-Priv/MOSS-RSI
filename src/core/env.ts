@@ -1,8 +1,9 @@
 // src/core/env.ts
 // 环境检测：平台、架构、路径解析。
 
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform, arch } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Environment, Platform } from './types';
 
 /**
@@ -56,7 +57,10 @@ export function detectEnvironment(): Environment {
   };
 }
 
-/** 包根解析结果缓存：一次进程内只解析一次（启动路径上的重复同步读 package.json 是纯浪费） */
+/**
+ * 包根解析结果缓存：一次进程内只解析一次（启动路径上的重复同步读 package.json 是纯浪费）。
+ * 使用静态 node:fs / node:path，保证 Bun 与 Node ESM 两种运行时行为一致。
+ */
 let cachedPackageRoot: string | null = null;
 
 function resolvePackageRoot(): string {
@@ -89,19 +93,17 @@ function findUpPackageJson(start: string): string | null {
   let current = start;
   for (let i = 0; i < 10; i++) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const fs = require('node:fs');
-      const path = require('node:path');
-      const pkgPath = path.join(current, 'package.json');
-      if (fs.existsSync(pkgPath)) {
-        // 校验 package name = moss，避免误判上级目录
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-        if (pkg.name === 'moss') return current;
+      const pkgPath = join(current, 'package.json');
+      if (existsSync(pkgPath)) {
+        // 校验包名：兼容 moss 与 scoped 包（如 @solo-thinker/moss），避免误判上级目录。
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown };
+        const name = typeof pkg.name === 'string' ? pkg.name : '';
+        if (name === 'moss' || /(^|\/)moss$/.test(name)) return current;
       }
     } catch {
       // 继续
     }
-    const parent = require('node:path').dirname(current);
+    const parent = dirname(current);
     if (parent === current) break;
     current = parent;
   }

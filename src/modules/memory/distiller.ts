@@ -116,7 +116,7 @@ export async function distillSession(
   // 构建 LLM 请求（消息裁剪：单条上限 + 总条数上限，防 prompt 膨胀）
   const MAX_MSGS = 60;
   const MAX_CHARS = 1500;
-  // 提示词从 agent/memory/ 加载（distill.md 已含角色设定行，作为单条 user 消息）；缺失则放弃本轮蒸馏（降级）
+  // 提示词从 agent/prompt/memory/ 加载（distill.md 已含角色设定行，作为单条 user 消息）；缺失则放弃本轮蒸馏（降级）
   const distillPrompt = loadPromptFileOrNull(deps.env, 'memory/distill.md');
   if (!distillPrompt) {
     return { created: 0, merged: 0, skipped: true, reason: 'distill prompt missing' };

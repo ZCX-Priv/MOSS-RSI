@@ -1,7 +1,7 @@
 // src/modules/subagent/templates.ts
 // 内置 Agent 模板（精简四件套：explorer / planner / coder / reviewer）。
 // 以注册表 builtIn agent 形式存在（不可删除），临时 subagent 直接以模板 id 运行。
-// 提示词外置：systemPrompt 从 agent/subagent/templates/<name>.md 加载。
+// 提示词外置：systemPrompt 从 agent/prompt/subagent/templates/<name>.md 加载。
 // tools 为默认工具白名单（引擎会并集统一 agent 工具）；空 = 全部工具。
 
 import type { Environment } from '../../core/types';
@@ -38,7 +38,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
     name: 'Explorer',
     description: '代码库探索专家：只读优先，快速定位结构与关键文件',
     promptPath: 'subagent/templates/explorer.md',
-    tools: ['read', 'glob', 'grep', 'web', 'skill', 'memory', 'todo', 'context', 'agent'],
+    tools: ['read', 'glob', 'grep', 'web', 'skill', 'documents', 'memory', 'todo', 'context', 'agent'],
     maxTurns: 200,
   },
   {
@@ -46,7 +46,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
     name: 'Planner',
     description: '任务规划专家：拆解目标为带依赖与验收标准的任务 DAG',
     promptPath: 'subagent/templates/planner.md',
-    tools: ['read', 'glob', 'grep', 'todo', 'skill', 'memory', 'context', 'agent'],
+    tools: ['read', 'glob', 'grep', 'todo', 'skill', 'documents', 'memory', 'context', 'agent'],
     maxTurns: 200,
   },
   {
@@ -64,6 +64,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
       'run_code',
       'todo',
       'skill',
+      'documents',
       'memory',
       'context',
       'browser',
@@ -86,6 +87,7 @@ const BUILTIN_TEMPLATE_META: readonly TemplateMeta[] = [
       'run_code',
       'todo',
       'skill',
+      'documents',
       'memory',
       'context',
       'web',

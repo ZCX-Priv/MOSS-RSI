@@ -2,7 +2,7 @@
 // 会话标题生成：收到新会话的首条用户消息后，立即依据问题生成标题（不等待首轮回复结束）。
 // 设计：
 //   - 非流式单次调用，失败/超时返回 null，由调用方保持原标题（不阻断主流程）；
-//   - 提示词外部化为 agent/title/generate.md，用户可通过 ~/.moss/agent/title/generate.md 覆盖。
+//   - 提示词外部化为 agent/prompt/title/generate.md，用户可通过 ~/.moss/agent/prompt/title/generate.md 覆盖。
 
 import type { Environment } from '../../core/types';
 import type { LLMRouter } from '../contracts';

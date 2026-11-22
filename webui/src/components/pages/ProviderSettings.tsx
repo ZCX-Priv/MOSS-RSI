@@ -345,27 +345,68 @@ export function ProviderSettings() {
           <p className="text-sm text-muted-foreground">{t('settings.provider.subtitle')}</p>
         </div>
 
-        {/* 类别胶囊导航：模型 / 语音（带图标，同「上下文」「外观」区 TabsList 样式） */}
-        <Tabs
-          value={category}
-          onValueChange={(v) => {
-            const next = v as ProviderCategory;
-            navigate(next === 'model' ? '/settings/provider' : `/settings/provider/${next}`);
-          }}
-        >
-          <TabsList>
-            <TabsTrigger value="model" className="gap-1.5">
-              <Box className="size-3.5" />
-              {t('settings.provider.categoryModel')}
-            </TabsTrigger>
-            <TabsTrigger value="voice" className="gap-1.5">
-              <Mic className="size-3.5" />
-              {t('settings.provider.categoryVoice')}
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+        {/* 胶囊导航 + 桌面端筛选/搜索/添加同一行靠右（移动端允许换行；语音类别隐藏服务商操作） */}
+        <div className="flex flex-wrap items-center gap-3">
+          <Tabs
+            className="shrink-0"
+            value={category}
+            onValueChange={(v) => {
+              const next = v as ProviderCategory;
+              navigate(next === 'model' ? '/settings/provider' : `/settings/provider/${next}`);
+            }}
+          >
+            <TabsList>
+              <TabsTrigger value="model" className="gap-1.5">
+                <Box className="size-3.5" />
+                {t('settings.provider.categoryModel')}
+              </TabsTrigger>
+              <TabsTrigger value="voice" className="gap-1.5">
+                <Mic className="size-3.5" />
+                {t('settings.provider.categoryVoice')}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
 
-        {/* 移动端搜索展开行：header 搜索按钮触发，出现在筛选上方 */}
+          {category !== 'voice' && (
+            <div className="ml-auto flex w-full flex-wrap items-center justify-end gap-2 md:w-auto">
+              <Select
+                value={formatFilter}
+                onValueChange={(v) => setFormatFilter(v as 'all' | ProviderItem['format'])}
+              >
+                <SelectTrigger className="w-full shrink-0 sm:w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t('settings.provider.allFormats')}</SelectItem>
+                  {FORMAT_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {/* 桌面端搜索框 + 添加按钮（移动端由 header 按钮替代） */}
+              <div className="hidden items-center gap-2 sm:flex">
+                <div className="relative w-full sm:w-56 xl:w-64 sm:shrink-0">
+                  <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    type="text"
+                    placeholder={t('settings.provider.searchPlaceholder')}
+                    className="pl-8"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                </div>
+                <Button className="shrink-0 gap-1.5" onClick={openAdd}>
+                  <Plus className="size-3.5" />
+                  {t('settings.provider.addProvider')}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 移动端搜索展开行：header 搜索按钮触发；桌面端由上方搜索框承担 */}
         {searchOpen && (
           <div className="flex items-center gap-2 sm:hidden">
             <div className="relative min-w-0 flex-1">
@@ -393,47 +434,6 @@ export function ProviderSettings() {
             </Button>
           </div>
         )}
-
-        {/* 筛选 + 搜索 + 添加同一组靠右（移动端筛选独占一行，搜索/添加收纳进全局 header 按钮） */}
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
-          {category !== 'voice' && (
-          <Select
-            value={formatFilter}
-            onValueChange={(v) => setFormatFilter(v as 'all' | ProviderItem['format'])}
-          >
-            <SelectTrigger className="w-full shrink-0 sm:w-36">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{t('settings.provider.allFormats')}</SelectItem>
-              {FORMAT_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          )}
-          {/* 桌面端搜索框 + 添加按钮（移动端由 header 按钮替代；语音类别不展示服务商操作） */}
-          {category !== 'voice' && (
-          <div className="hidden items-center gap-2 sm:flex">
-            <div className="relative w-full sm:w-64 sm:shrink-0">
-              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                type="text"
-                placeholder={t('settings.provider.searchPlaceholder')}
-                className="pl-8"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </div>
-            <Button className="shrink-0 gap-1.5" onClick={openAdd}>
-              <Plus className="size-3.5" />
-              {t('settings.provider.addProvider')}
-            </Button>
-          </div>
-          )}
-        </div>
       </div>
 
       {/* 语音类别：能力开关 + 识别语言 + 本地模型管理 */}

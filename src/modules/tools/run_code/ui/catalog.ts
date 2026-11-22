@@ -480,7 +480,7 @@ export const UI_COMPONENT_NAMES: readonly string[] = UI_COMPONENTS.map((c) => c.
   .slice()
   .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
-/** 生成本次 ui 命名空间的 TypeScript 声明（系统提示 SDK 代码块；说明文字在 agent/code-mode/ui-sdk.md） */
+/** 生成本次 ui 命名空间的 TypeScript 声明（系统提示 SDK 代码块；说明文字在 agent/prompt/code-mode/ui-sdk.md） */
 export function buildUiDeclarations(): string {
   const lines: string[] = [
     '```ts',

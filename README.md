@@ -307,7 +307,8 @@ MOSS/
 │   │                            #   rules/safety/server/terminal/tools/update/voice）
 │   └── utils/                   # 通用工具
 ├── browser-extension/           # Chrome 扩展（MOSS Browser Bridge，Manifest V3）
-├── agent/main/                  # Agent 系统提示词（.md）
+├── agent/prompt/                # Agent 系统提示词（.md，播种到 ~/.moss/agent/prompt/）
+├── agent/documents/             # 能力最佳实践文档库（播种到 ~/.moss/agent/documents/）
 ├── skills/                      # Skill 定义（.md + YAML front-matter，首次启动播种到 ~/.moss/skills/）
 ├── config/                      # 配置模板
 ├── docs/                        # 架构与 API 文档

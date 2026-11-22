@@ -907,7 +907,7 @@ export interface WSMessage {
 | 任务 / 会话 / Todo | `~/.moss/tasks/<groupId>/`、`~/.moss/todo/<sessionId>.json` |
 | Agent 注册表 | `~/.moss/agents.json` |
 | 自动化 | `~/.moss/automations.json`、`automations-history.json` |
-| Skill / Command / 提示词 / 附件 | `~/.moss/skills/`、`commands/`、`agent/`、`agent/attachments/` |
+| Skill / Command / 提示词 / 附件 | `~/.moss/skills/`、`commands/`、`agent/prompt/`、`agent/documents/`、`agent/attachments/` |
 | 规则 / 钩子 / 记忆 | `~/.moss/{rules,hooks,memory}/`（项目级 `<cwd>/.moss/`） |
 | 文件历史 | `~/.moss/file-history/` |
 | 浏览器 / 桌面 / 语音 | `~/.moss/browser/`、`~/.moss/computer/`、`~/.moss/models/asr/` |

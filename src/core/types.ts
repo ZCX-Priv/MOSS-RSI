@@ -257,7 +257,7 @@ export interface AppConfig {
     maxConcurrentRuns?: number;
     /** 同一轮并发执行 subagent 工具调用的上限（0 = 不限制；缺省 4） */
     maxConcurrentSubagents?: number;
-    /** 子代理最大嵌套层级（1=只能派发一层；2=主→子→孙；缺省 2） */
+    /** 子代理最大嵌套层级（0=不限制；1=只能派发一层；2=主→子→孙；缺省 2） */
     maxSubagentDepth?: number;
     workingDirectory: string;
     /** 代码模式（PTC + Intelligent UI）：run_code 限额（输出不设字节预算） */

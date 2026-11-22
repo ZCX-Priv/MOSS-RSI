@@ -92,6 +92,7 @@ const SUBAGENT_READONLY_TOOLS = [
   'read',
   'glob',
   'grep',
+  'documents',
   'todo',
   'ask',
   'skill',
@@ -1075,7 +1076,7 @@ export class AgentEngineImpl implements AgentEngine {
     );
     // 嵌套深度：主会话 depth=0；子代理由 runner 注入 depth。达到上限后由 agent 工具
     // 运行时守卫拒绝 delegate，但 status/message 仍需可用（不整工具移除）。
-    const maxSubagentDepth = Math.min(5, Math.max(1, cfg.maxSubagentDepth ?? 2));
+    const maxSubagentDepth = Math.min(32, Math.max(0, cfg.maxSubagentDepth ?? 2));
     // 同轮并行子代理上限（0 = 不限制）：写进系统提示，让模型按上限组织批次
     const maxParallelSubagents = Math.max(
       0,
@@ -1144,7 +1145,7 @@ export class AgentEngineImpl implements AgentEngine {
               title: '可用子代理',
               content: renderTemplate(availableTemplate, {
                 AGENTS: lines.join('\n'),
-                MAX_DEPTH: String(maxSubagentDepth),
+                MAX_DEPTH: maxSubagentDepth === 0 ? '不限制' : `${maxSubagentDepth} 层`,
                 MAX_PARALLEL:
                   maxParallelSubagents === 0 ? '不限制' : String(maxParallelSubagents),
               }).trimEnd(),
@@ -1177,7 +1178,7 @@ export class AgentEngineImpl implements AgentEngine {
         tools: sdkTools,
       });
       if (section) promptExtras.push(section);
-      else this.logger.warn('agent: code mode prompt missing (agent/code-mode/ptc.md), skipped');
+      else this.logger.warn('agent: code mode prompt missing (agent/prompt/code-mode/ptc.md), skipped');
     }
 
     // ReAct 循环（maxTurns=0 表示不限制 → Infinity；while 条件与触顶判断天然兼容）

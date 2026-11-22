@@ -16,7 +16,7 @@ import type { AgentRegistry } from './types';
 /** subagent 隐藏分组固定 id（dir=subagent，平坦存放每次会话） */
 const SUBAGENT_GROUP_ID = 'subagent';
 
-/** 子代理默认最大嵌套深度（配置缺失时的兜底；用户可在设置中调整） */
+/** 子代理默认最大嵌套深度（配置缺失时的兜底；0=不限制，用户可在设置中调整） */
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 
 /** 直接子代理（depth=1）默认并发数（配置缺失时的兜底；0 = 不限制） */
@@ -220,13 +220,13 @@ export class SubagentRunner {
     return this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
   }
 
-  /** 实时读取子代理最大嵌套层级（设置热更新立即生效） */
+  /** 实时读取子代理最大嵌套层级（设置热更新立即生效；0=不限制） */
   private maxSubagentDepth(): number {
     try {
       const config = this.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
       const value = config?.getAppConfig().agent.maxSubagentDepth;
-      if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
-        return Math.min(5, Math.floor(value));
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        return Math.min(32, Math.floor(value));
       }
     } catch {
       // 配置不可用：使用默认值
@@ -304,7 +304,7 @@ export class SubagentRunner {
     const parentDepth = input.parentSessionId
       ? this.sessionDepth.get(input.parentSessionId) ?? 0
       : 0;
-    if (parentDepth >= maxDepth) {
+    if (maxDepth > 0 && parentDepth >= maxDepth) {
       throw new Error(
         `子代理嵌套层级已达上限（${maxDepth} 层）：拒绝在 depth=${parentDepth} 的会话上继续派发。可在「设置 → 智能体」中调整最大嵌套层级。`,
       );
