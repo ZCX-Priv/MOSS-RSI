@@ -449,6 +449,9 @@ export const zh = {
       codeModeTitle: '代码模式',
       codeModeEnabled: '启用代码模式',
       codeModeEnabledDesc: '允许模型通过 run_code 写 TypeScript 程序调用工具并生成交互界面',
+      codeModeFullAccess: '超级PTC（完全体）',
+      codeModeFullAccessDesc:
+        '允许程序 import npm 与 node 内置模块、访问网络、读取真实环境变量、调用任意 AI API，并使用除 ask/agent/todo 外的全部工具与嵌套 run_code；风险等同在本机直接运行任意 TypeScript',
       codeModeUiEnabled: '启用智能界面',
       codeModeUiEnabledDesc: '允许程序使用 ui.* 组件与内嵌页面构建可交互界面（仪表盘/表单/游戏/网页）',
       codeModeCdnEnabled: '允许 CDN 资源',
@@ -459,6 +462,10 @@ export const zh = {
       codeModeMaxCharsDesc: '模型单次提交的 TypeScript 源码长度上限',
       codeModeMaxParallel: '嵌套调用并发',
       codeModeMaxParallelDesc: '只读工具可重叠，写操作/终端会独占执行',
+      codeModeMaxNestedDepth: '最大嵌套层数',
+      codeModeMaxNestedDepthDesc: '顶层算第 1 层；0 = 不限制',
+      codeModeMaxPrograms: '最大并发程序',
+      codeModeMaxProgramsDesc: '同时运行的 run_code 子进程上限；0 = 不限制；满额时新调用立即返回可重试错误',
       codeModeHint: '修改会实时生效（下一次请求/程序执行）。run_code 默认与 terminal 同级，需要用户确认。',
     },
     browser: {

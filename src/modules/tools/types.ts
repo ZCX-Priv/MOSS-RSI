@@ -171,6 +171,11 @@ export interface ToolContext {
   cwd: string;
   /** 工具调用 ID */
   toolCallId: string;
+  /**
+   * 当前 PTC 程序的调用深度（顶层为 0；嵌套 run_code 每次 +1）。
+   * 仅 run_code 链路使用；原生工具调用为 undefined。
+   */
+  codeDepth?: number;
   /** 通过事件总线发送进度事件 */
   emit: (event: ToolEvent) => void;
   logger: import('../../core/types').Logger;
@@ -194,7 +199,7 @@ export interface ToolContext {
   invokeTool?: (
     name: string,
     args: unknown,
-    opts?: { callId?: string; signal?: AbortSignal },
+    opts?: { callId?: string; signal?: AbortSignal; codeDepth?: number },
   ) => Promise<ToolResult>;
   /**
    * run_code 执行进度通道（仅 AgentEngine 注入）。

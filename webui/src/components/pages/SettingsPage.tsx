@@ -2662,6 +2662,8 @@ export function ToolsSettings() {
   const [codeTimeoutDraft, setCodeTimeoutDraft] = useState('');
   const [codeMaxCharsDraft, setCodeMaxCharsDraft] = useState('');
   const [codeMaxParallelDraft, setCodeMaxParallelDraft] = useState('');
+  const [codeNestedDepthDraft, setCodeNestedDepthDraft] = useState('');
+  const [codeMaxProgramsDraft, setCodeMaxProgramsDraft] = useState('');
 
   /** 编辑对话框保存：写配置成功后 toast 并关闭 */
   const handleSaveToolConfig = async (name: string, config: Record<string, unknown>) => {
@@ -2680,6 +2682,9 @@ export function ToolsSettings() {
     timeoutMs: 120_000,
     maxCodeChars: 20_000,
     maxParallelSubCalls: 10,
+    fullAccess: false,
+    maxNestedDepth: 2,
+    maxConcurrentPrograms: 4,
   };
 
   // config 外部变更（含 WS 热更新）时回填输入框草稿
@@ -2691,7 +2696,15 @@ export function ToolsSettings() {
     setCodeTimeoutDraft(String(Math.round(codeMode.timeoutMs / 1000)));
     setCodeMaxCharsDraft(String(codeMode.maxCodeChars));
     setCodeMaxParallelDraft(String(codeMode.maxParallelSubCalls));
-  }, [codeMode.timeoutMs, codeMode.maxCodeChars, codeMode.maxParallelSubCalls]);
+    setCodeNestedDepthDraft(String(codeMode.maxNestedDepth));
+    setCodeMaxProgramsDraft(String(codeMode.maxConcurrentPrograms));
+  }, [
+    codeMode.timeoutMs,
+    codeMode.maxCodeChars,
+    codeMode.maxParallelSubCalls,
+    codeMode.maxNestedDepth,
+    codeMode.maxConcurrentPrograms,
+  ]);
 
   const patchCodeMode = async (patch: Partial<CodeModeConfig>) => {
     if (!agentCfg) return;
@@ -2837,6 +2850,19 @@ export function ToolsSettings() {
 
           <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
             <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeFullAccess')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeFullAccessDesc')}</span>
+            </div>
+            <Switch
+              checked={codeMode.fullAccess}
+              disabled={!codeMode.enabled}
+              onCheckedChange={(v) => void patchCodeMode({ fullAccess: v })}
+              aria-label={t('settings.tools.codeModeFullAccess')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
               <span className="text-sm text-foreground">{t('settings.tools.codeModeUiEnabled')}</span>
               <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeUiEnabledDesc')}</span>
             </div>
@@ -2948,6 +2974,66 @@ export function ToolsSettings() {
               }}
               className="h-8 w-20 shrink-0 text-right"
               aria-label={t('settings.tools.codeModeMaxParallel')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxNestedDepth')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxNestedDepthDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={32}
+              value={codeNestedDepthDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeNestedDepthDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeNestedDepthDraft,
+                  codeMode.maxNestedDepth,
+                  0,
+                  32,
+                  (n) => patchCodeMode({ maxNestedDepth: n }),
+                  (n) => setCodeNestedDepthDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-20 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeMaxNestedDepth')}
+            />
+          </div>
+
+          <div className={cn('flex items-center justify-between gap-4 py-3', !codeMode.enabled && 'opacity-50')}>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-sm text-foreground">{t('settings.tools.codeModeMaxPrograms')}</span>
+              <span className="text-xs text-muted-foreground">{t('settings.tools.codeModeMaxProgramsDesc')}</span>
+            </div>
+            <Input
+              type="number"
+              min={0}
+              max={32}
+              value={codeMaxProgramsDraft}
+              disabled={!codeMode.enabled}
+              onChange={(e) => setCodeMaxProgramsDraft(e.target.value)}
+              onBlur={() =>
+                commitCodeNumber(
+                  codeMaxProgramsDraft,
+                  codeMode.maxConcurrentPrograms,
+                  0,
+                  32,
+                  (n) => patchCodeMode({ maxConcurrentPrograms: n }),
+                  (n) => setCodeMaxProgramsDraft(String(n)),
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+              className="h-8 w-20 shrink-0 text-right"
+              aria-label={t('settings.tools.codeModeMaxPrograms')}
             />
           </div>
         </div>

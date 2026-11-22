@@ -27,7 +27,10 @@
       "timeoutMs": 120000,
       "maxCodeChars": 20000,
       "maxOutputBytes": 262144,
-      "maxParallelSubCalls": 10
+      "maxParallelSubCalls": 10,
+      "fullAccess": true,
+      "maxNestedDepth": 2,
+      "maxConcurrentPrograms": 4
     }
   },
   "context": {

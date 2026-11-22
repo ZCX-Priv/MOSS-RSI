@@ -1,7 +1,7 @@
 // src/modules/tools/run_code/runtime/protocol.ts
 // 宿主 ↔ 子进程的行分隔 JSON-RPC 协议。
 // 设计要点：
-//   - 帧一律单行 JSON（字符串内换行会被 JSON.stringify 转义），每帧 ≤ 1MB；
+//   - 帧一律单行 JSON（字符串内换行会被 JSON.stringify 转义），每帧 ≤ 64MB；
 //   - 程序失败是 result 字段（error kind），不是宿主异常；
 //   - 工具调用只允许子进程请求，宿主校验 allowlist 后才执行；
 //   - 参数/返回值必须是 lossless JSON（拒绝 undefined/函数/BigInt/循环引用/非有限数）。
@@ -20,6 +20,8 @@ export interface RunLimits {
   timeoutMs: number;
   maxCodeChars: number;
   maxParallelSubCalls: number;
+  /** 同时运行的 run_code 子进程上限（0 = 不限制；缺省按 4） */
+  maxConcurrentPrograms?: number;
 }
 
 /** 宿主 → 子进程：启动一次程序 */
@@ -32,6 +34,12 @@ export interface RunFrame {
   cwd: string;
   limits: RunLimits;
   uiEnabled: boolean;
+  /** 超级PTC：完全体运行时 */
+  fullAccess: boolean;
+  /** 完全体临时模块路径（仅 fullAccess=true 时存在） */
+  programPath?: string;
+  /** 生成文件行号 → 原程序行号的偏移（仅 fullAccess=true 时存在） */
+  programLineOffset?: number;
 }
 
 /** 宿主 → 子进程：工具结果 / 中止 */
@@ -70,7 +78,19 @@ export type CodeFailureKind =
   | 'syntax'
   | 'output-limit'
   | 'protocol'
+  | 'capacity'
   | 'sandbox-unavailable';
+
+/**
+ * 控制帧前缀：子进程 stdout 同时承载第三方输出，只有带前缀的行才是控制帧。
+ * 不带前缀的行一律按普通日志处理，避免库/孙进程输出打断协议。
+ */
+export const FRAME_PREFIX = '@@MOSS_PTC@@';
+
+/** 是否为控制帧（用于区分普通 stdout 日志与非法控制帧） */
+export function isFrameLine(line: string): boolean {
+  return line.startsWith(FRAME_PREFIX);
+}
 
 /**
  * 单帧字节上限：崩溃保护，不是输出预算。
@@ -105,13 +125,14 @@ export function isLosslessJsonValue(value: unknown, depth = 0): value is CodeVal
 
 /** 序列化一帧（调用方负责检查字节上限） */
 export function encodeFrame(frame: HostToChild | ChildToHost): string {
-  return `${JSON.stringify(frame)}\n`;
+  return `${FRAME_PREFIX}${JSON.stringify(frame)}\n`;
 }
 
-/** 解析一行帧；非法 JSON 或形状不符返回 null */
+/** 解析一行控制帧；非控制帧、非法 JSON 或形状不符返回 null */
 export function parseFrameLine(line: string): HostToChild | ChildToHost | null {
+  if (!isFrameLine(line)) return null;
   try {
-    const parsed: unknown = JSON.parse(line);
+    const parsed: unknown = JSON.parse(line.slice(FRAME_PREFIX.length));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     const frame = parsed as Record<string, unknown>;
     if (frame.v !== 1 || typeof frame.type !== 'string') return null;

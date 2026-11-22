@@ -3,12 +3,13 @@
 //
 // 职责：
 //   1. 从 stdin 读取宿主控制帧（ready / run / tool-result / abort）；
-//   2. 用 Bun.Transpiler 剥离 TS 类型，AsyncFunction 执行模型写的 async 函数体；
-//   3. 注入 tools（Proxy → 宿主完整工具管线）、ui（UISpec 构建器）、console（日志帧）、受限 process shim；
-//   4. 把程序返回值 / UISpec / 错误以行分隔 JSON 帧写回 stdout。
+//   2. 沙箱模式用 Bun.Transpiler + AsyncFunction 执行函数体；
+//      完全体模式用原生 Bun ESM 模块执行（import / fetch / 真实 process 等）；
+//   3. 注入 tools（Proxy → 宿主完整工具管线）、ui（UISpec 构建器）、console（日志帧）；
+//   4. 把程序返回值 / UISpec / 错误以带前缀的行分隔 JSON 帧写回 stdout。
 //
-// 注意：这不是安全沙箱。参数遮蔽（fetch/Bun/Function/globalThis）只提高门槛，
-// 真正的边界是外层 run_code 的用户确认与嵌套工具的逐次 safety 决策。
+// 注意：完全体不是安全沙箱，等同本机运行任意 TypeScript；沙箱模式的参数遮蔽（fetch/Bun/Function/globalThis）
+// 只提高门槛，真正的边界是外层 run_code 的用户确认与嵌套工具的逐次 safety 决策。
 
 import {
   buildUiSpec,
@@ -17,8 +18,12 @@ import {
   type UiNamespace,
 } from '../ui/builder';
 import type { UIDiagnostic } from '../ui/spec';
+import { createRequire } from 'node:module';
+import { isAbsolute, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   byteLength,
+  encodeFrame,
   MAX_FRAME_BYTES,
   parseFrameLine,
   type ChildToHost,
@@ -38,7 +43,7 @@ const stdoutSink = Bun.stdout.writer();
 /** 写一帧到 stdout（宿主按行读取）。写失败（宿主已退出/超过协议上限）返回 false。 */
 async function writeFrame(frame: ChildToHost): Promise<boolean> {
   try {
-    const line = `${JSON.stringify(frame)}\n`;
+    const line = encodeFrame(frame);
     if (byteLength(line) > MAX_FRAME_BYTES) return false;
     stdoutSink.write(line);
     await stdoutSink.flush();
@@ -59,6 +64,9 @@ interface RunState {
   limits: RunLimits;
   cwd: string;
   uiEnabled: boolean;
+  fullAccess: boolean;
+  programPath?: string;
+  programLineOffset: number;
 }
 
 const state: RunState = {
@@ -67,9 +75,12 @@ const state: RunState = {
     timeoutMs: 120_000,
     maxCodeChars: 20_000,
     maxParallelSubCalls: 10,
+    maxConcurrentPrograms: 4,
   },
   cwd: realProcess.cwd(),
   uiEnabled: false,
+  fullAccess: false,
+  programLineOffset: 0,
 };
 
 /** new Function 包装的固定行号偏移（用于运行时错误栈改写） */
@@ -215,6 +226,145 @@ function createProcessShim(cwd: string): Record<string, unknown> {
   });
 }
 
+interface ProgramExecutionResult {
+  ok: boolean;
+  value?: unknown;
+}
+
+interface PtcRequire {
+  (id: string): unknown;
+  resolve(id: string): string;
+  cache: unknown;
+  main: unknown;
+}
+
+/** 完全体：从 cwd 解析 require；bare specifier 找不到时回退 MOSS 自身依赖。 */
+function createRequireFromCwd(cwd: string): PtcRequire {
+  const fromCwd = createRequire(join(cwd, '__moss_ptc_require.cjs'));
+  const fromMoss = createRequire(import.meta.url);
+  const requireFn = ((id: string) => {
+    try {
+      return fromCwd(id);
+    } catch (err) {
+      if (isModuleNotFoundError(err, id)) return fromMoss(id);
+      throw err;
+    }
+  }) as PtcRequire;
+  requireFn.resolve = (id: string) => fromCwd.resolve(id);
+  requireFn.cache = fromCwd.cache;
+  requireFn.main = fromCwd.main;
+  return requireFn;
+}
+
+function isModuleNotFoundError(err: unknown, id: string): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const value = err as { code?: unknown; message?: unknown };
+  return value.code === 'MODULE_NOT_FOUND' && typeof value.message === 'string' && value.message.includes(id);
+}
+
+/** 完全体：动态导入相对路径以 cwd 为基准，包名走 Bun.resolveSync。 */
+function createImportModule(cwd: string): (spec: string) => Promise<unknown> {
+  return async (spec: string): Promise<unknown> => {
+    if (spec.startsWith('file:') || spec.startsWith('node:')) return await import(spec);
+    if (spec.startsWith('.') || isAbsolute(spec)) {
+      return await import(pathToFileURL(resolve(cwd, spec)).href);
+    }
+    return await import(pathToFileURL(Bun.resolveSync(spec, cwd)).href);
+  };
+}
+
+function isSyntaxLikeError(err: unknown): boolean {
+  if (err instanceof SyntaxError) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /SyntaxError|Parse error|Unexpected|expected/i.test(message);
+}
+
+/** 把生成的 program.ts 行号改写回用户程序行号。 */
+function rewriteModuleError(err: unknown, lineOffset: number, program: string): string {
+  const raw = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
+  const lines = program.split(/\r\n|\r|\n/);
+  return raw.replace(/program\.ts:(\d+):(\d+)/g, (_match, line: string, column: string) => {
+    const generated = Number(line);
+    const original = generated - lineOffset;
+    if (Number.isFinite(original) && original >= 1) {
+      const source = lines[original - 1]?.trim() ?? '';
+      return `程序第 ${original} 行（第 ${column} 列）${source ? `：${source}` : ''}`;
+    }
+    return `程序运行时（生成文件第 ${generated} 行，第 ${column} 列）`;
+  });
+}
+
+/** 完全体：原生 ESM 模块执行（真实 fetch/Bun/process/require/importModule）。 */
+async function executeFullProgram(
+  tools: Record<string, (args?: unknown) => Promise<CodeValue>>,
+  ui: UiNamespace,
+  consoleShim: ReturnType<typeof createConsoleShim>,
+  program: string,
+): Promise<ProgramExecutionResult> {
+  const programPath = state.programPath;
+  if (!programPath) {
+    await writeFrame({
+      v: 1,
+      type: 'error',
+      kind: 'sandbox-unavailable',
+      message: '完全体模式缺少 programPath',
+    });
+    return { ok: false };
+  }
+
+  const context: Record<string, unknown> = {
+    tools,
+    ui,
+    console: consoleShim,
+    process: realProcess,
+    fetch: globalThis.fetch.bind(globalThis),
+    Bun,
+    sleep: sandboxSleep,
+    now: sandboxNow,
+    importModule: createImportModule(state.cwd),
+    require: createRequireFromCwd(state.cwd),
+    cwd: state.cwd,
+    filename: programPath,
+  };
+  (globalThis as Record<string, unknown>).__moss_ptc_ctx = context;
+
+  let mod: { default?: unknown };
+  try {
+    mod = (await import(pathToFileURL(programPath).href)) as { default?: unknown };
+  } catch (err) {
+    await writeFrame({
+      v: 1,
+      type: 'error',
+      kind: isSyntaxLikeError(err) ? 'syntax' : 'exception',
+      message: rewriteModuleError(err, state.programLineOffset, program),
+    });
+    return { ok: false };
+  }
+
+  if (typeof mod.default !== 'function') {
+    await writeFrame({
+      v: 1,
+      type: 'error',
+      kind: 'exception',
+      message: '超级PTC 程序入口缺失（未生成默认导出函数）',
+    });
+    return { ok: false };
+  }
+
+  try {
+    const value = await (mod.default as () => Promise<unknown>)();
+    return { ok: true, value };
+  } catch (err) {
+    await writeFrame({
+      v: 1,
+      type: 'error',
+      kind: 'exception',
+      message: rewriteModuleError(err, state.programLineOffset, program),
+    });
+    return { ok: false };
+  }
+}
+
 /** 执行 run 帧：编译 → 注入命名空间 → 执行 → 回传结果。 */
 async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise<void> {
   if (state.started) {
@@ -225,6 +375,9 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   state.limits = frame.limits;
   state.cwd = frame.cwd;
   state.uiEnabled = frame.uiEnabled;
+  state.fullAccess = frame.fullAccess === true;
+  state.programPath = frame.programPath;
+  state.programLineOffset = frame.programLineOffset ?? 0;
 
   if (typeof frame.program !== 'string' || frame.program.length === 0) {
     await writeFrame({ v: 1, type: 'error', kind: 'exception', message: 'program is empty' });
@@ -239,27 +392,12 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
     });
     return;
   }
-
-  // 用 async 函数声明包裹：既允许程序使用顶层 await/return，又避开
-  // Bun.Transpiler 对「ECMAScript module 顶层 return」的拒绝。
-  // 注：Bun.Transpiler 会裁剪裸表达式语句，因此必须用函数声明而不是 IIFE 表达式。
-  const wrapped = wrapProgram(frame.program);
-
-  let js: string;
-  try {
-    js = new Bun.Transpiler({ loader: 'ts' }).transformSync(wrapped);
-  } catch (err) {
-    // 转译器只给 Parse error，没有位置；失败时再用结构扫描器补充精确行列。
-    // 以转译结果为准：扫描器只在转译失败时参与诊断，避免正则启发式误报阻止合法代码。
-    const issue = scanStructure(frame.program);
-    const detail = describeTranspileErrors(err);
+  if (state.fullAccess && (typeof state.programPath !== 'string' || state.programPath === '')) {
     await writeFrame({
       v: 1,
       type: 'error',
-      kind: 'syntax',
-      message: issue.ok
-        ? buildTranspileFailure(frame.program, err)
-        : `${formatSyntaxIssue(issue.issue)}${detail ? `\nTS 解析器信息：${detail}` : ''}`,
+      kind: 'sandbox-unavailable',
+      message: '完全体模式缺少 programPath',
     });
     return;
   }
@@ -279,48 +417,79 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   const ui: UiNamespace = frame.uiEnabled ? builder.ui : createDisabledUiNamespace();
   const tools = createToolsProxy(frame.bindings);
   const consoleShim = createConsoleShim();
-  const processShim = createProcessShim(frame.cwd);
-
-  let fn: (...args: unknown[]) => Promise<unknown>;
-  try {
-    // 只编译一次：new Function 返回转译后的 async 函数声明。
-    // sourceURL 让运行时栈固定显示 moss-run-code.js，便于行号回写。
-    const body = `"use strict";\n${js}\nreturn __moss_run_program_2026__;\n//# sourceURL=${PROGRAM_SOURCE_URL}`;
-    fn = new Function(body)() as (...args: unknown[]) => Promise<unknown>;
-  } catch (err) {
-    await writeFrame({
-      v: 1,
-      type: 'error',
-      kind: 'syntax',
-      message: buildCompileFailure(frame.program, err),
-    });
-    return;
-  }
 
   let value: unknown;
-  try {
-    value = await fn(
-      tools,
-      ui,
-      consoleShim,
-      processShim,
-      blockedCallable('require'),
-      blockedCallable('fetch'),
-      blockedObject('Bun'),
-      blockedObject('globalThis'),
-      blockedCallable('Function'),
-      blockedCallable('setTimeout'),
-      blockedCallable('setInterval'),
-      blockedCallable('clearTimeout'),
-      blockedCallable('clearInterval'),
-      sandboxSleep,
-      sandboxNow,
-    );
-  } catch (err) {
-    const rawStack = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
-    const message = rewriteRuntimeStack(rawStack, js, frame.program, WRAPPER_EXTRA_LINES);
-    await writeFrame({ v: 1, type: 'error', kind: 'exception', message });
-    return;
+  if (state.fullAccess) {
+    const execution = await executeFullProgram(tools, ui, consoleShim, frame.program);
+    if (!execution.ok) return;
+    value = execution.value;
+  } else {
+    // 沙箱：用 async 函数声明包裹，既允许顶层 await/return，又避开
+    // Bun.Transpiler 对「ECMAScript module 顶层 return」的拒绝。
+    // 注：Bun.Transpiler 会裁剪裸表达式语句，因此必须用函数声明而不是 IIFE 表达式。
+    const wrapped = wrapProgram(frame.program);
+
+    let js: string;
+    try {
+      js = new Bun.Transpiler({ loader: 'ts' }).transformSync(wrapped);
+    } catch (err) {
+      // 转译器只给 Parse error，没有位置；失败时再用结构扫描器补充精确行列。
+      // 以转译结果为准：扫描器只在转译失败时参与诊断，避免正则启发式误报阻止合法代码。
+      const issue = scanStructure(frame.program);
+      const detail = describeTranspileErrors(err);
+      await writeFrame({
+        v: 1,
+        type: 'error',
+        kind: 'syntax',
+        message: issue.ok
+          ? buildTranspileFailure(frame.program, err)
+          : `${formatSyntaxIssue(issue.issue)}${detail ? `\nTS 解析器信息：${detail}` : ''}`,
+      });
+      return;
+    }
+
+    const processShim = createProcessShim(frame.cwd);
+
+    let fn: (...args: unknown[]) => Promise<unknown>;
+    try {
+      // 只编译一次：new Function 返回转译后的 async 函数声明。
+      // sourceURL 让运行时栈固定显示 moss-run-code.js，便于行号回写。
+      const body = `"use strict";\n${js}\nreturn __moss_run_program_2026__;\n//# sourceURL=${PROGRAM_SOURCE_URL}`;
+      fn = new Function(body)() as (...args: unknown[]) => Promise<unknown>;
+    } catch (err) {
+      await writeFrame({
+        v: 1,
+        type: 'error',
+        kind: 'syntax',
+        message: buildCompileFailure(frame.program, err),
+      });
+      return;
+    }
+
+    try {
+      value = await fn(
+        tools,
+        ui,
+        consoleShim,
+        processShim,
+        blockedCallable('require'),
+        blockedCallable('fetch'),
+        blockedObject('Bun'),
+        blockedObject('globalThis'),
+        blockedCallable('Function'),
+        blockedCallable('setTimeout'),
+        blockedCallable('setInterval'),
+        blockedCallable('clearTimeout'),
+        blockedCallable('clearInterval'),
+        sandboxSleep,
+        sandboxNow,
+      );
+    } catch (err) {
+      const rawStack = err instanceof Error ? (err.stack ?? `${err.name}: ${err.message}`) : String(err);
+      const message = rewriteRuntimeStack(rawStack, js, frame.program, WRAPPER_EXTRA_LINES);
+      await writeFrame({ v: 1, type: 'error', kind: 'exception', message });
+      return;
+    }
   }
 
   // ---- 2) 返回值净化：常见类型自动转换，不再因 invalid-output 整次失败 ----
@@ -336,7 +505,7 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
   const spec = buildUiSpec(built);
   const diagnostics: UIDiagnostic[] = built.diagnostics;
 
-  const resultLine = `${JSON.stringify({
+  const resultFrame: ChildToHost = {
     v: 1,
     type: 'result',
     ...(sanitizedValue !== undefined ? { value: sanitizedValue } : {}),
@@ -345,7 +514,8 @@ async function executeRun(frame: Extract<HostToChild, { type: 'run' }>): Promise
     uiDiagnostics: diagnostics,
     nestedCalls: callSeq,
     hasUi: !!spec,
-  })}\n`;
+  };
+  const resultLine = encodeFrame(resultFrame);
   if (byteLength(resultLine) > MAX_FRAME_BYTES) {
     await writeFrame({
       v: 1,

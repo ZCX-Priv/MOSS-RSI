@@ -452,6 +452,9 @@ export const en = {
       codeModeTitle: 'Code mode',
       codeModeEnabled: 'Enable code mode',
       codeModeEnabledDesc: 'Let the model write TypeScript programs via run_code to call tools and build interactive UI',
+      codeModeFullAccess: 'Super PTC (full access)',
+      codeModeFullAccessDesc:
+        'Allow programs to import npm/node built-ins, access the network, read real environment variables, call any AI API, and use all tools except ask/agent/todo, including nested run_code. Equivalent to running arbitrary TypeScript on this machine.',
       codeModeUiEnabled: 'Enable Smart UI',
       codeModeUiEnabledDesc: 'Allow programs to build interactive UI with ui.* components and embedded pages (dashboards / forms / games / web pages)',
       codeModeCdnEnabled: 'Allow CDN resources',
@@ -462,6 +465,10 @@ export const en = {
       codeModeMaxCharsDesc: 'Maximum TypeScript source length the model may submit per run',
       codeModeMaxParallel: 'Nested call concurrency',
       codeModeMaxParallelDesc: 'Read-only tools may overlap; writes/terminal run exclusively',
+      codeModeMaxNestedDepth: 'Max nesting depth',
+      codeModeMaxNestedDepthDesc: 'Top-level counts as depth 1; 0 = unlimited',
+      codeModeMaxPrograms: 'Max concurrent programs',
+      codeModeMaxProgramsDesc: 'Concurrent run_code subprocess limit; 0 = unlimited; new calls fail fast with a retryable error when full',
       codeModeHint: 'Changes apply to the next request/program run. run_code is treated like terminal and requires user confirmation by default.',
     },
     browser: {

@@ -4,8 +4,10 @@
 // 安全模型（必须诚实）：子进程能硬超时/强杀，避免死循环阻塞主服务；但这不是多租户安全沙箱。
 // 程序仍以当前用户权限运行，真正的安全边界是外层 run_code 的确认卡 + 嵌套工具逐次 safety 决策。
 
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, resolve as resolvePath } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { SYSTEM_SCOPE, systemRoot } from '../../../filesys/roots';
 import type { Logger } from '../../../../core/types';
 import type { RunCodeProgressEvent, ToolResult } from '../../types';
@@ -14,6 +16,7 @@ import {
   byteLength,
   CALL_ID_RE,
   encodeFrame,
+  isFrameLine,
   isLosslessJsonValue,
   MAX_FRAME_BYTES,
   parseFrameLine,
@@ -25,6 +28,7 @@ import {
   type HostToChild,
   type RunLimits,
 } from './protocol';
+import { cleanupProgramFile, prepareProgramFile, sweepStaleProgramDirs } from './program-file';
 import { toolResultErrorMessage, toolResultText, toolResultToCodeValue } from './value';
 import type { SanitizeWarning } from './sanitize';
 import type { ValidationResult } from './schema';
@@ -53,6 +57,8 @@ export interface RunCodeHostOptions {
   cwd: string;
   limits: RunLimits;
   uiEnabled: boolean;
+  /** 超级PTC：完全体运行时 */
+  fullAccess?: boolean;
   signal?: AbortSignal;
   /** 由 AgentEngine 注入：完整 safety/hooks 管线后的工具结果 */
   invokeTool: (name: string, args: unknown, opts: { callId: string; signal: AbortSignal }) => Promise<ToolResult>;
@@ -93,10 +99,14 @@ interface ChildProcessLike {
   kill(signal?: number | NodeJS.Signals): void;
 }
 
-/** 单条日志的格式化保护（协议帧硬上限，不是内容预算） */
-const MAX_LOG_ENTRY_BYTES = MAX_FRAME_BYTES;
-/** 嵌套调用记录条数上限（只限制条数，不截内容） */
+/** 单条日志上限（超出截断并标注） */
+const MAX_LOG_ENTRY_BYTES = 16 * 1024;
+/** 单次程序日志总预算：防止死循环 console.log 把宿主内存撑爆 */
+const MAX_LOG_TOTAL_BYTES = 4 * 1024 * 1024;
+/** 嵌套调用记录条数上限 */
 const MAX_CALL_RECORDS = 100;
+/** 单条调用记录存 UI/历史的正文与 metadata 上限（程序本身仍拿到完整结果） */
+const MAX_CALL_RESULT_BYTES = 256 * 1024;
 const STDERR_CAP_BYTES = 8_192;
 const EXIT_GRACE_MS = 150;
 const EXIT_HARD_WAIT_MS = 800;
@@ -104,6 +114,21 @@ const EXIT_HARD_WAIT_MS = 800;
 const MAX_PROGRESS_ARGS_BYTES = 16 * 1024;
 const MAX_PROGRESS_RESULT_TEXT_BYTES = 32 * 1024;
 const MAX_PROGRESS_RESULT_META_BYTES = 64 * 1024;
+
+/** 当前正在运行的 run_code 子进程数（maxConcurrentPrograms=0 时不使用该计数） */
+let activePrograms = 0;
+/** 活跃子进程注册表：宿主退出时同步清理，避免孤儿进程 */
+const activeChildren = new Set<ChildProcessLike>();
+let exitHookInstalled = false;
+
+function ensureExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.once('exit', () => {
+    for (const child of activeChildren) killChildTreeSync(child);
+    activeChildren.clear();
+  });
+}
 
 /** 执行一段程序；程序失败作为 result.error 返回，不 reject。 */
 export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeHostResult> {
@@ -139,6 +164,48 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   }
 
   const cwd = resolveCwd(opts.cwd);
+  const capacity = opts.limits.maxConcurrentPrograms ?? 4;
+  if (capacity > 0 && activePrograms >= capacity) {
+    return {
+      logs: [],
+      calls: [],
+      callsTruncated: false,
+      nestedCalls: 0,
+      hasUi: false,
+      durationMs: Math.round(performance.now() - startedAt),
+      truncated: false,
+      error: {
+        kind: 'capacity',
+        message:
+          `run_code 并发已达上限（${activePrograms}/${capacity}）。请稍后重试、减少同时运行的 run_code，` +
+          '或在 设置 → 工具 → 代码模式 中调整「最大并发程序」（0 = 不限制）。',
+      },
+    };
+  }
+
+  let programFile: { dir: string; path: string; lineOffset: number } | undefined;
+  if (opts.fullAccess) {
+    sweepStaleProgramDirs(join(cwd, '.cache', 'moss-ptc'));
+    sweepStaleProgramDirs(join(homedir(), '.moss', 'tmp', 'ptc'));
+    try {
+      programFile = prepareProgramFile(opts.program, cwd);
+    } catch (err) {
+      return {
+        logs: [],
+        calls: [],
+        callsTruncated: false,
+        nestedCalls: 0,
+        hasUi: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        truncated: false,
+        error: {
+          kind: 'sandbox-unavailable',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
+  }
+
   const runController = new AbortController();
   const logs: string[] = [];
   const calls: CodeRunCallRecord[] = [];
@@ -152,16 +219,22 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
   let runSent = false;
   let hasUi = false;
 
+  activePrograms += 1;
+  ensureExitHook();
+
   let child: ChildProcessLike;
   try {
     child = Bun.spawn([process.execPath, bootstrapPath], {
       cwd,
-      env: minimalEnv(),
+      env: opts.fullAccess ? realEnv() : minimalEnv(),
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
     }) as unknown as ChildProcessLike;
+    activeChildren.add(child);
   } catch (err) {
+    activePrograms = Math.max(0, activePrograms - 1);
+    if (programFile) cleanupProgramFile(programFile.dir);
     return {
       logs: [],
       calls: [],
@@ -184,6 +257,9 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     /** 日志批量缓冲：避免每条 console.log 都单独发一帧 WS（80ms / 50 条） */
     const logBuffer: string[] = [];
     let logTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 日志总预算（字节）与耗尽标记：防止死循环刷日志 */
+    let logBytes = 0;
+    let logsBudgetExhausted = false;
     /** 程序开始执行的绝对时刻（epoch ms），供前端实时计时 */
     let programStartedAtMs: number | null = null;
 
@@ -259,10 +335,19 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     };
 
     const appendLog = (text: string): void => {
-      if (finished) return;
+      if (finished || logsBudgetExhausted) return;
       const oversized = byteLength(text) > MAX_LOG_ENTRY_BYTES;
       const clean = truncateToBytes(text, MAX_LOG_ENTRY_BYTES);
       const entry = oversized ? `${clean}\n…（单条日志过长，已截断）` : clean;
+      const entryBytes = byteLength(entry);
+      if (logBytes + entryBytes > MAX_LOG_TOTAL_BYTES) {
+        logsBudgetExhausted = true;
+        const notice = `…（日志总量超过 ${Math.round(MAX_LOG_TOTAL_BYTES / 1024 / 1024)}MB，后续日志已省略）`;
+        logs.push(notice);
+        scheduleLog(notice);
+        return;
+      }
+      logBytes += entryBytes;
       logs.push(entry);
       scheduleLog(entry);
     };
@@ -282,8 +367,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     /**
      * 嵌套调用的富数据（前端复用普通工具卡渲染）。
-     * 预览完全放开：入参、结果正文、metadata 都不按字节截断。
-     * argsJson 由调用方预计算：同一份入参在 start/record/details 三处复用，避免多次全量 stringify。
+     * 程序本身拿到完整结果；这里只限制存入调用记录/历史的正文与 metadata，
+     * 避免长任务或大结果把会话内存撑爆。
      */
     const collectCallDetails = (
       argsJson: string | undefined,
@@ -291,10 +376,18 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       fallbackText?: string,
     ): Pick<CodeRunCallRecord, 'argumentsJson' | 'resultText' | 'resultMetadata'> => {
       const rawText = result ? toolResultText(result) : (fallbackText ?? '');
+      const resultText = rawText ? truncateToBytes(rawText, MAX_CALL_RESULT_BYTES) : '';
+      let resultMetadata: ToolResult['metadata'] | undefined;
+      if (result?.metadata) {
+        const metaJson = jsonText(result.metadata);
+        if (metaJson === undefined || byteLength(metaJson) <= MAX_CALL_RESULT_BYTES) {
+          resultMetadata = result.metadata;
+        }
+      }
       return {
         ...(argsJson ? { argumentsJson: argsJson } : {}),
-        ...(rawText ? { resultText: rawText } : {}),
-        ...(result?.metadata ? { resultMetadata: result.metadata } : {}),
+        ...(resultText ? { resultText } : {}),
+        ...(resultMetadata ? { resultMetadata } : {}),
       };
     };
 
@@ -380,6 +473,11 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
 
     const handleLine = (line: string): void => {
       if (finished) return;
+      // 非控制帧 stdout（第三方库 / 孙进程输出）一律按日志处理，不打断协议
+      if (!isFrameLine(line)) {
+        appendLog(line);
+        return;
+      }
       if (byteLength(line) > MAX_FRAME_BYTES) {
         void settle(protocolError(`frame exceeds ${MAX_FRAME_BYTES} bytes`));
         return;
@@ -403,6 +501,10 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           cwd,
           limits: opts.limits,
           uiEnabled: opts.uiEnabled,
+          fullAccess: opts.fullAccess === true,
+          ...(programFile
+            ? { programPath: programFile.path, programLineOffset: programFile.lineOffset }
+            : {}),
         });
         programStartedAtMs = Date.now();
         emitProgress({ phase: 'started', startedAtMs: programStartedAtMs });
@@ -689,7 +791,10 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
       } catch {
         // 已关闭
       }
-      await terminateChild(child);
+      await terminateChildTree(child);
+      activeChildren.delete(child);
+      activePrograms = Math.max(0, activePrograms - 1);
+      if (programFile) cleanupProgramFile(programFile.dir);
       resolvePromise({
         ...result,
         ...(nestedImages.length > 0 ? { images: nestedImages.slice() } : {}),
@@ -712,6 +817,8 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
     };
 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
+    // 竞态兜底：检查与注册之间已被 abort 时，addEventListener 不会再触发
+    if (opts.signal?.aborted) onAbort();
 
     timer = setTimeout(() => {
       runController.abort();
@@ -739,7 +846,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          if (buffer.length > MAX_FRAME_BYTES * 4) {
+          if (buffer.length > MAX_FRAME_BYTES + 4096) {
             await settle(protocolError('stdout buffer overflow without newline'));
             return;
           }
@@ -753,6 +860,7 @@ export async function runCodeProgram(opts: RunCodeHostOptions): Promise<RunCodeH
           }
         }
         if (!finished) {
+          if (buffer.trim() !== '') appendLog(buffer);
           await child.exited;
           await settle({
             logs: logs.slice(),
@@ -807,7 +915,7 @@ function resolveCwd(cwd: string): string {
   }
 }
 
-/** 最小环境变量：保留系统运行必需项，清空用户业务变量；程序内 process.env 也是空 shim。 */
+/** 最小环境变量：保留系统运行必需项，清空用户业务变量；沙箱内 process.env 也是空 shim。 */
 function minimalEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   const keys = process.platform === 'win32'
@@ -820,21 +928,54 @@ function minimalEnv(): Record<string, string> {
   return env;
 }
 
-async function terminateChild(child: ChildProcessLike): Promise<void> {
+/** 完全体：传递真实环境变量（含用户配置的 API Key 等），程序内 process.env 可用。 */
+function realEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string') env[key] = value;
+  }
+  return env;
+}
+
+/** 终止子进程及其派生进程（Windows taskkill /T；POSIX 进程组尽力而为） */
+async function terminateChildTree(child: ChildProcessLike): Promise<void> {
   const exited = await Promise.race([
     child.exited.then(() => true),
     new Promise<boolean>((r) => setTimeout(() => r(false), EXIT_GRACE_MS)),
   ]);
   if (exited) return;
+  killChildTreeSync(child);
+  await Promise.race([
+    child.exited,
+    new Promise<void>((r) => setTimeout(r, EXIT_HARD_WAIT_MS)),
+  ]);
+}
+
+/** 同步杀进程树：用于运行收尾与宿主 exit 钩子 */
+function killChildTreeSync(child: ChildProcessLike): void {
+  if (process.platform === 'win32') {
+    try {
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // taskkill 不可用时退回 child.kill
+    }
+  } else {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch {
+      // 非进程组：退回 child.kill
+    }
+  }
   try {
     child.kill('SIGKILL');
   } catch {
     // 已退出
   }
-  await Promise.race([
-    child.exited,
-    new Promise<void>((r) => setTimeout(r, EXIT_HARD_WAIT_MS)),
-  ]);
 }
 
 function isFailureKind(value: unknown): value is CodeFailureKind {
@@ -846,6 +987,7 @@ function isFailureKind(value: unknown): value is CodeFailureKind {
     value === 'syntax' ||
     value === 'output-limit' ||
     value === 'protocol' ||
+    value === 'capacity' ||
     value === 'sandbox-unavailable'
   );
 }
@@ -867,7 +1009,7 @@ function normalizeValueWarnings(value: unknown): SanitizeWarning[] {
   return out;
 }
 
-/** 完整 JSON 文本（预览完全放开，不再按字节截断）；不可序列化时返回 undefined */
+/** 完整 JSON 文本；不可序列化时返回 undefined */
 function jsonText(value: unknown): string | undefined {
   try {
     const json: string | undefined = JSON.stringify(value);

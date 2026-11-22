@@ -1157,14 +1157,12 @@ export class AgentEngineImpl implements AgentEngine {
     }
     if (codeMode.enabled) {
       const sdkTools = [
-        ...(toolRegistry?.listSchemas() ?? [])
-          .filter((t) => t.name !== 'run_code')
-          .map((t) => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-            annotations: t.annotations,
-          })),
+        ...(toolRegistry?.listSchemas() ?? []).map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          annotations: t.annotations,
+        })),
         ...mcpTools.map((t) => ({
           name: `mcp__${t.server}__${t.name}`,
           description: `[MCP:${t.server}] ${t.description ?? t.name}`,
@@ -1175,6 +1173,7 @@ export class AgentEngineImpl implements AgentEngine {
         env: this.env,
         uiEnabled: codeMode.uiEnabled,
         allowCdn: codeMode.allowCdn,
+        fullAccess: codeMode.fullAccess,
         tools: sdkTools,
       });
       if (section) promptExtras.push(section);
@@ -3388,6 +3387,8 @@ export class AgentEngineImpl implements AgentEngine {
       prechecked?: boolean;
       /** 当前会话模型 id（嵌套调用审查时继承） */
       model?: string;
+      /** 当前 PTC 深度（顶层 0；嵌套 run_code 递增） */
+      codeDepth?: number;
       /** 子代理父会话 id（审查/确认来源归属） */
       parentSessionId?: string;
     },
@@ -3486,6 +3487,7 @@ export class AgentEngineImpl implements AgentEngine {
       sessionId: ctx.sessionId,
       cwd: ctx.cwd,
       toolCallId: ctx.toolCallId,
+      codeDepth: ctx.codeDepth ?? 0,
       emit: (event) => {
         // 通用 progress 只记日志：旧实现错误地转发成 tool-call-start，
         // 会在工具执行中把卡片状态重置回 generating（闪烁/假状态）。
@@ -3575,6 +3577,7 @@ export class AgentEngineImpl implements AgentEngine {
             signal: opts?.signal ?? ctx.signal,
             permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
             model: ctx.model ?? '',
+            codeDepth: opts?.codeDepth ?? ctx.codeDepth ?? 0,
             ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
           },
           opts?.callId,
@@ -3609,7 +3612,8 @@ export class AgentEngineImpl implements AgentEngine {
    *   - 仍完整走 safety（executeBuiltinTool/executeMcpTool 内部）、Pre/PostToolUse 钩子、
    *     文件访问规则登记与 todo/context 副作用；
    *   - confirm 事件使用嵌套 toolCallId，前端现有 pending 卡片可直接应答；
-   *   - 禁止递归 run_code，且禁止 ask / agent / todo（程序内硬限制）。
+   *   - 允许嵌套 run_code（深度由 config.agent.codeMode.maxNestedDepth 控制）；
+   *     禁止 ask / agent / todo（程序内硬限制）。
    */
   private async invokeToolFromCode(
     name: string,
@@ -3625,6 +3629,8 @@ export class AgentEngineImpl implements AgentEngine {
       permissionMode: PermissionMode;
       /** 当前会话模型 id（嵌套审查继承） */
       model?: string;
+      /** 当前 PTC 深度（顶层 0；嵌套 run_code 递增） */
+      codeDepth?: number;
       /** 子代理父会话 id（审查/确认来源归属） */
       parentSessionId?: string;
     },
@@ -3638,12 +3644,6 @@ export class AgentEngineImpl implements AgentEngine {
             text: `Error: PTC 程序内禁止调用 ${name} 工具。请直接在主流程调用原生工具，不要写进 run_code 程序。`,
           },
         ],
-        isError: true,
-      };
-    }
-    if (name === 'run_code') {
-      return {
-        content: [{ type: 'text', text: 'Error: nested run_code is forbidden (recursion depth is fixed at 1)' }],
         isError: true,
       };
     }
@@ -3695,6 +3695,7 @@ export class AgentEngineImpl implements AgentEngine {
       signal: ctx.signal,
       permissionMode: this.sessionPermissionMode(ctx.sessionId, ctx.permissionMode),
       model: ctx.model ?? '',
+      codeDepth: ctx.codeDepth ?? 0,
       ...(ctx.parentSessionId ? { parentSessionId: ctx.parentSessionId } : {}),
     };
 
@@ -4063,6 +4064,8 @@ export class AgentEngineImpl implements AgentEngine {
       prechecked?: boolean;
       /** 当前会话模型 id（嵌套调用审查时继承） */
       model?: string;
+      /** 当前 PTC 深度（顶层 0；嵌套 run_code 递增） */
+      codeDepth?: number;
       /** 子代理父会话 id（审查/确认来源归属） */
       parentSessionId?: string;
     },

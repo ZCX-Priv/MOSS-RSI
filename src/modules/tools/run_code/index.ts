@@ -77,6 +77,9 @@ export default {
     if (!codeMode.enabled) {
       return err('代码模式未启用（config.agent.codeMode.enabled=false）。请在设置 → 工具 → 代码模式中开启。');
     }
+    const fullAccess = codeMode.fullAccess === true;
+    const maxNestedDepth = codeMode.maxNestedDepth ?? 2;
+    const maxConcurrentPrograms = codeMode.maxConcurrentPrograms ?? 4;
 
     const code = typeof p.code === 'string' ? p.code : '';
     const pageParsed = normalizePage(p.page);
@@ -88,6 +91,15 @@ export default {
     }
     if (page && !codeMode.uiEnabled) {
       return err('内嵌页面已关闭（config.agent.codeMode.uiEnabled=false）。请在设置 → 工具 → 启用智能界面中开启。');
+    }
+
+    // ---- 嵌套深度：顶层算第 1 层；0 = 不限制 ----
+    const codeDepth = (ctx.codeDepth ?? 0) + 1;
+    if (exceedsNestedDepth(codeDepth, maxNestedDepth)) {
+      return err(
+        `PTC 嵌套深度超限（当前第 ${codeDepth} 层，上限 ${maxNestedDepth} 层）。` +
+          '请减少嵌套，或在 设置 → 工具 → 代码模式 中调整「最大嵌套层数」（0 = 不限制）。',
+      );
     }
     const description =
       typeof p.description === 'string' && p.description.trim() !== ''
@@ -150,7 +162,7 @@ export default {
 
     const builtinTools = registry
       .listSchemas()
-      .filter((t) => t.name !== 'run_code' && !isPtcForbiddenTool(t.name));
+      .filter((t) => !isPtcForbiddenTool(t.name));
     let mcpTools: Array<{
       name: string;
       description: string;
@@ -188,6 +200,12 @@ export default {
     if (!invokeTool) {
       return err('run_code 必须在 Agent 会话中执行（缺少嵌套工具调用通道 invokeTool）');
     }
+    // 嵌套 run_code 需要知道父程序深度；宿主只负责透传，深度判断在本工具入口完成。
+    const invokeWithDepth = (
+      name: string,
+      args: unknown,
+      opts: { callId: string; signal: AbortSignal },
+    ): Promise<ToolResult> => invokeTool(name, args, { ...opts, codeDepth });
 
     // ---- 执行预算 ----
     const requested =
@@ -202,10 +220,12 @@ export default {
         timeoutMs,
         maxCodeChars: codeMode.maxCodeChars,
         maxParallelSubCalls: codeMode.maxParallelSubCalls,
+        maxConcurrentPrograms,
       },
       uiEnabled: codeMode.uiEnabled,
+      fullAccess,
       signal: ctx.signal,
-      invokeTool,
+      invokeTool: invokeWithDepth,
       isConcurrencySafe: (name) => safe.get(name) === true,
       validateCall: (name, args) => validateToolArguments(name, args, schemaByName.get(name)),
       onProgress: ctx.onRunCodeProgress,
@@ -312,6 +332,11 @@ export default {
 
 function err(message: string): ToolResult {
   return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
+}
+
+/** 深度口径：顶层算第 1 层；maxNestedDepth=0 表示不限制。 */
+export function exceedsNestedDepth(depth: number, maxNestedDepth: number): boolean {
+  return maxNestedDepth > 0 && depth > maxNestedDepth;
 }
 
 /**
@@ -548,6 +573,9 @@ function formatResultText(input: FormatInput): string {
     if (e?.kind === 'abort') {
       parts.push('程序被用户/父 run 中止。');
     }
+    if (e?.kind === 'capacity') {
+      parts.push('当前并发程序已满；可稍后重试，或在 设置 → 工具 → 代码模式 中调大「最大并发程序」（0 = 不限制）。');
+    }
     if (e?.kind === 'syntax') {
       parts.push('这是代码结构/语法问题：按上面的行号只修改对应语句，不要在未定位前整段重写。');
     }
@@ -597,7 +625,13 @@ function formatResultText(input: FormatInput): string {
     );
   }
   if (input.logs.length > 0) {
-    parts.push(`--- 日志 ---\n${input.logs.join('\n')}`);
+    const text = input.logs.join('\n');
+    const maxChars = 32 * 1024;
+    parts.push(
+      text.length <= maxChars
+        ? `--- 日志 ---\n${text}`
+        : `--- 日志（仅末尾 ${maxChars} 字符）---\n…（前部日志已省略）\n${text.slice(-maxChars)}`,
+    );
   }
   return parts.join('\n\n');
 }

@@ -59,18 +59,20 @@ return { after, note: before.text };
 - 在 PTC 里调用 `agent` / `ask` / `todo`：这些必须直接调用原生工具（agent 的 status/message/manage 也在程序内禁止）。
 
 ### 使用规则
-- `code` 是一个 async TypeScript 函数体；支持顶层 `await` 与 `return`，类型注解会被剥离。
-- 定时用注入的 `sleep(ms)` 与 `now()`；沙箱内 `setTimeout` 不可用（不要尝试）。
+- `code` 是一个 async TypeScript 函数体；支持顶层 `await` 与 `return`。
 - 工具失败会在程序内抛出可 `try/catch` 的 `ToolCallError`；错误对象带 `toolName`。
 - 只有 `return` 的值与 `console.log` 的文本会回到模型上下文；中间结果不会自动回灌，请主动裁剪。
 - 只读工具可以用 `Promise.all` 并发；写操作/终端等会按提交顺序独占执行。
 - 代码程序内禁止调用 {{PTC_FORBIDDEN_LABEL}}；违反会导致程序直接报错。
-- 不要 `import`/`require`/`fetch`/使用 `Bun`；程序只应依赖注入的 `tools`、`ui`、`console` 与受限 `process`。
 - 返回值对象里的 undefined/函数/BigInt/Date/Map/Set/NaN/循环引用会被自动净化并给出警告，不需要手工清洗；只返回需要的字段即可。
 - 程序有执行时间预算；返回值不设输出字节预算，会完整返回（仅 64MB 协议硬上限）。只返回必要字段，避免上下文被无用数据占满。
 - 语法/转译错误会给出程序自身的行号、列号与代码片段；按提示只改对应语句，不要在未定位前整段重写。
 - 大段 UI 建议先按块建变量，再组装，最后 `ui.render`；超深嵌套容易造成括号错配。
 - 不确定工具返回结构时，先写最小探针（单次调用 + `console.log`）确认，再批量执行。
+- `tools.run_code` 可以嵌套调用；顶层算第 1 层，深度与并发上限可在设置中调整（0 = 不限制）。
+- 完全体开启时，遇到 2 步以上、需要网络/AI/文件处理/条件分支/循环的任务，默认优先写 PTC，不要退回多轮原生工具调用。
+
+{{RUNTIME_RULES}}
 
 {{TOOL_RETURN_SHAPE}}
 {{UI_SECTION}}

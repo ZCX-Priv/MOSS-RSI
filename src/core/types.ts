@@ -269,6 +269,12 @@ export interface AppConfig {
       timeoutMs: number;
       maxCodeChars: number;
       maxParallelSubCalls: number;
+      /** 超级PTC：放开 import / fetch / 真实 env / Bun 等完全体能力 */
+      fullAccess: boolean;
+      /** 最大嵌套层数（顶层算第 1 层；0 = 不限制） */
+      maxNestedDepth: number;
+      /** 同时运行的 run_code 子进程上限（0 = 不限制） */
+      maxConcurrentPrograms: number;
     };
   };
   // tools 类型从 manifest 自动推导（单一真相源），新增工具无需手动改此文件

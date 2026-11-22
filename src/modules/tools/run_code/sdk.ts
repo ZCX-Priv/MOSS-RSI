@@ -26,6 +26,8 @@ export interface BuildCodeModePromptInput {
   uiEnabled: boolean;
   /** 是否允许内嵌页面引用外部 CDN 资源（决定提示词与运行时拦截口径） */
   allowCdn: boolean;
+  /** 超级PTC：决定运行时规则与完全体用法段 */
+  fullAccess: boolean;
   tools: CodeModeToolSchema[];
 }
 
@@ -35,7 +37,7 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
   if (!template) return null;
 
   const tools = input.tools
-    .filter((tool) => tool.name !== 'run_code' && !isPtcForbiddenTool(tool.name))
+    .filter((tool) => !isPtcForbiddenTool(tool.name))
     .slice()
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
@@ -73,15 +75,29 @@ export function buildCodeModePromptExtras(input: BuildCodeModePromptInput): Code
     uiSection = loadPromptFileOrNull(input.env, 'code-mode/ui-disabled.md')?.trim() ?? '';
   }
 
+  const runtimeRules = input.fullAccess
+    ? (loadPromptFileOrNull(input.env, 'code-mode/runtime-full.md') ?? '').trim()
+    : (loadPromptFileOrNull(input.env, 'code-mode/runtime-sandbox.md') ?? '').trim();
+
+  let content = renderTemplate(template, {
+    TOOL_SIGNATURES: signatures,
+    INLINE_PAGE: inlinePage,
+    PTC_FORBIDDEN_LABEL: PTC_FORBIDDEN_TOOL_LABEL,
+    TOOL_RETURN_SHAPE: toolReturnShape,
+    UI_SECTION: uiSection,
+    RUNTIME_RULES: runtimeRules,
+  }).trimEnd();
+
+  if (input.fullAccess) {
+    const superPtc = loadPromptFileOrNull(input.env, 'code-mode/super-ptc.md');
+    if (superPtc && superPtc.trim() !== '') content += `\n\n${superPtc.trim()}`;
+    const recipes = loadPromptFileOrNull(input.env, 'code-mode/ai-recipes.md');
+    if (recipes && recipes.trim() !== '') content += `\n\n${recipes.trim()}`;
+  }
+
   return {
     id: 'code-mode-sdk',
     title: '代码模式（PTC）',
-    content: renderTemplate(template, {
-      TOOL_SIGNATURES: signatures,
-      INLINE_PAGE: inlinePage,
-      PTC_FORBIDDEN_LABEL: PTC_FORBIDDEN_TOOL_LABEL,
-      TOOL_RETURN_SHAPE: toolReturnShape,
-      UI_SECTION: uiSection,
-    }).trimEnd(),
+    content,
   };
 }

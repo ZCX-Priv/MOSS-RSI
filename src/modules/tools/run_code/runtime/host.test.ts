@@ -2,6 +2,7 @@
 // run_code 子进程运行时最小闭环测试：转译、注入、工具调用、日志、返回值、UISpec。
 
 import { describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import type { ToolResult } from '../../types';
 import { validateUISpec } from '../ui/validate';
 import { runCodeProgram } from './host';
@@ -269,7 +270,7 @@ describe('run_code runtime host', () => {
     expect(result.calls[0]?.argumentsJson?.length ?? 0).toBeGreaterThan(64 * 1024);
   });
 
-  test('大日志不再受总量预算截断', async () => {
+  test('大日志按单条上限截断并标注', async () => {
     const result = await runCodeProgram({
       program: "console.log('z'.repeat(2 * 1024 * 1024));\nreturn 'ok';",
       bindings: [],
@@ -280,6 +281,195 @@ describe('run_code runtime host', () => {
       isConcurrencySafe: () => true,
     });
     expect(result.error).toBeUndefined();
-    expect(result.logs[0]?.length).toBe(2 * 1024 * 1024);
+    const log = result.logs[0] ?? '';
+    expect(log.length).toBeLessThan(2 * 1024 * 1024);
+    expect(log).toContain('单条日志过长');
+  });
+
+  test('完全体：原生 import + 真实 process.env', async () => {
+    process.env.MOSS_PTC_TEST = 'ok';
+    try {
+      const result = await runCodeProgram({
+        program: [
+          "import { join as joinPath } from 'node:path';",
+          'return { path: joinPath("a", "b"), env: process.env.MOSS_PTC_TEST };',
+        ].join('\n'),
+        bindings: [],
+        cwd: process.cwd(),
+        limits: LIMITS,
+        uiEnabled: false,
+        fullAccess: true,
+        invokeTool: echoTool(),
+        isConcurrencySafe: () => true,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.value).toEqual({ path: join('a', 'b'), env: 'ok' });
+    } finally {
+      delete process.env.MOSS_PTC_TEST;
+    }
+  });
+
+  test('完全体：fetch 可访问本地服务', async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response('pong');
+      },
+    });
+    try {
+      const result = await runCodeProgram({
+        program: `const resp = await fetch('http://127.0.0.1:${server.port}'); return await resp.text();`,
+        bindings: [],
+        cwd: process.cwd(),
+        limits: LIMITS,
+        uiEnabled: false,
+        fullAccess: true,
+        invokeTool: echoTool(),
+        isConcurrencySafe: () => true,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.value).toBe('pong');
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('完全体：require 可加载 node 内置模块', async () => {
+    const result = await runCodeProgram({
+      program: "const fs = require('node:fs'); return typeof fs.readFileSync;",
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      fullAccess: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.value).toBe('function');
+  });
+
+  test('ask/agent/todo 仍被拒绝，run_code 可注入', async () => {
+    const forbidden = await runCodeProgram({
+      program: "try { tools.ask; return 'accessed'; } catch (err) { return String(err); }",
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(forbidden.error).toBeUndefined();
+    expect(String(forbidden.value)).toContain('cannot be used inside run_code');
+
+    const allowed = await runCodeProgram({
+      program: 'return typeof tools.run_code;',
+      bindings: ['run_code'],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    expect(allowed.error).toBeUndefined();
+    expect(allowed.value).toBe('function');
+  });
+
+  test('嵌套 run_code 通过 invokeTool 透传', async () => {
+    const seen: string[] = [];
+    const result = await runCodeProgram({
+      program: [
+        "const nested = await tools.run_code({ code: 'return 1', description: 'nested' });",
+        'return nested;',
+      ].join('\n'),
+      bindings: ['run_code'],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      invokeTool: async (name) => {
+        seen.push(name);
+        return { content: [{ type: 'text', text: 'nested-ok' }] };
+      },
+      isConcurrencySafe: () => true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(seen).toEqual(['run_code']);
+    expect(result.value).toBe('nested-ok');
+  });
+
+  test('并发上限：满额立即返回 capacity', async () => {
+    const limits = { ...LIMITS, maxConcurrentPrograms: 1 };
+    const first = runCodeProgram({
+      program: "await sleep(600);\nreturn 'first';",
+      bindings: [],
+      cwd: process.cwd(),
+      limits,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+    await Bun.sleep(80);
+    const second = await runCodeProgram({
+      program: "return 'second';",
+      bindings: [],
+      cwd: process.cwd(),
+      limits,
+      uiEnabled: false,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+
+    expect(second.error?.kind).toBe('capacity');
+    const firstResult = await first;
+    expect(firstResult.error).toBeUndefined();
+    expect(firstResult.value).toBe('first');
+  });
+
+  test('并发上限 0 = 不限制', async () => {
+    const limits = { ...LIMITS, maxConcurrentPrograms: 0 };
+    const [a, b] = await Promise.all([
+      runCodeProgram({
+        program: 'return 1;',
+        bindings: [],
+        cwd: process.cwd(),
+        limits,
+        uiEnabled: false,
+        invokeTool: echoTool(),
+        isConcurrencySafe: () => true,
+      }),
+      runCodeProgram({
+        program: 'return 2;',
+        bindings: [],
+        cwd: process.cwd(),
+        limits,
+        uiEnabled: false,
+        invokeTool: echoTool(),
+        isConcurrencySafe: () => true,
+      }),
+    ]);
+
+    expect(a.error).toBeUndefined();
+    expect(b.error).toBeUndefined();
+    expect([a.value, b.value].sort()).toEqual([1, 2]);
+  });
+
+  test('process.exit 只影响子进程，host 返回错误且不崩溃', async () => {
+    const result = await runCodeProgram({
+      program: 'process.exit(3);',
+      bindings: [],
+      cwd: process.cwd(),
+      limits: LIMITS,
+      uiEnabled: false,
+      fullAccess: true,
+      invokeTool: echoTool(),
+      isConcurrencySafe: () => true,
+    });
+
+    expect(result.error).toBeDefined();
+    expect(['worker-exit', 'protocol']).toContain(result.error?.kind ?? '');
   });
 });

@@ -337,6 +337,12 @@ const codeModeSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
   maxCodeChars: z.number().int().min(1_000).max(200_000).default(20_000),
   maxParallelSubCalls: z.number().int().min(1).max(32).default(10),
+  /** 超级PTC：放开 import / fetch / 真实 env / Bun 等完全体能力 */
+  fullAccess: z.boolean().default(false),
+  /** 最大嵌套层数（顶层算第 1 层；0 = 不限制） */
+  maxNestedDepth: z.number().int().min(0).max(32).default(2),
+  /** 同时运行的 run_code 子进程上限（0 = 不限制） */
+  maxConcurrentPrograms: z.number().int().min(0).max(32).default(4),
 });
 
 /** 通用设置（UI「通用」页的后端项） */
@@ -414,6 +420,9 @@ export const appConfigSchema = z.object({
       timeoutMs: 120_000,
       maxCodeChars: 20_000,
       maxParallelSubCalls: 10,
+      fullAccess: false,
+      maxNestedDepth: 2,
+      maxConcurrentPrograms: 4,
     }),
   }),
   tools: buildToolsSchema(),
