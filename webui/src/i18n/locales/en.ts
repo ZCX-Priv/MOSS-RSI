@@ -270,6 +270,9 @@ export const en = {
       maxSubagentDepthLabel: 'Max subagent nesting depth',
       maxSubagentDepthDesc:
         'How many subagent layers may be spawned (1 = one layer; 2 = main → child → grandchild); default 2',
+      maxConcurrentSubagentsLabel: 'Max parallel subagents per round',
+      maxConcurrentSubagentsDesc:
+        'How many subagents may start in the same round (1-32; 0 = unlimited); default 4, extra calls queue',
     },
     provider: {
       title: 'Providers',
@@ -1657,6 +1660,11 @@ export const en = {
     cancelAgent: 'Stop this agent',
     cancelFailed: 'Failed to stop, please retry',
     cancelNotRunning: 'This agent has already finished',
+    board: 'Board',
+    boardRules: 'Board rules',
+    boardRulesEmpty: 'The main agent has not set board rules yet',
+    boardRuleBadge: 'Board rule',
+    boardDiscussionBadge: 'Board discussion',
   },
   plugins: {
     title: 'Plugins',

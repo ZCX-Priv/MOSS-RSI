@@ -6,12 +6,14 @@
 // - 任务页「智能体」标签与 REST 快照合并展示。
 // 本模块只保存可展示状态，不承担请求逻辑。
 
-import type { AgentBusMember, AgentBusMessage } from '../types/api';
+import type { AgentBoardNote, AgentBusMember, AgentBusMessage } from '../types/api';
 
 const membersBySession = new Map<string, AgentBusMember>();
 /** parentToolCallId → sessionId（同一时刻一个工具调用只对应一个子代理） */
 const sessionByParentToolCall = new Map<string, string>();
 const messagesById = new Map<string, AgentBusMessage>();
+/** rootSessionId → 白板规则（按 id 去重，updatedAt 新者胜） */
+const boardRulesByRoot = new Map<string, Map<string, AgentBoardNote>>();
 const listeners = new Set<() => void>();
 let version = 0;
 
@@ -96,6 +98,43 @@ export function listAgentBusMessages(rootSessionId?: string): AgentBusMessage[] 
   return [...messagesById.values()]
     .filter((m) => !rootSessionId || m.rootSessionId === rootSessionId)
     .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+}
+
+// ----------------------------------------------------------------------------
+// 共享白板（规则置顶展示；讨论走消息流）
+
+/** 快照水合：整表替换该 root 的规则 */
+export function hydrateAgentBoard(rootSessionId: string, rules: AgentBoardNote[]): void {
+  const next = new Map<string, AgentBoardNote>();
+  for (const rule of rules) {
+    if (rule?.id && rule.kind === 'rule') next.set(rule.id, rule);
+  }
+  boardRulesByRoot.set(rootSessionId, next);
+  notify();
+}
+
+/** 实时规则变更：按 id upsert（同标题覆盖由后端生成同一 id） */
+export function applyAgentBoardNote(note: AgentBoardNote): void {
+  if (!note || note.kind !== 'rule') return;
+  const rules = boardRulesByRoot.get(note.rootSessionId) ?? new Map<string, AgentBoardNote>();
+  rules.set(note.id, note);
+  boardRulesByRoot.set(note.rootSessionId, rules);
+  notify();
+}
+
+/** 实时规则删除 */
+export function applyAgentBoardRemoved(rootSessionId: string, id: string): void {
+  const rules = boardRulesByRoot.get(rootSessionId);
+  if (!rules || !rules.delete(id)) return;
+  notify();
+}
+
+/** 读取指定 root 的白板规则（按创建时间升序） */
+export function getAgentBoardRules(rootSessionId?: string): AgentBoardNote[] {
+  if (!rootSessionId) return [];
+  const rules = boardRulesByRoot.get(rootSessionId);
+  if (!rules) return [];
+  return [...rules.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
 }
 
 /** useSyncExternalStore 的 getSnapshot：版本号变化触发订阅者重渲染 */

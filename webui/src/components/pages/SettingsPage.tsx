@@ -2215,6 +2215,14 @@ export function AgentSettings() {
     setMaxSubagentDepthDraft(String(maxSubagentDepth));
   }, [maxSubagentDepth]);
 
+  const maxConcurrentSubagents = agentCfg?.maxConcurrentSubagents ?? 4;
+  const [maxConcurrentSubagentsDraft, setMaxConcurrentSubagentsDraft] = useState(
+    String(maxConcurrentSubagents),
+  );
+  useEffect(() => {
+    setMaxConcurrentSubagentsDraft(String(maxConcurrentSubagents));
+  }, [maxConcurrentSubagents]);
+
   const patchMaxSubagentDepth = async (v: number) => {
     if (!agentCfg || v === maxSubagentDepth) return;
     try {
@@ -2235,6 +2243,28 @@ export function AgentSettings() {
     const clamped = Math.max(1, Math.min(5, n));
     setMaxSubagentDepthDraft(String(clamped));
     void patchMaxSubagentDepth(clamped);
+  };
+
+  const patchMaxConcurrentSubagents = async (v: number) => {
+    if (!agentCfg || v === maxConcurrentSubagents) return;
+    try {
+      await updateAppConfig({ agent: { ...agentCfg, maxConcurrentSubagents: v } });
+    } catch {
+      // toast 已在 useConfig 内处理
+    }
+  };
+
+  /** 同轮并行子代理上限：clamp 到 [0,32]；0 = 不限制；非法回退当前值 */
+  const commitMaxConcurrentSubagentsDraft = () => {
+    const raw = maxConcurrentSubagentsDraft.trim();
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n) || n < 0) {
+      setMaxConcurrentSubagentsDraft(String(maxConcurrentSubagents));
+      return;
+    }
+    const clamped = Math.max(0, Math.min(32, n));
+    setMaxConcurrentSubagentsDraft(String(clamped));
+    void patchMaxConcurrentSubagents(clamped);
   };
 
   const handleEdit = async (id: string) => {
@@ -2371,6 +2401,29 @@ export function AgentSettings() {
             }}
             className="h-8 w-24 shrink-0 text-right"
             aria-label={t('settings.agent.maxSubagentDepthLabel')}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm text-foreground">
+              {t('settings.agent.maxConcurrentSubagentsLabel')}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {t('settings.agent.maxConcurrentSubagentsDesc')}
+            </span>
+          </div>
+          <Input
+            type="number"
+            min={0}
+            max={32}
+            value={maxConcurrentSubagentsDraft}
+            onChange={(e) => setMaxConcurrentSubagentsDraft(e.target.value)}
+            onBlur={commitMaxConcurrentSubagentsDraft}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+            className="h-8 w-24 shrink-0 text-right"
+            aria-label={t('settings.agent.maxConcurrentSubagentsLabel')}
           />
         </div>
       </div>

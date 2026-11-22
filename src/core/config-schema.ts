@@ -403,8 +403,8 @@ export const appConfigSchema = z.object({
     maxParallelTools: z.number().int().min(1).max(8).default(4),
     /** 同时运行的 agent run 上限（缺省按内存自适应） */
     maxConcurrentRuns: z.number().int().min(1).max(16).optional(),
-    /** 同轮并发子代理上限（缺省 4） */
-    maxConcurrentSubagents: z.number().int().min(1).max(8).default(4),
+    /** 同轮并发子代理上限（0 = 不限制；缺省 4） */
+    maxConcurrentSubagents: z.number().int().min(0).max(32).default(4),
     /** 子代理最大嵌套层级（1=只能派发一层；2=主→子→孙；缺省 2） */
     maxSubagentDepth: z.number().int().min(1).max(5).default(2),
     codeMode: codeModeSchema.default({

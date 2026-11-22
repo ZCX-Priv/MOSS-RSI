@@ -44,11 +44,56 @@ export interface AgentBusMessage {
   content: string;
   createdAt: string;
   delivered: boolean;
+  /** 白板消息类型（历史审计可能缺失） */
+  boardKind?: AgentBoardNoteKind;
 }
 
 export interface AgentBusSnapshot {
   members: AgentBusMember[];
   messages: AgentBusMessage[];
+  /** 白板规则（讨论已进入 messages；历史审计可能缺失） */
+  board?: { rules: AgentBoardNote[] };
+}
+
+/** 共享白板条目类型：rule=主代理设定的根本性原则；discussion=大群讨论 */
+export type AgentBoardNoteKind = 'rule' | 'discussion';
+
+/** 共享白板条目（任务树级持久化；进程重启后可恢复） */
+export interface AgentBoardNote {
+  id: string;
+  rootSessionId: string;
+  kind: AgentBoardNoteKind;
+  /** rule 必填：按标题覆盖（upsert） */
+  title?: string;
+  content: string;
+  authorAgentId: string;
+  authorSessionId: string;
+  authorName: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** 共享白板快照（rules=全部规则；discussion=最近 N 条讨论） */
+export interface AgentBoardSnapshot {
+  rootSessionId: string;
+  rules: AgentBoardNote[];
+  discussion: AgentBoardNote[];
+}
+
+/** 写入白板输入 */
+export interface PostBoardNoteInput {
+  fromSessionId: string;
+  kind: AgentBoardNoteKind;
+  title?: string;
+  content: string;
+}
+
+/** 写入白板结果 */
+export interface PostBoardNoteResult {
+  note?: AgentBoardNote;
+  /** 本次实时投递到收件箱的运行中成员数 */
+  delivered: number;
+  error?: string;
 }
 
 /** 注册/更新成员输入（同 sessionId 为 upsert） */
@@ -92,6 +137,12 @@ export interface AgentBus {
   send(input: SendAgentMessageInput): SendAgentMessageResult;
   /** 取出并标记已投递（引擎在 run 开始 / 每轮工具后调用） */
   drainInbox(sessionId: string): AgentBusMessage[];
-  /** 内存 + 审计文件合并快照（按 id 去重） */
+  /** 内存 + 审计文件合并快照（按 id 去重；成员账本仅在指定 root 时合并） */
   snapshot(rootSessionId?: string, opts?: { limit?: number }): AgentBusSnapshot;
+  /** 读取任务树共享白板（规则全量 + 最近讨论） */
+  readBoard(rootSessionId: string): AgentBoardSnapshot;
+  /** 写入白板：rule 仅主代理；discussion 所有成员 */
+  postBoard(input: PostBoardNoteInput): PostBoardNoteResult;
+  /** 删除白板规则（仅主代理） */
+  removeBoardNote(input: { fromSessionId: string; id: string }): { ok: boolean; error?: string };
 }

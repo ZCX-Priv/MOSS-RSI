@@ -19,6 +19,9 @@ const SUBAGENT_GROUP_ID = 'subagent';
 /** 子代理默认最大嵌套深度（配置缺失时的兜底；用户可在设置中调整） */
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 
+/** 直接子代理（depth=1）默认并发数（配置缺失时的兜底；0 = 不限制） */
+const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
+
 /** 子代理运行输入 */
 export interface SubagentRunInput {
   /** 模板 agent id（或注册表任意 agent id） */
@@ -85,6 +88,12 @@ export class SubagentRunner {
   private readonly sessionDepth = new Map<string, number>();
   /** 因父级取消而中止的 async 子代理：不再向父会话投递过期 result 回执 */
   private readonly stoppedByParent = new Set<string>();
+  /**
+   * 直接子代理（depth=1）并发闸门：动态读取 agent.maxConcurrentSubagents（0=不限制）。
+   * 嵌套子代理（depth≥2）不占用名额，避免"父代理持槽等待同步子代理"造成死锁。
+   */
+  private activeRootSubagents = 0;
+  private readonly rootSubagentWaiters: Array<() => void> = [];
 
   constructor(deps: {
     engine: AgentEngine;
@@ -104,6 +113,9 @@ export class SubagentRunner {
     }
     this.activeRuns.clear();
     this.sessionDepth.clear();
+    // 唤醒并释放排队中的运行，避免 destroy 后 Promise 永久悬挂
+    this.activeRootSubagents = 0;
+    for (const wake of this.rootSubagentWaiters.splice(0)) wake();
   }
 
   /** 同步一次性 subagent：模板 agentId + 专属 session，阻塞返回结果 */
@@ -222,6 +234,66 @@ export class SubagentRunner {
     return DEFAULT_MAX_SUBAGENT_DEPTH;
   }
 
+  /** 实时读取直接子代理并发上限（0 = 不限制；设置热更新立即生效） */
+  private maxConcurrentSubagents(): number {
+    try {
+      const config = this.services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE);
+      const value = config?.getAppConfig().agent.maxConcurrentSubagents;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.max(0, Math.min(32, Math.floor(value)));
+      }
+    } catch {
+      // 配置不可用：使用默认值
+    }
+    return DEFAULT_MAX_CONCURRENT_SUBAGENTS;
+  }
+
+  /**
+   * 获取直接子代理运行名额（depth=1）。
+   * - 0 = 不限制；
+   * - 嵌套子代理不占名额：父代理可能持槽等待同步子代理，若孙代理也抢槽会死锁。
+   * 返回幂等 release 函数，必须在 finally 调用。
+   */
+  private async acquireRunSlot(depth: number): Promise<() => void> {
+    if (depth !== 1) return () => {};
+    // 配置可能刚被调大：先把可唤醒的排队者放行
+    this.pumpRootSubagentWaiters();
+    const limit = this.maxConcurrentSubagents();
+    if (limit <= 0) return () => {};
+    if (this.activeRootSubagents < limit) {
+      this.activeRootSubagents += 1;
+      return this.makeRunSlotRelease();
+    }
+    await new Promise<void>((resolve) => {
+      this.rootSubagentWaiters.push(() => {
+        this.activeRootSubagents += 1;
+        resolve();
+      });
+    });
+    return this.makeRunSlotRelease();
+  }
+
+  /** 幂等 release：递减占用并唤醒后续排队者 */
+  private makeRunSlotRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeRootSubagents = Math.max(0, this.activeRootSubagents - 1);
+      this.pumpRootSubagentWaiters();
+    };
+  }
+
+  /** 按当前上限唤醒排队者（上限调大或名额释放时） */
+  private pumpRootSubagentWaiters(): void {
+    while (this.rootSubagentWaiters.length > 0) {
+      const limit = this.maxConcurrentSubagents();
+      if (limit > 0 && this.activeRootSubagents >= limit) break;
+      const wake = this.rootSubagentWaiters.shift();
+      wake?.();
+    }
+  }
+
   /** 校验 + 创建隐藏任务 + 深度/权限/中断登记 */
   private prepare(input: SubagentRunInput): PreparedRun {
     if (!input.template?.trim()) throw new Error('template required');
@@ -287,19 +359,26 @@ export class SubagentRunner {
       else input.signal.addEventListener('abort', forwardAbort, { once: true });
     }
 
-    this.registerBusMember(input, prepared);
+    // 直接子代理并发闸门：超过上限时在这里排队（sync/async 都生效；嵌套子代理不占名额）
+    const releaseRunSlot = await this.acquireRunSlot(depth);
 
     try {
+      const busMember = this.registerBusMember(input, prepared);
       // 父任务目标只用于理解上下文，明确标注「不是本次任务范围」，避免子代理扩大范围。
-      const userMessage = input.parentGoal?.trim()
+      const baseMessage = input.parentGoal?.trim()
         ? `父任务目标（仅用于理解上下文，不是本次任务范围）：\n${input.parentGoal.trim()}\n\n任务：\n${input.task}`
         : input.task;
+      // 共享白板：规则 + 最近讨论注入到子代理初始上下文（后派发的子代理也能看见）
+      const boardDigest = this.buildBoardDigest(busMember);
+      const userMessage = boardDigest ? `${baseMessage}\n\n${boardDigest}` : baseMessage;
       const result = await this.engine.run({
         sessionId: taskId,
         agentId: input.template,
         userMessage,
         permissionMode,
         cwd: input.cwd,
+        // 子代理并发由 agent.maxConcurrentSubagents 独立控制，不占用用户会话的全局 run 闸门
+        bypassRunLimiter: true,
         ...(input.toolAllowlist ? { toolAllowlist: input.toolAllowlist } : {}),
         ...(typeof input.maxTurns === 'number' ? { maxTurns: input.maxTurns } : {}),
         bus: {
@@ -350,6 +429,7 @@ export class SubagentRunner {
       this.sessionDepth.delete(taskId);
       this.stoppedByParent.delete(taskId);
       this.unregisterExternalRun(taskId, controller);
+      releaseRunSlot();
     }
   }
 
@@ -370,6 +450,54 @@ export class SubagentRunner {
       parentToolCallId: input.parentToolCallId,
       depth: prepared.depth,
     });
+  }
+
+  /**
+   * 共享白板摘要：主代理规则 + 最近讨论。
+   * 无内容时不注入（避免污染子代理上下文）；长度有硬上限，防止白板无限增长。
+   */
+  private buildBoardDigest(member: AgentBusMember | null): string | undefined {
+    if (!member) return undefined;
+    const bus = this.bus();
+    if (!bus) return undefined;
+    try {
+      const board = bus.readBoard(member.rootSessionId);
+      if (board.rules.length === 0 && board.discussion.length === 0) return undefined;
+      const lines: string[] = [
+        '[共享白板 · 任务树公共信息]',
+        '主代理设定的协作规则（供参考，不覆盖你的任务验收标准）：',
+      ];
+      let ruleBudget = 3000;
+      if (board.rules.length === 0) {
+        lines.push('- （暂无规则）');
+      } else {
+        for (const rule of board.rules) {
+          const text = `- ${rule.title ?? '未命名'}：${rule.content}`;
+          if (text.length > ruleBudget) break;
+          lines.push(text);
+          ruleBudget -= text.length;
+        }
+      }
+      const recent = board.discussion.slice(-8);
+      if (recent.length > 0) {
+        lines.push('最近白板讨论：');
+        let discussionBudget = 1500;
+        for (const note of recent) {
+          const content =
+            note.content.length > 200 ? `${note.content.slice(0, 200)}…` : note.content;
+          const text = `- ${note.authorAgentId}(${note.authorName})：${content}`;
+          if (text.length > discussionBudget) break;
+          lines.push(text);
+          discussionBudget -= text.length;
+        }
+      }
+      lines.push(
+        '可用 agent(action="board", boardAction="read") 查看完整白板；boardAction="post" 参与讨论（大群、持久）；需要私聊用 action="message"。',
+      );
+      return lines.join('\n');
+    } catch {
+      return undefined;
+    }
   }
 
   private sendResultToParent(

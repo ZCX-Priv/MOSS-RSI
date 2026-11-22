@@ -35,6 +35,8 @@ export interface SubagentCallItem {
   /** sync / async（历史会话可能缺省） */
   mode?: string;
   status?: ToolCall['status'];
+  /** 工具结果 metadata 里的持久化终态（刷新后总线缺失时的权威兜底） */
+  persistedStatus?: 'running' | 'completed' | 'failed' | 'aborted';
   resultText?: string;
   isError?: boolean;
   /** 分页历史轻量投影：展开该行时才拉取完整报告 */
@@ -42,17 +44,25 @@ export interface SubagentCallItem {
 }
 
 /** agent 结果文本固定前缀（中/英文构建都兼容），剥离后为最终报告正文 */
-const SUBAGENT_PREFIX = /^(?:子代理已完成|Subagent finished) \([^)]*\):\n*/;
+const SUBAGENT_PREFIX = /^(?:子代理已完成|子代理已中止|Subagent finished|Subagent aborted) \([^)]*\):\n*/;
 /** 结果文本中的子代理会话 id（用于展开微缩任务流） */
 const SUBAGENT_SESSION = /session=([0-9a-zA-Z_-]+)/;
 
 type RowStatus = 'running' | 'completed' | 'failed';
 
-/** 调用状态归一：优先总线实时状态（async 后台运行不依赖工具结果）；缺省按工具状态 */
+/** 调用状态归一：优先总线实时状态（async 后台运行不依赖工具结果）；其次结果里的持久化终态 */
 function rowStatusOf(call: SubagentCallItem, memberStatus?: string): RowStatus {
   if (memberStatus === 'running') return 'running';
   if (memberStatus === 'failed' || memberStatus === 'aborted') return 'failed';
   if (memberStatus === 'completed') return 'completed';
+  // 历史数据兼容优先：旧版本把 aborted/error 写成"已完成"，结果文本里的 finishReason 是最可靠的证据
+  if (call.resultText !== undefined && /\(finishReason=(?:aborted|error)\b/.test(call.resultText)) {
+    return 'failed';
+  }
+  // 刷新后总线成员可能缺失/尚未水合：以工具结果持久化的终态为权威，
+  // 避免 aborted/failed 被"有结果即完成"误判为成功。
+  if (call.persistedStatus === 'failed' || call.persistedStatus === 'aborted') return 'failed';
+  if (call.persistedStatus === 'completed') return 'completed';
   // 已有结果即完成：工具状态可能因事件丢失/历史合并滞后，结果是最强完成信号
   if (call.resultText !== undefined) return call.isError ? 'failed' : 'completed';
   if (call.status === 'generating' || call.status === 'executing') return 'running';

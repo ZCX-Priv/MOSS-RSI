@@ -188,8 +188,12 @@ function extractResultMode(
   }
 }
 
-/** 并发执行（上限 limit），保持每个任务的错误隔离由调用方 runOne 负责 */
+/** 并发执行（上限 limit；limit <= 0 表示不限制），保持每个任务的错误隔离由调用方 runOne 负责 */
 async function runWithLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  if (limit <= 0) {
+    await Promise.all(items.map((item) => fn(item)));
+    return;
+  }
   let cursor = 0;
   const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
     while (cursor < items.length) {
@@ -592,8 +596,9 @@ export class AgentEngineImpl implements AgentEngine {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
-    // 全局并发闸门：超限的 run 排队等待（不阻塞事件循环），避免低配机器被并发会话拖垮
-    const release = await this.runLimiter.acquire();
+    // 全局并发闸门：超限的 run 排队等待（不阻塞事件循环），避免低配机器被并发会话拖垮。
+    // 子代理运行有独立的 maxConcurrentSubagents 闸门，绕过此处，避免主代理占名额导致只剩 N-1 个并行。
+    const release = input.bypassRunLimiter ? () => {} : await this.runLimiter.acquire();
     const bus = this.services.tryResolve<AgentBus>(ServiceNames.AGENT_BUS);
     try {
       const result = await this.runUnlocked(input);
@@ -1071,6 +1076,11 @@ export class AgentEngineImpl implements AgentEngine {
     // 嵌套深度：主会话 depth=0；子代理由 runner 注入 depth。达到上限后由 agent 工具
     // 运行时守卫拒绝 delegate，但 status/message 仍需可用（不整工具移除）。
     const maxSubagentDepth = Math.min(5, Math.max(1, cfg.maxSubagentDepth ?? 2));
+    // 同轮并行子代理上限（0 = 不限制）：写进系统提示，让模型按上限组织批次
+    const maxParallelSubagents = Math.max(
+      0,
+      Math.min(32, Math.floor(cfg.maxConcurrentSubagents ?? 4)),
+    );
     const isCustomAgent = Boolean(agentProfile && agentProfile.builtIn !== true);
     // 工具白名单语义：
     // - 显式 tools 非空 → 只用白名单 + 协作工具（agent）；
@@ -1135,6 +1145,8 @@ export class AgentEngineImpl implements AgentEngine {
               content: renderTemplate(availableTemplate, {
                 AGENTS: lines.join('\n'),
                 MAX_DEPTH: String(maxSubagentDepth),
+                MAX_PARALLEL:
+                  maxParallelSubagents === 0 ? '不限制' : String(maxParallelSubagents),
               }).trimEnd(),
             });
           }
@@ -1651,9 +1663,11 @@ export class AgentEngineImpl implements AgentEngine {
           ? Math.max(1, Math.min(8, Math.floor(configuredParallel)))
           : 4;
       const configuredSubagentParallel = cfg.maxConcurrentSubagents;
+      // 0 = 不限制；其余钳制到 1..32。这里是同轮启动上限；
+      // 实际运行并发由 SubagentRunner 的动态闸门统一控制（sync/async 都生效）。
       const maxConcurrentSubagents =
         typeof configuredSubagentParallel === 'number' && Number.isFinite(configuredSubagentParallel)
-          ? Math.max(1, Math.min(8, Math.floor(configuredSubagentParallel)))
+          ? Math.max(0, Math.min(32, Math.floor(configuredSubagentParallel)))
           : MAX_CONCURRENT_SUBAGENT_RUNS;
       const isParallelSafeCall = (p: PreparedToolCall): boolean => {
         if (p.tc.name === 'ask' || isSubagentToolCall(p.tc)) return false;

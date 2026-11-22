@@ -31,7 +31,12 @@ import {
 import { diag, diagAlways } from './diag';
 import { emitInsightEvent } from './insight-bus';
 import { bindSubagentSession } from './subagent-sessions';
-import { applyAgentBusMember, applyAgentBusMessage } from './agent-bus';
+import {
+  applyAgentBoardNote,
+  applyAgentBoardRemoved,
+  applyAgentBusMember,
+  applyAgentBusMessage,
+} from './agent-bus';
 import i18n from '../i18n';
 import type { GenUISpec } from '../render/genui/types';
 import type {
@@ -54,6 +59,7 @@ import type {
   AskQuestion,
   AgentBusMember,
   AgentBusMessage,
+  AgentBoardNote,
 } from '../types/api';
 
 function genId(): string {
@@ -1473,11 +1479,18 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
         type?: string;
         member?: AgentBusMember;
         message?: AgentBusMessage;
+        note?: AgentBoardNote;
+        rootSessionId?: string;
+        id?: string;
       };
       if (payload.type === 'member' && payload.member) {
         applyAgentBusMember(payload.member);
       } else if (payload.type === 'message' && payload.message) {
         applyAgentBusMessage(payload.message);
+      } else if (payload.type === 'board' && payload.note) {
+        applyAgentBoardNote(payload.note);
+      } else if (payload.type === 'board-removed' && payload.rootSessionId && payload.id) {
+        applyAgentBoardRemoved(payload.rootSessionId, payload.id);
       }
       break;
     }

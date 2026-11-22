@@ -1078,6 +1078,7 @@ export class BrowserServiceImpl implements BrowserService {
 
     const cfg = this.getToolConfig();
     let groupId: number | null = null;
+    let groupWindowId: number | undefined;
     try {
       const group = await this.bridge.send(
         instanceId,
@@ -1086,15 +1087,27 @@ export class BrowserServiceImpl implements BrowserService {
           tabId: tab.tabId,
           title: groupTitle,
           color: cfg.tabGroupColor,
+          ...(openerRecord && openerRecord.groupId !== null
+            ? { groupId: openerRecord.groupId }
+            : {}),
+          allowCreate: false,
         },
         10_000,
       );
-      if (isRecord(group) && typeof group.groupId === 'number') groupId = group.groupId;
+      if (isRecord(group)) {
+        if (group.missing === true || typeof group.groupId !== 'number' || group.groupId < 0) {
+          // 分组已不存在：本次不接管，绝不新建第二个同名组；下一次 open 会按固定记录重建
+          return;
+        }
+        groupId = group.groupId;
+        if (typeof group.windowId === 'number') groupWindowId = group.windowId;
+      }
     } catch (err) {
       this.logger.warn(
         `[browser] 新标签页分组失败: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (groupId === null) return;
 
     const info = this.bridge.getInstance(instanceId);
     const key = `t${++this.tabSeq}`;
@@ -1105,7 +1118,11 @@ export class BrowserServiceImpl implements BrowserService {
       browserName: info?.browserName ?? 'Chromium',
       browserVersion: info?.browserVersion ?? '',
       nativeTabId: tab.tabId,
-      ...(tab.windowId >= 0 ? { windowId: tab.windowId } : {}),
+      ...(groupWindowId !== undefined
+        ? { windowId: groupWindowId }
+        : tab.windowId >= 0
+          ? { windowId: tab.windowId }
+          : {}),
       ownerSessionId,
       groupTitle,
       ...(typeof tab.openerTabId === 'number' ? { openerTabId: tab.openerTabId } : {}),
@@ -1128,8 +1145,11 @@ export class BrowserServiceImpl implements BrowserService {
     this.tabs.set(key, record);
     this.currentTabKey = key;
     this.sessionCurrentTab.set(ownerSessionId, key);
-    if (tab.windowId >= 0) {
-      this.sessionWindowId.set(this.windowKey(ownerSessionId, instanceId), tab.windowId);
+    if (record.windowId !== undefined) {
+      this.sessionWindowId.set(
+        this.windowKey(ownerSessionId, instanceId),
+        record.windowId,
+      );
     }
     this.lastTargetKey = instanceId;
     this.lastAdoptedTab = { instanceId, tab: key, at: Date.now() };
@@ -1193,6 +1213,10 @@ export class BrowserServiceImpl implements BrowserService {
 
   /** 扩展（重）连后恢复该实例中属于会话固定分组的 AI 标签页 */
   private async adoptExistingTabs(instanceId: string): Promise<void> {
+    // 先把该实例中同一会话的多个同名分组合并成一个，再统一认领标签
+    for (const binding of this.groups.list()) {
+      await this.consolidateGroups(instanceId, `${GROUP_TITLE_PREFIX}${binding.name}`);
+    }
     let groups: unknown;
     let tabs: unknown;
     try {
@@ -1552,19 +1576,54 @@ export class BrowserServiceImpl implements BrowserService {
     return titles;
   }
 
-  /** 浏览器中同名分组所在窗口；不存在/查询失败返回 undefined */
-  private async findGroupWindow(instanceId: string, title: string): Promise<number | undefined> {
+  /** 浏览器中所有同名分组（全局查找，不限制窗口） */
+  private async findLiveGroups(
+    instanceId: string,
+    title: string,
+  ): Promise<Array<{ groupId: number; windowId?: number }>> {
     try {
       const raw = await this.bridge.send(instanceId, 'groups.query', { title }, 5000);
-      if (Array.isArray(raw)) {
-        for (const item of raw) {
-          if (isRecord(item) && typeof item.windowId === 'number') return item.windowId;
-        }
+      if (!Array.isArray(raw)) return [];
+      const out: Array<{ groupId: number; windowId?: number }> = [];
+      for (const item of raw) {
+        if (!isRecord(item) || typeof item.id !== 'number') continue;
+        out.push({
+          groupId: item.id,
+          ...(typeof item.windowId === 'number' ? { windowId: item.windowId } : {}),
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /** 合并同名分组；旧扩展不支持该命令时返回 null */
+  private async consolidateGroups(
+    instanceId: string,
+    title: string,
+    preferredGroupId?: number,
+  ): Promise<{ groupId: number; windowId?: number } | null> {
+    try {
+      const raw = await this.bridge.send(
+        instanceId,
+        'groups.consolidate',
+        {
+          title,
+          ...(preferredGroupId !== undefined ? { groupId: preferredGroupId } : {}),
+        },
+        10_000,
+      );
+      if (isRecord(raw) && typeof raw.groupId === 'number') {
+        return {
+          groupId: raw.groupId,
+          ...(typeof raw.windowId === 'number' ? { windowId: raw.windowId } : {}),
+        };
       }
     } catch {
-      // 查询失败退回 sessionWindowId
+      // 旧扩展不认识 groups.consolidate：由调用方回退
     }
-    return undefined;
+    return null;
   }
 
   /** 串行化组名分配，避免并发会话抢到同一个名称 */
@@ -1643,23 +1702,35 @@ export class BrowserServiceImpl implements BrowserService {
     });
   }
 
-  /** 会话固定分组 + 该实例中同名组所在窗口 */
+  /** 会话固定分组 + 该实例中同名组（多个时先合并） */
   private async ensureSessionGroup(
     sessionId: string,
     instanceId: string,
     requested?: { groupName?: string; groupId?: string },
-  ): Promise<{ id: string; title: string; windowId?: number }> {
+  ): Promise<{ id: string; title: string; liveGroupId?: number; windowId?: number }> {
     const record = await this.resolveSessionGroup(sessionId, instanceId, requested);
     const title = this.groupTitleOf(record);
-    let windowId = this.sessionWindowId.get(this.windowKey(sessionId, instanceId));
-    const liveWindow = await this.findGroupWindow(instanceId, title);
-    if (liveWindow !== undefined) {
-      windowId = liveWindow;
-      this.sessionWindowId.set(this.windowKey(sessionId, instanceId), liveWindow);
+    const key = this.windowKey(sessionId, instanceId);
+    const stableWindowId = this.sessionWindowId.get(key);
+    let live = await this.findLiveGroups(instanceId, title);
+    if (live.length > 1) {
+      // 优先保留会话窗口中的组，避免窗口漂移；其余同名组由扩展合并
+      const preferred = live.find((item) => item.windowId === stableWindowId) ?? live[0];
+      const consolidated = await this.consolidateGroups(instanceId, title, preferred?.groupId);
+      live = consolidated ? [consolidated] : preferred ? [preferred] : live;
     }
+    const only =
+      live.length === 1
+        ? live[0]
+        : live.find((item) => item.windowId === stableWindowId) ?? live[0];
+    if (only?.windowId !== undefined) {
+      this.sessionWindowId.set(key, only.windowId);
+    }
+    const windowId = only?.windowId ?? stableWindowId;
     return {
       id: record.id,
       title,
+      ...(only ? { liveGroupId: only.groupId } : {}),
       ...(windowId !== undefined ? { windowId } : {}),
     };
   }
@@ -1717,6 +1788,7 @@ export class BrowserServiceImpl implements BrowserService {
           targetUrl,
           group.title,
           targetWindowId,
+          group.liveGroupId,
         );
       let created: Awaited<ReturnType<typeof createExternal>> = null;
       if (resolved.kind === 'external') {
@@ -1873,6 +1945,7 @@ export class BrowserServiceImpl implements BrowserService {
     initialUrl: string | undefined,
     groupTitle: string,
     windowId?: number,
+    liveGroupId?: number,
   ): Promise<{
     tabId: number;
     windowId?: number;
@@ -1899,6 +1972,7 @@ export class BrowserServiceImpl implements BrowserService {
             color: cfg.tabGroupColor,
             isolateWindow: true,
             ...(windowId !== undefined ? { windowId } : {}),
+            ...(liveGroupId !== undefined ? { groupId: liveGroupId } : {}),
           },
           timeout,
         );

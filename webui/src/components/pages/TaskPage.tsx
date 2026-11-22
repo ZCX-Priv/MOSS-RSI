@@ -2970,6 +2970,7 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
                 isError: matched?.isError,
                 ...(matched?.lazy ? { lazy: true } : {}),
                 ...(matched?.agentName ? { name: matched.agentName } : {}),
+                ...(matched?.agentStatus ? { persistedStatus: matched.agentStatus } : {}),
               };
             })}
           />

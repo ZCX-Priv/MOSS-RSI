@@ -52,22 +52,35 @@ export interface ToolResultEntry {
   lazy?: boolean;
   /** agent 工具结果里的模板显示名（运行时新建的自定义 Agent 也能显示名称） */
   agentName?: string;
+  /** agent 工具结果里的持久化终态（刷新后总线成员缺失时兜底，避免"失败变成功"） */
+  agentStatus?: 'running' | 'completed' | 'failed' | 'aborted';
 }
 
-/** 单条工具结果 → 索引项（统一提取文本/错误/懒加载/agent 名称） */
+/** 单条工具结果 → 索引项（统一提取文本/错误/懒加载/agent 名称与状态） */
 export function toToolResultEntry(result: ToolResult): ToolResultEntry {
   const text = result.content
     .filter((c) => c.type === 'text')
     .map((c) => (c.type === 'text' ? c.text : ''))
     .join('\n');
-  const meta = result.metadata as { agentRun?: { name?: unknown } } | undefined;
+  const meta = result.metadata as {
+    agentRun?: { name?: unknown; status?: unknown };
+  } | undefined;
   const rawName = meta?.agentRun?.name;
   const agentName = typeof rawName === 'string' ? rawName.trim() : '';
+  const rawStatus = meta?.agentRun?.status;
+  const agentStatus =
+    rawStatus === 'running' ||
+    rawStatus === 'completed' ||
+    rawStatus === 'failed' ||
+    rawStatus === 'aborted'
+      ? rawStatus
+      : undefined;
   return {
     text,
     isError: result.isError === true,
     ...(result.metadata?.__mossLazy ? { lazy: true } : {}),
     ...(agentName ? { agentName } : {}),
+    ...(agentStatus ? { agentStatus } : {}),
   };
 }
 

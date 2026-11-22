@@ -269,6 +269,8 @@ export const zh = {
       subagentExecTitle: '子代理执行策略',
       maxSubagentDepthLabel: '子代理嵌套最大层级',
       maxSubagentDepthDesc: '子代理可继续派发子代理的层数（1=只能派发一层；2=主→子→孙）；默认 2',
+      maxConcurrentSubagentsLabel: '同轮并行子代理上限',
+      maxConcurrentSubagentsDesc: '同一轮最多同时启动的子代理数量（1-32；0=不限制）；默认 4，超出的调用会排队',
     },
     provider: {
       title: '服务商',
@@ -1654,6 +1656,11 @@ export const zh = {
     cancelAgent: '终止该智能体',
     cancelFailed: '终止失败，请重试',
     cancelNotRunning: '该智能体已结束',
+    board: '白板',
+    boardRules: '白板规则',
+    boardRulesEmpty: '主代理尚未在白板设定规则',
+    boardRuleBadge: '白板·规则',
+    boardDiscussionBadge: '白板讨论',
   },
   plugins: {
     title: '插件库',

@@ -44,7 +44,18 @@
 - 独立的长任务（探索、批量改造、并行审查）→ `async`，主代理继续做别的事。
 - async 启动后，结束本轮前先 `agent(action="status", statusAction="list")` 收口；仍在运行就说明进度并等待，或继续其他可并行工作。
 - async 完成后，结果会以 `[智能体消息]` 注入父会话；不要重复执行同一任务。
-- 同一轮多个 `sync` agent 调用会并发执行（上限 agent.maxConcurrentSubagents）；有先后依赖时分轮派发。
+- 同一轮多个 `agent` 调用会并发执行；并发上限由设置中的 `agent.maxConcurrentSubagents` 实时读取（0 = 不限制，缺省 4）。超过上限的调用会排队，不会失败。
+- 该上限作用于主代理直接派发的子代理；子代理内部再派发的下级不占用此闸门（避免父代理等待同步子代理时死锁）。
+- `sync` 子代理运行期间主代理会被阻塞，无法即时回答子代理的提问；需要双向对话/询问时用 `async` 派发，子代理可通过 `message` 或白板讨论联系你。
+
+## 共享白板（大群）
+
+- 白板是任务树级、持久化的公共区域：后派发的子代理启动时会自动看到主代理规则与最近讨论。
+- 主代理设定规则：`agent(action="board", boardAction="rule", title="规则标题", content="...")`；同标题会覆盖旧规则；`boardAction="remove", boardId="..."` 删除规则。
+- 所有成员参与讨论：`agent(action="board", boardAction="post", content="...")`（持久、所有成员可见，属于大群）。
+- 查看白板：`agent(action="board", boardAction="read")`。
+- 规则是主代理设定的协作原则（不强制），不覆盖子代理任务的验收标准；子代理不可写规则。
+- `message` 仍用于点对点私聊/即时通知；白板用于公开、持久、需要所有人看到的讨论。
 
 ## task 写法（必须自包含）
 
@@ -64,9 +75,9 @@
 - 取消后台：`agent(action="status", statusAction="cancel", sessionId="a1")`（只能取消子代理）。
 - 发消息：`agent(action="message", to="a1"|"main"|"parent"|"all", content=...)`。
   - `all` = 当前任务树频道广播（只发给运行中的成员）。
-  - `parent` = 父代理；主代理没有父代理。
+  - `parent` = 父代理；主代理没有父代理。父代理即使当前空闲也会接收留言，在下一条用户消息开始时注入（不丢失）。
   - 只在「对方需要且会改变其行动」时发消息；汇报事实、路径、行号、验证结果，不发寒暄。
-  - 不要向已完成/未运行的智能体发 chat；结果回执用 `kind=result` 由运行器自动发送。
+  - 不要向已完成/未运行的兄弟智能体发 chat；结果回执用 `kind=result` 由运行器自动发送。
 
 ## 完成回报
 

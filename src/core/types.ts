@@ -255,7 +255,7 @@ export interface AppConfig {
     maxParallelTools?: number;
     /** 同时运行的 agent run 上限（缺省按内存自适应：<2GB 为 2，否则 4） */
     maxConcurrentRuns?: number;
-    /** 同一轮并发执行 subagent 工具调用的上限（缺省 4） */
+    /** 同一轮并发执行 subagent 工具调用的上限（0 = 不限制；缺省 4） */
     maxConcurrentSubagents?: number;
     /** 子代理最大嵌套层级（1=只能派发一层；2=主→子→孙；缺省 2） */
     maxSubagentDepth?: number;

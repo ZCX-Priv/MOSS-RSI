@@ -13,7 +13,9 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/http';
 import {
+  getAgentBoardRules,
   getAgentBusVersion,
+  hydrateAgentBoard,
   hydrateAgentBus,
   listAgentBusMembers,
   listAgentBusMessages,
@@ -169,6 +171,7 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
   const version = useSyncExternalStore(subscribeAgentBus, getAgentBusVersion);
   const members = useMemo(() => listAgentBusMembers(sessionId), [sessionId, version]);
   const liveMessages = useMemo(() => listAgentBusMessages(sessionId), [sessionId, version]);
+  const boardRules = useMemo(() => getAgentBoardRules(sessionId), [sessionId, version]);
 
   const [snapshotMessages, setSnapshotMessages] = useState<AgentBusMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -185,6 +188,7 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
     try {
       const snapshot = await api.getAgentBusSnapshot({ root: sessionId, limit: 200 });
       hydrateAgentBus(snapshot.members);
+      hydrateAgentBoard(sessionId, snapshot.board?.rules ?? []);
       setSnapshotMessages(snapshot.messages);
       setFailed(false);
     } catch {
@@ -275,8 +279,9 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
   }, [visibleMessages.length]);
 
   const renderMessage = (message: AgentBusMessage) => {
-    const to =
-      message.toAgentId === null
+    const to = message.boardKind
+      ? t('agentBus.board')
+      : message.toAgentId === null
         ? t('agentBus.channel')
         : message.toAgentId;
     return (
@@ -290,6 +295,20 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
           </span>
           <span className="shrink-0">→</span>
           <span className="shrink-0">{to}</span>
+          {message.boardKind && (
+            <span
+              className={cn(
+                'shrink-0 rounded-full border px-1.5 py-0.5 text-[9px]',
+                message.boardKind === 'rule'
+                  ? 'border-primary/30 bg-primary/10 text-primary-text'
+                  : 'border-border bg-muted text-muted-foreground',
+              )}
+            >
+              {message.boardKind === 'rule'
+                ? t('agentBus.boardRuleBadge')
+                : t('agentBus.boardDiscussionBadge')}
+            </span>
+          )}
           {message.kind === 'result' && (
             <span className="shrink-0 rounded-full border border-success/30 bg-success/10 px-1.5 py-0.5 text-[9px] text-success">
               {t('subagent.card.completed')}
@@ -321,6 +340,40 @@ export function AgentBusPanel({ sessionId }: { sessionId: string }) {
         >
           <RefreshCw className="size-3.5" />
         </button>
+      </div>
+
+      {/* 共享白板规则（置顶）：主代理设定的协作原则，子代理只读+讨论 */}
+      <div className="shrink-0 border-b border-border px-2 py-1.5">
+        <div className="flex items-center gap-1.5 px-1 pb-1">
+          <span className="text-[11px] font-medium text-foreground">{t('agentBus.boardRules')}</span>
+          <span className="text-[10px] text-muted-foreground">{boardRules.length}</span>
+        </div>
+        {boardRules.length === 0 ? (
+          <div className="px-1 pb-1 text-[11px] text-muted-foreground">
+            {t('agentBus.boardRulesEmpty')}
+          </div>
+        ) : (
+          <div className="flex max-h-[160px] flex-col gap-1 overflow-auto no-scrollbar">
+            {boardRules.map((rule) => (
+              <div
+                key={rule.id}
+                className="rounded-lg border border-primary/20 bg-primary/5 px-2 py-1.5"
+              >
+                <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <span className="min-w-0 truncate font-medium text-foreground/80">
+                    {rule.title ?? rule.id}
+                  </span>
+                  <span className="shrink-0">·</span>
+                  <span className="shrink-0">{rule.authorName}</span>
+                  <span className="ml-auto shrink-0 tabular-nums">{formatTime(rule.createdAt)}</span>
+                </div>
+                <div className="mt-0.5 whitespace-pre-wrap break-words text-[11px] text-foreground">
+                  {rule.content}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 运行中智能体树（卡片 + 拓扑；不包含已结束成员） */}

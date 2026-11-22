@@ -429,6 +429,11 @@ export interface AgentRunInput {
   permissionMode?: PermissionMode;
   /** 工作目录 */
   cwd: string;
+  /**
+   * 绕过全局 run 并发闸门（仅子代理内部运行使用）。
+   * 子代理并发由 agent.maxConcurrentSubagents 独立控制，不应与用户会话争抢名额。
+   */
+  bypassRunLimiter?: boolean;
   /** 流式事件回调 */
   onEvent: (event: AgentEvent) => void;
   /** 中断信号 */

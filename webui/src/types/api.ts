@@ -549,7 +549,7 @@ export interface AppConfig {
     maxTokens: number;
     maxTurns: number;
     workingDirectory: string;
-    /** 同轮并发子代理上限（可选；后端缺省 4） */
+    /** 同轮并发子代理上限（0 = 不限制；后端缺省 4） */
     maxConcurrentSubagents?: number;
     /** 子代理最大嵌套层级（可选；后端缺省 2） */
     maxSubagentDepth?: number;
@@ -1624,11 +1624,32 @@ export interface AgentBusMessage {
   content: string;
   createdAt: string;
   delivered: boolean;
+  /** 白板消息类型（历史审计可能缺失） */
+  boardKind?: AgentBoardNoteKind;
+}
+
+/** 共享白板条目类型：rule=主代理设定的根本性原则；discussion=大群讨论 */
+export type AgentBoardNoteKind = 'rule' | 'discussion';
+
+/** 共享白板条目 */
+export interface AgentBoardNote {
+  id: string;
+  rootSessionId: string;
+  kind: AgentBoardNoteKind;
+  title?: string;
+  content: string;
+  authorAgentId: string;
+  authorSessionId: string;
+  authorName: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface AgentBusSnapshot {
   members: AgentBusMember[];
   messages: AgentBusMessage[];
+  /** 白板规则（讨论已进入 messages） */
+  board?: { rules: AgentBoardNote[] };
 }
 
 // ============================================================================

@@ -1,9 +1,10 @@
 // src/modules/agent-bus/bus.ts
-// AgentBus 实现：成员树 + 收件箱 + 频道广播 + JSONL 审计。
+// AgentBus 实现：成员树 + 收件箱 + 频道广播 + JSONL 审计 + 共享白板。
 //
 // 设计边界：
-// - 单进程内存态；完成/失败成员保留供 WebUI 面板回看，进程重启后由新 run 重建。
+// - 单进程内存态；成员终态额外写 members.jsonl 账本，刷新/重启后可恢复（running 投影为 aborted）。
 // - 消息审计落盘 ~/.moss/agent-bus/<rootSessionId>.jsonl（同步小写入，失败只告警）。
+// - 白板落盘 ~/.moss/agent-bus/<rootSessionId>.board.json（原子写；规则主代理独占，讨论所有成员可写）。
 // - `send` 只保证「投递到收件箱」，不保证目标已消费；引擎在 run 开始/每轮工具后 drain。
 // - 事件通过 EventBus `agent-bus:event` 广播，server 转发为 WS `agent-bus.event`。
 
@@ -11,11 +12,17 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { EventBus, Environment, Logger } from '../../core/types';
+import { atomicWriteFile } from '../../utils/fs-atomic';
 import type {
+  AgentBoardNote,
+  AgentBoardNoteKind,
+  AgentBoardSnapshot,
   AgentBus,
   AgentBusMember,
   AgentBusMessage,
   AgentBusSnapshot,
+  PostBoardNoteInput,
+  PostBoardNoteResult,
   RegisterAgentInput,
   SendAgentMessageInput,
   SendAgentMessageResult,
@@ -24,10 +31,43 @@ import type {
 const MAX_TASK_CHARS = 200;
 const MAX_MESSAGE_CHARS = 8000;
 const MAX_MESSAGES_PER_ROOT = 500;
+/** 单条白板内容上限 */
+const MAX_BOARD_CONTENT_CHARS = 4000;
+/** 每个任务树的规则上限 */
+const MAX_BOARD_RULES = 20;
+/** 每个任务树的讨论保留上限（环形） */
+const MAX_BOARD_DISCUSSION = 200;
+/** readBoard 返回的最近讨论条数 */
+const BOARD_READ_DISCUSSION = 50;
+
+/** 白板内存状态 */
+interface BoardState {
+  rules: AgentBoardNote[];
+  discussion: AgentBoardNote[];
+}
 
 /** 审计文件名安全化（sessionId 由内部生成，仍防御异常字符） */
 function safeFileName(id: string): string {
   return id.replace(/[^0-9a-zA-Z._-]/g, '_');
+}
+
+/** 成员排序：root → depth → startedAt（与 list 保持一致） */
+function compareMembers(a: AgentBusMember, b: AgentBusMember): number {
+  if (a.rootSessionId !== b.rootSessionId) return a.rootSessionId < b.rootSessionId ? -1 : 1;
+  if (a.depth !== b.depth) return a.depth - b.depth;
+  return Date.parse(a.startedAt) - Date.parse(b.startedAt);
+}
+
+/** 宽松校验白板条目（损坏的审计行直接忽略） */
+function isBoardNote(value: unknown): value is AgentBoardNote {
+  if (!value || typeof value !== 'object') return false;
+  const note = value as Partial<AgentBoardNote>;
+  return (
+    typeof note.id === 'string' &&
+    (note.kind === 'rule' || note.kind === 'discussion') &&
+    typeof note.content === 'string' &&
+    typeof note.createdAt === 'string'
+  );
 }
 
 export class AgentBusImpl implements AgentBus {
@@ -35,6 +75,10 @@ export class AgentBusImpl implements AgentBus {
   private readonly inbox = new Map<string, AgentBusMessage[]>();
   private readonly messages: AgentBusMessage[] = [];
   private readonly rootCounters = new Map<string, number>();
+  /** 已从成员账本恢复过序号的 root（避免重复扫描） */
+  private readonly counterRestored = new Set<string>();
+  /** 共享白板内存缓存（rootSessionId → 规则/讨论） */
+  private readonly boards = new Map<string, BoardState>();
   private readonly auditDir: string;
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
@@ -50,6 +94,8 @@ export class AgentBusImpl implements AgentBus {
     this.inbox.clear();
     this.messages.length = 0;
     this.rootCounters.clear();
+    this.counterRestored.clear();
+    this.boards.clear();
   }
 
   register(input: RegisterAgentInput): AgentBusMember {
@@ -77,6 +123,7 @@ export class AgentBusImpl implements AgentBus {
         error: undefined,
       };
       this.members.set(input.sessionId, updated);
+      this.appendMemberLedger(updated);
       this.emitMember(updated);
       return updated;
     }
@@ -84,6 +131,7 @@ export class AgentBusImpl implements AgentBus {
     const parent = input.parentSessionId ? this.members.get(input.parentSessionId) : undefined;
     const rootSessionId =
       parent?.rootSessionId ?? (input.kind === 'main' ? input.sessionId : input.parentSessionId ?? input.sessionId);
+    this.ensureRootCounter(rootSessionId);
     const agentId = input.kind === 'main' ? 'main' : this.nextAgentId(rootSessionId);
     const member: AgentBusMember = {
       agentId,
@@ -102,6 +150,7 @@ export class AgentBusImpl implements AgentBus {
       startedAt: now,
     };
     this.members.set(input.sessionId, member);
+    this.appendMemberLedger(member);
     this.emitMember(member);
     return member;
   }
@@ -114,6 +163,7 @@ export class AgentBusImpl implements AgentBus {
     if (!existing) return;
     const updated: AgentBusMember = { ...existing, ...patch };
     this.members.set(sessionId, updated);
+    this.appendMemberLedger(updated);
     // 子代理结束后清空其收件箱；主代理保留（result 消息等下一次 run 注入）
     if (updated.status !== 'running' && updated.kind === 'subagent') {
       this.inbox.delete(sessionId);
@@ -137,11 +187,7 @@ export class AgentBusImpl implements AgentBus {
     const all = [...this.members.values()].filter(
       (m) => !rootSessionId || m.rootSessionId === rootSessionId,
     );
-    return all.sort((a, b) => {
-      if (a.rootSessionId !== b.rootSessionId) return a.rootSessionId < b.rootSessionId ? -1 : 1;
-      if (a.depth !== b.depth) return a.depth - b.depth;
-      return Date.parse(a.startedAt) - Date.parse(b.startedAt);
-    });
+    return all.sort(compareMembers);
   }
 
   send(input: SendAgentMessageInput): SendAgentMessageResult {
@@ -219,7 +265,7 @@ export class AgentBusImpl implements AgentBus {
 
   snapshot(rootSessionId?: string, opts?: { limit?: number }): AgentBusSnapshot {
     const limit = Math.max(1, Math.min(2000, opts?.limit ?? 500));
-    const members = this.list(rootSessionId);
+    const members = this.mergePersistedMembers(this.list(rootSessionId), rootSessionId);
     const byId = new Map<string, AgentBusMessage>();
     for (const message of this.messages) {
       if (rootSessionId && message.rootSessionId !== rootSessionId) continue;
@@ -244,7 +290,120 @@ export class AgentBusImpl implements AgentBus {
     const messages = [...byId.values()]
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
       .slice(-limit);
-    return { members, messages };
+    return {
+      members,
+      messages,
+      ...(rootSessionId
+        ? { board: { rules: [...this.board(rootSessionId).rules] } }
+        : {}),
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // 共享白板
+
+  readBoard(rootSessionId: string): AgentBoardSnapshot {
+    const state = this.board(rootSessionId);
+    return {
+      rootSessionId,
+      rules: [...state.rules],
+      discussion: state.discussion.slice(-BOARD_READ_DISCUSSION),
+    };
+  }
+
+  postBoard(input: PostBoardNoteInput): PostBoardNoteResult {
+    const from = this.members.get(input.fromSessionId);
+    if (!from) return { delivered: 0, error: '发送方未注册到智能体总线' };
+    const kind: AgentBoardNoteKind = input.kind === 'rule' ? 'rule' : 'discussion';
+    const content = input.content.trim().slice(0, MAX_BOARD_CONTENT_CHARS);
+    if (!content) return { delivered: 0, error: '白板内容不能为空' };
+    const title = (input.title ?? '').trim().slice(0, 120);
+
+    if (kind === 'rule' && from.kind !== 'main') {
+      return { delivered: 0, error: '仅主代理可设定白板规则；子代理请使用 discussion 参与讨论' };
+    }
+    if (kind === 'rule' && !title) {
+      return { delivered: 0, error: 'rule 需要 title（同标题会覆盖旧规则）' };
+    }
+
+    const state = this.board(from.rootSessionId);
+    const now = new Date().toISOString();
+    let note: AgentBoardNote;
+    if (kind === 'rule') {
+      const existing = state.rules.find((item) => item.title === title);
+      if (existing) {
+        note = {
+          ...existing,
+          content,
+          authorAgentId: from.agentId,
+          authorSessionId: from.sessionId,
+          authorName: from.name,
+          updatedAt: now,
+        };
+        state.rules = state.rules.map((item) => (item.id === existing.id ? note : item));
+      } else {
+        if (state.rules.length >= MAX_BOARD_RULES) {
+          return {
+            delivered: 0,
+            error: `白板规则已达上限（${MAX_BOARD_RULES} 条），请先删除旧规则`,
+          };
+        }
+        note = {
+          id: randomUUID(),
+          rootSessionId: from.rootSessionId,
+          kind,
+          title,
+          content,
+          authorAgentId: from.agentId,
+          authorSessionId: from.sessionId,
+          authorName: from.name,
+          createdAt: now,
+        };
+        state.rules.push(note);
+      }
+    } else {
+      note = {
+        id: randomUUID(),
+        rootSessionId: from.rootSessionId,
+        kind,
+        content,
+        authorAgentId: from.agentId,
+        authorSessionId: from.sessionId,
+        authorName: from.name,
+        createdAt: now,
+      };
+      state.discussion.push(note);
+      if (state.discussion.length > MAX_BOARD_DISCUSSION) {
+        state.discussion.splice(0, state.discussion.length - MAX_BOARD_DISCUSSION);
+      }
+    }
+
+    this.saveBoard(from.rootSessionId, state);
+    this.emitBoard('board', { note, rootSessionId: from.rootSessionId });
+    const delivered = this.deliverBoardMessage(
+      from,
+      kind === 'rule' ? `[白板规则] ${title}：\n${content}` : `[白板讨论] ${content}`,
+      kind,
+    );
+    return { note, delivered };
+  }
+
+  removeBoardNote(input: { fromSessionId: string; id: string }): { ok: boolean; error?: string } {
+    const from = this.members.get(input.fromSessionId);
+    if (!from) return { ok: false, error: '发送方未注册到智能体总线' };
+    if (from.kind !== 'main') return { ok: false, error: '仅主代理可删除白板规则' };
+    const state = this.board(from.rootSessionId);
+    const target = state.rules.find((item) => item.id === input.id);
+    if (!target) return { ok: false, error: `未找到白板规则 "${input.id}"` };
+    state.rules = state.rules.filter((item) => item.id !== target.id);
+    this.saveBoard(from.rootSessionId, state);
+    this.emitBoard('board-removed', { rootSessionId: from.rootSessionId, id: target.id });
+    this.deliverBoardMessage(
+      from,
+      `[白板规则已删除] ${target.title ?? target.id}`,
+      'rule',
+    );
+    return { ok: true };
   }
 
   // --------------------------------------------------------------------------
@@ -253,6 +412,172 @@ export class AgentBusImpl implements AgentBus {
     const next = (this.rootCounters.get(rootSessionId) ?? 0) + 1;
     this.rootCounters.set(rootSessionId, next);
     return `a${next}`;
+  }
+
+  /** 从成员账本恢复 root 的 aN 序号（进程重启后新子代理不与历史成员重号） */
+  private ensureRootCounter(rootSessionId: string): void {
+    if (this.counterRestored.has(rootSessionId)) return;
+    this.counterRestored.add(rootSessionId);
+    const persisted = this.readMemberLedger(rootSessionId);
+    let max = this.rootCounters.get(rootSessionId) ?? 0;
+    for (const member of persisted) {
+      const matched = /^a(\d+)$/.exec(member.agentId);
+      if (matched) max = Math.max(max, Number(matched[1]));
+    }
+    this.rootCounters.set(rootSessionId, max);
+  }
+
+  /** 成员账本路径 */
+  private memberLedgerPath(rootSessionId: string): string {
+    return join(this.auditDir, `${safeFileName(rootSessionId)}.members.jsonl`);
+  }
+
+  /** 追加成员快照（只追加；读取时按 sessionId 取最后一条） */
+  private appendMemberLedger(member: AgentBusMember): void {
+    try {
+      mkdirSync(this.auditDir, { recursive: true });
+      appendFileSync(this.memberLedgerPath(member.rootSessionId), `${JSON.stringify(member)}\n`, 'utf8');
+    } catch (err) {
+      this.logger.warn('agent-bus: member ledger append failed', {
+        rootSessionId: member.rootSessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 读取成员账本：按 sessionId 去重（最后一条胜出） */
+  private readMemberLedger(rootSessionId: string): AgentBusMember[] {
+    try {
+      const raw = readFileSync(this.memberLedgerPath(rootSessionId), 'utf8');
+      const bySession = new Map<string, AgentBusMember>();
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as AgentBusMember;
+          if (
+            parsed &&
+            typeof parsed.sessionId === 'string' &&
+            typeof parsed.rootSessionId === 'string' &&
+            typeof parsed.agentId === 'string' &&
+            typeof parsed.status === 'string' &&
+            typeof parsed.startedAt === 'string'
+          ) {
+            if (parsed.rootSessionId === rootSessionId) bySession.set(parsed.sessionId, parsed);
+          }
+        } catch {
+          // 损坏行忽略
+        }
+      }
+      return [...bySession.values()];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 合并持久成员：内存优先；持久化 running 但内存不存在 = 上次进程退出时未收尾，
+   * 投影为 aborted（只投影，不改写账本）。
+   */
+  private mergePersistedMembers(
+    memoryMembers: AgentBusMember[],
+    rootSessionId?: string,
+  ): AgentBusMember[] {
+    if (!rootSessionId) return memoryMembers;
+    const bySession = new Map(memoryMembers.map((m) => [m.sessionId, m]));
+    for (const persisted of this.readMemberLedger(rootSessionId)) {
+      if (bySession.has(persisted.sessionId)) continue;
+      bySession.set(
+        persisted.sessionId,
+        persisted.status === 'running'
+          ? {
+              ...persisted,
+              status: 'aborted',
+              finishReason: 'interrupted',
+              error: '应用重启导致运行中断',
+            }
+          : persisted,
+      );
+    }
+    return [...bySession.values()].sort(compareMembers);
+  }
+
+  /** 白板落盘路径 */
+  private boardPath(rootSessionId: string): string {
+    return join(this.auditDir, `${safeFileName(rootSessionId)}.board.json`);
+  }
+
+  /** 读取/缓存白板状态（文件损坏时降级为空板） */
+  private board(rootSessionId: string): BoardState {
+    const cached = this.boards.get(rootSessionId);
+    if (cached) return cached;
+    let state: BoardState = { rules: [], discussion: [] };
+    try {
+      const raw = readFileSync(this.boardPath(rootSessionId), 'utf8');
+      const parsed = JSON.parse(raw) as { rules?: unknown; discussion?: unknown };
+      state = {
+        rules: Array.isArray(parsed.rules)
+          ? parsed.rules.filter(isBoardNote).filter((n) => n.kind === 'rule')
+          : [],
+        discussion: Array.isArray(parsed.discussion)
+          ? parsed.discussion.filter(isBoardNote).filter((n) => n.kind === 'discussion')
+          : [],
+      };
+    } catch {
+      // 文件不存在/损坏：空板
+    }
+    this.boards.set(rootSessionId, state);
+    return state;
+  }
+
+  /** 原子写入白板（失败只告警，不影响内存态） */
+  private saveBoard(rootSessionId: string, state: BoardState): void {
+    try {
+      mkdirSync(this.auditDir, { recursive: true });
+      atomicWriteFile(this.boardPath(rootSessionId), JSON.stringify(state, null, 2));
+    } catch (err) {
+      this.logger.warn('agent-bus: board persist failed', {
+        rootSessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** 广播白板事件（WS agent-bus.event） */
+  private emitBoard(type: 'board' | 'board-removed', payload: Record<string, unknown>): void {
+    void this.eventBus.broadcast('agent-bus:event', { type, ...payload });
+  }
+
+  /** 把白板变更实时投递给同 root 的其他成员；主代理即使空闲也保留留言（下次 run 注入） */
+  private deliverBoardMessage(
+    from: AgentBusMember,
+    content: string,
+    boardKind: AgentBoardNoteKind,
+  ): number {
+    const targets = [...this.members.values()].filter(
+      (m) =>
+        m.rootSessionId === from.rootSessionId &&
+        m.sessionId !== from.sessionId &&
+        (m.status === 'running' || m.kind === 'main'),
+    );
+    if (targets.length === 0) return 0;
+    const message: AgentBusMessage = {
+      id: randomUUID(),
+      rootSessionId: from.rootSessionId,
+      fromAgentId: from.agentId,
+      fromSessionId: from.sessionId,
+      fromName: from.name,
+      toAgentId: null,
+      toSessionId: null,
+      channel: `board:${from.rootSessionId}`,
+      kind: 'chat',
+      content: content.slice(0, MAX_MESSAGE_CHARS),
+      createdAt: new Date().toISOString(),
+      delivered: false,
+      boardKind,
+    };
+    this.pushMessage(message);
+    for (const target of targets) this.enqueue(target.sessionId, message);
+    return targets.length;
   }
 
   private resolveTargets(
@@ -297,7 +622,9 @@ export class AgentBusImpl implements AgentBus {
     if (resolved.sessionId === from.sessionId) {
       return '不能向自己发送消息';
     }
-    if (kind === 'chat' && resolved.status !== 'running') {
+    // 父代理是特殊收件人：即使当前 run 已结束也允许留言，下一条用户消息开始时注入，
+    // 保证 async 子代理的提问/汇报不会因父代理暂时空闲而丢失。
+    if (kind === 'chat' && resolved.status !== 'running' && target !== 'parent') {
       return `目标智能体 ${resolved.agentId}(${resolved.name}) 未在运行（status=${resolved.status}）`;
     }
     return [resolved];

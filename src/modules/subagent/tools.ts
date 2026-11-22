@@ -20,7 +20,7 @@ import type { SubagentRunner } from './runner';
 const DEFAULT_SUBAGENT_MAX_TURNS = 200;
 const MIN_SUBAGENT_MAX_TURNS = 200;
 
-type AgentAction = 'delegate' | 'status' | 'message' | 'manage';
+type AgentAction = 'delegate' | 'status' | 'message' | 'board' | 'manage';
 
 interface AgentToolParams {
   action?: AgentAction;
@@ -44,6 +44,10 @@ interface AgentToolParams {
   // message
   to?: string;
   content?: string;
+  // board
+  boardAction?: 'read' | 'post' | 'rule' | 'remove';
+  title?: string;
+  boardId?: string;
   // manage
   manageAction?: 'list' | 'get' | 'create' | 'update' | 'delete' | 'tools';
   id?: string;
@@ -53,6 +57,13 @@ interface AgentToolParams {
   model?: string;
   maxTokens?: number;
   icon?: string;
+}
+
+/** 子代理终态：aborted 不能被当成 completed（否则刷新后失败会变成功） */
+function resolveAgentRunStatus(finishReason: string): 'completed' | 'failed' | 'aborted' {
+  if (finishReason === 'error') return 'failed';
+  if (finishReason === 'aborted') return 'aborted';
+  return 'completed';
 }
 
 /** 归一化工具白名单：接受数组或单个字符串；去空/去重；空值视为未填写（走模板默认） */
@@ -248,16 +259,19 @@ async function runDelegate(
     parentSessionId: ctx.sessionId,
     signal: ctx.signal,
   });
+  const status = resolveAgentRunStatus(output.finishReason);
+  const prefix = status === 'aborted' ? '子代理已中止' : '子代理已完成';
   const result = textResult(
-    `子代理已完成 (finishReason=${output.finishReason}, session=${output.sessionId}, ${configSummary}):\n\n${output.result}`,
-    output.finishReason === 'error',
+    `${prefix} (finishReason=${output.finishReason}, session=${output.sessionId}, ${configSummary}):\n\n${output.result}`,
+    status === 'failed' || status === 'aborted',
   );
   result.metadata = {
     agentRun: {
       sessionId: output.sessionId,
       template,
       name: output.name,
-      status: output.finishReason === 'error' ? 'failed' : 'completed',
+      status,
+      finishReason: output.finishReason,
     },
   };
   return result;
@@ -331,6 +345,80 @@ function runMessage(p: AgentToolParams, ctx: ToolContext): ToolResult {
     .map((m) => `${m.agentId}(${m.name})`)
     .join(', ');
   return textResult(`已送达 ${result.delivered} 个智能体：${recipients}`);
+}
+
+/** action=board：共享白板读取 / 讨论 / 规则管理 */
+function runBoard(p: AgentToolParams, ctx: ToolContext): ToolResult {
+  const bus = resolveBus(ctx.services);
+  if (!bus) return errorResult('智能体总线不可用');
+  const self = bus.get(ctx.sessionId);
+  if (!self) return errorResult('当前会话未注册到智能体总线');
+  const action = p.boardAction ?? 'read';
+
+  if (action === 'read') {
+    const board = bus.readBoard(self.rootSessionId);
+    const lines: string[] = [`共享白板（root=${self.rootSessionId}）`];
+    lines.push(`\n规则（${board.rules.length}）：`);
+    if (board.rules.length === 0) {
+      lines.push('- （主代理尚未设定规则）');
+    } else {
+      for (const rule of board.rules) {
+        lines.push(`- [${rule.id}] ${rule.title ?? '未命名'}：${rule.content}`);
+      }
+    }
+    lines.push(`\n最近讨论（${board.discussion.length}）：`);
+    if (board.discussion.length === 0) {
+      lines.push('- （暂无讨论）');
+    } else {
+      for (const note of board.discussion.slice(-20)) {
+        const content = note.content.length > 500 ? `${note.content.slice(0, 500)}…` : note.content;
+        lines.push(`- ${note.authorAgentId}(${note.authorName}) [${note.createdAt}]: ${content}`);
+      }
+    }
+    return textResult(lines.join('\n').slice(0, 6000));
+  }
+
+  if (action === 'post') {
+    const content = (p.content ?? '').trim();
+    if (!content) return errorResult('post 需要 content');
+    const posted = bus.postBoard({
+      fromSessionId: ctx.sessionId,
+      kind: 'discussion',
+      content,
+    });
+    if (posted.error) return errorResult(posted.error);
+    return textResult(
+      `已在白板讨论区发言（实时投递 ${posted.delivered} 个运行中成员）。` +
+        '白板内容持久保存，后派发的子代理也会在启动时看到最近讨论。',
+    );
+  }
+
+  if (action === 'rule') {
+    const content = (p.content ?? '').trim();
+    const title = (p.title ?? '').trim();
+    if (!title) return errorResult('rule 需要 title（同标题会覆盖旧规则）');
+    if (!content) return errorResult('rule 需要 content');
+    const posted = bus.postBoard({
+      fromSessionId: ctx.sessionId,
+      kind: 'rule',
+      title,
+      content,
+    });
+    if (posted.error) return errorResult(posted.error);
+    return textResult(
+      `已${posted.note?.updatedAt ? '更新' : '新增'}白板规则「${title}」（id=${posted.note?.id ?? '-'}，` +
+        `实时投递 ${posted.delivered} 个运行中成员）。`,
+    );
+  }
+
+  if (action === 'remove') {
+    const id = (p.boardId ?? '').trim();
+    if (!id) return errorResult('remove 需要 boardId');
+    const removed = bus.removeBoardNote({ fromSessionId: ctx.sessionId, id });
+    return removed.ok ? textResult(`已删除白板规则 "${id}"`) : errorResult(removed.error ?? '删除失败');
+  }
+
+  return errorResult(`未知 board 操作 "${String(action)}"；可选 read / post / rule / remove`);
 }
 
 /** action=manage：注册表 Agent 管理 */
@@ -422,29 +510,48 @@ function runManage(p: AgentToolParams, ctx: ToolContext): ToolResult {
   return errorResult(`未知 manage 操作 "${String(manageAction)}"`);
 }
 
+/** 当前同轮并行上限（tool description 每次 listSchemas 时实时读取） */
+function concurrentSubagentText(services: ServiceRegistry): string {
+  try {
+    const cfg = services.tryResolve<ConfigService>(ServiceNames.CONFIG_SERVICE)?.getAppConfig();
+    const raw = cfg?.agent.maxConcurrentSubagents;
+    const value = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 4;
+    return value === 0
+      ? '当前同轮并行上限：不限制（0）；仍建议按任务独立性与资源情况分批。'
+      : `当前同轮并行上限：${value}；超过上限的调用会排队执行，不会失败。`;
+  } catch {
+    return '当前同轮并行上限：4（缺省）；超过上限的调用会排队执行，不会失败。';
+  }
+}
+
 function createAgentTool(
   runner: SubagentRunner,
   env: Environment,
   registry: AgentRegistry | null,
+  services: ServiceRegistry,
 ): Tool {
   // 用法文案从 agent/subagent/usage.md 加载；缺失时为空串降级
   const usage = loadPromptFileOrNull(env, 'subagent/usage.md') ?? '';
   return {
     name: 'agent',
     icon: 'bot',
-    description:
-      '多智能体统一工具（action 分派）。delegate（缺省）：把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns），多个独立任务应在同一轮发起多个 async 调用并行执行；status：列出/查看/取消当前任务树中的智能体；message：向主代理/兄弟代理/频道发送消息；manage：管理内置与自定义 Agent（list/get/create/update/delete/tools）。' +
-      `${agentCatalogText(registry)}嵌套层级受设置中的 maxSubagentDepth 限制；子代理不可使用 manage。${usage}`,
+    // 动态描述：每次 listSchemas() 都读取实时配置，保证模型知道当前并行上限
+    get description(): string {
+      return (
+        '多智能体统一工具（action 分派）。delegate（缺省）：把自包含任务委派给一次性子代理（template + task + mode + 可选 tools/maxTurns），多个独立任务应在同一轮发起多个 async 调用并行执行；status：列出/查看/取消当前任务树中的智能体；message：向主代理/兄弟代理点对点私聊；board：共享白板（主代理设定规则，所有成员可读/讨论）；manage：管理内置与自定义 Agent（list/get/create/update/delete/tools）。' +
+        `${agentCatalogText(registry)}${concurrentSubagentText(services)}嵌套层级受设置中的 maxSubagentDepth 限制；子代理不可使用 manage。${usage}`
+      );
+    },
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['delegate', 'status', 'message', 'manage'],
+          enum: ['delegate', 'status', 'message', 'board', 'manage'],
           description:
-            '操作类型：delegate（缺省）=派发子代理；status=列出/查看/取消智能体；message=向智能体发消息；manage=管理 Agent 注册表',
+            '操作类型：delegate（缺省）=派发子代理；status=列出/查看/取消智能体；message=点对点私聊；board=共享白板（规则/讨论）；manage=管理 Agent 注册表',
           description_en:
-            'Operation: delegate (default) = dispatch a subagent; status = list/get/cancel agents; message = send a message; manage = manage the agent registry',
+            'Operation: delegate (default) = dispatch a subagent; status = list/get/cancel agents; message = direct message; board = shared board (rules/discussion); manage = manage the agent registry',
         },
         statusAction: {
           type: 'string',
@@ -521,8 +628,28 @@ function createAgentTool(
         },
         content: {
           type: 'string',
-          description: 'message：消息正文（≤8000 字符；只写对方需要且会改变其行动的事实）',
-          description_en: 'message: message body (<=8000 chars; facts that change the recipient action)',
+          description:
+            'message/board：正文（message ≤8000 字符；board ≤4000 字符；只写对方需要且会改变其行动的事实）',
+          description_en:
+            'message/board: body text (message <=8000 chars; board <=4000 chars; facts that change the recipient action)',
+        },
+        boardAction: {
+          type: 'string',
+          enum: ['read', 'post', 'rule', 'remove'],
+          description:
+            'board 子操作：read（默认）读取规则与最近讨论；post 在讨论区发言（所有成员）；rule 设定/覆盖规则（仅主代理，需要 title）；remove 删除规则（仅主代理，需要 boardId）',
+          description_en:
+            'board sub-operation: read (default) | post discussion (all members) | rule upsert (main agent only, requires title) | remove rule (main agent only, requires boardId)',
+        },
+        title: {
+          type: 'string',
+          description: 'board rule：规则标题（同标题覆盖旧规则，仅主代理）',
+          description_en: 'board rule: rule title (same title upserts; main agent only)',
+        },
+        boardId: {
+          type: 'string',
+          description: 'board remove：规则 id（从 boardAction="read" 结果中获取）',
+          description_en: 'board remove: rule id (from boardAction="read" output)',
         },
         id: {
           type: 'string',
@@ -574,10 +701,12 @@ function createAgentTool(
             return runStatus(p, ctx, runner);
           case 'message':
             return runMessage(p, ctx);
+          case 'board':
+            return runBoard(p, ctx);
           case 'manage':
             return runManage(p, ctx);
           default:
-            return errorResult(`未知 action "${String(action)}"；可选 delegate / status / message / manage`);
+            return errorResult(`未知 action "${String(action)}"；可选 delegate / status / message / board / manage`);
         }
       } catch (err) {
         return errorResult(err instanceof Error ? err.message : String(err));
@@ -599,7 +728,7 @@ export function registerAgentTools(
     return;
   }
   const agentRegistry = services.tryResolve<AgentRegistry>(ServiceNames.AGENT_REGISTRY);
-  const tool = createAgentTool(runner, env, agentRegistry);
+  const tool = createAgentTool(runner, env, agentRegistry, services);
   try {
     registry.register(tool);
   } catch (err) {

@@ -306,6 +306,13 @@ async function dispatch(method, params) {
       });
     case 'groups.ensure':
       return ensureGroup(params);
+    case 'groups.consolidate':
+      return consolidateMossGroups(
+        typeof params.title === 'string' ? params.title.trim() : '',
+        typeof params.groupId === 'number' && Number.isFinite(params.groupId)
+          ? params.groupId
+          : undefined,
+      );
     case 'groups.update':
       return updateGroup(params);
     case 'debugger.attach':
@@ -386,6 +393,10 @@ async function ensureMossWindow(params) {
     typeof params.windowId === 'number' && Number.isFinite(params.windowId)
       ? params.windowId
       : undefined;
+  const groupIdParam =
+    typeof params.groupId === 'number' && Number.isFinite(params.groupId)
+      ? params.groupId
+      : undefined;
   const isolateWindow = params.isolateWindow !== false;
 
   // 兼容模式：在当前窗口建页 + 分组；不登记为 MOSS 窗口，也不会被自动激活
@@ -443,6 +454,34 @@ async function ensureMossWindow(params) {
       ? windowIdParam
       : undefined;
 
+  // 关键修复：先按标题全局查找同名组并合并，直接复用其所在窗口与 groupId；
+  // 不再要求该窗口在 mossWindows 登记表中，避免每次 open 新建一个同名分组。
+  const consolidated = await consolidateMossGroups(title, groupIdParam);
+  if (consolidated) {
+    const tab = await chrome.tabs.create({
+      url: markerUrl,
+      active: false,
+      windowId: consolidated.windowId,
+    });
+    await chrome.tabs.group({ groupId: consolidated.groupId, tabIds: [tab.id] });
+    try {
+      const group = await chrome.tabGroups.get(consolidated.groupId);
+      if (group.color !== color) {
+        await chrome.tabGroups.update(consolidated.groupId, { color });
+      }
+    } catch {
+      // 分组可能已关闭
+    }
+    return {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      groupId: consolidated.groupId,
+      createdWindow: false,
+      createdWithUrl: false,
+      windowOwned: true,
+    };
+  }
+
   const groups = await chrome.tabGroups.query({ title });
   for (const legacyTitle of legacyTitles) {
     if (legacyTitle === title) continue;
@@ -455,16 +494,8 @@ async function ensureMossWindow(params) {
     }
   }
 
-  const existing =
-    groups.find(
-      (group) =>
-        typeof group.windowId === 'number' &&
-        ownedWindowIds.has(group.windowId) &&
-        (preferredWindowId === undefined || group.windowId === preferredWindowId),
-    ) ??
-    groups.find(
-      (group) => typeof group.windowId === 'number' && ownedWindowIds.has(group.windowId),
-    );
+  // 兜底：合并后仍可能因并发出现同名组，此时复用任意同名组，而不是新建
+  const existing = groups.find((group) => typeof group.windowId === 'number');
   if (existing) {
     const tab = await chrome.tabs.create({
       url: markerUrl,
@@ -621,35 +652,101 @@ const GROUP_COLORS = new Set([
   'orange',
 ]);
 
+async function queryMossGroups(title) {
+  return chrome.tabGroups.query({ title });
+}
+
+/** 把标签移入指定分组：跨窗口时先移动标签到组所在窗口，再加入组 */
+async function attachTabToGroup(tabId, groupId) {
+  const group = await chrome.tabGroups.get(groupId);
+  let tab = await chrome.tabs.get(tabId);
+  if (tab.windowId !== group.windowId) {
+    tab = await chrome.tabs.move(tabId, { windowId: group.windowId, index: -1 });
+  }
+  if (tab.groupId !== groupId) {
+    await chrome.tabs.group({ groupId, tabIds: [tabId] });
+  }
+  return { tabId, windowId: group.windowId, groupId };
+}
+
+/**
+ * 合并同名分组：保留一个组，其余组的标签移入保留组，空组自动回收。
+ * 保留优先级：preferredGroupId > MOSS 登记窗口中标签最多的组 > 标签最多的组 > 第一个。
+ * 固定标签不移动，避免破坏用户固定标签。
+ */
+async function consolidateMossGroups(title, preferredGroupId) {
+  if (!title) return null;
+  const groups = await queryMossGroups(title);
+  if (groups.length === 0) return null;
+  if (groups.length === 1) {
+    return { groupId: groups[0].id, windowId: groups[0].windowId, merged: 0 };
+  }
+  const owned = await loadMossWindows();
+  const stats = [];
+  for (const group of groups) {
+    const tabs = await chrome.tabs.query({ groupId: group.id });
+    stats.push({ group, count: tabs.length });
+  }
+  const preferred = preferredGroupId
+    ? stats.find((item) => item.group.id === preferredGroupId)
+    : undefined;
+  const ownedStats = stats.filter((item) => owned.has(item.group.windowId));
+  const pool = ownedStats.length > 0 ? ownedStats : stats;
+  const keep =
+    preferred ??
+    pool.slice().sort((a, b) => b.count - a.count)[0] ??
+    stats[0];
+  let merged = 0;
+  for (const item of stats) {
+    if (item.group.id === keep.group.id) continue;
+    const tabs = await chrome.tabs.query({ groupId: item.group.id });
+    for (const tab of tabs) {
+      if (tab.pinned) continue;
+      try {
+        await attachTabToGroup(tab.id, keep.group.id);
+        merged += 1;
+      } catch {
+        // 单个标签移动失败不阻断其它标签
+      }
+    }
+  }
+  return { groupId: keep.group.id, windowId: keep.group.windowId, merged };
+}
+
 async function ensureGroup(params) {
   const tabId = Number(params.tabId);
   const title = typeof params.title === 'string' && params.title.trim() ? params.title.trim() : 'MOSS';
   const color = GROUP_COLORS.has(params.color) ? params.color : 'blue';
-  const legacyTitles = Array.isArray(params.legacyTitles)
-    ? params.legacyTitles.filter((value) => typeof value === 'string' && value.trim())
-    : [];
-  const tab = await chrome.tabs.get(tabId);
-  let existing = (await chrome.tabGroups.query({ title, windowId: tab.windowId }))[0];
-  if (!existing && legacyTitles.length > 0) {
-    for (const legacyTitle of legacyTitles) {
-      const legacy = (await chrome.tabGroups.query({ title: legacyTitle, windowId: tab.windowId }))[0];
-      if (legacy) {
-        await chrome.tabGroups.update(legacy.id, { title, color });
-        existing = legacy;
-        break;
-      }
+  const preferredGroupId =
+    typeof params.groupId === 'number' && Number.isFinite(params.groupId) ? params.groupId : undefined;
+  const allowCreate = params.allowCreate !== false;
+  await chrome.tabs.get(tabId);
+
+  // 全局查找同名组并合并：绝不按标签所在窗口新建同名组
+  const keep = await consolidateMossGroups(title, preferredGroupId);
+  if (keep) {
+    const attached = await attachTabToGroup(tabId, keep.groupId);
+    try {
+      const group = await chrome.tabGroups.get(keep.groupId);
+      if (group.color !== color) await chrome.tabGroups.update(keep.groupId, { color });
+    } catch {
+      // 分组可能已关闭
     }
+    return {
+      groupId: attached.groupId,
+      windowId: attached.windowId,
+      created: false,
+      merged: keep.merged,
+    };
   }
-  if (existing) {
-    await chrome.tabs.group({ groupId: existing.id, tabIds: [tabId] });
-    if (existing.color !== color) {
-      await chrome.tabGroups.update(existing.id, { color });
-    }
-    return { groupId: existing.id, created: false };
+
+  if (!allowCreate) {
+    return { groupId: -1, created: false, missing: true };
   }
+
   const groupId = await chrome.tabs.group({ tabIds: [tabId] });
   await chrome.tabGroups.update(groupId, { title, color });
-  return { groupId, created: true };
+  return { groupId, created: true, merged: 0 };
 }
 
 async function updateGroup(params) {
