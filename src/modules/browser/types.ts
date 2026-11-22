@@ -96,11 +96,14 @@ export interface BrowserTabInfo {
   browserVersion: string;
   nativeTabId: number;
   windowId?: number;
+  /** Chrome 运行时分组 id；浏览器重启/组重建后会变化，不能作为持久标识 */
   groupId: number | null;
   /** 所属会话（会话独立标签组/当前标签；缺省=共享） */
   sessionId?: string;
-  /** 该会话的标签组名（MOSS、MOSS-0…） */
+  /** 该会话的固定标签组名（MOSS - <名称>） */
   groupTitle?: string;
+  /** MOSS 稳定分组 id（与 groupTitle 绑定，跨重启不变） */
+  groupIdText?: string;
   url: string;
   title: string;
   active: boolean;
@@ -136,6 +139,7 @@ export interface BrowserStatus {
   tabs: BrowserTabInfo[];
   currentTab: string | null;
   config: {
+    /** legacy：旧版分组基础名，仅用于识别历史分组，不再参与新分组命名 */
     tabGroupTitle: string;
     tabGroupColor: string;
     maxSnapshotNodes: number;
@@ -154,8 +158,15 @@ export interface BrowserOpenOptions {
   focus?: boolean;
   /** 临时 CDP 端点；传入时本次及后续调用使用该端点（覆盖目标为 cdp） */
   cdpEndpoint?: string;
-  /** 调用方会话 id：每个会话独立标签组/窗口/当前标签；缺省=shared */
+  /** 调用方会话 id：每个会话独立固定分组/窗口/当前标签；缺省=shared */
   sessionId?: string;
+  /**
+   * 分组名（8~10 字描述，不含「MOSS - 」前缀）。
+   * 会话首次 open 必填；之后可省略（自动沿用固定分组），显式传入时必须与固定记录一致。
+   */
+  groupName?: string;
+  /** MOSS 稳定分组 id；首次不可用；之后可省略，显式传入时必须与固定记录一致 */
+  groupId?: string;
 }
 
 /** 聚焦结果（自动焦点/显式 focus 共用） */
@@ -390,6 +401,8 @@ export interface NativeTabInfo {
   /** 打开该标签页的源标签页（target=_blank / window.open） */
   openerTabId?: number;
   groupId: number;
+  /** 所在分组标题（扩展新版本上报；用于判断是否被拖出固定分组） */
+  groupTitle?: string;
   url: string;
   title: string;
   active: boolean;
@@ -463,8 +476,16 @@ export interface BrowserService {
   autoInstallExtensions(force?: boolean): Promise<BrowserInstallerStatus>;
   getInstallerStatus(): BrowserInstallerStatus;
 
-  /** 打开 AI 标签页（自动归组） */
+  /** 打开 AI 标签页（自动归组；首次需 groupName，后续自动沿用固定分组） */
   openTab(options: BrowserOpenOptions): Promise<BrowserTabInfo>;
+  /** 会话固定分组记录（id/name/title）；未命名返回 null */
+  getSessionGroup(sessionId: string): { id: string; name: string; title: string } | null;
+  /** 会话固定分组名（不含前缀）；未命名返回 null */
+  getSessionGroupName(sessionId: string): string | null;
+  /** 校验标签仍属于本会话固定分组；脱离/跨会话直接抛错 */
+  assertSessionTab(tab: string, sessionId: string): void;
+  /** 用固定分组在后台新建 about:blank 标签（会话已命名时可用） */
+  ensureSessionTabForSession(sessionId: string): Promise<BrowserTabInfo>;
   /** 指定会话当前的 AI 标签页 key（无则 null） */
   getSessionTab(sessionId: string): string | null;
   listTabs(all?: boolean, target?: BrowserTarget): Promise<BrowserTabInfo[]>;

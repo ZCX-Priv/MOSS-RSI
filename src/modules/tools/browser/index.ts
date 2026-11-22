@@ -63,7 +63,7 @@ function formatMode(mode: BrowserStatus['mode']): string {
 function formatTabLine(tab: BrowserTabInfo): string {
   const groupLabel =
     tab.groupTitle && tab.groupId !== null
-      ? `${tab.groupTitle} (${tab.groupId})`
+      ? `${tab.groupTitle}${tab.groupIdText ? `（group_id: ${tab.groupIdText}）` : ''} (${tab.groupId})`
       : tab.groupId;
   return t('browserTool.tabLine', {
     tab: tab.tab,
@@ -296,15 +296,45 @@ export default {
     const browser = pickString(params, 'browser');
     const cdpEndpoint = pickString(params, 'cdp_endpoint');
     const timeoutMs = pickNumber(params, 'timeout_ms');
-    // 每个会话独立当前标签：无显式 tab 时只取本会话标签。
-    // 不再回退全局 currentTab，避免 A 会话误操作 B 会话最近打开的标签（多会话抢标签的根因）。
+    // 每个会话独立当前标签：无显式 tab 时只取本会话固定分组内的标签。
     const sessionId = ctx.sessionId;
-    const effectiveTab = tab ?? service.getSessionTab(sessionId) ?? undefined;
+    let effectiveTab = tab ?? service.getSessionTab(sessionId) ?? undefined;
     // 自动聚焦仅作为单次调用的显式开关：默认关闭，绝不跟随每次操作切换用户标签。
     const autoFocus = pickBoolean(params, 'auto_focus') === true;
-    // 需要标签的 action 必须有本会话（或无归属）标签，禁止落到其它会话的全局当前标签
-    if (TAB_REQUIRED_ACTIONS.has(action) && !effectiveTab) {
-      return errorResult(t('browserTool.sessionTabMissing'));
+    let autoReopenNote = '';
+    const finish = (text: string): ToolResult =>
+      textResult(autoReopenNote ? `${autoReopenNote}\n${text}` : text);
+    // 需要标签的 action：显式 tab 必须是本会话固定分组成员；无标签时按固定分组自动恢复
+    if (TAB_REQUIRED_ACTIONS.has(action)) {
+      if (tab) {
+        try {
+          service.assertSessionTab(tab, sessionId);
+        } catch (err) {
+          return errorResult(err instanceof Error ? err.message : String(err));
+        }
+      } else if (!effectiveTab) {
+        if (action === 'focus' || action === 'close') {
+          return errorResult(t('browserTool.sessionTabMissing'));
+        }
+        try {
+          const created = await service.ensureSessionTabForSession(sessionId);
+          effectiveTab = created.tab;
+          // 扩展模式下必须真正进入分组；CDP / 无扩展内置 Chrome 没有分组语义，允许继续
+          if (
+            created.instanceKind !== 'cdp' &&
+            created.instanceId !== 'builtin' &&
+            created.groupId === null
+          ) {
+            return errorResult(t('browserTool.reopenFailed'));
+          }
+          autoReopenNote = t('browserTool.autoReopened', {
+            title: created.groupTitle ?? service.getSessionGroup(sessionId)?.title ?? '',
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return errorResult(`${t('browserTool.sessionTabMissing')}：${message}`);
+        }
+      }
     }
 
     try {
@@ -315,7 +345,7 @@ export default {
 
       switch (action) {
         case 'status':
-          return textResult(formatStatus(service.getStatus()));
+          return finish(formatStatus(service.getStatus()));
 
         case 'setup': {
           const status = await service.ensureExtension();
@@ -327,63 +357,77 @@ export default {
             formatInstaller(service.getInstallerStatus()),
             t('browserTool.setupSteps'),
           ];
-          return textResult(lines.join('\n'));
+          return finish(lines.join('\n'));
         }
 
         case 'open': {
+          const groupName = pickString(params, 'group_name');
+          const groupId = pickString(params, 'group_id');
           const info = await service.openTab({
             target: cdpEndpoint ? 'cdp' : browser,
             ...(cdpEndpoint ? { cdpEndpoint } : {}),
             ...(pickString(params, 'url') ? { url: pickString(params, 'url') } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+            ...(groupName !== undefined ? { groupName } : {}),
+            ...(groupId !== undefined ? { groupId } : {}),
             focus: autoFocus,
             sessionId,
           });
-          const groupTitle = info.groupTitle ?? service.getStatus().config.tabGroupTitle;
-          return textResult(
+          const fixed = service.getSessionGroup(sessionId);
+          const groupLabel = info.groupTitle ?? fixed?.title ?? service.getStatus().config.tabGroupTitle;
+          const idLabel = info.groupIdText ?? fixed?.id;
+          return finish(
             t('browserTool.opened', {
               tab: info.tab,
               browser: `${info.browserName} ${info.browserVersion}`.trim(),
-              group: info.groupId !== null ? `${groupTitle} (${info.groupId})` : t('browserTool.groupNone'),
+              group:
+                info.groupId !== null
+                  ? `${groupLabel}${idLabel ? `（group_id: ${idLabel}）` : ''} (${info.groupId})`
+                  : t('browserTool.groupNone'),
               url: info.url,
-            }),
+            }) + (fixed ? `\n${t('browserTool.groupFixedHint', { title: fixed.title, id: fixed.id })}` : ''),
           );
         }
 
         case 'tabs': {
           const all = pickBoolean(params, 'all') === true;
           let tabs = await service.listTabs(all, cdpEndpoint ? 'cdp' : browser);
-          // 非 all：只展示本会话标签（无归属的旧标签作为兜底保留，避免升级后旧页不可见）
-          if (!all) tabs = tabs.filter((item) => item.sessionId === sessionId || !item.sessionId);
+          // 非 all：只展示本会话固定分组内的标签，绝不展示其它会话/无归属标签
+          if (!all) tabs = tabs.filter((item) => item.sessionId === sessionId);
+          const fixed = service.getSessionGroup(sessionId);
           if (tabs.length === 0) {
-            return textResult(all ? t('browserTool.nativeTabsEmpty') : t('browserTool.tabsNone'));
+            const empty = all ? t('browserTool.nativeTabsEmpty') : t('browserTool.tabsNone');
+            return finish(fixed ? `${t('browserTool.sessionGroupTitle', { title: fixed.title, id: fixed.id })}\n${empty}` : empty);
           }
           const lines = [
             all ? t('browserTool.nativeTabsTitle') : t('browserTool.tabsListTitle'),
+            ...(fixed && !all
+              ? [t('browserTool.sessionGroupTitle', { title: fixed.title, id: fixed.id })]
+              : []),
             ...tabs.map((item) => formatTabLine(item)),
           ];
           if (all) lines.push(t('browserTool.nativeHint'));
-          return textResult(lines.join('\n'));
+          return finish(lines.join('\n'));
         }
 
         case 'focus': {
           const key = requireTabKey(effectiveTab);
           const result = await service.ensureFocused(key);
           if (!result.focused) {
-            return textResult(
+            return finish(
               t('browserTool.focusSkipped', {
                 tab: result.tab,
                 reason: result.reason ?? '',
               }),
             );
           }
-          return textResult(t('browserTool.focused', { tab: result.tab }));
+          return finish(t('browserTool.focused', { tab: result.tab }));
         }
 
         case 'close': {
           const key = requireTabKey(effectiveTab);
           await service.closeTab(key);
-          return textResult(t('browserTool.closed', { tab: key }));
+          return finish(t('browserTool.closed', { tab: key }));
         }
 
         case 'navigate': {
@@ -401,7 +445,7 @@ export default {
             ...(reload ? { reload: true } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           });
-          return textResult(formatPageInfo(info));
+          return finish(formatPageInfo(info));
         }
 
         case 'snapshot': {
@@ -412,7 +456,7 @@ export default {
             count: snapshot.refCount,
             truncated: snapshot.truncated ? t('browserTool.snapshotTruncated') : '',
           });
-          return textResult(`${snapshot.text}\n\n${footer}`);
+          return finish(`${snapshot.text}\n\n${footer}`);
         }
 
         case 'screenshot': {
@@ -459,7 +503,7 @@ export default {
           if (autoFocus && info.openedTab) {
             await service.ensureFocused(info.openedTab.tab).catch(() => undefined);
           }
-          return textResult(`${t('browserTool.clicked')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.clicked')}\n${formatPageInfo(info)}`);
         }
 
         case 'hover': {
@@ -467,7 +511,7 @@ export default {
             ...(pickString(params, 'ref') ? { ref: pickString(params, 'ref') } : {}),
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
           });
-          return textResult(`${t('browserTool.hovered')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.hovered')}\n${formatPageInfo(info)}`);
         }
 
         case 'type': {
@@ -479,7 +523,7 @@ export default {
             ...(pickBoolean(params, 'replace') !== undefined ? { replace: pickBoolean(params, 'replace') } : {}),
             ...(pickBoolean(params, 'submit') !== undefined ? { submit: pickBoolean(params, 'submit') } : {}),
           });
-          return textResult(`${t('browserTool.typed')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.typed')}\n${formatPageInfo(info)}`);
         }
 
         case 'press_key': {
@@ -492,13 +536,13 @@ export default {
           if (autoFocus && info.openedTab) {
             await service.ensureFocused(info.openedTab.tab).catch(() => undefined);
           }
-          return textResult(`${t('browserTool.keyPressed', { key })}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.keyPressed', { key })}\n${formatPageInfo(info)}`);
         }
 
         case 'frames': {
           const frames = await service.listFrames(effectiveTab);
           if (frames.length === 0) {
-            return textResult(
+            return finish(
               '当前标签页没有可用的 iframe 子会话（可能没有跨域 iframe，或浏览器不支持子会话）。可先用 action=screenshot 查看页面。',
             );
           }
@@ -512,7 +556,7 @@ export default {
             );
           }
           lines.push('提示：游戏/画布优先用 frame=auto 或上述 key；frame 内坐标使用该 iframe 的 CSS 坐标。');
-          return textResult(lines.join('\n'));
+          return finish(lines.join('\n'));
         }
 
         case 'key_down': {
@@ -521,7 +565,7 @@ export default {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
           });
-          return textResult(`已按下 ${key}\n${formatPageInfo(info)}`);
+          return finish(`已按下 ${key}\n${formatPageInfo(info)}`);
         }
 
         case 'key_up': {
@@ -530,7 +574,7 @@ export default {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
           });
-          return textResult(`已抬起 ${key}\n${formatPageInfo(info)}`);
+          return finish(`已抬起 ${key}\n${formatPageInfo(info)}`);
         }
 
         case 'hold': {
@@ -543,7 +587,7 @@ export default {
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
             ...(pickStringArray(params, 'modifiers') ? { modifiers: pickStringArray(params, 'modifiers') } : {}),
           });
-          return textResult(`已按住 ${keys.join('+')} ${duration}ms\n${formatPageInfo(info)}`);
+          return finish(`已按住 ${keys.join('+')} ${duration}ms\n${formatPageInfo(info)}`);
         }
 
         case 'macro': {
@@ -593,7 +637,7 @@ export default {
             action === 'wait_stable'
               ? await service.waitStable(effectiveTab, waitOptions)
               : await service.waitChange(effectiveTab, waitOptions);
-          return textResult(
+          return finish(
             `wait_${result.reason}（${result.elapsedMs}ms，采样 ${result.samples} 次，diff=${result.diffPercent}%）${
               result.matched ? '' : '：超时未满足条件'
             }${result.frame ? ` · frame=${result.frame}` : ''}`,
@@ -608,7 +652,7 @@ export default {
             ...(pickString(params, 'selector') ? { selector: pickString(params, 'selector') } : {}),
             values,
           });
-          return textResult(`${t('browserTool.selected')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.selected')}\n${formatPageInfo(info)}`);
         }
 
         case 'scroll': {
@@ -617,7 +661,7 @@ export default {
             ...(pickNumber(params, 'delta_x') !== undefined ? { deltaX: pickNumber(params, 'delta_x') } : {}),
             ...(pickNumber(params, 'delta_y') !== undefined ? { deltaY: pickNumber(params, 'delta_y') } : {}),
           });
-          return textResult(`${t('browserTool.scrolled')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.scrolled')}\n${formatPageInfo(info)}`);
         }
 
         case 'drag': {
@@ -642,7 +686,7 @@ export default {
               ? { durationMs: pickNumber(params, 'duration_ms') }
               : {}),
           });
-          return textResult(`${t('browserTool.dragged')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.dragged')}\n${formatPageInfo(info)}`);
         }
 
         case 'evaluate': {
@@ -651,7 +695,7 @@ export default {
             expression,
             ...(pickString(params, 'frame') ? { frame: pickString(params, 'frame') } : {}),
           });
-          return textResult(t('browserTool.evaluated', { type: result.type, result: result.result }));
+          return finish(t('browserTool.evaluated', { type: result.type, result: result.result }));
         }
 
         case 'wait': {
@@ -664,7 +708,7 @@ export default {
           if (!effectiveTab && !selector && !text) {
             // 无 AI 标签页时，纯等待退化为本地 sleep
             await sleep(Math.min(10_000, Math.max(0, waitMs ?? 0)));
-            return textResult(t('browserTool.waited'));
+            return finish(t('browserTool.waited'));
           }
           if (!effectiveTab) return errorResult(t('browserTool.sessionTabMissing'));
           const info = await service.waitFor(effectiveTab, {
@@ -673,7 +717,7 @@ export default {
             ...(text ? { text } : {}),
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           });
-          return textResult(`${t('browserTool.waited')}\n${formatPageInfo(info)}`);
+          return finish(`${t('browserTool.waited')}\n${formatPageInfo(info)}`);
         }
 
         case 'console': {
@@ -689,7 +733,7 @@ export default {
             }
           }
           if (clear) lines.push(t('browserTool.consoleCleared'));
-          return textResult(lines.join('\n'));
+          return finish(lines.join('\n'));
         }
 
         default:

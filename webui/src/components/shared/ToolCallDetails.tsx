@@ -26,6 +26,7 @@ import {
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { resolveToolIcon } from '@/lib/tool-icons';
+import { formatToolDisplayName } from '@/lib/tool-name';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { useStore } from '../../store';
 import { wsClient } from '../../api/ws';
@@ -709,6 +710,7 @@ export const ToolCallDetails = memo(function ToolCallDetails({
     !hasResult && (toolCall.status === 'generating' || toolCall.status === 'executing');
 
   const ToolIcon = resolveToolIcon(toolCall.name, iconMap);
+  const displayName = titleOverride ?? formatToolDisplayName(toolCall.name);
 
   const sourceText = useMemo(() => {
     if (!isOpen) return '';
@@ -819,8 +821,8 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         ) : (
           <ToolIcon className="size-3.5 shrink-0" />
         )}
-        <span className="max-w-[45%] shrink-0 truncate" title={toolCall.name}>
-          {titleOverride ?? toolCall.name}
+        <span className="max-w-[45%] shrink-0 truncate" title={displayName}>
+          {displayName}
         </span>
         {summary && (
           toolCall.name === 'terminal' ? (

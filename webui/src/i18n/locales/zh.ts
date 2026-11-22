@@ -461,7 +461,7 @@ export const zh = {
     },
     browser: {
       title: '浏览器',
-      subtitle: '管理浏览器扩展桥接、内置 Chrome 与 AI 标签组能力',
+      subtitle: '管理浏览器扩展桥接、内置 Chrome 与会话固定标签组能力',
       refresh: '刷新',
       loading: '正在读取浏览器状态…',
       copied: '已复制扩展目录',
@@ -483,7 +483,7 @@ export const zh = {
       kindBuiltin: '内置',
       kindExternal: '扩展',
       extensionTitle: '浏览器扩展',
-      extensionDesc: '扩展负责把 CDP 命令中继给浏览器，并创建「MOSS」标签组。',
+      extensionDesc: '扩展负责把 CDP 命令中继给浏览器，并按会话创建固定的「MOSS - <名称>」标签组（新标签自动归组、会话间完全隔离）。',
       extensionPath: '扩展目录',
       extensionVersion: '版本 v{{version}}',
       extensionNotSeeded: '尚未播种（请刷新或重启 MOSS）',

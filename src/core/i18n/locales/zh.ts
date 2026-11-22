@@ -917,7 +917,27 @@ export const zh = {
     consoleEmpty: '（无消息）',
     consoleCleared: '已清空 console 缓冲',
     unknownAction: '未知 action：{{action}}',
-    sessionTabMissing: '本会话没有可用的 AI 标签页，请先执行 action=open 打开一个页面',
+    sessionTabMissing:
+      '本会话没有可用的 AI 标签页；首次请执行 action=open 并提供 8~10 字的 group_name，之后 open 会自动沿用固定分组',
+    groupNameRequired:
+      '本会话首次 open 必须提供 group_name（8~10 个字的描述，系统会自动加「MOSS - 」前缀）',
+    groupNameInvalid: '分组名必须是 8~10 个字符（不含「MOSS - 」前缀），当前为 {{count}} 个字符',
+    groupNameMismatch:
+      '本会话固定分组是「{{title}}」（group_id: {{id}}）；本次 group_name 为「{{received}}」，与固定分组不一致',
+    groupIdMismatch:
+      'group_id「{{received}}」与本会话固定分组「{{title}}」（{{id}}）不一致',
+    groupIdWithoutName:
+      '本会话尚未建立分组，首次 open 不能使用 group_id；请提供 8~10 字的 group_name',
+    groupNameTaken: '分组名「{{name}}」已被其它会话或浏览器中已有分组占用，请换一个名称',
+    tabDetached: '标签 {{tab}} 已不属于本会话固定分组「{{title}}」，已拒绝操作',
+    tabNotOwned: '标签 {{tab}} 不属于本会话，已拒绝操作',
+    sessionGroupTitle: '本会话固定分组：{{title}}（group_id: {{id}}）',
+    groupFixedHint:
+      '本会话固定分组：{{title}}（group_id: {{id}}）；后续 open 可省略 group_name/group_id，显式传入时必须与之一致',
+    autoReopened:
+      '原标签已脱离本会话固定分组，已自动在「{{title}}」新建空白标签；需要访问网页请先 navigate 或 open',
+    reopenFailed:
+      '无法在本会话固定分组中创建标签（浏览器未返回分组）；请检查浏览器扩展是否已连接并启用分组权限',
   },
   cli: {
     unknownCommand: '未知命令: {{command}}',

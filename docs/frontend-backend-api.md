@@ -847,6 +847,12 @@ export interface BrowserStatus {
     nativeTabId: number;
     windowId?: number;
     groupId: number | null;
+    /** 所属会话（会话独立固定标签组） */
+    sessionId?: string;
+    /** 会话固定标签组名（MOSS - <名称>） */
+    groupTitle?: string;
+    /** MOSS 稳定分组 id（跨重启不变） */
+    groupIdText?: string;
     url: string;
     title: string;
     active: boolean;

@@ -42,11 +42,25 @@ const MOSS_WINDOWS_KEY = 'mossWindows';
 let mossWindows = null;
 let loadingMossWindows = null;
 
-/** 判断分组标题是否属于某个 MOSS 会话分组（MOSS、MOSS-0、MOSS-1…） */
+/** 新固定分组前缀：MOSS - <会话名> */
+const MOSS_GROUP_PREFIX = 'MOSS - ';
+
+/** 是否为新的会话固定分组标题 */
+function isMossSessionGroupTitle(title) {
+  return (
+    typeof title === 'string' &&
+    title.startsWith(MOSS_GROUP_PREFIX) &&
+    title.slice(MOSS_GROUP_PREFIX.length).trim().length > 0
+  );
+}
+
+/** 判断分组标题是否属于某个 MOSS 分组（新前缀 + 历史 MOSS / MOSS-N / MOSS AI） */
 function isMossGroupTitle(title, base) {
-  if (typeof title !== 'string' || !title || typeof base !== 'string' || !base) return false;
-  if (title === base) return true;
-  return title.startsWith(`${base}-`) && /^\d+$/.test(title.slice(base.length + 1));
+  if (typeof title !== 'string' || !title) return false;
+  if (isMossSessionGroupTitle(title)) return true;
+  if (typeof base === 'string' && base && title === base) return true;
+  if (title === 'MOSS' || title === 'MOSS AI') return true;
+  return /^MOSS-\d+$/.test(title);
 }
 
 /**
@@ -359,7 +373,7 @@ async function ensureMossWindow(params) {
       ? params.initialUrl
       : '';
   const title = typeof params.title === 'string' && params.title.trim() ? params.title.trim() : 'MOSS';
-  // 窗口归属按「分组基名」判定（MOSS / MOSS-N 都属于同一个 MOSS 窗口），不能用会话分组名本身
+  // 窗口归属按「MOSS 基名」判定（MOSS - <会话名> 都属于同一个 MOSS 窗口），不能用会话分组名本身
   const baseTitle =
     typeof params.baseTitle === 'string' && params.baseTitle.trim()
       ? params.baseTitle.trim()
@@ -522,30 +536,12 @@ async function ensureMossWindow(params) {
 
 async function getTab(tabId) {
   const tab = await chrome.tabs.get(tabId);
-  return {
-    tabId: tab.id,
-    windowId: tab.windowId,
-    groupId: typeof tab.groupId === 'number' ? tab.groupId : -1,
-    url: tab.url || '',
-    title: tab.title || '',
-    active: tab.active === true,
-    status: tab.status || '',
-    pinned: tab.pinned === true,
-  };
+  return tabPayload(tab);
 }
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.map((tab) => ({
-    tabId: tab.id,
-    windowId: tab.windowId,
-    groupId: typeof tab.groupId === 'number' ? tab.groupId : -1,
-    url: tab.url || '',
-    title: tab.title || '',
-    active: tab.active === true,
-    status: tab.status || '',
-    pinned: tab.pinned === true,
-  }));
+  return Promise.all(tabs.map((tab) => tabPayload(tab)));
 }
 
 /**
@@ -810,12 +806,22 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   forwardEvent('debugger.detached', { tabId: source.tabId, reason });
 });
 
-function tabPayload(tab) {
+async function tabPayload(tab) {
+  let groupTitle;
+  if (typeof tab.groupId === 'number' && tab.groupId >= 0) {
+    try {
+      const group = await chrome.tabGroups.get(tab.groupId);
+      groupTitle = typeof group.title === 'string' ? group.title : '';
+    } catch {
+      groupTitle = undefined;
+    }
+  }
   return {
     tabId: tab.id,
     windowId: tab.windowId,
     openerTabId: typeof tab.openerTabId === 'number' ? tab.openerTabId : undefined,
     groupId: typeof tab.groupId === 'number' ? tab.groupId : -1,
+    ...(groupTitle ? { groupTitle } : {}),
     url: tab.url || '',
     title: tab.title || '',
     active: tab.active === true,
@@ -824,8 +830,36 @@ function tabPayload(tab) {
   };
 }
 
+/**
+ * 页面点击产生的 _blank / window.open 新标签：
+ * opener 属于本会话的「MOSS - <名称>」分组时，直接归入同一分组；
+ * 若弹到新窗口，先移回 opener 窗口再归组，保证会话只有一个固定分组。
+ */
+async function adoptIntoOpenerGroup(tab) {
+  if (!tab || typeof tab.openerTabId !== 'number') return;
+  try {
+    const opener = await chrome.tabs.get(tab.openerTabId);
+    if (!opener || typeof opener.groupId !== 'number' || opener.groupId < 0) return;
+    const group = await chrome.tabGroups.get(opener.groupId);
+    if (!isMossSessionGroupTitle(group.title)) return;
+    let current = tab;
+    if (tab.windowId !== opener.windowId) {
+      current = await chrome.tabs.move(tab.id, { windowId: opener.windowId, index: -1 });
+    }
+    if (current.groupId !== opener.groupId) {
+      await chrome.tabs.group({ groupId: opener.groupId, tabIds: [tab.id] });
+    }
+  } catch {
+    // 标签/窗口可能已被关闭，或分组已被移除
+  }
+}
+
 chrome.tabs.onCreated.addListener((tab) => {
-  forwardEvent('tab.created', { tab: tabPayload(tab) });
+  void (async () => {
+    await adoptIntoOpenerGroup(tab);
+    const fresh = await chrome.tabs.get(tab.id).catch(() => tab);
+    forwardEvent('tab.created', { tab: await tabPayload(fresh) });
+  })();
 });
 
 // 手动切换标签不会触发 tabs.onUpdated：单独同步 active 状态，避免 MOSS 用过期焦点做判断
@@ -833,7 +867,8 @@ chrome.tabs.onActivated.addListener((info) => {
   if (!info || typeof info.tabId !== 'number') return;
   chrome.tabs
     .get(info.tabId)
-    .then((tab) => forwardEvent('tab.updated', { tab: tabPayload(tab) }))
+    .then((tab) => tabPayload(tab))
+    .then((payload) => forwardEvent('tab.updated', { tab: payload }))
     .catch(() => undefined);
 });
 
@@ -844,9 +879,30 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status !== 'complete' && !changeInfo.url && !changeInfo.title) return;
-  forwardEvent('tab.updated', { tab: tabPayload(tab) });
+  if (
+    changeInfo.status !== 'complete' &&
+    !changeInfo.url &&
+    !changeInfo.title &&
+    changeInfo.groupId === undefined
+  ) {
+    return;
+  }
+  void tabPayload(tab)
+    .then((payload) => forwardEvent('tab.updated', { tab: payload }))
+    .catch(() => undefined);
 });
+
+// 跨窗口移动不会触发 onUpdated：单独同步窗口/分组变化
+function forwardTabUpdate(tabId) {
+  chrome.tabs
+    .get(tabId)
+    .then((tab) => tabPayload(tab))
+    .then((payload) => forwardEvent('tab.updated', { tab: payload }))
+    .catch(() => undefined);
+}
+
+chrome.tabs.onAttached.addListener((tabId) => forwardTabUpdate(tabId));
+chrome.tabs.onDetached.addListener((tabId) => forwardTabUpdate(tabId));
 
 // ============================================================================
 // 消息：offscreen / popup

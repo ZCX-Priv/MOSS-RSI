@@ -919,7 +919,30 @@ export const en = {
     consoleEmpty: '(no messages)',
     consoleCleared: 'Console buffer cleared',
     unknownAction: 'Unknown action: {{action}}',
-    sessionTabMissing: 'This session has no usable AI tab; run action=open first',
+    sessionTabMissing:
+      'This session has no usable AI tab. The first action=open must provide an 8-10 character group_name; later opens reuse the fixed group automatically',
+    groupNameRequired:
+      'The first open in this session must provide group_name (8-10 characters; the "MOSS - " prefix is added automatically)',
+    groupNameInvalid:
+      'group_name must be 8-10 characters (without the "MOSS - " prefix); received {{count}}',
+    groupNameMismatch:
+      'This session is fixed to "{{title}}" (group_id: {{id}}); received group_name "{{received}}"',
+    groupIdMismatch:
+      'group_id "{{received}}" does not match this session\'s fixed group "{{title}}" ({{id}})',
+    groupIdWithoutName:
+      'This session has no group yet; the first open cannot use group_id. Provide an 8-10 character group_name',
+    groupNameTaken:
+      'The group name "{{name}}" is already used by another session or an existing browser group; choose another name',
+    tabDetached:
+      'Tab {{tab}} is no longer in this session\'s fixed group "{{title}}"; the operation was rejected',
+    tabNotOwned: 'Tab {{tab}} does not belong to this session; the operation was rejected',
+    sessionGroupTitle: 'This session\'s fixed group: {{title}} (group_id: {{id}})',
+    groupFixedHint:
+      'This session\'s fixed group: {{title}} (group_id: {{id}}). Later opens may omit group_name/group_id; if passed, they must match',
+    autoReopened:
+      'The previous tab left this session\'s fixed group; a blank tab was created in "{{title}}". Use navigate or open to load a page',
+    reopenFailed:
+      'Could not create a tab in this session\'s fixed group (the browser returned no group); check that the extension is connected and allowed to manage tab groups',
   },
   cli: {
     unknownCommand: 'Unknown command: {{command}}',

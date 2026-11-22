@@ -2249,8 +2249,10 @@ export interface BrowserTabInfo {
   groupId: number | null;
   /** 所属会话（会话独立标签组） */
   sessionId?: string;
-  /** 会话标签组名（MOSS、MOSS-0…） */
+  /** 会话固定标签组名（MOSS - <名称>） */
   groupTitle?: string;
+  /** MOSS 稳定分组 id（跨重启不变） */
+  groupIdText?: string;
   url: string;
   title: string;
   active: boolean;
@@ -2281,6 +2283,7 @@ export interface BrowserStatus {
   tabs: BrowserTabInfo[];
   currentTab: string | null;
   config: {
+    /** legacy：旧版分组基础名，仅用于识别历史分组 */
     tabGroupTitle: string;
     tabGroupColor: string;
     maxSnapshotNodes: number;

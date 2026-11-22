@@ -463,7 +463,7 @@ export const en = {
     },
     browser: {
       title: 'Browser',
-      subtitle: 'Manage the browser extension bridge, built-in Chrome, and AI tab groups',
+      subtitle: 'Manage the browser extension bridge, built-in Chrome, and per-session fixed tab groups',
       refresh: 'Refresh',
       loading: 'Reading browser status…',
       copied: 'Extension directory copied',
@@ -485,7 +485,7 @@ export const en = {
       kindBuiltin: 'Built-in',
       kindExternal: 'Extension',
       extensionTitle: 'Browser extension',
-      extensionDesc: 'The extension relays CDP commands and creates the "MOSS" tab group.',
+      extensionDesc: 'The extension relays CDP commands and creates a per-session fixed "MOSS - <name>" tab group (new tabs are grouped automatically and sessions stay isolated).',
       extensionPath: 'Extension directory',
       extensionVersion: 'Version v{{version}}',
       extensionNotSeeded: 'Not seeded yet (refresh or restart MOSS)',

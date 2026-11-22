@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { PendingConfirm } from '../../types/api';
 import { cn } from '@/lib/utils';
+import { formatToolDisplayName } from '@/lib/tool-name';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -100,7 +101,7 @@ export function ConfirmPromptCard({ confirms, className }: ConfirmPromptCardProp
         <ShieldAlert className="size-3.5 shrink-0 text-warning" />
         <span className="shrink-0 text-xs font-medium text-foreground">
           {t('task.confirmTitle')}
-          {current.toolName ? ` · ${current.toolName}` : ''}
+          {current.toolName ? ` · ${formatToolDisplayName(current.toolName)}` : ''}
         </span>
         {/* 权限来源：区分主会话与同时发起的多个子代理 */}
         {current.source?.kind === 'subagent' ? (
