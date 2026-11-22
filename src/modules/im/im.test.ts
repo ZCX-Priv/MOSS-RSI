@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger, ServiceRegistry } from '../../core/types';
 import { ServiceNames } from '../../core/types';
-import type { AgentEngine, AgentEvent } from '../contracts';
+import type { AgentEvent } from '../contracts';
 import type { ServerInstance } from '../server/types';
 import { getSessionTodoPathFromDir, writeSessionTodoStore } from '../tools/todo/shared/store';
 import type { AskOutcome, AskQuestion } from '../tools/types';

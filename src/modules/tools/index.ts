@@ -25,7 +25,6 @@ class ToolsModule implements Module {
 
   private registry: ToolRegistryImpl | null = null;
   private skillRegistry: SkillRegistry | null = null;
-  private ctx: ModuleContext | null = null;
   /** 已加载的内置工具（含 disabled 的，供 config 热重载启用时直接注册） */
   private loadedBuiltinTools: Tool[] = [];
   private builtinWatcher?: FSWatcher;
@@ -34,7 +33,7 @@ class ToolsModule implements Module {
   private toolSignatures = new Map<string, Map<string, string>>();
 
   async initialize(ctx: ModuleContext): Promise<void> {
-    this.ctx = ctx;
+
     this.registry = new ToolRegistryImpl(ctx.logger, ctx.config);
     // 技能/命令注册表立即返回：技能播种与文件扫描在 warmup 后台执行
     const skillRegistry = createSkillRegistry(ctx.env, ctx.logger, ctx.eventBus, ctx.config);

@@ -125,7 +125,7 @@ class RemoteModule implements Module {
    * 关闭时同时停公网隧道（绑回 loopback 后隧道流量会绕过门卫，必须停）。
    */
   private handleSetEnabled(enabled: boolean) {
-    return async (req: HttpRequest): Promise<HttpResponse> => {
+    return async (_req: HttpRequest): Promise<HttpResponse> => {
       const cfg = this.ctx.config.getAppConfig();
       if (cfg.remote.enabled === enabled) {
         return { status: 200, body: { rebound: false, enabled } };

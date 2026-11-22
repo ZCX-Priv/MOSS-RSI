@@ -236,11 +236,6 @@ export function createListTasksHandler(services: ServiceRegistry): RouteHandler 
       // 首屏侧边栏呈现空列表且不重试（需手动刷新才恢复）。
       return { status: 503, body: { error: ErrorCode.AGENT_ENGINE_UNAVAILABLE } };
     }
-    // 运行态随列表一并返回（权威来源为 server 实例的 activeRuns）：
-    // 刷新后首屏即可渲染「运行中」转圈，彻底修复「任务在后台跑却显示已完成」。
-    const server = services.tryResolve<{ isSessionRunning?: (sid: string) => boolean }>(
-      ServiceNames.SERVER_INSTANCE,
-    );
     // 按分组查询：?groupId=<id>&limit=N&offset=M —— 侧边栏按分组按需加载（组内排序，可分页）。
     // 只返回该组任务（order asc → createdAt desc），total 为该组任务总数；
     // 不再有「跨分组全局排序的扁平分页」，故不会把某些分组（尤其各组 order=0 的任务）挤出分页外。

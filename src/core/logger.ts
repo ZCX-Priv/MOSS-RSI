@@ -48,13 +48,18 @@ const RESET = '\x1b[0m';
 interface LogEntry {
   ts: string;
   level: LogLevel;
+  /** 输出进程 PID：多实例共享同一个日志文件时用于区分来源 */
+  pid: number;
   scope: string;
   message: string;
   context?: Record<string, unknown>;
 }
 
-/** 日志行解析：`<ts> <LEVEL padEnd5> [<scope>] <message> [context-json]` */
-const LOG_LINE_RE = /^(\S+)\s+(DEBUG|INFO|WARN|ERROR|FATAL)\s*\[([^\]]*)\]\s?(.*)$/;
+/**
+ * 日志行解析：`<ts> <LEVEL padEnd5> [pid:<pid>] [<scope>] <message> [context-json]`。
+ * pid 段是后加的，做可选匹配以兼容历史日志（多实例排查必须能区分进程）。
+ */
+const LOG_LINE_RE = /^(\S+)\s+(DEBUG|INFO|WARN|ERROR|FATAL)\s*(?:\[pid:\d+\])?\s*\[([^\]]*)\]\s?(.*)$/;
 /** 合法日志文件名：moss-YYYY-MM-DD.log 或 moss-YYYY-MM-DD-N.log */
 const LOG_FILE_RE = /^moss-\d{4}-\d{2}-\d{2}(?:-\d+)?\.log$/;
 
@@ -482,6 +487,7 @@ class LoggerImpl implements Logger {
     const entry: LogEntry = {
       ts: localTimestamp(),
       level,
+      pid: process.pid,
       scope: this.scope,
       message,
       context,
@@ -493,15 +499,16 @@ class LoggerImpl implements Logger {
   private writeConsole(entry: LogEntry): void {
     const color = this.colorize ? LEVEL_COLORS[entry.level] : '';
     const reset = this.colorize ? RESET : '';
+    const pidStr = `[pid:${entry.pid}]`;
     const scopeStr = entry.scope ? `[${entry.scope}]` : '';
     const ctxStr = entry.context ? ' ' + JSON.stringify(entry.context) : '';
-    const line = `${color}${entry.ts}${reset} ${color}${entry.level.toUpperCase().padEnd(5)}${reset} ${scopeStr} ${entry.message}${ctxStr}`;
+    const line = `${color}${entry.ts}${reset} ${color}${entry.level.toUpperCase().padEnd(5)}${reset} ${pidStr} ${scopeStr} ${entry.message}${ctxStr}`;
     this.consoleSink.write(line, entry.level);
   }
 
   private writeToFile(entry: LogEntry): void {
     const line =
-      `${entry.ts} ${entry.level.toUpperCase().padEnd(5)} [${entry.scope}] ${entry.message}` +
+      `${entry.ts} ${entry.level.toUpperCase().padEnd(5)} [pid:${entry.pid}] [${entry.scope}] ${entry.message}` +
       (entry.context ? ' ' + JSON.stringify(entry.context) : '') +
       '\n';
     this.fileWriter.append(line);

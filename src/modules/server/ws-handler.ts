@@ -1344,7 +1344,7 @@ export class WsHandler {
     }
   }
 
-  private handleTerminalInput(state: ConnectionState, msg: WSMessage): void {
+  private handleTerminalInput(_state: ConnectionState, msg: WSMessage): void {
     const payload = (msg.payload ?? {}) as { terminalId?: string; data?: string };
     if (!payload.terminalId || typeof payload.data !== 'string') return;
     this.terminalService()?.write(payload.terminalId, payload.data);

@@ -193,7 +193,6 @@ export class McpClient {
   private readonly name: string;
   private readonly config: ServerConfig;
   private readonly logger: Logger;
-  private readonly eventBus: EventBus;
   /** 实际使用的传输（http 可能回退为 sse） */
   private effectiveTransport: 'stdio' | 'http' | 'sse' | null = null;
   /** 模块级钩子（sampling 全局；由 manager 创建时注入） */
@@ -207,11 +206,10 @@ export class McpClient {
   /** 外部取消标记：断开/删除服务器时立即中止进行中的连接 */
   private cancelled = false;
 
-  constructor(name: string, config: ServerConfig, logger: Logger, eventBus: EventBus, hooks?: McpClientHooks) {
+  constructor(name: string, config: ServerConfig, logger: Logger, _eventBus: EventBus, hooks?: McpClientHooks) {
     this.name = name;
     this.config = config;
     this.logger = logger;
-    this.eventBus = eventBus;
     this.hooks = hooks;
   }
 

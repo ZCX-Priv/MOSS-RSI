@@ -101,10 +101,6 @@ function termuxBinPath(env: NodeJS.ProcessEnv): string {
   return join(env.PREFIX ?? '/data/data/com.termux/files/usr', 'bin', 'cloudflared');
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 /** 合并多个分段文件为一个目标文件（顺序拼接后统一结束）。 */
 async function mergeParts(partFiles: string[], dest: string): Promise<void> {
   const out = createWriteStream(dest);

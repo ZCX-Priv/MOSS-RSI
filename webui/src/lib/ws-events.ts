@@ -1138,6 +1138,13 @@ export function applyWsMessage(msg: WSMessage, opts?: { silent?: boolean }): voi
       );
       break;
     }
+    case 'compaction-failed': {
+      if (!sessionId) break;
+      const payload = (msg.payload ?? {}) as { reason?: string };
+      const reason = payload.reason ? `: ${payload.reason}` : '';
+      toast.error(`${i18n.t('context.compactFailed')}${reason}`);
+      break;
+    }
     case 'compaction-completed': {
       if (!sessionId) break;
       const payload = (msg.payload ?? {}) as { compaction?: CompactionRecord };

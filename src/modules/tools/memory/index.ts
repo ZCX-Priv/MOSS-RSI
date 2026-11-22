@@ -11,7 +11,7 @@
 import type { ToolContext, ToolResult } from '../types';
 import { ServiceNames } from '../../../core/types';
 import { MEMORY_HALLS } from '../../../modules/memory/types';
-import type { MemoryHall, MemoryUpsertInput } from '../../../modules/memory/types';
+import type { MemoryUpsertInput } from '../../../modules/memory/types';
 import type { MemoryEngineServiceImpl } from '../../../modules/memory/service';
 
 type MemoryHallType = (typeof MEMORY_HALLS)[number];

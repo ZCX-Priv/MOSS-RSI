@@ -97,9 +97,15 @@ export function alignWindowBoundaries(kept: ContextMessage[], active: readonly C
       }
     }
   }
-  // 3. 兜底最后一条（避免空对话触发 provider 400）
+  // 3. 兜底最后一条（避免空对话触发 provider 400）。
+  // 不能直接取末尾：若最后一条是 tool，会形成孤立 tool，provider 仍然 400。
   if (aligned.length === 0 && active.length > 0) {
-    aligned.push(active[active.length - 1]);
+    for (let i = active.length - 1; i >= 0; i--) {
+      if (active[i].role !== 'tool') {
+        aligned.push(active[i]);
+        break;
+      }
+    }
   }
   return aligned;
 }

@@ -12,8 +12,6 @@ import type { VoiceModelDef } from './types';
 export const SHERPA_MODELS_BASE =
   'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models';
 
-const MB = 1024 * 1024;
-
 /** 内置模型清单：流式 / 离线多渠道，覆盖中文、中英混说与多语言 */
 export const VOICE_MODEL_CATALOG: VoiceModelDef[] = [
   {

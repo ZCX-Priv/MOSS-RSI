@@ -28,7 +28,6 @@ import {
   estimateMessageBytes,
 } from '../budgeter/estimator';
 import { sanitizeMessages, alignWindowBoundaries } from '../healer/pair-sanitize';
-import { renderRefTag, stripOwnRefTag } from '../refs';
 import { ENV_CONTEXT_MSG_NAME } from './env-context';
 
 /** 摘要消息 name 标识（与 compressor 一致） */
@@ -111,7 +110,6 @@ function messageBytes(
   includeThinking = false,
 ): number {
   let total = estimateMessageBytes(m, includeThinking);
-  if (m.metadata?.imageEvicted === true) return total;
   for (const p of messageImagePaths(m)) total += imagePathBytes(p, optimized);
   return total;
 }
@@ -183,11 +181,6 @@ export interface BuildViewOptions {
    * 用于 governor 的预览视图——预览只需要 breakdown/bytes，不应付出两次图片编码成本。
    */
   skipImageEncoding?: boolean;
-  /**
-   * 是否给消息正文加 <acp tokens type>ref</acp> 标签（模型可见）。
-   * 关闭时模型无法按 ref 指定压缩区间；工具调用参数永不加标签。
-   */
-  renderRefs?: boolean;
 }
 
 export interface BuiltView {
@@ -197,6 +190,8 @@ export interface BuiltView {
   tailDropped: number;
   /** 因图片淘汰而降级为占位符的图片张数 */
   evictedImages: number;
+  /** 发送前配对修复统计（>0 说明视图里出现过孤立 tool / 缺结果的 tool_calls） */
+  sanitizeDropped: { orphanTools: number; strippedToolCalls: number };
   /** 本次发送视图的估算字节数（文本 UTF-8 + 图片 base64；含 system 前缀） */
   bytes: number;
   /**
@@ -304,7 +299,6 @@ export function buildRequestView(
   if (opts.budgetTokens !== undefined || opts.budgetBytes !== undefined || imageTotalBudget !== Number.POSITIVE_INFINITY) {
     const anchors = prepared.filter(isAnchorMessage);
     const anchorTokens = anchors.reduce((s, m) => s + estimateMessageTokens(m, includeThinking), 0);
-    const anchorBytes = anchors.reduce((s, m) => s + messageBytes(m, optimized, includeThinking), 0);
     const rest = prepared.filter(m => !isAnchorMessage(m));
 
     // (A) token 尾部保留：从后往前累积，超 token 预算即停（至少保留 1 条普通消息）
@@ -365,11 +359,9 @@ export function buildRequestView(
             ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
             ...(m.name ? { name: m.name } : {}),
             ...(m.isError !== undefined ? { isError: m.isError } : {}),
-            // 用元数据标记“图片已淘汰”，这样后续 sanitize/加 ref 标签产生副本时不会丢失状态
-            metadata: { ...(m.metadata ?? {}), imageEvicted: true },
+            ...(m.metadata ? { metadata: m.metadata } : {}),
             ...(m.timestamp ? { timestamp: m.timestamp } : {}),
             ...(m.thinking ? { thinking: m.thinking } : {}),
-            ...(m.ref ? { ref: m.ref } : {}),
           };
         });
       }
@@ -402,33 +394,22 @@ export function buildRequestView(
 
   // ===== 4. 发送前自愈：tool_use/tool_result 配对完整性 =====
   const sanitized = sanitizeMessages(windowed);
-  // 4.5 消息引用标签（模型可见）：只加在正文前面，工具调用参数保持字节不变。
-  // 标签是渲染态，不落盘；旧标签先剥离，保证重复渲染幂等。
-  const tagged = sanitized.messages.map(m => {
-    if (!opts.renderRefs || !m.ref) return m;
-    const next: ContextMessage = {
-      ...m,
-      content: `${renderRefTag(m)}${stripOwnRefTag(m.content, m.ref)}`,
-    };
-    originalOf.set(next, originalOf.get(m) ?? m);
-    return next;
-  });
   // ephemeral 注入位置：最后一条「真实用户消息」之前。
   // 不能追加到消息流末尾——那样记忆/提醒会成为模型看到的最后一条 user 指令，
   // 模型会只回复「收到/明白」而不执行任务（长会话中的高频复现问题）。
   // 工具循环中最后一条消息是 tool 结果，插入到用户请求之前同样不会破坏 tool 配对。
-  let insertAt = tagged.length;
-  for (let i = tagged.length - 1; i >= 0; i -= 1) {
-    const m = tagged[i];
+  let insertAt = sanitized.messages.length;
+  for (let i = sanitized.messages.length - 1; i >= 0; i -= 1) {
+    const m = sanitized.messages[i];
     if (m.role === 'user' && !m.name) {
       insertAt = i;
       break;
     }
   }
   const full = [
-    ...tagged.slice(0, insertAt),
+    ...sanitized.messages.slice(0, insertAt),
     ...ephemeral,
-    ...tagged.slice(insertAt),
+    ...sanitized.messages.slice(insertAt),
   ];
 
   // ===== 5. 转 UnifiedMessage =====
@@ -436,8 +417,7 @@ export function buildRequestView(
   // 优化结果优先（governor 预计算）；仅「尚未被淘汰」的消息真正内联图片。
   const imageMessagesToMark: ContextMessage[] = [];
   const conversation: UnifiedMessage[] = full.map(m => {
-    const evicted = m.metadata?.imageEvicted === true;
-    const paths = evicted ? [] : messageImagePaths(m);
+    const paths = evictedImagePaths.has(m) ? [] : messageImagePaths(m);
     // 预览视图只估算：不读盘、不 base64；图片字节已由 messageBytes/stat 计入预算。
     const { images, skipped } = opts.skipImageEncoding
       ? { images: [] as UnifiedImage[], skipped: [] as string[] }
@@ -502,6 +482,10 @@ export function buildRequestView(
     },
     tailDropped,
     evictedImages,
+    sanitizeDropped: {
+      orphanTools: sanitized.droppedOrphanTools,
+      strippedToolCalls: sanitized.strippedToolCalls,
+    },
     bytes: bodyBytes,
     imageMessagesToMark,
   };

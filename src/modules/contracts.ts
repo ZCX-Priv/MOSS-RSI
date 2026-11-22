@@ -127,19 +127,13 @@ export interface ToolRegistry {
 // ============================================================================
 
 import type {
-  ArchiveSearchResult,
   CompactPreview,
   CompactionRecord,
   ContextSessionLike,
-  ContextStatusReport,
   ContextStats,
-  DecompressResult,
   HealResult,
   ManualCompactResult,
-  ModelCompressRange,
-  ModelCompressResult,
   PreparedRequest,
-  RetrieveResult,
   SessionStoreBridge,
 } from './context/types';
 
@@ -185,22 +179,6 @@ export interface ContextEngine {
   getStats(sessionId: string): ContextStats | null;
   /** 压缩历史 */
   getCompactions(sessionId: string): CompactionRecord[];
-  /** 上下文自省（context 工具 action=status） */
-  getStatusReport?(sessionId: string): ContextStatusReport | null;
-  /** 模型主导压缩：按 ref 区间折叠并写入模型自写摘要（全有或全无） */
-  compressRanges?(sessionId: string, ranges: ModelCompressRange[], focus?: string): Promise<ModelCompressResult>;
-  /** 解压归档原文（context 工具 action=decompress；按 blockId 或消息 ref） */
-  decompressCompaction?(sessionId: string, blockIdOrRef: string, limit?: number): DecompressResult;
-  /** 取回被外置的大工具结果（context 工具 action=retrieve） */
-  retrieveExternalized?(sessionId: string, ref: string): RetrieveResult;
-  /** 归档检索（context 工具 action=search 的归档分支） */
-  searchContextArchive?(
-    sessionId: string,
-    query: string,
-    scope: 'current' | 'all',
-    topK?: number,
-    includeTool?: boolean,
-  ): ArchiveSearchResult[];
   /**
    * 确认「本轮请求已成功送达」→ 把本轮内联发送过图片的消息标记为已发送（落盘）。
    * 之后这些图片在发送视图中降级为占位符（避免历史 base64 每轮重发撑爆请求体）。

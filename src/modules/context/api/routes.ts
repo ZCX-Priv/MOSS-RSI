@@ -74,24 +74,6 @@ export function createManualCompactHandler(services: ServicesLike): RouteHandler
   };
 }
 
-/** POST /api/context/gc：清理过期折叠归档 + 外置工具结果（body: { olderThanDays? }） */
-export function createContextGcHandler(services: ServicesLike): RouteHandler {
-  return async (req: HttpRequest): Promise<HttpResponse> => {
-    const engine = resolveEngine(services);
-    if (!engine) return { status: 503, body: { error: 'context engine unavailable' } };
-    const body = (req.body ?? {}) as { olderThanDays?: unknown };
-    const days =
-      typeof body.olderThanDays === 'number' && Number.isFinite(body.olderThanDays) && body.olderThanDays > 0
-        ? Math.floor(body.olderThanDays)
-        : 365;
-    try {
-      return { status: 200, body: { ok: true, olderThanDays: days, ...engine.gcContext(days) } };
-    } catch (err) {
-      return { status: 500, body: { ok: false, error: err instanceof Error ? err.message : String(err) } };
-    }
-  };
-}
-
 export function createSummaryModelsHandler(services: ServicesLike): RouteHandler {
   return async (_req: HttpRequest): Promise<HttpResponse> => {
     const engine = resolveEngine(services);

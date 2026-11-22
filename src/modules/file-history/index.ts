@@ -18,11 +18,9 @@ export { archiveDirectory, extractArchive } from './archive';
 export type { ArchiveResult } from './archive';
 
 class FileHistoryModule implements Module {
-  private ctx!: ModuleContext;
   private service!: FileHistoryServiceImpl | null;
 
   async initialize(ctx: ModuleContext): Promise<void> {
-    this.ctx = ctx;
     const config = this.readConfig(ctx);
     // 先注册服务：写工具首次调用即可用（幂等迁移在 warmup 中后台完成）
     this.service = new FileHistoryServiceImpl(ctx.env, ctx.logger, config);

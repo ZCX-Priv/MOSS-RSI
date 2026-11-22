@@ -11,40 +11,28 @@ import type {
 } from '../../../core/types';
 import { ServiceNames } from '../../../core/types';
 import { flattenModels } from '../../../core/provider-utils';
-import type { LLMRouter, ToolRegistry, MCPManager } from '../../contracts';
+import type { LLMRouter } from '../../contracts';
 import type {
-  ArchiveSearchResult,
   CompactPreview,
   CompactionRecord,
   ContextBreakdown,
   ContextEngineConfig,
   ContextMessage,
   ContextSessionLike,
-  ContextStatusBlock,
-  ContextStatusRange,
-  ContextStatusReport,
   ContextStats,
-  DecompressResult,
   HealResult,
   ManualCompactResult,
-  ModelCompressRange,
-  ModelCompressResult,
   PreparedRequest,
-  RetrieveResult,
   SessionStoreBridge,
   SystemSection,
 } from '../types';
 // 注：ContextStatsEventPayload 已删除——部分形状类型合法化了不完整 payload（白屏缺陷共犯）
 import {
-  CACHE_LEDGER_BUFFER_SIZE,
   DEFAULT_CONTEXT_CONFIG,
   TELEMETRY_BUFFER_SIZE as BUFFER_SIZE,
 } from '../types';
 import { TokenCalibrator } from '../budgeter/calibration';
-import { decomposeCacheMiss } from '../budgeter/cache-ledger';
 import {
-  estimateMessageTokens,
-  estimateMessagesTokens,
   estimateTextTokens,
   messagesChars,
   parseContextWindow,
@@ -62,20 +50,8 @@ import {
   previewCompact as governorPreview,
   type GovernorDeps,
 } from '../governor';
-import { applyFold, resolveSummaryModel } from '../compressor';
-import { isProtectedMessage, planCompaction } from '../compressor/planner';
-import {
-  findArchivedByRef,
-  gcContextStore,
-  getExternalized,
-  listArchiveSessionIds,
-  listCompactions,
-  readCompaction,
-  searchArchive,
-} from '../store/context-store';
-import { readExternalizedFile } from '../compiler/tool-result-store';
+import { resolveSummaryModel } from '../compressor';
 import { ensureContextPrompts } from '../prompt-loader';
-import { ensureSessionRefs, indexOfRef } from '../refs';
 import { isReasoningContentProvider } from '../../llm/providers/openai-chat';
 
 /** 本地自然日 key（YYYY-MM-DD；概览按日遥测的桶键） */
@@ -107,10 +83,6 @@ interface SessionTelemetry {
   lastSentChars: number;
   /** 上次发送视图对应的模型（校准必须按模型分键，否则切换模型后比率污染） */
   lastSentModel: string;
-  /** 上一次请求的输入 token（缓存 miss 归因的“新内容”上界） */
-  lastPromptTokens: number;
-  /** 上一次 prepareRequest 是否触发了压缩 */
-  lastCompactionTriggered: boolean;
 }
 
 export interface ContextEngineServiceDeps {
@@ -150,8 +122,6 @@ export class ContextEngineServiceImpl {
   private readonly compactionFailures = new Map<string, { at: number; reason: string }>();
   /** 压缩重入锁：sessionId 正在压缩（防 governor 自动压缩与模型自主压缩并发） */
   private readonly compactingSessions = new Set<string>();
-  /** 空闲后台预压缩定时器（run 结束 → 延迟检查；用户发新消息时取消） */
-  private readonly backgroundCompactTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sessionStore: SessionStoreBridge | null = null;
   /** 图片优化器（发送前压缩；sharp 不可用时自动降级为不压缩） */
   private readonly imageOptimizer: ImageOptimizer;
@@ -221,18 +191,9 @@ export class ContextEngineServiceImpl {
       compaction: { ...DEFAULT_CONTEXT_CONFIG.compaction, ...ctx.compaction },
       healer: { ...DEFAULT_CONTEXT_CONFIG.healer, ...ctx.healer },
       telemetry: { ...DEFAULT_CONTEXT_CONFIG.telemetry, ...ctx.telemetry },
-      refs: { ...DEFAULT_CONTEXT_CONFIG.refs, ...ctx.refs },
-      toolResultStorage: {
-        ...DEFAULT_CONTEXT_CONFIG.toolResultStorage,
-        ...ctx.toolResultStorage,
-      },
       toolResultSummary: {
         ...DEFAULT_CONTEXT_CONFIG.toolResultSummary,
         ...ctx.toolResultSummary,
-      },
-      backgroundCompact: {
-        ...DEFAULT_CONTEXT_CONFIG.backgroundCompact,
-        ...ctx.backgroundCompact,
       },
       rules: { ...DEFAULT_CONTEXT_CONFIG.rules, ...ctx.rules },
       hooks: { ...DEFAULT_CONTEXT_CONFIG.hooks, ...ctx.hooks },
@@ -264,14 +225,6 @@ export class ContextEngineServiceImpl {
     await ensureEnvProbed(this.env);
     const windowTokens = opts.windowTokens ?? this.resolveWindowTokens(opts.model);
     this.noteCwd(opts.cwd);
-    // 稳定消息引用：新消息在进入任何视图前分配 mNNNNN（编号永不复用）
-    if (ensureSessionRefs(session)) {
-      try {
-        this.sessionStore?.persist(session);
-      } catch {
-        // 引用落盘失败不阻断请求；下一轮会重试
-      }
-    }
     const includeThinking = this.resolveIncludeThinking(opts.model);
     const deps = this.buildGovernorDeps(opts.model);
     const prepared = await governorPrepare(deps, {
@@ -322,7 +275,6 @@ export class ContextEngineServiceImpl {
     t.lastSystemSections = sections;
     t.lastSentChars = sentChars;
     t.lastSentModel = opts.model;
-    t.lastCompactionTriggered = prepared.compactionTriggered;
 
     return prepared;
   }
@@ -389,58 +341,10 @@ export class ContextEngineServiceImpl {
 
   markBusy(sessionId: string): void {
     this.busySessions.add(sessionId);
-    // 用户还在跑：取消任何待执行的空闲预压缩
-    this.cancelBackgroundCompact(sessionId);
   }
 
   markIdle(sessionId: string): void {
     this.busySessions.delete(sessionId);
-    this.scheduleBackgroundCompact(sessionId);
-  }
-
-  /** 模块销毁：清理所有待执行的空闲预压缩定时器 */
-  dispose(): void {
-    for (const timer of this.backgroundCompactTimers.values()) clearTimeout(timer);
-    this.backgroundCompactTimers.clear();
-  }
-
-  /** 取消待执行的空闲预压缩（用户发新消息 / 会话销毁） */
-  private cancelBackgroundCompact(sessionId: string): void {
-    const timer = this.backgroundCompactTimers.get(sessionId);
-    if (!timer) return;
-    clearTimeout(timer);
-    this.backgroundCompactTimers.delete(sessionId);
-  }
-
-  /** run 结束后延迟检查：占用 ≥ 阈值且会话仍空闲，则提前压缩（避免下一轮请求前阻塞） */
-  private scheduleBackgroundCompact(sessionId: string): void {
-    const cfg = this.getConfig().backgroundCompact;
-    if (!cfg.enabled) return;
-    if (this.backgroundCompactTimers.has(sessionId)) return;
-    const delay = Math.max(0, cfg.delayMs);
-    const timer = setTimeout(() => {
-      this.backgroundCompactTimers.delete(sessionId);
-      void this.runBackgroundCompact(sessionId);
-    }, delay);
-    this.backgroundCompactTimers.set(sessionId, timer);
-  }
-
-  private async runBackgroundCompact(sessionId: string): Promise<void> {
-    if (this.busySessions.has(sessionId) || this.compactingSessions.has(sessionId)) return;
-    const session = this.sessionStore?.get(sessionId);
-    if (!session) return;
-    const cfg = this.getConfig().backgroundCompact;
-    const stats = this.getStats(sessionId);
-    if (!stats || stats.windowTokens <= 0) return;
-    const ratio = (stats.lastUsage?.promptTokens ?? stats.breakdown.total) / stats.windowTokens;
-    if (ratio < cfg.ratio) return;
-    const outcome = await this.manualCompact(sessionId);
-    this.logger.debug('context: background compaction', {
-      sessionId,
-      ratio: Number(ratio.toFixed(3)),
-      ok: outcome.ok,
-      reason: outcome.reason,
-    });
   }
 
   /**
@@ -483,7 +387,6 @@ export class ContextEngineServiceImpl {
     // 用会话最近一次请求的模型解析窗口；无样本才回退全局默认模型。
     const model = session.contextTelemetry?.lastModel ?? this.resolveMainModel();
     const windowTokens = this.resolveWindowTokens(model);
-    ensureSessionRefs(session);
     const deps = this.buildGovernorDeps(model);
     this.compactingSessions.add(sessionId);
     try {
@@ -524,7 +427,6 @@ export class ContextEngineServiceImpl {
     }
     const model = session.contextTelemetry?.lastModel ?? this.resolveMainModel();
     const windowTokens = this.resolveWindowTokens(model);
-    ensureSessionRefs(session);
     const deps = this.buildGovernorDeps(model);
     this.compactingSessions.add(sessionId);
     try {
@@ -548,185 +450,6 @@ export class ContextEngineServiceImpl {
       return outcome.record
         ? { ok: true, compaction: outcome.record }
         : { ok: false, reason: outcome.reason ?? 'compaction not applicable' };
-    } finally {
-      this.compactingSessions.delete(sessionId);
-    }
-  }
-
-  /**
-   * 模型主导压缩：按 ref 区间折叠，摘要由模型自己写（不再额外调用摘要 LLM）。
-   * 全有或全无：任一区间校验失败则一条都不折叠，避免半截状态。
-   */
-  async compressRanges(
-    sessionId: string,
-    ranges: ModelCompressRange[],
-    _focus?: string,
-  ): Promise<ModelCompressResult> {
-    const session = this.sessionStore?.get(sessionId);
-    if (!session) return { ok: false, reason: 'session not found', blockIds: [], foldedRanges: 0 };
-    if (this.compactingSessions.has(sessionId)) {
-      return { ok: false, reason: 'compaction already in progress', blockIds: [], foldedRanges: 0 };
-    }
-    if (!Array.isArray(ranges) || ranges.length === 0) {
-      return { ok: false, reason: 'ranges required', blockIds: [], foldedRanges: 0 };
-    }
-    ensureSessionRefs(session);
-    const config = this.getConfig();
-    const messages = session.messages;
-    const protectedTools = config.compaction.protectedTools;
-    const latestUserIndex = (() => {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m.role === 'user' && !m.name && !m.deletedAt && !m.compacted) return i;
-      }
-      return -1;
-    })();
-
-    interface Resolved {
-      start: number;
-      end: number;
-      region: ContextMessage[];
-      summary: string;
-    }
-    const resolved: Resolved[] = [];
-    const errors: string[] = [];
-
-    for (const range of ranges) {
-      const label = `${range.startRef ?? '?'}–${range.endRef ?? '?'}`;
-      let start = indexOfRef(session, range.startRef ?? '');
-      let end = indexOfRef(session, range.endRef ?? '');
-      if (start < 0 || end < 0) {
-        errors.push(`${label}: ref 不存在（用 status 查看当前有效 ref）`);
-        continue;
-      }
-      if (start > end) [start, end] = [end, start];
-
-      // turn 完整性：区间不能以孤立 tool 结果开头，也不能把 assistant(tool_calls) 与结果拆开
-      if (messages[start].role === 'tool' && messages[start].toolCallId) {
-        for (let i = start - 1; i >= 0; i--) {
-          const candidate = messages[i];
-          if (candidate.role === 'assistant' && candidate.toolCalls?.some(tc => tc.id === messages[start].toolCallId)) {
-            start = i;
-            break;
-          }
-        }
-      }
-      if (messages[end].role === 'assistant' && messages[end].toolCalls?.length) {
-        const ids = new Set(messages[end].toolCalls!.map(tc => tc.id));
-        let j = end + 1;
-        while (j < messages.length && messages[j].role === 'tool' && ids.has(messages[j].toolCallId ?? '')) {
-          end = j;
-          j++;
-        }
-      }
-
-      const region = messages.slice(start, end + 1);
-      if (region.length === 0) {
-        errors.push(`${label}: 区间为空`);
-        continue;
-      }
-      if (region.some(m => m.deletedAt || m.compacted)) {
-        errors.push(`${label}: 区间包含已删除或已压缩消息`);
-        continue;
-      }
-      if (region.some(m => isProtectedMessage(m, protectedTools))) {
-        errors.push(`${label}: 区间包含受保护消息（env-context / 受保护工具）`);
-        continue;
-      }
-      if (latestUserIndex >= start && latestUserIndex <= end) {
-        errors.push(`${label}: 不能折叠用户最新的原始请求`);
-        continue;
-      }
-      const summary = (range.summary ?? '').trim();
-      if (summary.length < config.compaction.minSummaryLength) {
-        errors.push(`${label}: 摘要过短（${summary.length} < ${config.compaction.minSummaryLength} 字符）`);
-        continue;
-      }
-      if (summary.length > config.compaction.maxSummaryLength) {
-        errors.push(`${label}: 摘要过长（${summary.length} > ${config.compaction.maxSummaryLength} 字符）`);
-        continue;
-      }
-      const regionTokens = estimateMessagesTokens(region);
-      if (regionTokens < config.compaction.minCompressRange) {
-        errors.push(`${label}: 区间过小（${regionTokens} < ${config.compaction.minCompressRange} tokens）`);
-        continue;
-      }
-      const summaryTokens = estimateTextTokens(summary) + 8;
-      if (summaryTokens > regionTokens * config.compaction.maxShrinkRatio) {
-        errors.push(
-          `${label}: 摘要不够小（${summaryTokens} > ${regionTokens} × ${config.compaction.maxShrinkRatio}），请压缩摘要或合并更大区间`,
-        );
-        continue;
-      }
-      resolved.push({ start, end, region, summary });
-    }
-
-    // 区间重叠检查（展开后）
-    const ordered = [...resolved].sort((a, b) => a.start - b.start);
-    for (let i = 1; i < ordered.length; i++) {
-      if (ordered[i].start <= ordered[i - 1].end) {
-        errors.push(`区间重叠：${ordered[i - 1].start}-${ordered[i - 1].end} 与 ${ordered[i].start}-${ordered[i].end}`);
-      }
-    }
-    if (errors.length > 0) {
-      return { ok: false, reason: 'range validation failed', errors, blockIds: [], foldedRanges: 0 };
-    }
-
-    this.compactingSessions.add(sessionId);
-    try {
-      const activeBefore = session.messages.filter(m => !m.deletedAt && !m.compacted);
-      const beforeTokens = estimateMessagesTokens(activeBefore);
-      const blockIds: string[] = [];
-      for (const item of ordered) {
-        const record = applyFold({
-          env: this.env,
-          session,
-          region: item.region,
-          summary: item.summary,
-          summaryModel: 'model',
-          trigger: 'model',
-        });
-        blockIds.push(record.blockId ?? record.id);
-        this.compactionFailures.delete(sessionId);
-      }
-      ensureSessionRefs(session);
-      delete session.pressureState;
-      try {
-        this.sessionStore?.persist(session);
-      } catch (err) {
-        this.logger.warn('context: persist model compaction failed', {
-          sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      const windowTokens = this.resolveWindowTokens(
-        session.contextTelemetry?.lastModel ?? this.resolveMainModel(),
-      );
-      const afterActive = session.messages.filter(m => !m.deletedAt && !m.compacted);
-      this.writeCompactionGuard(sessionId, {
-        at: Date.now(),
-        tokens: estimateMessagesTokens(afterActive),
-        windowTokens,
-      });
-      this.emitWs(sessionId, {
-        type: 'compaction-completed',
-        sessionId,
-        payload: {
-          sessionId,
-          compaction: session.compactions?.[session.compactions.length - 1],
-        },
-      });
-      return {
-        ok: true,
-        blockIds,
-        foldedRanges: blockIds.length,
-        beforeTokens,
-        afterTokens: estimateMessagesTokens(afterActive),
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.noteCompactionOutcome(sessionId, { record: null, reason: msg });
-      return { ok: false, reason: msg, blockIds: [], foldedRanges: 0 };
     } finally {
       this.compactingSessions.delete(sessionId);
     }
@@ -802,9 +525,6 @@ export class ContextEngineServiceImpl {
       cacheHits: [...cacheHits],
       avgHitRate,
       systemSections: this.appendDynamicSections(t.lastSystemSections, session),
-      ...(session.contextTelemetry?.cacheLedger
-        ? { cacheLedger: session.contextTelemetry.cacheLedger.slice(-20) }
-        : {}),
     };
   }
 
@@ -812,199 +532,6 @@ export class ContextEngineServiceImpl {
   getCompactions(sessionId: string): CompactionRecord[] {
     const session = this.sessionStore?.get(sessionId);
     return session?.compactions ? [...session.compactions] : [];
-  }
-
-  /** 上下文制品 GC（归档 + 外置工具结果；只删过期制品，不动 session 主存储） */
-  gcContext(olderThanDays = 365): { compactions: number; messages: number; externalized: number; files: number } {
-    return gcContextStore(this.env, olderThanDays);
-  }
-
-  // ========================================================================
-  // 上下文自省 / 归档检索（context 工具 status / decompress / search）
-  // ========================================================================
-
-  /** 沿 derivedFrom 父链收集会话 id（含自身；深度上限 8，带环检测） */
-  private lineageSessionIds(sessionId: string): string[] {
-    const out: string[] = [];
-    const seen = new Set<string>();
-    let current: string | undefined = sessionId;
-    for (let depth = 0; depth < 8 && current && !seen.has(current); depth++) {
-      seen.add(current);
-      out.push(current);
-      current = this.sessionStore?.get(current)?.derivedFrom;
-    }
-    return out;
-  }
-
-  /** 上下文自省：占用、构成、可压缩区间、活跃块账本 */
-  getStatusReport(sessionId: string): ContextStatusReport | null {
-    const session = this.sessionStore?.get(sessionId);
-    if (!session) return null;
-    const stats = this.getStats(sessionId);
-    if (!stats) return null;
-    const config = this.getConfig();
-    const active = session.messages.filter(m => !m.deletedAt && !m.compacted);
-    const compactable: ContextStatusRange[] = [];
-
-    const plan = planCompaction(
-      active,
-      stats.windowTokens,
-      config.compaction.tailKeepRatio,
-      config.compaction.minFoldTokens,
-      config.compaction.minCompactMessages,
-      config.compaction.protectedTools,
-      config.compaction.preserveRecentTokens,
-    );
-    if (plan.ok) {
-      const region = active
-        .slice(plan.startIdx, plan.endIdx + 1)
-        .filter(m => !isProtectedMessage(m, config.compaction.protectedTools));
-      if (region.length > 0) {
-        compactable.push({
-          ...(region[0].ref ? { startRef: region[0].ref } : {}),
-          ...(region[region.length - 1].ref ? { endRef: region[region.length - 1].ref } : {}),
-          messages: region.length,
-          tokens: estimateMessagesTokens(region),
-        });
-      }
-    }
-
-    // 额外的“单条大招”提示：模型可按 ref 精确折叠某个超大工具结果/消息。
-    const singles = active
-      .filter(m => !isProtectedMessage(m) && m.role !== 'user')
-      .map(m => ({ m, tokens: estimateMessageTokens(m) }))
-      .filter(x => x.tokens >= 2000 && x.m.ref)
-      .sort((a, b) => b.tokens - a.tokens)
-      .slice(0, 5);
-    for (const { m, tokens } of singles) {
-      compactable.push({ startRef: m.ref, endRef: m.ref, messages: 1, tokens });
-    }
-
-    const blocks: ContextStatusBlock[] = listCompactions(this.env, sessionId, 10).map(b => ({
-      id: b.id,
-      tier: b.tier,
-      refs: b.refs,
-      tokens: Math.max(0, Math.round(b.summary.length * 0.4)),
-      createdAt: b.createdAt,
-      trigger: b.trigger,
-    }));
-
-    const activeSummary = session.messages.find(
-      m => m.name === 'compaction-summary' && !m.compacted && !m.deletedAt,
-    );
-    return {
-      sessionId,
-      usedTokens: stats.lastUsage?.promptTokens ?? stats.breakdown.total,
-      windowTokens: stats.windowTokens,
-      usedPercent: stats.usedPercent,
-      breakdown: stats.breakdown,
-      compactable,
-      blocks,
-      activeSummaryTokens: activeSummary ? estimateTextTokens(activeSummary.content) : 0,
-      ...(session.pressureState
-        ? { pressure: { lastTokens: session.pressureState.lastTokens, lastBand: session.pressureState.lastBand } }
-        : {}),
-    };
-  }
-
-  /**
-   * 解压归档原文：先按 blockId 查当前会话，再沿父链查；blockId 若不是块 id，
-   * 则按消息 ref（mNNNNN）查找。返回的是历史原文，不是当前指令。
-   */
-  decompressCompaction(sessionId: string, blockIdOrRef: string, limit = 200): DecompressResult {
-    const lineage = this.lineageSessionIds(sessionId);
-    for (const sid of lineage) {
-      const found = readCompaction(this.env, sid, blockIdOrRef, limit);
-      if (found.meta) {
-        return {
-          ok: true,
-          blockId: found.meta.id,
-          tier: found.meta.tier,
-          total: found.meta.count,
-          messages: found.messages.map(m => ({
-            ...(m.ref ? { ref: m.ref } : {}),
-            index: m.index,
-            role: m.role,
-            ...(m.name ? { name: m.name } : {}),
-            content: m.content,
-            ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
-            ...(m.timestamp ? { timestamp: m.timestamp } : {}),
-          })),
-        };
-      }
-    }
-    if (/^m\d{1,7}$/i.test(blockIdOrRef.trim())) {
-      const byRef = findArchivedByRef(this.env, lineage, blockIdOrRef.trim().toLowerCase());
-      if (byRef) {
-        return {
-          ok: true,
-          blockId: byRef.meta.id,
-          tier: byRef.meta.tier,
-          total: 1,
-          messages: [
-            {
-              ...(byRef.message.ref ? { ref: byRef.message.ref } : {}),
-              index: byRef.message.index,
-              role: byRef.message.role,
-              ...(byRef.message.name ? { name: byRef.message.name } : {}),
-              content: byRef.message.content,
-              ...(byRef.message.toolCallId ? { toolCallId: byRef.message.toolCallId } : {}),
-              ...(byRef.message.timestamp ? { timestamp: byRef.message.timestamp } : {}),
-            },
-          ],
-        };
-      }
-    }
-    return { ok: false, reason: `未找到块或引用：${blockIdOrRef}`, messages: [], total: 0 };
-  }
-
-  /** 取回被外置的大工具结果（按会话及父链校验） */
-  retrieveExternalized(sessionId: string, ref: string): RetrieveResult {
-    const target = ref.trim().toLowerCase();
-    for (const sid of this.lineageSessionIds(sessionId)) {
-      const record = getExternalized(this.env, sid, target);
-      if (!record) continue;
-      try {
-        return {
-          ok: true,
-          ref: record.ref,
-          path: record.path,
-          tokens: record.tokens,
-          content: readExternalizedFile(record),
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          ref: record.ref,
-          path: record.path,
-          reason: `读取外置文件失败：${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-    }
-    return { ok: false, reason: `未找到外置内容：${ref}` };
-  }
-
-  /** 归档检索（scope=current 含父链；scope=all 全库） */
-  searchContextArchive(
-    sessionId: string,
-    query: string,
-    scope: 'current' | 'all',
-    topK = 5,
-    includeTool = false,
-  ): ArchiveSearchResult[] {
-    const ids = scope === 'all' ? listArchiveSessionIds(this.env) : this.lineageSessionIds(sessionId);
-    return searchArchive(this.env, ids, query, topK, includeTool).map(h => ({
-      sessionId: h.sessionId,
-      blockId: h.compactionId,
-      tier: h.tier,
-      ...(h.ref ? { ref: h.ref } : {}),
-      index: h.index,
-      role: h.role,
-      snippet: h.snippet,
-      score: h.score,
-      ...(h.timestamp ? { timestamp: h.timestamp } : {}),
-      archived: true,
-    }));
   }
 
   /** engine 每轮流结束后上报 usage（持久化遥测 + tokPerChar 校准 + WS 推送） */
@@ -1052,26 +579,6 @@ export class ContextEngineServiceImpl {
           delete daily[stale];
         }
       }
-      // 缓存 miss 三分账：新内容 / 压缩重付 / TTL 重付
-      const ledgerSample = decomposeCacheMiss({
-        input: promptTokens,
-        cached: cachedTokens,
-        previousInput: t.lastPromptTokens,
-        compactionTriggered: t.lastCompactionTriggered,
-      });
-      const cacheLedger = [
-        ...(session.contextTelemetry?.cacheLedger ?? []),
-        {
-          at: new Date().toISOString(),
-          input: promptTokens,
-          cached: cachedTokens,
-          ...ledgerSample,
-          compactionTriggered: t.lastCompactionTriggered,
-        },
-      ];
-      if (cacheLedger.length > CACHE_LEDGER_BUFFER_SIZE) {
-        cacheLedger.splice(0, cacheLedger.length - CACHE_LEDGER_BUFFER_SIZE);
-      }
       session.contextTelemetry = {
         lastUsage,
         cacheHits,
@@ -1083,11 +590,8 @@ export class ContextEngineServiceImpl {
           since: prevTotals?.since ?? new Date().toISOString(),
         },
         usageDaily: daily,
-        cacheLedger,
         lastModel: t.lastSentModel || session.contextTelemetry?.lastModel,
       };
-      t.lastPromptTokens = promptTokens;
-      t.lastCompactionTriggered = false;
       try {
         this.sessionStore?.persist(session);
       } catch (err) {
@@ -1210,8 +714,6 @@ export class ContextEngineServiceImpl {
         lastSystemSections: [],
         lastSentChars: 0,
         lastSentModel: '',
-        lastPromptTokens: 0,
-        lastCompactionTriggered: false,
       };
       this.telemetry.set(sessionId, t);
     }
@@ -1231,7 +733,6 @@ export class ContextEngineServiceImpl {
       );
       const view = buildRequestView(session, staticSystemPrompt, {
         includeThinking: this.resolveIncludeThinking(model),
-        renderRefs: this.getConfig().refs.enabled,
       });
       t.lastBreakdown = view.breakdown;
       t.lastWindowTokens = this.resolveWindowTokens(model);

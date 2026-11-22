@@ -58,12 +58,6 @@ function pickString(obj: unknown, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function pickNumber(obj: unknown, key: string): number | undefined {
-  if (!isObject(obj)) return undefined;
-  const value = obj[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {

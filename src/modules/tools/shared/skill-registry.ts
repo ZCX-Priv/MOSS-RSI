@@ -707,7 +707,7 @@ async function startWatch(
     debounce = setTimeout(flush, SKILL_WATCH_DEBOUNCE_MS);
   };
 
-  watcher.on('change', (eventType: string, filename: string | Buffer | null) => {
+  watcher.on('change', (_eventType: string, filename: string | Buffer | null) => {
     if (filename === null || Buffer.isBuffer(filename)) return;
     const name: string = filename.replace(/\\/g, '/');
     if (!name) return;

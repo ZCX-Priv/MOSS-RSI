@@ -20,7 +20,6 @@ import type {
   PreparedRequest,
 } from '../types';
 import { buildStaticSystemPrompt, buildRequestView, ensureEnvContext, collectSessionImagePaths } from '../compiler';
-import { externalizeLargeToolResults } from '../compiler/tool-result-store';
 import type { OptimizedImage, ImageOptimizer } from '../compiler';
 import type { PromptExtraSection, RulesSectionInput } from '../compiler/system-prompt';
 import { MEMORY_CONTEXT_MSG_NAME } from '../compiler/view-builder';
@@ -121,6 +120,40 @@ function buildRulesSectionForRequest(
 /** 上下文过半提醒消息 name（ephemeral；仅本次请求视图、不持久化） */
 export const CONTEXT_PRESSURE_MSG_NAME = 'context-pressure';
 
+/** 压缩失败终态：前端据此结束「压缩中」的未知状态（失败不阻断本轮请求） */
+function emitCompactionFailed(
+  deps: GovernorDeps,
+  sessionId: string,
+  trigger: 'auto' | 'manual',
+  reason: string,
+): void {
+  deps.emitWs(sessionId, {
+    type: 'compaction-failed',
+    sessionId,
+    payload: { sessionId, trigger, reason },
+  });
+}
+
+/**
+ * manualCompact 专用：计算估算器单位与真实 token 的换算比例。
+ * 与 prepareRequest 的 estimatorScale 同一口径（buildView 预览 + 校准估算）。
+ */
+function resolveEstimatorScale(
+  deps: GovernorDeps,
+  session: ContextSessionLike,
+  staticSystemPrompt: string,
+): number {
+  try {
+    const preview = buildRequestView(session, staticSystemPrompt, { skipImageEncoding: true });
+    if (preview.breakdown.total <= 0) return 1;
+    const calibrated = deps.estimateTokensForMessages?.(preview.messages);
+    if (calibrated === null || calibrated === undefined || calibrated <= 0) return 1;
+    return preview.breakdown.total / calibrated;
+  } catch {
+    return 1;
+  }
+}
+
 /**
  * 构造「上下文过半提醒」文本（纯函数，便于单测）。
  * @param usedTokens 当前上下文占用估算（token）
@@ -165,22 +198,6 @@ export async function prepareRequest(
       sessionId: session.id,
       error: err instanceof Error ? err.message : String(err),
     });
-  }
-
-  // ===== 1.5 大工具结果外置（CCR 式）：超阈值原文落盘，视图留头尾预览 + ref =====
-  // 工具结果摘要开启时跳过外置：摘要模式已在落库前压缩；original 模式要求原文完整，
-  // 不能再被头尾预览截断（避免同一结果被二次处理）。
-  if (!config.toolResultSummary?.enabled) {
-    try {
-      if (externalizeLargeToolResults(session, deps.env, config.toolResultStorage)) {
-        deps.persistSession(session);
-      }
-    } catch (err) {
-      deps.logger.warn('context: externalize tool results failed', {
-        sessionId: session.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
   }
 
   // ===== 1.7 记忆注入（memory 引擎；模块未启用/未注册时跳过）=====
@@ -281,7 +298,6 @@ export async function prepareRequest(
       budgetBytes,
       imageEviction: { enabled: true, protectUnseen: true },
       maxTotalImageBytes: config.imageOptimization.maxTotalImageBytes,
-      renderRefs: config.refs.enabled,
       ...(estimateOnly ? { skipImageEncoding: true } : {}),
       ...(ephemeralMessages ? { ephemeralMessages } : {}),
       ...(optimizedImages ? { optimizedImages } : {}),
@@ -307,6 +323,9 @@ export async function prepareRequest(
     effectiveTotal > 0 && preview.breakdown.total > 0
       ? preview.breakdown.total / effectiveTotal
       : 1;
+  // 压缩规划/尾部保留/冷却增长都在「估算器单位」里记账（estimateMessageTokens），
+  // 必须先把真实窗口 token 换算成估算单位，否则与校准后的 effectiveTotal 口径不一致。
+  const windowTokensEst = Math.max(1, Math.round(windowTokens * estimatorScale));
 
   // 上下文过半提醒（每轮注入、不持久化）：仅在压缩功能可用且近期没有失败时提醒。
   // 旧实现无条件注入：compaction.enabled=false 时模型被反复要求压缩，失败后形成复读。
@@ -376,12 +395,10 @@ export async function prepareRequest(
     const activeForPlan = session.messages.filter(m => !m.deletedAt && !m.compacted);
     const plan = planCompaction(
       activeForPlan,
-      windowTokens,
+      windowTokensEst,
       config.compaction.tailKeepRatio,
       config.compaction.minFoldTokens,
       config.compaction.minCompactMessages,
-      config.compaction.protectedTools,
-      config.compaction.preserveRecentTokens,
     );
     const guard = deps.getCompactionGuard?.(session.id);
     // 换模型/换窗口后旧水位失效：否则小窗口的“压缩后 token”会在大窗口里误判冷却。
@@ -392,9 +409,11 @@ export async function prepareRequest(
       config.compaction.cooldownGrowthMinTokens,
       Math.floor(windowTokens * config.compaction.cooldownGrowthWindowRatio),
     );
+    // guard.tokens 与 preview.breakdown.total 都是估算器单位，增长阈值同步换算
+    const cooldownGrowthEst = Math.max(1, Math.round(cooldownGrowth * estimatorScale));
     const withinCooldown = guardValid
       ? Date.now() - guard.at < config.compaction.cooldownMs &&
-        preview.breakdown.total < guard.tokens + cooldownGrowth
+        preview.breakdown.total < guard.tokens + cooldownGrowthEst
       : false;
 
     if (!plan.ok) {
@@ -426,7 +445,8 @@ export async function prepareRequest(
             staticSystemPrompt,
             summaryModelId: requestModel,
             summaryModelConfigured: config.compaction.summaryModel,
-            windowTokens,
+            // CompactSessionInput.windowTokens 使用估算器单位（与 planCompaction/buildView 一致）
+            windowTokens: windowTokensEst,
             trigger: 'auto',
           });
           if (outcome.record) {
@@ -452,11 +472,13 @@ export async function prepareRequest(
               reason: outcome.reason,
             });
             deps.onCompactionFailure?.(session.id, outcome.reason);
+            emitCompactionFailed(deps, session.id, 'auto', outcome.reason);
           }
         } catch (err) {
           degradedReason = `compaction threw: ${err instanceof Error ? err.message : String(err)}`;
           deps.onDegraded(session.id, degradedReason);
           deps.onCompactionFailure?.(session.id, degradedReason);
+          emitCompactionFailed(deps, session.id, 'auto', degradedReason);
         }
       } else {
         degradedReason = 'llm router unavailable for compaction';
@@ -478,6 +500,24 @@ export async function prepareRequest(
   if (final.tailDropped > 0) {
     degradedReason = degradedReason ?? `hard ceiling: dropped ${final.tailDropped} head messages`;
     deps.onDegraded(session.id, `tail window dropped ${final.tailDropped} messages`);
+  }
+  // 发送前配对修复统计：出现即说明视图里原本存在未配对的 tool 消息（会丢上下文）
+  const repaired = final.sanitizeDropped;
+  if (repaired.orphanTools > 0 || repaired.strippedToolCalls > 0) {
+    const detail = `tool pairs repaired: -${repaired.orphanTools} orphan results / -${repaired.strippedToolCalls} tool_calls`;
+    degradedReason = degradedReason ?? detail;
+    deps.logger.warn('context: tool pairs repaired in request view', {
+      sessionId: session.id,
+      orphanTools: repaired.orphanTools,
+      strippedToolCalls: repaired.strippedToolCalls,
+    });
+    deps.onDegraded(session.id, detail);
+  }
+  // 极端裁剪后只剩 system：显式降级，避免 provider 收到空对话
+  if (final.messages.length <= 1) {
+    const detail = 'request view has no conversation messages after windowing';
+    degradedReason = degradedReason ?? detail;
+    deps.onDegraded(session.id, detail);
   }
   // 字节兜底后仍超上限（锚定消息/单条巨消息本身过大）：显式降级（llm router 还有末位护栏兜底）
   if (final.bytes > byteBudget) {
@@ -525,6 +565,8 @@ export async function manualCompact(
     deps.env,
     buildRulesSectionForRequest(deps, config, input.session.id, input.cwd),
   );
+  const estimatorScale = resolveEstimatorScale(deps, input.session, staticSystemPrompt);
+  const windowTokensEst = Math.max(1, Math.round(input.windowTokens * estimatorScale));
 
   deps.emitWs(input.session.id, {
     type: 'compaction-started',
@@ -532,18 +574,26 @@ export async function manualCompact(
     payload: { sessionId: input.session.id, trigger: 'manual' },
   });
 
-  const outcome = await compactSession(input.session, {
-    env: deps.env,
-    config: config.compaction,
-    llm,
-    logger: deps.logger,
-    staticSystemPrompt,
-    summaryModelId: requestModel,
-    summaryModelConfigured: config.compaction.summaryModel,
-    windowTokens: input.windowTokens,
-    trigger: 'manual',
-    ...(input.focus ? { focus: input.focus } : {}),
-  });
+  let outcome: Awaited<ReturnType<typeof compactSession>>;
+  try {
+    outcome = await compactSession(input.session, {
+      env: deps.env,
+      config: config.compaction,
+      llm,
+      logger: deps.logger,
+      staticSystemPrompt,
+      summaryModelId: requestModel,
+      summaryModelConfigured: config.compaction.summaryModel,
+      // 与 auto 同一口径：CompactSessionInput.windowTokens 使用估算器单位
+      windowTokens: windowTokensEst,
+      trigger: 'manual',
+      ...(input.focus ? { focus: input.focus } : {}),
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    emitCompactionFailed(deps, input.session.id, 'manual', reason);
+    return { record: null, reason };
+  }
 
   if (outcome.record) {
     delete input.session.pressureState;
@@ -554,6 +604,8 @@ export async function manualCompact(
       sessionId: input.session.id,
       payload: { sessionId: input.session.id, compaction: outcome.record },
     });
+  } else if (outcome.reason) {
+    emitCompactionFailed(deps, input.session.id, 'manual', outcome.reason);
   }
   return outcome;
 }

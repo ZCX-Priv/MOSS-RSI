@@ -594,7 +594,7 @@ function sanitizeTimelineItems(
   value: unknown,
   path: string,
   ctx: WalkCtx,
-  state: Record<string, UIStateValue>,
+  _state: Record<string, UIStateValue>,
 ): UIPropValue | undefined {
   if (!Array.isArray(value)) {
     diag(ctx, 'invalid_literal', path, 'warning', 'expected items array');

@@ -210,6 +210,9 @@ export function findJsonViolation(
       }
     } else {
       for (const [key, entryValue] of Object.entries(value)) {
+        // 与 JSON.stringify 语义一致：对象里的 undefined = 该属性未提供，直接省略。
+        // （JS 里 `{ tab: undefined }` 是非常自然的“用默认值”写法，不应判为非法参数）
+        if (entryValue === undefined) continue;
         const hit = visit(entryValue, `${currentPath}.${key}`, depth + 1);
         if (hit) {
           ancestors.delete(value);

@@ -1954,7 +1954,6 @@ export const en = {
     compactionCardTitle: 'Context Compaction',
     triggerAuto: 'auto',
     triggerManual: 'manual',
-    triggerModel: 'model',
     compactedMessages: 'Compacted messages',
     duration: 'Duration',
     summaryModel: 'Summary model',

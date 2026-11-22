@@ -9,7 +9,7 @@ import { applyPreventSleep, disposePreventSleep } from '../../utils/prevent-slee
 import { HttpRouter } from './http-router';
 import { WsHandler } from './ws-handler';
 import { StaticAssets } from './static-assets';
-import type { ServerInstance, Route, WSMessageHandler, WSConnection, RequestGuard, GuardRequestContext, GuardResponse } from './types';
+import type { ServerInstance, Route, WSMessageHandler, WSConnection, RequestGuard, GuardRequestContext } from './types';
 import { createHealthHandler } from './routes/health';
 import {
   createGetAppConfigHandler,
@@ -165,7 +165,6 @@ import {
   createContextCompactionsHandler,
   createCompactPreviewHandler,
   createManualCompactHandler,
-  createContextGcHandler,
   createSummaryModelsHandler,
 } from './routes/context';
 import {
@@ -580,7 +579,6 @@ class ServerModule implements Module {
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compactions', handler: createContextCompactionsHandler(services), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/context/:sessionId/compact-preview', handler: createCompactPreviewHandler(services), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/context/:sessionId/compact', handler: createManualCompactHandler(services), auth: true });
-    this.router.addRoute({ method: 'POST', pattern: '/api/context/gc', handler: createContextGcHandler(services), auth: true });
 
     // rules（规则引擎：双作用域 CRUD）
     this.router.addRoute({ method: 'GET', pattern: '/api/rules', handler: createListRulesHandler(services), auth: true });

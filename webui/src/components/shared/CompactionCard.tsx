@@ -4,7 +4,7 @@
 
 import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, Loader2, Package } from 'lucide-react';
+import { ChevronDown, ChevronRight, Package } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatDuration } from '@/lib/format-duration';
 import { Button } from '@/components/ui/button';
@@ -49,10 +49,7 @@ export const CompactionCard = memo(function CompactionCard({
           <span className="ml-1">
             {compaction.trigger === 'manual'
               ? t('context.triggerManual')
-              : compaction.trigger === 'model'
-                ? t('context.triggerModel')
-                : t('context.triggerAuto')}
-            {compaction.tier ? ` · T${compaction.tier}` : ''}
+              : t('context.triggerAuto')}
           </span>
           <span className="ml-auto flex items-center gap-2 tabular-nums">
             <span>
@@ -88,19 +85,6 @@ export const CompactionCard = memo(function CompactionCard({
     </div>
   );
 });
-
-/** 压缩进行中占位卡片（compaction-started 后、completed 前的短暂状态） */
-export function CompactionPendingCard() {
-  const { t } = useTranslation();
-  return (
-    <div className="flex justify-center py-1">
-      <div className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
-        <Loader2 className="size-3.5 animate-spin text-primary-strong" />
-        <span>{t('context.compactionRunning')}</span>
-      </div>
-    </div>
-  );
-}
 
 /** 压缩按钮专用导出（保持 Button 引用避免 tree-shake 抖掉） */
 export { Button as CompactionCardButton };

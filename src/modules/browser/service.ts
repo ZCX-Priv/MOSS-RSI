@@ -41,7 +41,6 @@ import {
   waitStable as waitFrameStable,
   type CdpSession,
   type FrameSignature,
-  type ScreenshotRegion,
   type ScreenshotResult,
 } from './page';
 import {

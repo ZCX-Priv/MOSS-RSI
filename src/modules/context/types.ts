@@ -18,6 +18,8 @@ export interface CompactionConfig {
   tailKeepRatio: number;
   /** 摘要输出上限 token */
   summaryMaxTokens: number;
+  /** 单次压缩摘要调用的总超时 ms（超时放弃本轮压缩，绝不阻塞主循环） */
+  summaryTimeoutMs: number;
   /** 可压缩区最小 token（低于此值不值得一次摘要调用） */
   minFoldTokens: number;
   /** 摘要模型：'inherit' = 主模型；否则为 providers 旗下模型 id */
@@ -43,22 +45,6 @@ export interface CompactionConfig {
   cooldownGrowthMinTokens: number;
   /** 冷却增长窗口比例（与下限取较大者） */
   cooldownGrowthWindowRatio: number;
-  /**
-   * 恒保护的工具名（其调用消息与结果都不折叠）。
-   * 默认包含 context：模型需要记住自己刚压缩过什么，且压缩块账本不能被折叠掉。
-   */
-  protectedTools: string[];
-  /**
-   * 尾部额外逐字保留的 token 下限（与 tailKeepRatio 取较大者；上限为窗口 40%）。
-   * 0 = 只按 tailKeepRatio。
-   */
-  preserveRecentTokens: number;
-  /** 模型主导压缩：单次可折叠区间的最小 token（低于此值拒绝，避免碎片化） */
-  minCompressRange: number;
-  /** 模型主导压缩：摘要最小字符数 */
-  minSummaryLength: number;
-  /** 模型主导压缩：摘要最大字符数 */
-  maxSummaryLength: number;
 }
 
 /** 图片发送前优化配置（TinyPNG 式压缩；减少请求体字节同时保留细节） */
@@ -168,31 +154,6 @@ export interface MemoryConfig {
   recallMaxPerRoom: number;
 }
 
-/** 消息引用渲染配置（模型可见的 <acp> 标签；关闭后模型无法按 ref 指定压缩区间） */
-export interface RefsConfig {
-  enabled: boolean;
-}
-
-/** 空闲后台预压缩（run 结束后、用户未发新消息时提前压缩，避免下一轮请求前阻塞） */
-export interface BackgroundCompactConfig {
-  enabled: boolean;
-  /** 占用达到窗口该比例才预压缩（默认 0.7） */
-  ratio: number;
-  /** run 结束后延迟多少毫秒再检查（默认 3000；用户立刻发消息时会被 busy 取消） */
-  delayMs: number;
-}
-
-/** 大工具结果外置配置（CCR 式：原文落盘/入库，视图只留预览 + ref） */
-export interface ToolResultStorageConfig {
-  enabled: boolean;
-  /** 超过该 token 数的工具结果外置（默认 4000） */
-  minTokens: number;
-  /** 占位符保留的开头字符数 */
-  headChars: number;
-  /** 占位符保留的结尾字符数 */
-  tailChars: number;
-}
-
 /**
  * 工具结果摘要配置（默认关闭）：
  * 工具执行完成后先交给摘要模型压缩，再把摘要写入会话供主模型使用。
@@ -212,14 +173,8 @@ export interface ContextEngineConfig {
   compaction: CompactionConfig;
   healer: HealerConfig;
   telemetry: ContextTelemetryConfig;
-  /** 消息引用标签（默认开） */
-  refs: RefsConfig;
-  /** 大工具结果外置（默认开） */
-  toolResultStorage: ToolResultStorageConfig;
   /** 工具结果摘要（默认关：开启后先用摘要模型压缩再交给主模型） */
   toolResultSummary: ToolResultSummaryConfig;
-  /** 空闲后台预压缩（默认开） */
-  backgroundCompact: BackgroundCompactConfig;
   /** 用户规则引擎（默认开） */
   rules: RulesConfig;
   /** 生命周期钩子引擎（默认开） */
@@ -246,6 +201,7 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
   compactRatio: 0.80,
   tailKeepRatio: 0.16,
   summaryMaxTokens: 8192,
+  summaryTimeoutMs: 120000,
   minFoldTokens: 400,
   summaryModel: 'inherit',
   maxShrinkRatio: 0.5,
@@ -254,11 +210,6 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
   cooldownMs: 60000,
   cooldownGrowthMinTokens: 8000,
   cooldownGrowthWindowRatio: 0.02,
-  protectedTools: ['context'],
-  preserveRecentTokens: 5000,
-  minCompressRange: 1200,
-  minSummaryLength: 50,
-  maxSummaryLength: 20000,
 };
 
 export const DEFAULT_IMAGE_OPTIMIZATION_CONFIG: ImageOptimizationConfig = {
@@ -293,28 +244,11 @@ export const DEFAULT_CONTEXT_TELEMETRY_CONFIG: ContextTelemetryConfig = {
   enabled: true,
 };
 
-export const DEFAULT_REFS_CONFIG: RefsConfig = {
-  enabled: true,
-};
-
-export const DEFAULT_TOOL_RESULT_STORAGE_CONFIG: ToolResultStorageConfig = {
-  enabled: true,
-  minTokens: 4000,
-  headChars: 2000,
-  tailChars: 2000,
-};
-
 export const DEFAULT_TOOL_RESULT_SUMMARY_CONFIG: ToolResultSummaryConfig = {
   enabled: false,
   model: '',
   reasoningEffort: 'off',
   minChars: 400,
-};
-
-export const DEFAULT_BACKGROUND_COMPACT_CONFIG: BackgroundCompactConfig = {
-  enabled: true,
-  ratio: 0.7,
-  delayMs: 3000,
 };
 
 export const DEFAULT_RULES_CONFIG: RulesConfig = {
@@ -354,10 +288,7 @@ export const DEFAULT_CONTEXT_CONFIG: ContextEngineConfig = {
   compaction: { ...DEFAULT_COMPACTION_CONFIG },
   healer: { ...DEFAULT_HEALER_CONFIG },
   telemetry: { ...DEFAULT_CONTEXT_TELEMETRY_CONFIG },
-  refs: { ...DEFAULT_REFS_CONFIG },
-  toolResultStorage: { ...DEFAULT_TOOL_RESULT_STORAGE_CONFIG },
   toolResultSummary: { ...DEFAULT_TOOL_RESULT_SUMMARY_CONFIG },
-  backgroundCompact: { ...DEFAULT_BACKGROUND_COMPACT_CONFIG },
   rules: { ...DEFAULT_RULES_CONFIG },
   hooks: { ...DEFAULT_HOOKS_CONFIG },
   memory: { ...DEFAULT_MEMORY_CONFIG },
@@ -410,11 +341,6 @@ export interface ContextMessage {
   deletedAt?: string;
   /** 压缩标记：已被压缩摘要替代。发送视图排除 */
   compacted?: boolean;
-  /**
-   * 稳定消息引用（mNNNNN）。由 context 引擎分配并随 session 落盘；
-   * 物理折叠后编号永不复用，模型可据此指定压缩区间或解压。
-   */
-  ref?: string;
 }
 
 /** 环境上下文锚定信息（会话创建时生成，append-only 保证前缀稳定） */
@@ -429,7 +355,7 @@ export interface EnvContextInfo {
 export interface CompactionRecord {
   id: string;
   at: string;
-  trigger: 'auto' | 'manual' | 'model';
+  trigger: 'auto' | 'manual';
   /** 压缩前估算 token */
   beforeTokens: number;
   /** 压缩后估算 token（含摘要消息） */
@@ -446,14 +372,6 @@ export interface CompactionRecord {
   summaryModel: string;
   /** 摘要生成耗时 ms */
   durationMs: number;
-  /** 摘要层级：1=原始消息摘要，2=摘要蒸馏，3=事实索引 */
-  tier?: 1 | 2 | 3;
-  /** 块 id（= SQLite 归档中的 compaction id；decompress/status 用） */
-  blockId?: string;
-  /** 归档 id（原文存放在 SQLite context store；与 blockId 同值） */
-  archiveId?: string;
-  /** 被折叠区间覆盖的消息引用（mNNNNN） */
-  refs?: string[];
 }
 
 /** 引擎可见的会话结构（agent Session 的结构子集；鸭子类型注入避免循环依赖） */
@@ -472,9 +390,7 @@ export interface ContextSessionLike {
   pressureState?: ContextPressureState;
   /** 压缩冷却水位（随 session 落盘；重启后仍生效） */
   compactionGuard?: CompactionGuard;
-  /** 消息引用游标（mNNNNN 单调递增；物理折叠后也绝不回退，防 ref 重用） */
-  refCursor?: number;
-  /** 派生会话的父会话 id（子代理出生时记录；压缩归档检索可沿父链只读回退） */
+  /** 派生会话的父会话 id（子代理出生时记录；思维链翻译按它识别子代理） */
   derivedFrom?: string;
   /** 本会话最近一次 run 的工作目录（随 session 落盘；手动压缩/遥测按会话取，勿用全局 lastCwd） */
   lastCwd?: string;
@@ -547,25 +463,6 @@ export interface SessionDailyUsage {
   requests: number;
 }
 
-/** 单次请求的缓存 miss 三分账（新内容 / 压缩重付 / 上游 TTL 或客户端改写） */
-export interface CacheLedgerSample {
-  at: string;
-  /** 本次输入 token（含缓存命中部分） */
-  input: number;
-  /** 缓存命中 token */
-  cached: number;
-  /** 总 miss = input - cached */
-  missed: number;
-  /** 新追加内容导致的合法 miss */
-  newContent: number;
-  /** 本轮发生压缩导致的缓存重付 */
-  compactionRepayment: number;
-  /** 无法归因的剩余 miss（上游 TTL / 客户端改写） */
-  ttlRepayment: number;
-  /** 本轮是否触发了压缩 */
-  compactionTriggered: boolean;
-}
-
 /** 会话级持久化遥测（agent Session 内嵌字段；lastUsage/cacheHits/usageTotals 的单一真源） */
 export interface SessionContextTelemetry {
   /** 最近一次请求的真实 usage（LLM 上报；无样本为 null） */
@@ -580,8 +477,6 @@ export interface SessionContextTelemetry {
   usageTotals?: SessionUsageTotals;
   /** 按自然日累计（设置-概览图表；保留最近 400 天） */
   usageDaily?: Record<string, SessionDailyUsage>;
-  /** 缓存 miss 三分账环形缓冲（上限 CACHE_LEDGER_BUFFER_SIZE） */
-  cacheLedger?: CacheLedgerSample[];
   /** 最近一次请求使用的模型（手动/模型压缩按它解析窗口，避免用全局默认模型） */
   lastModel?: string;
 }
@@ -705,14 +600,10 @@ export interface ContextStats {
   /** 近样本平均命中率（无样本为 null） */
   avgHitRate: number | null;
   systemSections: SystemSection[];
-  /** 缓存 miss 三分账（最近样本，供面板/调试） */
-  cacheLedger?: CacheLedgerSample[];
 }
 
 /** 遥测环形缓冲容量（每 session 保留最近样本数） */
 export const TELEMETRY_BUFFER_SIZE = 50;
-/** 缓存 miss 三分账环形缓冲容量 */
-export const CACHE_LEDGER_BUFFER_SIZE = 100;
 
 // ============================================================================
 // 手动压缩结果
@@ -723,108 +614,6 @@ export interface ManualCompactResult {
   /** ok=false 的原因（会话不存在/运行中/区太小/摘要失败） */
   reason?: string;
   compaction?: CompactionRecord;
-}
-
-// ============================================================================
-// 上下文自省 / 归档检索（context 工具 status/decompress/search 的数据契约）
-// ============================================================================
-
-/** 可压缩区间（ref 范围 + 估算 token） */
-export interface ContextStatusRange {
-  startRef?: string;
-  endRef?: string;
-  /** 区间内活跃消息数 */
-  messages: number;
-  /** 估算 token */
-  tokens: number;
-}
-
-/** 活跃压缩块（来自 SQLite 归档账本） */
-export interface ContextStatusBlock {
-  id: string;
-  tier: number;
-  refs: string[];
-  tokens: number;
-  createdAt: string;
-  trigger: string;
-}
-
-export interface ContextStatusReport {
-  sessionId: string;
-  usedTokens: number;
-  windowTokens: number;
-  usedPercent: number;
-  breakdown: ContextBreakdown;
-  compactable: ContextStatusRange[];
-  blocks: ContextStatusBlock[];
-  activeSummaryTokens: number;
-  /** 当前压力提醒水位（无则 undefined） */
-  pressure?: { lastTokens: number; lastBand: number };
-}
-
-/** 归档原文消息（decompress 返回） */
-export interface DecompressMessage {
-  ref?: string;
-  index: number;
-  role: ContextMessage['role'];
-  name?: string;
-  content: string;
-  toolCallId?: string;
-  timestamp?: string;
-}
-
-export interface DecompressResult {
-  ok: boolean;
-  reason?: string;
-  blockId?: string;
-  tier?: number;
-  messages: DecompressMessage[];
-  total: number;
-}
-
-/** 归档检索命中 */
-export interface ArchiveSearchResult {
-  sessionId: string;
-  blockId: string;
-  tier: number;
-  ref?: string;
-  index: number;
-  role: ContextMessage['role'];
-  snippet: string;
-  score: number;
-  timestamp?: string;
-  archived: true;
-}
-
-/** 模型主导压缩：单个 ref 区间 */
-export interface ModelCompressRange {
-  startRef: string;
-  endRef: string;
-  /** 模型自写的自包含摘要（不含 <compaction-summary> 标签） */
-  summary: string;
-  topic?: string;
-}
-
-/** 外置工具结果取回结果 */
-export interface RetrieveResult {
-  ok: boolean;
-  reason?: string;
-  ref?: string;
-  path?: string;
-  tokens?: number;
-  content?: string;
-}
-
-/** 模型主导压缩结果 */
-export interface ModelCompressResult {
-  ok: boolean;
-  reason?: string;
-  /** 失败时的逐区间原因（全有或全无：任一失败则一条都不折叠） */
-  errors?: string[];
-  blockIds: string[];
-  foldedRanges: number;
-  beforeTokens?: number;
-  afterTokens?: number;
 }
 
 /** 手动压缩预览（确认对话框数据源） */

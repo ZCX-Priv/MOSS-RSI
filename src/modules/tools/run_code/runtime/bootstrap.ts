@@ -27,6 +27,7 @@ import {
   type RunLimits,
 } from './protocol';
 import { findJsonViolation, sanitizeForJson } from './sanitize';
+import { isPtcForbiddenTool } from '../forbidden';
 import { calibrateWrapperExtraLines, PROGRAM_SOURCE_URL, rewriteRuntimeStack } from './stack';
 import { formatSourceExcerpt, locateChunkFailure, scanStructure } from './syntax';
 import { ToolCallError } from './value';
@@ -140,6 +141,12 @@ function createToolsProxy(allowlist: string[]): Record<string, (args?: unknown) 
     get(_target, prop) {
       if (typeof prop !== 'string') return undefined;
       if (!allowed.has(prop)) {
+        // 设计上禁止进沙箱的工具：给出可执行指引，避免模型反复猜“为什么不存在”
+        if (isPtcForbiddenTool(prop)) {
+          throw new Error(
+            `Tool "${prop}" cannot be used inside run_code (PTC). Call the native "${prop}" tool directly instead.`,
+          );
+        }
         const suggestions = closestToolNames(prop, allowed);
         const available = [...allowed].slice(0, 30).join(', ');
         throw new Error(

@@ -106,7 +106,6 @@ class AutomationServiceImpl implements AutomationService {
   private readonly logger: Logger;
   private readonly services: ServiceRegistry;
   private readonly eventBus: EventBus;
-  private readonly env: Environment;
   private data: AutomationsStoreData;
   private history: HistoryStoreData;
   /** 调度定时器索引：automationId -> timer */
@@ -124,7 +123,6 @@ class AutomationServiceImpl implements AutomationService {
     services: ServiceRegistry;
     eventBus: EventBus;
   }) {
-    this.env = deps.env;
     this.logger = deps.logger;
     this.services = deps.services;
     this.eventBus = deps.eventBus;

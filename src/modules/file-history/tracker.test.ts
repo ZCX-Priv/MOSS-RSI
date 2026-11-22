@@ -9,7 +9,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Logger, Environment } from '../../core/types';
 import { FileHistoryServiceImpl } from './service';
-import { readEntries } from './transcript';
 import { DEFAULT_FILE_HISTORY_CONFIG, type FileHistoryConfig } from './types';
 
 const logger: Logger = {
@@ -229,7 +228,7 @@ describe('track/commit 统一协议', () => {
     const file = join(dataDir, 'f.txt');
     writeFileSync(file, 'v1', 'utf8');
 
-    const tracker = await svc.track({ sessionId: SESSION, absPath: file, toolName: 'write' });
+    await svc.track({ sessionId: SESSION, absPath: file, toolName: 'write' });
     // 模拟变更失败：不调用 commit
     expect(svc.listHistory(SESSION)).toHaveLength(0);
     expect(readdirSync(join(dataDir, 'file-history', 'backups')).length).toBe(1); // 备份已落盘（孤儿）

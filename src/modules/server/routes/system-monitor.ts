@@ -278,7 +278,7 @@ const SHELL_NAMES = new Set([
   'cmd.exe', 'cmd', 'bash', 'bash.exe', 'zsh', 'sh', 'fish', 'wsl.exe', 'conhost.exe',
 ]);
 
-function collectProcesses(env: Environment, raw: RawProcess[], cores: number, now: number): {
+function collectProcesses(_env: Environment, raw: RawProcess[], cores: number, now: number): {
   processes: MossProcessInfo[];
   mossPercent: number;
   mossBytes: number;

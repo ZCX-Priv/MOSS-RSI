@@ -29,11 +29,6 @@ type StackEntry =
   | { kind: 'template'; line: number; column: number }
   | { kind: 'templateExpr'; line: number; column: number };
 
-interface Cursor {
-  line: number;
-  column: number;
-}
-
 /** 括号字符的人类可读名（保留原字符，避免把 } 写成 {） */
 function describe(char: '(' | '[' | '{' | ')' | ']' | '}'): string {
   return `'${char}'`;

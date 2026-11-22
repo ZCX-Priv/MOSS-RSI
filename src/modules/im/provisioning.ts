@@ -61,8 +61,6 @@ const TERMINAL_STATUSES = new Set<ImProvisioningStatus>([
   'cancelled',
 ]);
 
-const STALE_TOKEN_MESSAGE = '微信登录凭据已失效，请重新扫码接入';
-
 interface QqQrCredentials {
   appId: string;
   appSecret: string;

@@ -321,7 +321,8 @@ describe('buildRecallSection（query 切换：同消息稳定 / 新消息防重�
     } as unknown as Logger;
 
     engine = new MemoryEngineServiceImpl({
-      env: { dataDir } as Environment,
+      // packageRoot 指向仓库根：召回提示词 memory/inject-recall.md 从这里加载
+      env: { dataDir, packageRoot: process.cwd() } as Environment,
       config,
       services,
       logger,

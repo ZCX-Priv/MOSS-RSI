@@ -8,7 +8,7 @@ import type { Environment, Logger } from '../../core/types';
 import type { LLMRouter } from '../contracts';
 import type { UnifiedMessage } from '../llm/types';
 import { loadPromptFileOrNull } from '../context/prompt-loader';
-import { buildMemoryRecord, globalMemoryRoot, listAllMemories, projectMemoryRoot, projectWing, writeMemory } from './storage';
+import { buildMemoryRecord, listAllMemories, projectWing, writeMemory } from './storage';
 import { tokenOverlap, tokenize } from './tokenizer';
 import type { DistilledMemory } from './types';
 import { MEMORY_HALLS } from './types';

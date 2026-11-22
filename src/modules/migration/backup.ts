@@ -5,7 +5,7 @@
 //   - 本文件只做「文件与 zip」的搬运和会话 JSON 的还原；
 //   - 会话热写入（engine.importSessions）与配置合并（config 服务）由 index.ts 编排。
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppConfig, ApiConfig } from '../../core/types';
 import type { Session } from '../agent/session';

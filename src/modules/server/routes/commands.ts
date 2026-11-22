@@ -140,7 +140,7 @@ export function createCreateCommandHandler(
 /** PUT /api/commands/:name — 更新内容（重写 <name>.md；禁止改名） */
 export function createUpdateCommandHandler(
   services: ServiceRegistry,
-  env: Environment,
+  _env: Environment,
 ): RouteHandler {
   return async (req: HttpRequest, params?: Record<string, string>): Promise<HttpResponse> => {
     const name = params?.name;

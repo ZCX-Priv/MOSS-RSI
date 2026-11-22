@@ -16,6 +16,8 @@ import { ServiceNames, type LogLevel } from '../core/types';
 import type { ServerInstance } from '../modules/server/types';
 import { startMcpStdio } from '../modules/mcp/stdio';
 import { t } from '../core/i18n';
+import { join } from 'node:path';
+import { acquireInstanceLock, InstanceLockError, type InstanceLockHandle } from '../utils/instance-lock';
 
 export interface ParsedArgs {
   command: string;
@@ -133,6 +135,29 @@ async function cmdStart(parsed: ParsedArgs): Promise<number> {
 
 async function startForeground(parsed: ParsedArgs): Promise<number> {
   const env = detectEnvironment();
+
+  // 单实例判定：原子锁是唯一依据。必须在 kernel.start 之前获取——
+  // 旧实现在 kernel.start 之后才写 PID，两个同时启动的进程都能通过检查，
+  // 共享 dataDir 时会互相覆盖会话文件。
+  let lock: InstanceLockHandle;
+  try {
+    lock = await acquireInstanceLock({
+      lockPath: join(env.dataDir, 'moss.lock'),
+      // dev --watch 重启：给旧进程留出收尾窗口
+      waitMs: process.env.MOSS_DEV === '1' ? 5000 : 0,
+    });
+  } catch (err) {
+    if (err instanceof InstanceLockError) {
+      const owner = err.owner;
+      const where = owner?.port ? `，端口 ${owner.port}` : '';
+      console.error(`MOSS 已在运行（PID ${owner?.pid ?? '未知'}${where}）。`);
+      console.error('请先执行 moss stop，或使用不同的 MOSS_DATA_DIR 启动独立实例。');
+      return 1;
+    }
+    console.error(t('cli.failedToStart', { error: err instanceof Error ? err.message : String(err) }));
+    return 1;
+  }
+
   const kernel = new Microkernel();
   try {
     const ctx = await kernel.start({
@@ -146,21 +171,26 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
     const serverInstance = ctx.services.tryResolve<ServerInstance>(ServiceNames.SERVER_INSTANCE);
     const port = serverInstance?.port;
 
-    // 写 PID 文件
+    // 写 PID 文件（status/stop 用；单例判定以 moss.lock 为准）
     writePidFile(env.pidFile, {
       pid: process.pid,
       startedAt: new Date().toISOString(),
       port,
       ...currentProcessIdentity(),
     });
+    if (port !== undefined) lock.updatePort(port);
 
     console.log(t('cli.started', { pid: process.pid }));
 
     // 注册退出钩子
     const cleanup = async () => {
-      await kernel.stop();
-      removePidFile(env.pidFile);
-      process.exit(0);
+      try {
+        await kernel.stop();
+      } finally {
+        removePidFile(env.pidFile);
+        lock.release();
+        process.exit(0);
+      }
     };
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
@@ -174,6 +204,7 @@ async function startForeground(parsed: ParsedArgs): Promise<number> {
   } catch (err) {
     console.error(t('cli.failedToStart', { error: err instanceof Error ? err.message : String(err) }));
     await kernel.stop().catch(() => {});
+    lock.release();
     return 1;
   }
 }
@@ -332,7 +363,7 @@ async function fetchHealthInfo(port: number): Promise<HealthInfo | null> {
 }
 
 async function cmdRestart(): Promise<number> {
-  const stopCode = await cmdStop();
+  await cmdStop();
   // 即使 stop 失败也尝试 start
   await sleep(500);
   const startCode = await cmdStart({ command: 'start', foreground: false, rest: [] });

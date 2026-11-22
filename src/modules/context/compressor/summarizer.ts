@@ -8,7 +8,7 @@
 import type { Environment } from '../../../core/types';
 import type { CompactionConfig, ContextMessage } from '../types';
 import type { LLMRouter } from '../../contracts';
-import type { UnifiedMessage } from '../../llm/types';
+import type { UnifiedMessage, UnifiedRequest, UnifiedResponse } from '../../llm/types';
 import { loadPromptFile, renderTemplate } from '../prompt-loader';
 import { sanitizeMessages } from '../healer/pair-sanitize';
 
@@ -57,6 +57,63 @@ export function sanitizeCompactionRegion(region: readonly ContextMessage[]): Con
   return sanitizeMessages(region).messages;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** 摘要超时（配置可能来自旧配置文件，运行时兜底） */
+function resolveSummaryTimeoutMs(config: CompactionConfig): number {
+  const v = config.summaryTimeoutMs;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, 600000) : 120000;
+}
+
+/** 是否值得重试的瞬时错误（4xx/空输出/截断不重试） */
+function isTransientSummaryError(err: unknown): boolean {
+  if (err instanceof SummarizeError) return false;
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status === 'number') {
+    return status === 408 || status === 429 || status >= 500;
+  }
+  if (err instanceof TypeError) return true; // fetch failed
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ECONNRESET|ETIMEDOUT|socket hang up|aborted|timeout|fetch failed/i.test(msg);
+}
+
+/**
+ * 带总超时的摘要调用：最多 2 次，仅瞬时错误重试，总耗时不超过 timeoutMs。
+ * 超时/失败统一转 SummarizeError，由调用方放弃本轮压缩（不修改会话）。
+ */
+async function completeSummaryWithTimeout(
+  llm: LLMRouter,
+  request: UnifiedRequest,
+  timeoutMs: number,
+): Promise<UnifiedResponse> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
+    try {
+      return await llm.complete(request, controller.signal);
+    } catch (err) {
+      lastError = err;
+      if (attempt === 1 || !isTransientSummaryError(err)) break;
+      const wait = Math.min(500, Math.max(0, deadline - Date.now()));
+      if (wait <= 0) break;
+      await sleep(wait);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const msg = lastError instanceof Error ? lastError.message : String(lastError ?? '');
+  if (lastError === undefined || /aborted|timeout/i.test(msg)) {
+    throw new SummarizeError(`summarizer timed out after ${timeoutMs}ms`);
+  }
+  throw new SummarizeError(msg);
+}
+
 /** 被压缩区消息 → UnifiedMessage（与视图构建相同的转换口径） */
 function regionToUnifiedMessages(region: readonly ContextMessage[]): UnifiedMessage[] {
   return region.map(m => ({
@@ -96,12 +153,16 @@ export async function summarizeRegion(input: SummarizeInput): Promise<string> {
     { role: 'user', content: instruction },
   ];
 
-  const response = await llm.complete({
-    model: summaryModelId,
-    messages,
-    stream: false,
-    max_tokens: config.summaryMaxTokens,
-  });
+  const response = await completeSummaryWithTimeout(
+    llm,
+    {
+      model: summaryModelId,
+      messages,
+      stream: false,
+      max_tokens: config.summaryMaxTokens,
+    },
+    resolveSummaryTimeoutMs(config),
+  );
 
   const summary = response.content.trim();
   if (summary === '') {

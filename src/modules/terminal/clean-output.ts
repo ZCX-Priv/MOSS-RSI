@@ -205,27 +205,6 @@ function ansiLen(w: string, j: number): number {
   return 0;
 }
 
-/** 跳过空白与 ANSI 序列（ConPTY 硬换行 / 光标重绘插入的噪声），返回新下标 */
-function skipNoise(w: string, j: number): number {
-  let k = j;
-  for (;;) {
-    const ch = w[k];
-    if (ch === undefined) return k;
-    if (/\s/.test(ch)) {
-      k++;
-      continue;
-    }
-    if (ch === '\u001b') {
-      const n = ansiLen(w, k);
-      if (n > 0) {
-        k += n;
-        continue;
-      }
-    }
-    return k;
-  }
-}
-
 /**
  * 跳过回显噪声：空白、ANSI 序列，以及**跨行后的续行提示符**（`>> ` / `> ` / `PS path>> `）。
  *

@@ -231,6 +231,7 @@ const contextSchema = z.object({
       compactRatio: z.number().min(0.5).max(0.95).default(0.80),
       tailKeepRatio: z.number().min(0.05).max(0.5).default(0.16),
       summaryMaxTokens: z.number().int().positive().default(8192),
+      summaryTimeoutMs: z.number().int().min(5000).max(600000).default(120000),
       minFoldTokens: z.number().int().positive().default(400),
       summaryModel: z.string().default('inherit'),
       maxShrinkRatio: z.number().min(0.1).max(0.95).default(0.5),
@@ -239,11 +240,6 @@ const contextSchema = z.object({
       cooldownMs: z.number().int().min(0).default(60000),
       cooldownGrowthMinTokens: z.number().int().min(0).default(8000),
       cooldownGrowthWindowRatio: z.number().min(0).max(0.5).default(0.02),
-      protectedTools: z.array(z.string()).default(['context']),
-      preserveRecentTokens: z.number().int().min(0).default(5000),
-      minCompressRange: z.number().int().min(0).default(1200),
-      minSummaryLength: z.number().int().min(0).default(50),
-      maxSummaryLength: z.number().int().min(0).default(20000),
     })
     .prefault({}),
   healer: z
@@ -256,29 +252,6 @@ const contextSchema = z.object({
   telemetry: z
     .object({
       enabled: z.boolean().default(true),
-    })
-    .prefault({}),
-  // 消息引用标签（模型可见的 <acp> 标签）
-  refs: z
-    .object({
-      enabled: z.boolean().default(true),
-    })
-    .prefault({}),
-  // 大工具结果外置（超阈值原文落盘，视图只留头尾预览 + ref）
-  toolResultStorage: z
-    .object({
-      enabled: z.boolean().default(true),
-      minTokens: z.number().int().min(0).default(4000),
-      headChars: z.number().int().min(0).default(2000),
-      tailChars: z.number().int().min(0).default(2000),
-    })
-    .prefault({}),
-  // 空闲后台预压缩
-  backgroundCompact: z
-    .object({
-      enabled: z.boolean().default(true),
-      ratio: z.number().min(0.1).max(0.95).default(0.7),
-      delayMs: z.number().int().min(0).default(3000),
     })
     .prefault({}),
   rules: z

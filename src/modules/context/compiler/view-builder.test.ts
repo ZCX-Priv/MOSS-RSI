@@ -88,29 +88,6 @@ describe('view-builder（ephemeral + breakdown 扩展）', () => {
     expect(view.breakdown.memory).toBe(0);
   });
 
-  test('renderRefs：正文加 <acp> 标签，工具参数保持原样，会话不落标签', () => {
-    const session = mkSession([
-      { role: 'user', name: 'env-context', content: '[环境上下文]', ref: 'm00001' },
-      { role: 'user', content: '请修复 bug', ref: 'm00002' },
-      {
-        role: 'assistant',
-        content: '读取文件',
-        ref: 'm00003',
-        toolCalls: [{ id: 'tc1', name: 'read', arguments: '{"path":"a.ts"}' }],
-      },
-      { role: 'tool', toolCallId: 'tc1', name: 'read', content: '文件内容', ref: 'm00004' },
-    ]);
-    const view = buildRequestView(session, 'SYSTEM', { renderRefs: true });
-    const userMsg = view.messages.find(m => m.content.includes('请修复 bug'));
-    expect(userMsg?.content.startsWith('<acp tokens="')).toBe(true);
-    expect(userMsg?.content).toContain('>m00002</acp>\n请修复 bug');
-    // 工具调用参数逐字节不变
-    const assistant = view.messages.find(m => m.toolCalls?.length);
-    expect(assistant?.toolCalls?.[0].function.arguments).toBe('{"path":"a.ts"}');
-    // 会话原文不落标签
-    expect(session.messages[1].content).toBe('请修复 bug');
-  });
-
   test('thinking：默认剥离历史 thinking；includeThinking=true 保留全部（DeepSeek 全量回传数据源）', () => {
     const session = mkSession([
       { role: 'user', content: '第一轮' },

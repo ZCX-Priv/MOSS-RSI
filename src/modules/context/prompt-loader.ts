@@ -31,14 +31,19 @@ export function loadPromptFileOrNull(env: Environment, relativePath: string): st
   }
 
   // 2. 包内种子源（<packageRoot>/agent/...）
-  const pkgFile = join(env.packageRoot, 'agent', relativePath);
-  try {
-    if (existsSync(pkgFile)) {
-      const text = readFileSync(pkgFile, 'utf8');
-      if (text.trim() !== '') return stripBom(text);
+  // packageRoot 在异常构造/测试桩里可能缺失：join(undefined) 会直接抛 TypeError，
+  // 这里显式跳过，让调用方走兜底文本而不是被路径错误打断。
+  const pkgRoot = env.packageRoot;
+  if (typeof pkgRoot === 'string' && pkgRoot !== '') {
+    const pkgFile = join(pkgRoot, 'agent', relativePath);
+    try {
+      if (existsSync(pkgFile)) {
+        const text = readFileSync(pkgFile, 'utf8');
+        if (text.trim() !== '') return stripBom(text);
+      }
+    } catch {
+      // 落回兜底
     }
-  } catch {
-    // 落回兜底
   }
 
   return null;

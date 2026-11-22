@@ -17,11 +17,13 @@ import type { LLMRouter } from '../../contracts';
 import { estimateMessagesTokens, estimateTextTokens } from '../budgeter/estimator';
 import { planCompaction, isProtectedMessage } from './planner';
 import { summarizeRegion, SummarizeError } from './summarizer';
+import { rebaseDistillWatermark } from './watermark';
 import { COMPACTION_SUMMARY_MSG_NAME } from '../compiler/view-builder';
+import { sanitizeMessages } from '../healer/pair-sanitize';
 
-/** 摘要消息包裹标签 */
-export const SUMMARY_TAG_OPEN = '<compaction-summary>';
-export const SUMMARY_TAG_CLOSE = '</compaction-summary>';
+/** 摘要消息包裹标签（仅本文件使用） */
+const SUMMARY_TAG_OPEN = '<compaction-summary>';
+const SUMMARY_TAG_CLOSE = '</compaction-summary>';
 
 export interface CompactSessionInput {
   env: Environment;
@@ -145,26 +147,69 @@ export async function compactSession(
   // 原实现仅标记 compacted=true，原文永久驻留内存与磁盘，小时级长任务下只增不减；
   // 现直接从 session.messages 移除被压缩消息，由摘要消息替代（业界 /compact 标准做法）。
   // 工具结果保持全文（用户要求：利好 LLM 读大文件）——折叠的只是已退出请求视图的旧消息。
+  // 记忆蒸馏水位是数组下标，物理删除后必须按旧下标重算（A1）。
+  const memoryWatermark = session.memoryState?.lastDistilledIndex;
+  const beforeFoldMessages = memoryWatermark === undefined ? null : [...session.messages];
   const compactedSet = new Set(region);
 
   // 6. 摘要消息插入：紧跟被压缩区间最后一条消息之后（保持消息流时序）。
-  // 插入点必须在物理删除前计算（lastRegionMsg 定位）
+  // 插入点必须在物理删除前计算（lastRegionMsg 定位）。
+  // 摘要期间会话可能被外部改动：锚点丢失时放弃本轮，绝不把摘要插到索引 0
+  // （那会压在 env-context 之前，破坏「env 恒为第 0 条」的视图假设）。
   const lastRegionMsg = region[region.length - 1];
-  const insertAt = session.messages.lastIndexOf(lastRegionMsg) + 1;
+  const lastIndex = session.messages.lastIndexOf(lastRegionMsg);
+  if (lastIndex < 0) {
+    logger.warn('context: compaction aborted (region anchor missing)', { sessionId: session.id });
+    return { record: null, reason: 'region anchor not found (session mutated during summarization)' };
+  }
+  const insertAt = lastIndex + 1;
   const summaryMessage: ContextMessage = {
     role: 'user',
     name: COMPACTION_SUMMARY_MSG_NAME,
     content: `${SUMMARY_TAG_OPEN}\n${summary}\n${SUMMARY_TAG_CLOSE}`,
     timestamp: new Date().toISOString(),
   };
-  session.messages.splice(insertAt, 0, summaryMessage);
-  // 按对象身份移除被压缩消息（保护消息 skill-inject/env-context 与已删除死消息不受影响；
-  // 摘要消息不在 removeSet 中自然保留，落在被折叠区间原位）
-  session.messages = session.messages.filter(m => !compactedSet.has(m));
+
+  // 原子性：折叠阶段任何异常都恢复原会话（摘要失败时本函数未改动 session，
+  // 这里必须保持同一语义：失败 = 会话逐条等价）。
+  const messagesSnapshot = session.messages;
+  const compactionsBefore = session.compactions?.length ?? 0;
+  try {
+    session.messages.splice(insertAt, 0, summaryMessage);
+    // 按对象身份移除被压缩消息（保护消息 skill-inject/env-context 与已删除死消息不受影响；
+    // 摘要消息不在 removeSet 中自然保留，落在被折叠区间原位）
+    session.messages = session.messages.filter(m => !compactedSet.has(m));
+
+    // 6.5 记忆蒸馏水位重算（数组下标，不是消息身份）。
+    if (session.memoryState && beforeFoldMessages) {
+      session.memoryState.lastDistilledIndex =
+        rebaseDistillWatermark(beforeFoldMessages, session.messages, memoryWatermark) ?? 0;
+    }
+  } catch (err) {
+    session.messages = messagesSnapshot;
+    if (session.memoryState && memoryWatermark !== undefined) {
+      session.memoryState.lastDistilledIndex = memoryWatermark;
+    }
+    if (session.compactions) session.compactions.length = compactionsBefore;
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('context: compaction fold failed; session restored', { sessionId: session.id, error: msg });
+    return { record: null, reason: `fold failed: ${msg}` };
+  }
 
   // 7. 压缩后估算（env-context + 新摘要 + 尾部）
   const afterActive = session.messages.filter(m => !m.deletedAt && !m.compacted);
   const afterTokens = estimateMessagesTokens(afterActive);
+
+  // 7.5 配对自检：物理折叠不得切断 tool_use/tool_result。
+  // 正常路径应为 0；>0 说明规划边界出现意外，只告警不回滚（避免掩盖问题）。
+  const pairCheck = sanitizeMessages(afterActive);
+  if (pairCheck.droppedOrphanTools > 0 || pairCheck.strippedToolCalls > 0) {
+    logger.warn('context: compaction left unpaired tool messages', {
+      sessionId: session.id,
+      orphanTools: pairCheck.droppedOrphanTools,
+      strippedToolCalls: pairCheck.strippedToolCalls,
+    });
+  }
 
   // 8. 历史记录
   const record: CompactionRecord = {

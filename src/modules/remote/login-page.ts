@@ -146,7 +146,7 @@ const NOSCRIPT_CSS = `
 `;
 
 /** 页面外壳：统一 head（主题脚本先于渲染执行）+ 居中容器 */
-function pageShell(title: string, inner: string, script = ''): string {
+function pageShell(_title: string, inner: string, script = ''): string {
   return `<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex,nofollow">

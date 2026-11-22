@@ -6,6 +6,5 @@ export {
   createContextCompactionsHandler,
   createCompactPreviewHandler,
   createManualCompactHandler,
-  createContextGcHandler,
   createSummaryModelsHandler,
 } from '../../context/api/routes';

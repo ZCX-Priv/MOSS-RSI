@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { basename, join } from 'node:path';
 import type { Environment } from '../../core/types';
 import { MEMORY_HALLS } from './types';
-import type { MemoryHall, MemoryOrigin, MemoryRecord, MemoryScope, MemoryUpsertInput, ScopedMemoryRecord } from './types';
+import type { MemoryHall, MemoryRecord, MemoryScope, MemoryUpsertInput, ScopedMemoryRecord } from './types';
 
 /** 计算记忆内容哈希（sha256 前 16 位 hex） */
 export function computeMemoryId(input: {

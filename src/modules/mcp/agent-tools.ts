@@ -194,7 +194,7 @@ const STATUS_TEXT_HINT =
   'Poll this to follow progress. Pass the taskId returned by moss_dispatch_task.';
 
 /** 构造 agent 级工具集（registry 为 MCP 任务注册表；未就绪时相关工具返回明确错误） */
-export function createAgentTools(registry: McpTaskRegistry | null): AgentTool[] {
+export function createAgentTools(_registry: McpTaskRegistry | null): AgentTool[] {
   const tools: AgentTool[] = [];
 
   // ----------------------------------------------------------- 派发任务

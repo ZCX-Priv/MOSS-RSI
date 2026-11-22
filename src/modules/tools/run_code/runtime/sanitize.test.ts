@@ -47,9 +47,14 @@ describe('sanitizeForJson', () => {
 });
 
 describe('findJsonViolation', () => {
+  test('对象里的 undefined 视为未提供（与 JSON.stringify 一致）', () => {
+    expect(findJsonViolation({ a: 1, b: undefined }, 'args')).toBeNull();
+    expect(findJsonViolation({ tab: undefined, nested: { x: undefined } }, 'args')).toBeNull();
+  });
+
   test('定位第一个非法路径', () => {
-    expect(findJsonViolation({ a: 1, b: undefined }, 'args')?.path).toBe('args.b');
     expect(findJsonViolation({ a: [1, () => 1] }, 'args')?.path).toBe('args.a[1]');
+    expect(findJsonViolation({ a: [1, undefined] }, 'args')?.path).toBe('args.a[1]');
     expect(findJsonViolation({ a: new Date() }, 'args')?.reason).toContain('Date');
   });
 

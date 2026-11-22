@@ -283,7 +283,7 @@ function isEngineSelfLink(host: string, path: string): boolean {
 }
 
 /** 软件下载站/破解站特征（仅对非权威域名生效） */
-function isDownloadSpam(host: string, path: string, title: string, tier: 'high' | 'neutral' | 'low'): boolean {
+function isDownloadSpam(_host: string, path: string, title: string, tier: 'high' | 'neutral' | 'low'): boolean {
   if (tier === 'high') return false;
   const piracy = /(破解版|绿色版|激活版|汉化版|免激活|无敌版)/.test(title);
   if (piracy) return true;

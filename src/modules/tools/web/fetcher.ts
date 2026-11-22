@@ -366,7 +366,7 @@ async function fetchOnceWithRetry(
 /** 流式读取 body，超过 MAX_FETCH_BYTES 立即中止（Content-Length 预检 + 累计双保险） */
 async function readBodyWithLimit(
   response: Response,
-  signal: AbortSignal,
+  _signal: AbortSignal,
 ): Promise<{ body: Uint8Array; bytes: number }> {
   const body = response.body;
   if (!body) {

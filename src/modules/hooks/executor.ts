@@ -7,7 +7,7 @@
 // TS 模块：export default async (input) => ({decision, reason}) | void
 
 import { statSync } from 'node:fs';
-import { isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import type { Environment, Logger } from '../../core/types';
 import type { HookInput, HookOutput, ScopedHookRecord } from './types';
 import { scriptsDir } from './storage';
@@ -27,7 +27,7 @@ export interface HookExecutionOutcome {
 }
 
 /** 命令行 ~ 展开与变量环境 */
-function expandCommand(command: string, env: Environment, cwd: string): string {
+function expandCommand(command: string, env: Environment, _cwd: string): string {
   let cmd = command;
   if (cmd.startsWith('~/') || cmd.startsWith('~\\') || cmd === '~') {
     cmd = env.homeDir + cmd.slice(1);

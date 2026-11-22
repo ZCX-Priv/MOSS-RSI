@@ -5,7 +5,6 @@
 import { t } from '../../../core/i18n';
 import { ServiceNames } from '../../../core/types';
 import type {
-  BrowserFrameInfo,
   BrowserMacroStep,
   BrowserPageInfo,
   BrowserRect,

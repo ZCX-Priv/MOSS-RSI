@@ -1063,17 +1063,10 @@ export interface ImProvisioningSnapshot {
 export interface CompactionRecord {
   id: string;
   at: string;
-  trigger: 'auto' | 'manual' | 'model';
+  trigger: 'auto' | 'manual';
   beforeTokens: number;
   afterTokens: number;
   compactedCount: number;
-  /** 摘要层级（1=消息摘要，2=蒸馏，3=事实索引）；旧记录无此字段 */
-  tier?: 1 | 2 | 3;
-  /** 归档块 id（decompress 用） */
-  blockId?: string;
-  archiveId?: string;
-  /** 被折叠区间覆盖的消息 refs */
-  refs?: string[];
   /** 物理折叠的消息条数（新实现 = compactedCount；旧记录仅标记未折叠时缺省） */
   foldedMessageCount?: number;
   summary: string;

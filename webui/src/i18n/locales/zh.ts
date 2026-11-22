@@ -1951,7 +1951,6 @@ export const zh = {
     compactionCardTitle: '上下文压缩',
     triggerAuto: '自动',
     triggerManual: '手动',
-    triggerModel: '模型',
     compactedMessages: '压缩消息数',
     duration: '耗时',
     summaryModel: '摘要模型',

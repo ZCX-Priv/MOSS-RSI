@@ -15,7 +15,7 @@ import { LiveDraftStore, type LiveDraft } from './live-draft';
 import { ThinkingTranslator } from './thinking-translator';
 import { computeHistorySlice, describeSlice } from './history-page';
 import { searchHistoryDocs, type HistorySearchDoc } from './history-search';
-import { LLMError, type UnifiedRequest, type UnifiedMessage } from '../llm/types';
+import type { UnifiedRequest, UnifiedMessage } from '../llm/types';
 import type {
   AgentMessage,
   AgentEngine,
@@ -121,6 +121,12 @@ function isSubagentToolCall(tc: { name: string; arguments: string }): boolean {
 /** 工具调用上下文（预检与执行共用） */
 interface ToolCallContext {
   sessionId: string;
+  /**
+   * 运行中会话的权威对象。
+   * 工具结果必须写到这里；禁止再用 this.sessions.get(sessionId) 取对象——
+   * 会话一旦被 LRU/watcher 重载，get 会返回第二个对象，导致结果写丢、落盘互相覆盖。
+   */
+  session: Session;
   cwd: string;
   toolCallId: string;
   onEvent: (event: AgentEvent) => void;
@@ -624,6 +630,22 @@ export class AgentEngineImpl implements AgentEngine {
       });
       throw err;
     } finally {
+      // run 收尾：先把权威对象归位并立即落盘，再解除钉住。
+      // 顺序不能反——先 unpin 会留出窗口让 LRU/watcher 把会话换成重载对象，
+      // 旧对象随后覆盖落盘，工具结果再次丢失。
+      const authoritative = this.sessions.pinnedSession(input.sessionId);
+      if (authoritative) {
+        this.sessions.adopt(input.sessionId, authoritative);
+        try {
+          this.sessions.persistSession(authoritative);
+        } catch (err) {
+          this.logger.warn(t('agent.persistRunStatsFailed'), {
+            sessionId: input.sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      this.sessions.unpin(input.sessionId);
       release();
     }
   }
@@ -958,6 +980,9 @@ export class AgentEngineImpl implements AgentEngine {
       agentProfile?.maxTokens ?? cfg.maxTokens,
     );
     const session = this.sessions.getOrCreate(sessionId);
+    // 钉住运行中会话：整个 run 期间 get/getOrCreate 恒返回这个对象，
+    // 绝不被 LRU 淘汰 / watcher invalidate / 磁盘重载替换成第二个 Session。
+    this.sessions.pin(sessionId, session);
     // 新 run 开始：清空上一次错误态（侧边栏/分组错误图标立即消失）
     this.sessions.clearLastError(session);
     // 多智能体总线：主代理/子代理统一注册（子代理由 runner 预注册并传 bus meta，upsert 保号）
@@ -1181,6 +1206,20 @@ export class AgentEngineImpl implements AgentEngine {
         break;
       }
       turn++;
+
+      // 运行中会话身份归位：无论 LRU 淘汰、watcher invalidate 还是其他路径把 map 条目
+      // 删掉/换成磁盘重载对象，本轮一律以 run 手里的 session 为权威，并记录一次真凶证据。
+      // peek 只读内存，不触发 loadFromDisk；adopt 只改引用，不做磁盘 IO。
+      const mapped = this.sessions.peek(sessionId);
+      if (mapped !== session) {
+        this.logger.warn('agent: session instance replaced during run', {
+          sessionId,
+          mapPresent: mapped !== undefined,
+          runMessages: session.messages.length,
+          mapMessages: mapped?.messages.length ?? -1,
+        });
+      }
+      this.sessions.adopt(sessionId, session);
 
       // 逐轮重建流式草稿：messageId = `<sessionId>#<msgSeq>`，每 turn 消耗一个会话级序号。
       // 逐轮取号（而非「run 基数 + turn」）保证同一会话内所有 run、所有 turn 的 id 严格单调
@@ -1492,6 +1531,7 @@ export class AgentEngineImpl implements AgentEngine {
           try {
             return await this.prepareToolCall(tc, {
               sessionId,
+              session,
               cwd,
               toolCallId: tc.id,
               onEvent: emit,
@@ -1541,7 +1581,7 @@ export class AgentEngineImpl implements AgentEngine {
           // abort 时补一个错误 tool 结果，保持 tool_calls 配对完整
           // 否则 assistant 消息已带 tool_calls 但缺少对应 tool 结果，session 复用时会触发 HTTP 400
           this.sessions.addToolMessage(
-            this.sessions.get(sessionId)!,
+            session,
             tc.id,
             'Error: aborted by user',
             tc.name,
@@ -1557,6 +1597,7 @@ export class AgentEngineImpl implements AgentEngine {
         try {
           await this.executePreparedToolCall(p, {
             sessionId,
+            session,
             cwd,
             toolCallId: tc.id,
             // 统一走 emit：工具生命周期事件同步草稿状态（刷新后工具卡片状态保真）
@@ -1580,7 +1621,7 @@ export class AgentEngineImpl implements AgentEngine {
             error: err instanceof Error ? err.message : String(err),
           });
           this.sessions.addToolMessage(
-            this.sessions.get(sessionId)!,
+            session,
             tc.id,
             `Error: ${err instanceof Error ? err.message : String(err)}`,
             tc.name,
@@ -1660,7 +1701,7 @@ export class AgentEngineImpl implements AgentEngine {
       // 但若未来新增异常路径漏写，这里会补齐缺失项并告警，从根上杜绝
       // 「assistant.tool_calls 后 tool 消息不足」导致的 HTTP 400。
       const persistedToolIds = new Set<string>();
-      for (const m of this.sessions.get(sessionId)!.messages) {
+      for (const m of session.messages) {
         if (m.role === 'tool' && m.toolCallId) persistedToolIds.add(m.toolCallId);
       }
       const missingToolIds = toolCalls.filter(tc => !persistedToolIds.has(tc.id));
@@ -1671,7 +1712,7 @@ export class AgentEngineImpl implements AgentEngine {
         });
         for (const tc of missingToolIds) {
           this.sessions.addToolMessage(
-            this.sessions.get(sessionId)!,
+            session,
             tc.id,
             'Error: tool result missing (auto-repaired)',
             tc.name,
@@ -2853,7 +2894,7 @@ export class AgentEngineImpl implements AgentEngine {
   private async reviewToolCall(
     toolName: string,
     args: unknown,
-    ctx: ToolCallContext,
+    ctx: Omit<ToolCallContext, 'session'>,
   ): Promise<SafetyReviewResult> {
     const { sessionId, toolCallId, onEvent, signal, parentSessionId } = ctx;
     const base = { sessionId, toolCallId, toolName, ...(parentSessionId ? { parentSessionId } : {}) };
@@ -2962,14 +3003,14 @@ export class AgentEngineImpl implements AgentEngine {
     prepared: PreparedToolCall,
     ctx: ToolCallContext,
   ): Promise<void> {
-    const { sessionId, cwd, toolCallId, onEvent, signal } = ctx;
-    const { tc, healedName, args, healLogText, resultMode, mcpMatch } = prepared;
+    const { sessionId, session, cwd, toolCallId, onEvent, signal } = ctx;
+    const { healedName, args, healLogText, resultMode, mcpMatch } = prepared;
     const hooksEngine = this.services.tryResolve<HooksEngineServiceImpl>(ServiceNames.HOOKS_ENGINE);
 
     // 工具执行前再次检查 abort（防止在确认等待期间被 abort）
     if (signal?.aborted) {
       this.sessions.addToolMessage(
-        this.sessions.get(sessionId)!,
+        session,
         toolCallId,
         'Error: aborted by user',
         healedName,
@@ -2982,7 +3023,7 @@ export class AgentEngineImpl implements AgentEngine {
     if (prepared.outcome.kind === 'denied') {
       const text = prepared.outcome.text;
       this.sessions.addToolMessage(
-        this.sessions.get(sessionId)!,
+        session,
         toolCallId,
         text + healLogText,
         healedName,
@@ -3006,7 +3047,7 @@ export class AgentEngineImpl implements AgentEngine {
           ? `Tool "${healedName}" canceled: permission prompt unavailable in a headless subagent session (timed out)`
           : `Tool "${healedName}" canceled (user declined the permission prompt)`;
         this.sessions.addToolMessage(
-          this.sessions.get(sessionId)!,
+          session,
           toolCallId,
           reason + healLogText,
           healedName,
@@ -3122,7 +3163,7 @@ export class AgentEngineImpl implements AgentEngine {
     }
 
     this.sessions.addToolMessage(
-      this.sessions.get(sessionId)!,
+      session,
       toolCallId,
       storedResultText + healLogText,
       healedName,
@@ -3133,6 +3174,8 @@ export class AgentEngineImpl implements AgentEngine {
           ...(summaryMeta ? { toolResultSummary: summaryMeta } : {}),
         },
         ...(imagePaths.length > 0 ? { images: imagePaths } : {}),
+        // journal 存原始完整结果：开启摘要时也不让崩溃恢复拿到被压缩的版本
+        originalContent: resultText + healLogText,
       },
     );
 
@@ -3146,7 +3189,7 @@ export class AgentEngineImpl implements AgentEngine {
     });
 
     // 阶段5.1：工具执行副作用 WS 推送（todo-updated / context-updated / file-*）
-    this.notifyToolSideEffects(healedName, args, sessionId, toolCallId);
+    this.notifyToolSideEffects(healedName, args, session, toolCallId);
 
     // ===== 钩子事件：PostToolUse（通知型 fire-and-forget；失败仅日志） =====
     if (hooksEngine) {
@@ -3238,7 +3281,8 @@ export class AgentEngineImpl implements AgentEngine {
    *   （onFilesysChange，避免双发且天然覆盖 delete/move 等旧版无通知的工具）
    * server 模块未加载时静默跳过，不阻断工具执行。
    */
-  private notifyToolSideEffects(toolName: string, args: unknown, sessionId: string, toolCallId: string): void {
+  private notifyToolSideEffects(toolName: string, args: unknown, session: Session, toolCallId: string): void {
+    const sessionId = session.id;
     const server = this.services.tryResolve<{
       sendToSession: (sid: string, msg: unknown) => void;
     }>(ServiceNames.SERVER_INSTANCE);
@@ -3250,9 +3294,8 @@ export class AgentEngineImpl implements AgentEngine {
           // 会话级存储：直接读该 session 的文件（天然隔离）
           const store = readSessionTodoStore(getSessionTodoPath(this.env, sessionId));
           const todos = store.items;
-          // 持久化快照到 assistant 消息（刷新后可恢复）
-          const session = this.sessions.get(sessionId);
-          if (session) this.sessions.attachTodoSnapshot(session, toolCallId, todos);
+          // 持久化快照到 assistant 消息（刷新后可恢复）：用 run 的权威对象，绝不再 get 重载
+          this.sessions.attachTodoSnapshot(session, toolCallId, todos);
 
           // 子代理会话：todo 属于子代理自己（数据按 sessionId 隔离落盘）。
           // 隐藏会话没有前端订阅 → 通过独立事件 subagent.todo 定向通知 root 页面；
@@ -3320,6 +3363,8 @@ export class AgentEngineImpl implements AgentEngine {
     args: unknown,
     ctx: {
       sessionId: string;
+      /** 运行中会话的权威对象（嵌套调用透传；工具结果写回同一对象） */
+      session: Session;
       cwd: string;
       toolCallId: string;
       onEvent: (event: AgentEvent) => void;
@@ -3509,6 +3554,7 @@ export class AgentEngineImpl implements AgentEngine {
           nestedArgs,
           {
             sessionId: ctx.sessionId,
+            session: ctx.session,
             cwd: ctx.cwd,
             parentToolCallId: ctx.toolCallId,
             onEvent: ctx.onEvent,
@@ -3556,6 +3602,8 @@ export class AgentEngineImpl implements AgentEngine {
     args: unknown,
     ctx: {
       sessionId: string;
+      /** 运行中会话的权威对象（嵌套调用需要回写 todo 快照/上下文轨迹） */
+      session: Session;
       cwd: string;
       parentToolCallId: string;
       onEvent: (event: AgentEvent) => void;
@@ -3616,6 +3664,7 @@ export class AgentEngineImpl implements AgentEngine {
 
     const nestedCtx = {
       sessionId: ctx.sessionId,
+      session: ctx.session,
       cwd: ctx.cwd,
       toolCallId,
       // 只把交互事件转发给上层；嵌套工具进度/生命周期事件不进主消息流。
@@ -3693,7 +3742,7 @@ export class AgentEngineImpl implements AgentEngine {
     }
 
     // 副作用：嵌套 todo 快照挂到外层 run_code 的 toolCallId；read/grep/glob 更新 contextFiles。
-    this.notifyToolSideEffects(name, args, ctx.sessionId, ctx.parentToolCallId);
+    this.notifyToolSideEffects(name, args, ctx.session, ctx.parentToolCallId);
 
     return result;
   }
@@ -3962,9 +4011,9 @@ export class AgentEngineImpl implements AgentEngine {
    */
   private buildFallbackMessages(
     session: Session,
-    cwd: string,
-    model: string,
-    modelDisplayName: string,
+    _cwd: string,
+    _model: string,
+    _modelDisplayName: string,
     promptExtras?: PromptExtraSection[] | null,
   ): UnifiedMessage[] {
     const systemContent = buildStaticSystemPrompt(this.env, null, promptExtras ?? null);

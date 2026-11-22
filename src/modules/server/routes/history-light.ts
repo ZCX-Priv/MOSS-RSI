@@ -9,14 +9,6 @@ export const LAZY_RESULT_FLAG = '__mossLazy';
 /** 首屏预览保留的正文长度（够看开头，不足以替代完整内容） */
 const PREVIEW_CHARS = 800;
 
-interface LooseMessage {
-  role?: unknown;
-  content?: unknown;
-  isError?: unknown;
-  metadata?: unknown;
-  [key: string]: unknown;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
