@@ -230,6 +230,8 @@ function isSafeRelPath(rel: string): boolean {
 
 export interface InstallMarketSkillOptions {
   canonicalName: string;
+  /** 市场图标（写入 .market.json，管理面板优先展示） */
+  iconUrl?: string;
   env: Environment;
   registry: SkillRegistry;
   /** 安装后启用（缺省即启用；存在同名禁用配置时显式打开） */
@@ -249,6 +251,10 @@ export async function installMarketSkill(
   }
 
   const { env, registry, config } = opts;
+  const iconUrl =
+    typeof opts.iconUrl === 'string' && /^https?:\/\//i.test(opts.iconUrl) && opts.iconUrl.length <= 2048
+      ? opts.iconUrl
+      : undefined;
   const slug = canonicalName.slice(canonicalName.indexOf('/') + 1);
   const name = normalizeSkillName(slug);
   const skillDir = resolve(env.dataDir, 'skills', name);
@@ -319,6 +325,14 @@ export async function installMarketSkill(
         const target = resolve(staging, f.rel);
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, f.data);
+      }
+      // 市场图标元数据（隐藏文件，不计入技能附件）
+      if (iconUrl) {
+        writeFileSync(
+          resolve(staging, '.market.json'),
+          JSON.stringify({ source: 'skillhub', canonicalName, iconUrl }, null, 2),
+          'utf8',
+        );
       }
       // SKILL.md 最后写（watcher 以它为来源文件）
       writeFileSync(resolve(staging, 'SKILL.md'), skillMd, 'utf8');

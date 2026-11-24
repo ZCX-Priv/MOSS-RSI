@@ -396,6 +396,14 @@ export const api = {
     optionIndex?: number;
     env?: Record<string, string>;
     name?: string;
+    manual?: {
+      transport: 'stdio' | 'http' | 'sse';
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+    };
   }) =>
     request<{
       name: string;
@@ -757,10 +765,8 @@ export const api = {
   marketCategories: () =>
     request<{ categories: MarketCategoryItem[] }>('GET', '/api/skills/market/categories'),
   /** 安装 SkillHub 技能：后端下载 zip 写入本地技能目录并启用 */
-  installMarketSkill: (canonicalName: string) =>
-    request<{ name: string; installed: boolean }>('POST', '/api/skills/market/install', {
-      canonicalName,
-    }),
+  installMarketSkill: (data: { canonicalName: string; iconUrl?: string }) =>
+    request<{ name: string; installed: boolean }>('POST', '/api/skills/market/install', data),
   getSkill: (name: string) => request<{ skill: SkillDetail }>('GET', `/api/skills/${name}`),
   updateSkill: (name: string, patch: { enabled: boolean }) =>
     request<{ name: string; enabled: boolean }>('PATCH', `/api/skills/${encodeURIComponent(name)}`, patch),

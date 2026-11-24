@@ -1192,6 +1192,8 @@ export interface McpServer {
     source: McpMarketSource;
     id: string;
     version?: string;
+    /** 市场图标（管理面板优先展示） */
+    iconUrl?: string;
   };
 }
 
@@ -1217,7 +1219,8 @@ export interface McpMarketEnvField {
 
 export interface McpMarketInstallOption {
   index: number;
-  kind: 'stdio' | 'remote';
+  /** manual = 市场没有可用配置时的手动兜底（命令/URL 由用户填写） */
+  kind: 'stdio' | 'remote' | 'manual';
   transport: 'stdio' | 'http' | 'sse';
   label: string;
   registryType?: string;
@@ -1253,6 +1256,27 @@ export interface McpMarketDetail extends McpMarketItem {
   installOptions: McpMarketInstallOption[];
   obtainUrl?: string;
   readme?: string;
+}
+
+/** MCP 市场安装阶段（WS：mcp.install-progress） */
+export type McpInstallPhase =
+  | 'prepare'
+  | 'start'
+  | 'download'
+  | 'install'
+  | 'connect'
+  | 'done'
+  | 'error';
+
+export interface McpInstallProgressEvent {
+  source?: McpMarketSource;
+  id?: string;
+  server?: string;
+  phase: McpInstallPhase;
+  detail?: string;
+  log?: string;
+  downloaded?: number;
+  error?: string;
 }
 
 export interface McpTool {
@@ -1704,6 +1728,8 @@ export interface SkillItem {
   enabled?: boolean;
   /** Lucide 图标名（kebab-case） */
   icon?: string;
+  /** 市场安装图标（http(s) URL；管理面板优先展示） */
+  iconUrl?: string;
   /** 激活时建议允许的工具列表 */
   allowedTools?: string[];
   /** 目录式 skill 的附属文件清单（references/scripts/assets 相对路径） */

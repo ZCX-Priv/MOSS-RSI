@@ -44,6 +44,7 @@ import { useStore } from '../../store';
 import { api } from '../../api/http';
 import { copyText } from '../../lib/clipboard';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
+import { PluginIcon } from '../shared/PluginIcon';
 import { savePluginOrder, SKILL_ORDER_KEY, MCP_ORDER_KEY } from '../../lib/plugin-order';
 import type { McpServer } from '../../types/api';
 
@@ -538,9 +539,7 @@ export function SkillsTab({
                   undeletableHint={t('plugins.builtinUndeletable')}
                 >
                   <Card className="flex flex-row items-center gap-3 p-3">
-                    <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                      <Icon className="size-5" />
-                    </div>
+                    <PluginIcon src={skill.iconUrl} fallback={<Icon className="size-5" />} />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <div className="flex items-center gap-2">
                         <h3 className="text-sm font-medium text-foreground">{skill.name}</h3>
@@ -1244,8 +1243,11 @@ export function McpTab({
                 >
                   <Card className="flex flex-col gap-2 p-3">
                     <div className="flex flex-row items-center gap-3">
-                      <div className="relative flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                        <Cable className="size-5" />
+                      <div className="relative">
+                        <PluginIcon
+                          src={server.market?.iconUrl}
+                          fallback={<Cable className="size-5" />}
+                        />
                         <span
                           className={statusColor(server.status)}
                           title={

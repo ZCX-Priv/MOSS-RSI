@@ -16,28 +16,21 @@ import { useSkills } from '../../hooks/useSkills';
 import { useStore } from '../../store';
 import { api } from '../../api/http';
 import { RunningBar } from '../shared/RunningBar';
+import { PluginIcon } from '../shared/PluginIcon';
 import { McpMarketPage } from './McpMarketPage';
 import type { MarketCategoryItem, MarketSkillItem } from '../../types/api';
 
 const PAGE_SIZE = 24;
 
-/** 卡片图标：SkillHub iconUrl，缺失或加载失败时回退技能名首字符 */
+/** 卡片图标：SkillHub iconUrl，缺失或加载失败/超时回退技能名首字符 */
 function SkillIcon({ item }: { item: MarketSkillItem }) {
-  const [broken, setBroken] = useState(false);
   return (
-    <div className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted">
-      {item.iconUrl && !broken ? (
-        <img
-          src={item.iconUrl}
-          alt=""
-          loading="lazy"
-          className="size-10 object-cover"
-          onError={() => setBroken(true)}
-        />
-      ) : (
+    <PluginIcon
+      src={item.iconUrl}
+      fallback={
         <span className="text-sm font-medium text-muted-foreground">{item.name.slice(0, 1)}</span>
-      )}
-    </div>
+      }
+    />
   );
 }
 
@@ -77,13 +70,14 @@ export function SkillMarketPage() {
   /** 已展示的技能指纹（跨页去重交给后端过滤） */
   const excludeRef = useRef<Set<string>>(new Set());
 
-  // 分类（失败静默：仍可只看“全部”）
+  // 分类（失败静默：仍可只看“全部”）；MCP tab 下不请求技能数据
   useEffect(() => {
+    if (tab !== 'skills') return;
     api
       .marketCategories()
       .then((res) => setCategories(res.categories))
       .catch(() => {});
-  }, []);
+  }, [tab]);
 
   // 搜索防抖
   useEffect(() => {
@@ -120,10 +114,11 @@ export function SkillMarketPage() {
     [debouncedKeyword, category],
   );
 
-  // 分类/关键词变化 → 回到第一页重新加载
+  // 分类/关键词变化 → 回到第一页重新加载（仅技能 tab）
   useEffect(() => {
+    if (tab !== 'skills') return;
     void load(1);
-  }, [load]);
+  }, [load, tab]);
 
   /** 列表滚动容器：距底部 300px 内自动加载下一页 */
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -150,7 +145,10 @@ export function SkillMarketPage() {
     async (item: MarketSkillItem): Promise<void> => {
       setInstalling(item.canonicalName);
       try {
-        const res = await api.installMarketSkill(item.canonicalName);
+        const res = await api.installMarketSkill({
+          canonicalName: item.canonicalName,
+          ...(item.iconUrl ? { iconUrl: item.iconUrl } : {}),
+        });
         setInstalledLocal((prev) => new Set(prev).add(res.name));
         toast.success(t('plugins.marketInstallSuccess', { name: item.name }));
         void reloadSkills();
@@ -178,25 +176,6 @@ export function SkillMarketPage() {
     },
     [navigate],
   );
-
-  // 按分类顺序分组（未知分类归“其他”，排最后）
-  const groups = useMemo(() => {
-    const order = new Map(categories.map((c, i) => [c.key, i]));
-    const names = new Map(categories.map((c) => [c.key, c.name]));
-    const buckets = new Map<string, MarketSkillItem[]>();
-    for (const item of items) {
-      const list = buckets.get(item.category);
-      if (list) list.push(item);
-      else buckets.set(item.category, [item]);
-    }
-    return Array.from(buckets.entries())
-      .sort(([a], [b]) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER))
-      .map(([key, list]) => ({
-        key,
-        title: names.get(key) ?? t('plugins.marketGroupOther'),
-        list,
-      }));
-  }, [items, categories, t]);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -300,56 +279,49 @@ export function SkillMarketPage() {
           </div>
         )}
 
-        <div className="flex flex-col gap-6">
-          {groups.map((group) => (
-            <section key={group.key} className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium text-foreground">{group.title}</h2>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {group.list.map((item) => {
-                  const installed = installedNames.has(item.installName);
-                  const busy = installing === item.canonicalName;
-                  return (
-                    <Card key={item.canonicalName} className="flex flex-row items-center gap-3 p-3">
-                      <SkillIcon item={item} />
-                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <h3 className="truncate text-sm font-medium text-foreground">{item.name}</h3>
-                        <p className="line-clamp-2 text-xs text-muted-foreground">
-                          {item.description || item.subCategory}
-                        </p>
-                      </div>
-                      {installed ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="shrink-0 gap-1"
-                          onClick={() => useSkill(item)}
-                        >
-                          <ArrowRight className="size-3.5" />
-                          {t('plugins.marketUse')}
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="relative shrink-0 gap-1 overflow-hidden"
-                          disabled={busy}
-                          onClick={() => void install(item)}
-                        >
-                          {busy && <RunningBar />}
-                          {busy ? (
-                            <Loader2 className="size-3.5 animate-spin" />
-                          ) : (
-                            <Download className="size-3.5" />
-                          )}
-                          {busy ? t('plugins.marketInstalling') : t('plugins.marketInstall')}
-                        </Button>
-                      )}
-                    </Card>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {items.map((item) => {
+            const installed = installedNames.has(item.installName);
+            const busy = installing === item.canonicalName;
+            return (
+              <Card key={item.canonicalName} className="flex flex-row items-center gap-3 p-3">
+                <SkillIcon item={item} />
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <h3 className="truncate text-sm font-medium text-foreground">{item.name}</h3>
+                  <p className="line-clamp-2 text-xs text-muted-foreground">
+                    {item.description || item.subCategory}
+                  </p>
+                </div>
+                {installed ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1"
+                    onClick={() => useSkill(item)}
+                  >
+                    <ArrowRight className="size-3.5" />
+                    {t('plugins.marketUse')}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="relative shrink-0 gap-1 overflow-hidden"
+                    disabled={busy}
+                    onClick={() => void install(item)}
+                  >
+                    {busy && <RunningBar />}
+                    {busy ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    {busy ? t('plugins.marketInstalling') : t('plugins.marketInstall')}
+                  </Button>
+                )}
+              </Card>
+            );
+          })}
         </div>
 
         {loading && items.length > 0 && (

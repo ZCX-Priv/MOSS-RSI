@@ -10,7 +10,11 @@
 import { t } from '../../core/i18n';
 import type { EventBus, Logger } from '../../core/types';
 import type { MCPManager } from '../contracts';
-import { DEFAULT_CONNECT_TIMEOUT_MS, type ServerConfig } from './client';
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  type McpInstallProgressPayload,
+  type ServerConfig,
+} from './client';
 import {
   applyHeaderTemplates,
   createMarketProviders,
@@ -37,6 +41,8 @@ const DEFAULT_SOURCE: McpMarketSource = 'mcpmarket';
 const PAGE_SIZE_DEFAULT = 24;
 const PAGE_SIZE_MAX = 50;
 const DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+/** 列表查询缓存时长 */
+const QUERY_CACHE_TTL_MS = 60 * 1000;
 /** 市场安装后的连接超时（npx/uvx 首次下载依赖可能较慢，SDK 默认 60s 不够） */
 const MARKET_CONNECT_TIMEOUT_MS = DEFAULT_CONNECT_TIMEOUT_MS;
 
@@ -44,6 +50,16 @@ const SOURCES: McpMarketSource[] = ['mcpmarket', 'official', 'modelscope'];
 
 /** 本地服务器名合法字符（与 MCPManager 校验保持一致） */
 const SERVER_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+/** 手动配置安装：市场没有可用配置时由用户填写 */
+export interface McpManualInstall {
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
 
 export interface McpMarketService {
   query(args: {
@@ -62,6 +78,8 @@ export interface McpMarketService {
       optionIndex?: number;
       env?: Record<string, string>;
       name?: string;
+      /** kind='manual' 时必须提供 */
+      manual?: McpManualInstall;
     },
     opts?: { awaitConnect?: boolean },
   ): Promise<{
@@ -93,9 +111,62 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** 市场图标只接受 http(s) URL（限长），避免写入奇怪协议 */
+function marketIconUrl(raw: string | undefined): string | undefined {
+  return raw && raw.length <= 2048 && /^https?:\/\//i.test(raw) ? raw : undefined;
+}
+
+/** 替换模板中的 {VAR}；URL 场景对值做 encodeURIComponent */
+function substituteBracedVars(
+  text: string,
+  values: Record<string, string>,
+  encode = false,
+): string {
+  return text.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, key: string) => {
+    const value = values[key];
+    if (value === undefined || value === '') return match;
+    return encode ? encodeURIComponent(value) : value;
+  });
+}
+
+/** 环境变量键名合法字符（手动配置） */
+const MANUAL_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** 请求头键名合法字符（手动配置） */
+const MANUAL_HEADER_KEY_RE = /^[A-Za-z0-9-]+$/;
+
+function sanitizeManualEnv(raw: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (typeof value !== 'string' || !MANUAL_ENV_KEY_RE.test(key)) continue;
+    if (!value || value.includes('\n') || value.includes('\r')) continue;
+    out[key] = value.slice(0, 8192);
+  }
+  return out;
+}
+
+function sanitizeManualHeaders(raw: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (typeof value !== 'string' || !MANUAL_HEADER_KEY_RE.test(key)) continue;
+    if (!value || value.includes('\n') || value.includes('\r')) continue;
+    out[key] = value.slice(0, 8192);
+  }
+  return out;
+}
+
 export class McpMarketServiceImpl implements McpMarketService {
   private readonly providers = new Map<McpMarketSource, McpMarketProvider>();
   private readonly detailCache = new Map<string, { at: number; value: McpMarketDetail }>();
+  /** 列表查询缓存：60 秒内重复进入/切换源直接命中 */
+  private readonly queryCache = new Map<
+    string,
+    { at: number; value: McpMarketQueryResult & { source: McpMarketSource } }
+  >();
+  /** 同 key 并发请求合并，避免 React 双挂载重复打上游 */
+  private readonly queryInflight = new Map<
+    string,
+    Promise<McpMarketQueryResult & { source: McpMarketSource }>
+  >();
 
   constructor(
     private readonly deps: {
@@ -123,16 +194,36 @@ export class McpMarketServiceImpl implements McpMarketService {
   }): Promise<McpMarketQueryResult & { source: McpMarketSource }> {
     const source = resolveSource(args.source);
     const pageSize = Math.min(PAGE_SIZE_MAX, Math.max(1, args.pageSize ?? PAGE_SIZE_DEFAULT));
+    const keyword = typeof args.keyword === 'string' ? args.keyword : '';
+    const pageToken =
+      typeof args.pageToken === 'string' && args.pageToken ? args.pageToken : undefined;
+    const key = `${source}|${keyword}|${pageToken ?? ''}|${pageSize}`;
+
+    const cached = this.queryCache.get(key);
+    if (cached && Date.now() - cached.at < QUERY_CACHE_TTL_MS) {
+      return cached.value;
+    }
+    const inflight = this.queryInflight.get(key);
+    if (inflight) return inflight;
+
+    const task = (async () => {
+      try {
+        const result = await this.provider(source).query(keyword, pageToken, pageSize);
+        const value = { ...result, source };
+        // 简单容量上限：避免长时间搜索导致缓存无限增长
+        if (this.queryCache.size >= 200) this.queryCache.clear();
+        this.queryCache.set(key, { at: Date.now(), value });
+        return value;
+      } catch (err) {
+        if (err instanceof McpMarketError) throw err;
+        throw new McpMarketError('UPSTREAM_UNAVAILABLE', errorMessage(err));
+      }
+    })();
+    this.queryInflight.set(key, task);
     try {
-      const result = await this.provider(source).query(
-        typeof args.keyword === 'string' ? args.keyword : '',
-        typeof args.pageToken === 'string' && args.pageToken ? args.pageToken : undefined,
-        pageSize,
-      );
-      return { ...result, source };
-    } catch (err) {
-      if (err instanceof McpMarketError) throw err;
-      throw new McpMarketError('UPSTREAM_UNAVAILABLE', errorMessage(err));
+      return await task;
+    } finally {
+      this.queryInflight.delete(key);
     }
   }
 
@@ -155,19 +246,9 @@ export class McpMarketServiceImpl implements McpMarketService {
     }
   }
 
-  /** 广播安装阶段（前端进度条用）：download → install → start */
-  private emitProgress(
-    detail: { source: McpMarketSource; id: string; name: string },
-    phase: 'download' | 'install' | 'start',
-  ): void {
-    void this.deps.eventBus
-      .broadcast('mcp:install:progress', {
-        source: detail.source,
-        id: detail.id,
-        name: detail.name,
-        phase,
-      })
-      .catch(() => {});
+  /** 广播安装进度（真实阶段 + 可选日志，不含伪造百分比） */
+  private emitProgress(payload: McpInstallProgressPayload): void {
+    void this.deps.eventBus.broadcast('mcp:install:progress', payload).catch(() => {});
   }
 
   async install(
@@ -177,6 +258,7 @@ export class McpMarketServiceImpl implements McpMarketService {
       optionIndex?: number;
       env?: Record<string, string>;
       name?: string;
+      manual?: McpManualInstall;
     },
     opts?: { awaitConnect?: boolean },
   ): Promise<{
@@ -188,11 +270,15 @@ export class McpMarketServiceImpl implements McpMarketService {
     error?: string;
   }> {
     const source = resolveSource(args.source);
-    this.emitProgress({ source, id: args.id, name: args.id }, 'download');
+    this.emitProgress({
+      source,
+      id: args.id,
+      phase: 'prepare',
+      detail: '读取市场配置',
+    });
     const detail = await this.detail(source, args.id);
-    this.emitProgress(detail, 'install');
     const option = this.selectOption(detail, args.optionIndex);
-    const inputs = this.validateEnv(option, args.env ?? {});
+    const inputs = option.kind === 'manual' ? {} : this.validateEnv(option, args.env ?? {});
 
     // 名称与冲突处理
     const servers = this.deps.manager.listServers();
@@ -221,7 +307,17 @@ export class McpMarketServiceImpl implements McpMarketService {
     }
 
     // 组装最终 ServerConfig
-    const def = this.buildServerConfig(detail, option, inputs);
+    this.emitProgress({
+      source: detail.source,
+      id: detail.id,
+      server: name,
+      phase: 'prepare',
+      detail: '写入服务器配置',
+    });
+    const def =
+      option.kind === 'manual'
+        ? this.buildManualServerConfig(detail, args.manual)
+        : this.buildServerConfig(detail, option, inputs);
     try {
       if (updated) {
         await this.deps.manager.updateServer(name, def, { connect: false });
@@ -239,15 +335,23 @@ export class McpMarketServiceImpl implements McpMarketService {
       updated,
     });
 
-    // 配置已写入：进入启动/连接阶段
-    this.emitProgress(detail, 'start');
+    // 配置已写入：进入启动/连接阶段（后续 download/install/connect 由 manager 根据真实日志推送）
+    this.emitProgress({
+      source: detail.source,
+      id: detail.id,
+      server: name,
+      phase: 'start',
+    });
 
     // 连接策略：路由路径后台连接（立即返回）；工具路径等待连接结果
     if (opts?.awaitConnect) {
       let connected = false;
       let error: string | undefined;
       try {
-        await this.deps.manager.connect(name, { timeoutMs: MARKET_CONNECT_TIMEOUT_MS });
+        await this.deps.manager.connect(name, {
+          timeoutMs: MARKET_CONNECT_TIMEOUT_MS,
+          verbose: true,
+        });
         connected = true;
       } catch (err) {
         error = errorMessage(err);
@@ -261,11 +365,13 @@ export class McpMarketServiceImpl implements McpMarketService {
       };
     }
 
-    void this.deps.manager.connect(name, { timeoutMs: MARKET_CONNECT_TIMEOUT_MS }).catch((err: unknown) => {
-      // manager 已广播错误并安排自动重试，这里只记录日志，避免重复广播
-      const message = errorMessage(err);
-      this.deps.logger.warn(t('mcp.marketConnectFailed', { name }), { error: message });
-    });
+    void this.deps.manager
+      .connect(name, { timeoutMs: MARKET_CONNECT_TIMEOUT_MS, verbose: true })
+      .catch((err: unknown) => {
+        // manager 已广播错误并安排自动重试，这里只记录日志，避免重复广播
+        const message = errorMessage(err);
+        this.deps.logger.warn(t('mcp.marketConnectFailed', { name }), { error: message });
+      });
 
     return { name, installed: true, ...(updated ? { updated: true } : {}) };
   }
@@ -341,17 +447,23 @@ export class McpMarketServiceImpl implements McpMarketService {
     return values;
   }
 
+  /** 市场元数据（安装来源 / 版本 / 图标） */
+  private marketMeta(detail: McpMarketDetail): NonNullable<ServerConfig['market']> {
+    return {
+      source: detail.source,
+      id: detail.id,
+      ...(detail.version ? { version: detail.version } : {}),
+      ...(marketIconUrl(detail.iconUrl) ? { iconUrl: detail.iconUrl } : {}),
+    };
+  }
+
   /** 把市场详情 + 选项 + env 输入转换为 MCPManager 的 ServerConfig */
   private buildServerConfig(
     detail: McpMarketDetail,
     option: McpMarketInstallOption,
     inputs: Record<string, string>,
   ): ServerConfig {
-    const market = {
-      source: detail.source,
-      id: detail.id,
-      ...(detail.version ? { version: detail.version } : {}),
-    };
+    const market = this.marketMeta(detail);
 
     if (option.kind === 'stdio') {
       if (!option.command) {
@@ -362,13 +474,8 @@ export class McpMarketServiceImpl implements McpMarketService {
         const value = inputs[field.name];
         if (value !== undefined && value !== '') env[field.name] = value;
       }
-      // 官方 Registry 的 packageArguments 可能含 {VAR} 占位符：安装时用用户输入补全
-      const args = (option.args ?? []).map((arg) =>
-        arg.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, key: string) => {
-          const value = inputs[key];
-          return value !== undefined && value !== '' ? value : match;
-        }),
-      );
+      // 市场配置的 args 可能含 {VAR} 占位符（来自 YOUR_API_KEY / *** 等识别结果）
+      const args = (option.args ?? []).map((arg) => substituteBracedVars(arg, inputs));
       // npx 在非交互子进程中可能等待“是否安装”确认：统一补 -y，避免首次安装卡死
       const baseCommand = option.command.toLowerCase().replace(/\.cmd$/i, '');
       if (baseCommand === 'npx' && !args.includes('-y') && !args.includes('--yes')) {
@@ -386,11 +493,13 @@ export class McpMarketServiceImpl implements McpMarketService {
     if (!option.url) {
       throw new McpMarketError('OPTION_INVALID', 'remote option is missing url');
     }
+    // URL 查询/路径中的 {VAR}（如 apikey={API_KEY}）替换为实际输入值；查询值做 URL 编码
+    const renderedUrl = substituteBracedVars(option.url, inputs, true);
     let url: URL;
     try {
-      url = new URL(option.url);
+      url = new URL(renderedUrl);
     } catch {
-      throw new McpMarketError('OPTION_INVALID', `invalid remote url: ${option.url}`);
+      throw new McpMarketError('OPTION_INVALID', `invalid remote url: ${renderedUrl}`);
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new McpMarketError('OPTION_INVALID', `unsupported remote protocol: ${url.protocol}`);
@@ -411,7 +520,113 @@ export class McpMarketServiceImpl implements McpMarketService {
 
     return {
       transport: option.transport,
-      url: option.url,
+      url: renderedUrl,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      market,
+    };
+  }
+
+  /** 手动配置安装：市场没有可用配置时，由用户在弹窗填写的命令/URL 生成 ServerConfig */
+  private buildManualServerConfig(
+    detail: McpMarketDetail,
+    manual: McpManualInstall | undefined,
+  ): ServerConfig {
+    if (!manual || typeof manual !== 'object') {
+      throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualRequired'));
+    }
+    const market = this.marketMeta(detail);
+
+    if (manual.transport === 'stdio') {
+      const command = typeof manual.command === 'string' ? manual.command.trim() : '';
+      if (!command || command.length > 500) {
+        throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+          message: 'command is required',
+        }));
+      }
+      const args = Array.isArray(manual.args)
+        ? manual.args
+            .filter((value): value is string => typeof value === 'string')
+            .slice(0, 100)
+            .map((value) => value.slice(0, 2000))
+        : [];
+      // 与自动安装一致：npx 在非交互子进程中补 -y，避免首次安装等待确认
+      const baseCommand = command.toLowerCase().replace(/\.cmd$/i, '');
+      if (baseCommand === 'npx' && !args.includes('-y') && !args.includes('--yes')) {
+        args.unshift('-y');
+      }
+      if (
+        manual.env !== undefined &&
+        (typeof manual.env !== 'object' || manual.env === null || Array.isArray(manual.env))
+      ) {
+        throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+          message: 'env must be an object',
+        }));
+      }
+      for (const [key, value] of Object.entries(manual.env ?? {})) {
+        if (
+          typeof value !== 'string' ||
+          !MANUAL_ENV_KEY_RE.test(key) ||
+          value.includes('\n') ||
+          value.includes('\r')
+        ) {
+          throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+            message: `invalid env: ${key}`,
+          }));
+        }
+      }
+      const env = sanitizeManualEnv(manual.env);
+      return {
+        transport: 'stdio',
+        command,
+        ...(args.length > 0 ? { args } : {}),
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+        market,
+      };
+    }
+
+    if (manual.transport !== 'http' && manual.transport !== 'sse') {
+      throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+        message: 'transport must be stdio, http or sse',
+      }));
+    }
+    const urlRaw = typeof manual.url === 'string' ? manual.url.trim() : '';
+    let url: URL;
+    try {
+      url = new URL(urlRaw);
+    } catch {
+      throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+        message: 'invalid url',
+      }));
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+        message: `unsupported protocol: ${url.protocol}`,
+      }));
+    }
+    if (
+      manual.headers !== undefined &&
+      (typeof manual.headers !== 'object' || manual.headers === null || Array.isArray(manual.headers))
+    ) {
+      throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+        message: 'headers must be an object',
+      }));
+    }
+    for (const [key, value] of Object.entries(manual.headers ?? {})) {
+      if (
+        typeof value !== 'string' ||
+        !MANUAL_HEADER_KEY_RE.test(key) ||
+        value.includes('\n') ||
+        value.includes('\r')
+      ) {
+        throw new McpMarketError('OPTION_INVALID', t('mcp.marketManualInvalid', {
+          message: `invalid header: ${key}`,
+        }));
+      }
+    }
+    const headers = sanitizeManualHeaders(manual.headers);
+    return {
+      transport: manual.transport,
+      url: urlRaw,
       ...(Object.keys(headers).length > 0 ? { headers } : {}),
       market,
     };

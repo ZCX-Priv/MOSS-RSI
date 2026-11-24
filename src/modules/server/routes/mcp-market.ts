@@ -9,6 +9,7 @@ import { ServiceNames } from '../../../core/types';
 import { ErrorCode } from '../../../core/error-codes';
 import {
   McpMarketError,
+  type McpManualInstall,
   type McpMarketService,
   type McpMarketSource,
 } from '../../mcp/market';
@@ -146,6 +147,7 @@ export function createMcpMarketInstallHandler(services: ServiceRegistry): RouteH
       optionIndex?: unknown;
       env?: unknown;
       name?: unknown;
+      manual?: unknown;
     };
     const id = typeof body.id === 'string' ? body.id.trim() : '';
     if (!id) {
@@ -159,8 +161,12 @@ export function createMcpMarketInstallHandler(services: ServiceRegistry): RouteH
             ),
           ) as Record<string, string>)
         : undefined;
+    const manual =
+      body.manual && typeof body.manual === 'object' && !Array.isArray(body.manual)
+        ? (body.manual as McpManualInstall)
+        : undefined;
     try {
-      // 等待连接结果：首次 npx/uvx 下载依赖可能较慢，但弹窗需要明确反馈
+      // 写盘后立即返回；依赖下载/安装/连接进度通过 WS 实时推送
       const result = await market.install(
         {
           source: readSource(body.source),
@@ -171,8 +177,9 @@ export function createMcpMarketInstallHandler(services: ServiceRegistry): RouteH
               : undefined,
           ...(env ? { env } : {}),
           ...(typeof body.name === 'string' && body.name.trim() ? { name: body.name.trim() } : {}),
+          ...(manual ? { manual } : {}),
         },
-        { awaitConnect: true },
+        { awaitConnect: false },
       );
       return { status: 200, body: result };
     } catch (err) {

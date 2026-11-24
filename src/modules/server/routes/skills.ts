@@ -36,6 +36,7 @@ function toSkillItem(
     builtin: isBuiltinSkill(env, s.name),
     ...(s.dir ? { dir: s.dir } : {}),
     ...(s.icon ? { icon: s.icon } : {}),
+    ...(s.iconUrl ? { iconUrl: s.iconUrl } : {}),
     ...(s.allowedTools ? { allowedTools: s.allowedTools } : {}),
     ...(s.files && s.files.length > 0 ? { files: s.files } : {}),
   };

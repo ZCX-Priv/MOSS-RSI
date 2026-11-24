@@ -9,7 +9,7 @@
 // 运行：bun test src/modules/mcp/client.test.ts
 
 import { describe, it, expect } from 'bun:test';
-import { McpClient } from './client';
+import { McpClient, transportAttempts } from './client';
 import type { Logger, EventBus } from '../../core/types';
 
 /** sdkClient 实际收到的实参列表（每个元素是一次调用的 args 数组） */
@@ -36,6 +36,14 @@ function makeClient(): McpClient {
     noopEventBus,
   );
 }
+
+describe('transportAttempts', () => {
+  it('远端传输双向回退：配置优先，失败后尝试另一种', () => {
+    expect(transportAttempts('stdio')).toEqual(['stdio']);
+    expect(transportAttempts('http')).toEqual(['http', 'sse']);
+    expect(transportAttempts('sse')).toEqual(['sse', 'http']);
+  });
+});
 
 describe('McpClient.callTool 实参顺序（SDK callTool(params, resultSchema?, options?)）', () => {
   it('options 落在第 3 位，第 2 位 resultSchema 为 undefined', async () => {

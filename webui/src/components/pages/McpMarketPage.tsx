@@ -22,20 +22,23 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { useMcp } from '../../hooks/useMcp';
 import { api } from '../../api/http';
 import { wsClient } from '../../api/ws';
 import { copyText } from '../../lib/clipboard';
 import { RunningBar } from '../shared/RunningBar';
+import { PluginIcon } from '../shared/PluginIcon';
 import type {
+  McpInstallPhase,
+  McpInstallProgressEvent,
   McpMarketDetail,
   McpMarketEnvField,
   McpMarketInstallOption,
@@ -46,25 +49,74 @@ import type {
 const PAGE_SIZE = 24;
 const SOURCE_STORAGE_KEY = 'moss.mcpMarketSource';
 const SERVER_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+/** 列表缓存时长（切换 tab / 源后立即恢复） */
+const LIST_CACHE_MS = 60_000;
 
-/** 安装三阶段：下载安装配置 → 写入安装 → 启动并连接 */
-type InstallPhase = 'download' | 'install' | 'start';
+/** 安装阶段顺序（只允许前进；error 直接覆盖） */
+const INSTALL_PHASE_RANK: Record<McpInstallPhase, number> = {
+  prepare: 0,
+  start: 1,
+  download: 2,
+  install: 3,
+  connect: 4,
+  done: 5,
+  error: 99,
+};
+
+/** 阶段 → i18n key */
+const INSTALL_PHASE_KEYS: Record<McpInstallPhase, string> = {
+  prepare: 'plugins.mcpInstallPhasePrepare',
+  start: 'plugins.mcpInstallPhaseStart',
+  download: 'plugins.mcpInstallPhaseDownload',
+  install: 'plugins.mcpInstallPhaseInstall',
+  connect: 'plugins.mcpInstallConnecting',
+  done: 'plugins.mcpInstallPhaseDone',
+  error: 'plugins.mcpInstallPhaseError',
+};
 
 interface InstallTask {
   /** `${source}:${id}` */
   key: string;
-  name: string;
-  phase: InstallPhase;
+  source: McpMarketSource;
+  id: string;
+  /** 写盘成功后返回的本地服务器名 */
+  name?: string;
+  marketName: string;
+  phase: McpInstallPhase;
+  detail?: string;
+  log: string[];
+  downloaded: number;
+  startedAt: number;
+  /** 重新配置：旧连接可能仍是 connected，需确认新连接已开始/完成 */
+  reconfiguring: boolean;
 }
 
-const INSTALL_PHASES: InstallPhase[] = ['download', 'install', 'start'];
+/** 安装提交参数（自动配置 / 手动配置共用） */
+interface InstallPayload {
+  source: McpMarketSource;
+  id: string;
+  optionIndex?: number;
+  env?: Record<string, string>;
+  name?: string;
+  /** 重新配置已安装的同源服务器 */
+  reconfiguring?: boolean;
+  manual?: {
+    transport: 'stdio' | 'http' | 'sse';
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    headers?: Record<string, string>;
+  };
+}
 
-/** 阶段对应进度值（阶段内不谎报字节进度，仅做阶段级推进） */
-const INSTALL_PHASE_PERCENT: Record<InstallPhase, number> = {
-  download: 20,
-  install: 55,
-  start: 85,
-};
+/** 第一页列表缓存（模块级：切换 tab 后立即恢复） */
+interface ListCacheEntry {
+  items: McpMarketItem[];
+  nextToken?: string;
+  at: number;
+}
+const listCache = new Map<string, ListCacheEntry>();
 
 const SOURCE_OPTIONS: Array<{ value: McpMarketSource; labelKey: string }> = [
   { value: 'mcpmarket', labelKey: 'plugins.mcpMarketSourceMcpMarket' },
@@ -83,23 +135,13 @@ function readSavedSource(): McpMarketSource {
   return saved === 'official' || saved === 'modelscope' ? saved : 'mcpmarket';
 }
 
-/** 市场卡片图标：加载失败回退 Cable */
+/** 市场卡片图标：加载失败/超时回退 Cable */
 function MarketIcon({ item }: { item: McpMarketItem }) {
-  const [broken, setBroken] = useState(false);
   return (
-    <div className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted">
-      {item.iconUrl && !broken ? (
-        <img
-          src={item.iconUrl}
-          alt=""
-          loading="lazy"
-          className="size-10 object-cover"
-          onError={() => setBroken(true)}
-        />
-      ) : (
-        <Cable className="size-5 text-muted-foreground" />
-      )}
-    </div>
+    <PluginIcon
+      src={item.iconUrl}
+      fallback={<Cable className="size-5 text-muted-foreground" />}
+    />
   );
 }
 
@@ -113,6 +155,14 @@ function defaultsFor(option: McpMarketInstallOption | undefined): Record<string,
   return out;
 }
 
+/** 手动配置：把市场声明的 env 变量预填为 KEY=默认值 */
+function manualEnvSeed(option: McpMarketInstallOption | undefined): string {
+  return (option?.env ?? [])
+    .filter((field) => field.fixedValue === undefined)
+    .map((field) => `${field.name}=${field.default ?? ''}`)
+    .join('\n');
+}
+
 function renderHeaderTemplates(
   templates: Record<string, string> | undefined,
   values: Record<string, string>,
@@ -124,6 +174,19 @@ function renderHeaderTemplates(
   return out;
 }
 
+/** 替换 {VAR}：URL 场景对值做 URL 编码，未填写的变量保留 {VAR} */
+function renderTemplate(
+  text: string,
+  values: Record<string, string>,
+  encode = false,
+): string {
+  return text.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, key: string) => {
+    const value = values[key];
+    if (!value) return match;
+    return encode ? encodeURIComponent(value) : value;
+  });
+}
+
 /** 生成与参考图一致的 mcpServers JSON 预览 */
 function buildPreview(
   option: McpMarketInstallOption | undefined,
@@ -132,22 +195,78 @@ function buildPreview(
 ): string {
   if (!option) return '{}';
   const entry: Record<string, unknown> = {};
+  // 固定值 + 用户输入：用于替换 args / URL / headers 中的 {VAR}
+  const values: Record<string, string> = {};
+  for (const field of option.env) {
+    const value = field.fixedValue ?? envValues[field.name] ?? '';
+    if (value) values[field.name] = value;
+  }
   if (option.kind === 'stdio') {
     entry.command = option.command ?? '';
-    if (option.args && option.args.length > 0) entry.args = option.args;
-    const env: Record<string, string> = {};
-    for (const field of option.env) {
-      const value = field.fixedValue ?? envValues[field.name] ?? '';
-      if (value) env[field.name] = value;
+    if (option.args && option.args.length > 0) {
+      entry.args = option.args.map((arg) => renderTemplate(arg, values));
     }
-    if (Object.keys(env).length > 0) entry.env = env;
+    if (Object.keys(values).length > 0) entry.env = values;
   } else {
     entry.type = option.transport === 'sse' ? 'sse' : 'http';
-    entry.url = option.url ?? '';
-    const headers = renderHeaderTemplates(option.headerTemplates, envValues);
+    entry.url = renderTemplate(option.url ?? '', values, true);
+    const headers = renderHeaderTemplates(option.headerTemplates, values);
     if (Object.keys(headers).length > 0) entry.headers = headers;
   }
   return JSON.stringify({ mcpServers: { [name || 'server']: entry } }, null, 2);
+}
+
+/** 逐行解析 KEY=VALUE / Key: Value，返回合法值与非法行 */
+function parseKeyValueLines(
+  text: string,
+  separator: '=' | ':',
+  keyRe: RegExp,
+): { values: Record<string, string>; invalid: string[] } {
+  const values: Record<string, string> = {};
+  const invalid: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const index = line.indexOf(separator);
+    if (index <= 0) {
+      invalid.push(line);
+      continue;
+    }
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1).trim();
+    if (!keyRe.test(key)) {
+      invalid.push(line);
+      continue;
+    }
+    values[key] = value;
+  }
+  return { values, invalid };
+}
+
+/** 手动配置的 JSON 预览 */
+function buildManualPreview(params: {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command: string;
+  argsText: string;
+  url: string;
+  envText: string;
+  headersText: string;
+}): string {
+  const entry: Record<string, unknown> = {};
+  if (params.transport === 'stdio') {
+    entry.command = params.command.trim();
+    const args = params.argsText.trim() ? params.argsText.trim().split(/\s+/).filter(Boolean) : [];
+    if (args.length > 0) entry.args = args;
+    const env = parseKeyValueLines(params.envText, '=', /^[A-Za-z_][A-Za-z0-9_]*$/).values;
+    if (Object.keys(env).length > 0) entry.env = env;
+  } else {
+    entry.type = params.transport === 'sse' ? 'sse' : 'http';
+    entry.url = params.url.trim();
+    const headers = parseKeyValueLines(params.headersText, ':', /^[A-Za-z0-9-]+$/).values;
+    if (Object.keys(headers).length > 0) entry.headers = headers;
+  }
+  return JSON.stringify({ mcpServers: { [params.name || 'server']: entry } }, null, 2);
 }
 
 export function McpMarketPage({
@@ -177,6 +296,18 @@ export function McpMarketPage({
 
   /** 请求序号：源/关键词快速切换时丢弃过期响应 */
   const seqRef = useRef(0);
+  /** 详情请求序号：快速点击不同卡片时丢弃过期响应 */
+  const detailSeqRef = useRef(0);
+  /** 详情缓存：再次点击同一卡片直接打开 */
+  const detailCacheRef = useRef(new Map<string, McpMarketDetail>());
+  /** 已结束任务（避免 connected/error 重复 toast） */
+  const handledTaskRef = useRef(new Set<string>());
+  /** 重新配置时旧状态可能仍是 connected：必须观察到 connecting/disconnected 才接受新结果 */
+  const sawNonConnectedRef = useRef(false);
+  /** 日志批量刷新（避免每行日志触发整页重渲染） */
+  const pendingLogsRef = useRef<string[]>([]);
+  const pendingLogKeyRef = useRef('');
+  const logFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     localStorage.setItem(SOURCE_STORAGE_KEY, source);
@@ -187,16 +318,53 @@ export function McpMarketPage({
     return () => clearTimeout(timer);
   }, [keyword]);
 
+  /** 批量把缓冲日志追加到匹配的安装任务 */
+  const flushPendingLogs = useCallback((): void => {
+    logFlushTimerRef.current = null;
+    const lines = pendingLogsRef.current.splice(0);
+    if (lines.length === 0) return;
+    const logKey = pendingLogKeyRef.current;
+    setInstallTask((prev) => {
+      if (!prev) return prev;
+      const matches =
+        (prev.name !== undefined && logKey === `server:${prev.name}`) ||
+        logKey === `${prev.source}:${prev.id}`;
+      if (!matches) return prev;
+      return { ...prev, log: [...prev.log, ...lines].slice(-200) };
+    });
+  }, []);
+
+  const scheduleLogFlush = useCallback((): void => {
+    if (logFlushTimerRef.current) return;
+    logFlushTimerRef.current = setTimeout(flushPendingLogs, 150);
+  }, [flushPendingLogs]);
+
+  useEffect(
+    () => () => {
+      if (logFlushTimerRef.current) clearTimeout(logFlushTimerRef.current);
+    },
+    [],
+  );
+
   const load = useCallback(
     async (pageToken: string | undefined, append: boolean): Promise<void> => {
       const seq = ++seqRef.current;
+      const cacheKey = `${source}|${debouncedKeyword}`;
       if (append) {
         setLoadingMore(true);
       } else {
-        // 源/关键词切换：先清空旧列表，避免短暂展示另一个源的条目
-        setItems([]);
-        setNextToken(undefined);
-        setLoading(true);
+        const cached = listCache.get(cacheKey);
+        if (cached && Date.now() - cached.at < LIST_CACHE_MS) {
+          // 命中缓存：立即渲染，同时后台静默刷新
+          setItems(cached.items);
+          setNextToken(cached.nextToken);
+          setLoading(false);
+        } else {
+          setItems([]);
+          setNextToken(undefined);
+          setLoading(true);
+        }
+        scrollRef.current?.scrollTo({ top: 0 });
       }
       setError(false);
       try {
@@ -208,6 +376,13 @@ export function McpMarketPage({
         if (seq !== seqRef.current) return;
         setItems((prev) => (append ? [...prev, ...res.items] : res.items));
         setNextToken(res.nextPageToken);
+        if (!append) {
+          listCache.set(cacheKey, {
+            items: res.items,
+            nextToken: res.nextPageToken,
+            at: Date.now(),
+          });
+        }
       } catch {
         if (seq === seqRef.current) setError(true);
       } finally {
@@ -244,53 +419,119 @@ export function McpMarketPage({
     [servers],
   );
 
-  // 安装阶段事件（后端 mcp:install:progress）：驱动弹窗进度条
+  // 安装进度事件（后端真实阶段 + npm/uv 日志）
   useEffect(() => {
     const unsub = wsClient.onMessage((msg) => {
       if (msg.type !== 'mcp.install-progress') return;
-      const payload = msg.payload as
-        | { source?: unknown; id?: unknown; phase?: unknown }
-        | undefined;
-      if (!payload) return;
-      if (!INSTALL_PHASES.includes(payload.phase as InstallPhase)) return;
-      const key = `${String(payload.source ?? '')}:${String(payload.id ?? '')}`;
-      const phase = payload.phase as InstallPhase;
-      setInstallTask((prev) => (prev && prev.key === key ? { ...prev, phase } : prev));
+      const payload = msg.payload as Partial<McpInstallProgressEvent> | undefined;
+      if (!payload || typeof payload.phase !== 'string') return;
+      const phase = payload.phase as McpInstallPhase;
+      if (!(phase in INSTALL_PHASE_RANK)) return;
+
+      setInstallTask((prev) => {
+        if (!prev) return prev;
+        const matches =
+          (typeof payload.server === 'string' && prev.name === payload.server) ||
+          (payload.source === prev.source && payload.id === prev.id);
+        if (!matches) return prev;
+        const nextPhase =
+          phase === 'error' || INSTALL_PHASE_RANK[phase] >= INSTALL_PHASE_RANK[prev.phase]
+            ? phase
+            : prev.phase;
+        return {
+          ...prev,
+          phase: nextPhase,
+          ...(typeof payload.detail === 'string' && payload.detail
+            ? { detail: payload.detail }
+            : {}),
+          ...(typeof payload.downloaded === 'number'
+            ? { downloaded: payload.downloaded }
+            : {}),
+        };
+      });
+
+      if (typeof payload.log === 'string' && payload.log) {
+        // 用 source/id 匹配：API 返回前任务还没有本地服务器名，但 source/id 一开始就有
+        pendingLogKeyRef.current = `${payload.source ?? ''}:${payload.id ?? ''}`;
+        pendingLogsRef.current.push(...payload.log.split(/\r?\n/));
+        if (pendingLogsRef.current.length > 200) {
+          pendingLogsRef.current = pendingLogsRef.current.slice(-200);
+        }
+        scheduleLogFlush();
+      }
     });
     return unsub;
-  }, []);
+  }, [scheduleLogFlush]);
 
-  /** 发起安装：任务托管在页面层，弹窗关闭后仍持续；结束后刷新列表 */
+  // 连接成功/失败：关闭对应弹窗并清理任务（失败时配置已写入，MCP 管理页可重试）
+  useEffect(() => {
+    const task = installTask;
+    if (!task?.name) return;
+    const server = servers.find((item) => item.name === task.name);
+    if (!server) return;
+    const closeCurrentDialog = detail?.source === task.source && detail.id === task.id;
+    if (server.status === 'connecting' || server.status === 'disconnected') {
+      sawNonConnectedRef.current = true;
+      return;
+    }
+    // 重新配置时旧状态可能仍是 connected/error：需新连接已开始/完成，或超过 3s 兜底
+    const newConnectionStarted =
+      sawNonConnectedRef.current || task.phase === 'done' || Date.now() - task.startedAt > 3000;
+    if (server.status === 'connected') {
+      if (task.reconfiguring && !newConnectionStarted) return;
+      if (handledTaskRef.current.has(task.key)) return;
+      handledTaskRef.current.add(task.key);
+      toast.success(t('plugins.mcpInstallSuccess', { name: task.name }));
+      if (closeCurrentDialog) setDetailOpen(false);
+      setInstallTask(null);
+      return;
+    }
+    const newConnectionFailed =
+      task.phase === 'error' ||
+      sawNonConnectedRef.current ||
+      Date.now() - task.startedAt > 3000;
+    if (server.status === 'error' && server.lastError && newConnectionFailed) {
+      if (handledTaskRef.current.has(task.key)) return;
+      handledTaskRef.current.add(task.key);
+      toast.warning(
+        t('plugins.mcpInstallConnectFailed', { error: server.lastError }),
+        { duration: 8000 },
+      );
+      if (closeCurrentDialog) setDetailOpen(false);
+      setInstallTask(null);
+    }
+  }, [servers, installTask, detail, t]);
+
+  /** 发起安装：写盘后立即返回；后续下载/安装/连接进度由 WS 驱动 */
   const startInstall = useCallback(
-    async (
-      payload: {
-        source: McpMarketSource;
-        id: string;
-        optionIndex?: number;
-        env?: Record<string, string>;
-        name?: string;
-      },
-      marketDetail: McpMarketDetail,
-    ): Promise<void> => {
+    async (payload: InstallPayload, marketDetail: McpMarketDetail): Promise<void> => {
       const key = `${payload.source}:${payload.id}`;
-      setInstallTask({ key, name: marketDetail.name, phase: 'download' });
+      pendingLogsRef.current = [];
+      pendingLogKeyRef.current = key;
+      handledTaskRef.current.clear();
+      sawNonConnectedRef.current = false;
+      setInstallTask({
+        key,
+        source: payload.source,
+        id: payload.id,
+        marketName: marketDetail.name,
+        phase: 'prepare',
+        log: [],
+        downloaded: 0,
+        startedAt: Date.now(),
+        reconfiguring: payload.reconfiguring === true,
+      });
       try {
         const result = await api.marketMcpInstall(payload);
-        if (result.connected === false) {
-          toast.warning(
-            t('plugins.mcpInstallConnectFailed', { error: result.error ?? '' }),
-            { duration: 8000 },
-          );
-        } else {
-          toast.success(t('plugins.mcpInstallSuccess', { name: result.name }));
-        }
+        setInstallTask((prev) =>
+          prev && prev.key === key ? { ...prev, name: result.name } : prev,
+        );
         await reload();
       } catch (err) {
+        setInstallTask(null);
         const message = err instanceof Error ? err.message : String(err);
         toast.error(`${t('plugins.mcpInstallFailed')}${message ? `: ${message}` : ''}`);
         throw err;
-      } finally {
-        setInstallTask(null);
       }
     },
     [reload, t],
@@ -298,18 +539,33 @@ export function McpMarketPage({
 
   const openInstall = useCallback(
     async (item: McpMarketItem, existingName?: string): Promise<void> => {
+      const seq = ++detailSeqRef.current;
+      const cacheKey = `${item.source}:${item.id}`;
+      const cached = detailCacheRef.current.get(cacheKey);
+      if (cached) {
+        setDetail(cached);
+        setInstalledName(existingName);
+        setDetailOpen(true);
+        return;
+      }
+      // 先打开弹窗展示加载态，详情返回后再渲染表单（避免点击后无反馈）
+      setDetail(null);
+      setInstalledName(existingName);
+      setDetailOpen(true);
       setDetailLoadingId(item.id);
       try {
         const result = await api.marketMcpDetail(item.source, item.id);
+        if (seq !== detailSeqRef.current) return;
+        detailCacheRef.current.set(cacheKey, result);
         setDetail(result);
-        setInstalledName(existingName);
-        setDetailOpen(true);
       } catch (err) {
+        if (seq !== detailSeqRef.current) return;
+        setDetailOpen(false);
         toast.error(
           `${t('plugins.mcpMarketLoadFailed')}${err instanceof Error ? `: ${err.message}` : ''}`,
         );
       } finally {
-        setDetailLoadingId(null);
+        if (seq === detailSeqRef.current) setDetailLoadingId(null);
       }
     },
     [t],
@@ -335,8 +591,17 @@ export function McpMarketPage({
       {/* 列表 */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-6 pb-6">
         {loading && items.length === 0 && (
-          <div className="flex justify-center py-12">
-            <Loader2 className="size-5 animate-spin text-muted-foreground" />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <Card key={index} className="flex flex-row items-start gap-3 p-3">
+                <div className="size-10 shrink-0 animate-pulse rounded-lg bg-muted" />
+                <div className="flex min-w-0 flex-1 flex-col gap-2 py-0.5">
+                  <div className="h-3.5 w-1/2 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-full animate-pulse rounded bg-muted/70" />
+                  <div className="h-3 w-2/3 animate-pulse rounded bg-muted/70" />
+                </div>
+              </Card>
+            ))}
           </div>
         )}
 
@@ -376,6 +641,20 @@ export function McpMarketPage({
                   <p className="line-clamp-2 text-xs text-muted-foreground">
                     {item.description || t('plugins.mcpMarketNoDescription')}
                   </p>
+                  {installing && installTask && (
+                    <div className="flex flex-col gap-1 pt-0.5">
+                      <div className="relative h-1 w-full overflow-hidden rounded-full bg-muted">
+                        <span className="absolute inset-y-0 w-1/3 animate-[moss-running-bar_1.2s_ease-in-out_infinite] rounded-full bg-primary" />
+                      </div>
+                      <p className="truncate text-[11px] text-primary-strong">
+                        {t(INSTALL_PHASE_KEYS[installTask.phase])}
+                        {installTask.detail ? ` · ${installTask.detail}` : ''}
+                        {installTask.downloaded > 0
+                          ? ` · ${t('plugins.mcpInstallDownloaded', { count: installTask.downloaded })}`
+                          : ''}
+                      </p>
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                     <span>{t(SOURCE_LABEL_KEYS[item.source])}</span>
                     {item.hosted && (
@@ -401,7 +680,7 @@ export function McpMarketPage({
                   variant={installed ? 'outline' : 'default'}
                   size="sm"
                   className="relative shrink-0 gap-1 overflow-hidden"
-                  disabled={busy || installing}
+                  disabled={busy}
                   onClick={() => void openInstall(item, installed?.name)}
                 >
                   {installing && <RunningBar />}
@@ -456,16 +735,7 @@ function McpInstallDialog({
   detail: McpMarketDetail | null;
   installedName?: string;
   task?: InstallTask | null;
-  onInstall: (
-    payload: {
-      source: McpMarketSource;
-      id: string;
-      optionIndex?: number;
-      env?: Record<string, string>;
-      name?: string;
-    },
-    detail: McpMarketDetail,
-  ) => Promise<void>;
+  onInstall: (payload: InstallPayload, detail: McpMarketDetail) => Promise<void>;
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
@@ -477,6 +747,14 @@ function McpInstallDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState<string[]>([]);
+  // 手动配置
+  const [manualTransport, setManualTransport] = useState<'stdio' | 'http' | 'sse'>('stdio');
+  const [manualCommand, setManualCommand] = useState('');
+  const [manualArgsText, setManualArgsText] = useState('');
+  const [manualUrl, setManualUrl] = useState('');
+  const [manualEnvText, setManualEnvText] = useState('');
+  const [manualHeadersText, setManualHeadersText] = useState('');
+  const [elapsed, setElapsed] = useState(0);
 
   // 只展示当前弹窗条目对应的安装任务（避免上一个条目的进度串台）
   const activeTask = useMemo(
@@ -485,14 +763,7 @@ function McpInstallDialog({
     [task, detail],
   );
   const phase = activeTask?.phase;
-  const phasePercent = phase ? INSTALL_PHASE_PERCENT[phase] : 0;
-  const phaseLabel = phase
-    ? phase === 'download'
-      ? t('plugins.mcpInstallPhaseDownload')
-      : phase === 'install'
-        ? t('plugins.mcpInstallPhaseInstall')
-        : t('plugins.mcpInstallConnecting')
-    : '';
+  const phaseLabel = phase ? t(INSTALL_PHASE_KEYS[phase]) : '';
 
   useEffect(() => {
     if (!open || !detail) return;
@@ -505,6 +776,19 @@ function McpInstallDialog({
     setBusy(false);
     setError(null);
     setMissing([]);
+    setManualTransport(first?.transport ?? 'stdio');
+    setManualCommand(first?.command ?? '');
+    setManualArgsText((first?.args ?? []).join(' '));
+    setManualUrl(first?.url ?? '');
+    setManualEnvText(first?.kind === 'manual' ? manualEnvSeed(first) : '');
+    setManualHeadersText(
+      first?.headerTemplates
+        ? Object.entries(first.headerTemplates)
+            .map(([key, value]) => `${key}: ${value}`)
+            .join('\n')
+        : '',
+    );
+    setElapsed(0);
   }, [open, detail, installedName]);
 
   const option = useMemo(
@@ -514,6 +798,7 @@ function McpInstallDialog({
       detail?.installOptions[0],
     [detail, optionIndex],
   );
+  const isManualOption = option?.kind === 'manual';
 
   const editableFields = useMemo(
     () => (option?.env ?? []).filter((field) => field.fixedValue === undefined),
@@ -547,15 +832,111 @@ function McpInstallDialog({
       setEnvValues(defaultsFor(next));
       setMissing([]);
       setError(null);
+      if (next?.kind === 'manual') {
+        setManualTransport(next.transport);
+        setManualCommand(next.command ?? '');
+        setManualArgsText((next.args ?? []).join(' '));
+        setManualUrl(next.url ?? '');
+        setManualEnvText(manualEnvSeed(next));
+        setManualHeadersText(
+          next.headerTemplates
+            ? Object.entries(next.headerTemplates)
+                .map(([key, value]) => `${key}: ${value}`)
+                .join('\n')
+            : '',
+        );
+      }
     },
     [detail],
   );
 
-  const preview = useMemo(() => buildPreview(option, name, envValues), [option, name, envValues]);
+  const manualEnvParsed = useMemo(
+    () => parseKeyValueLines(manualEnvText, '=', /^[A-Za-z_][A-Za-z0-9_]*$/),
+    [manualEnvText],
+  );
+  const manualHeadersParsed = useMemo(
+    () => parseKeyValueLines(manualHeadersText, ':', /^[A-Za-z0-9-]+$/),
+    [manualHeadersText],
+  );
+  const manualLinesInvalid =
+    isManualOption &&
+    (manualTransport === 'stdio'
+      ? manualEnvParsed.invalid.length > 0
+      : manualHeadersParsed.invalid.length > 0);
+  const manualRequiredMissing =
+    isManualOption && manualTransport === 'stdio'
+      ? (option?.env ?? [])
+          .filter(
+            (field) =>
+              field.required &&
+              field.fixedValue === undefined &&
+              !(manualEnvParsed.values[field.name] ?? '').trim(),
+          )
+          .map((field) => field.name)
+      : [];
+  const manualValid =
+    !isManualOption ||
+    (manualTransport === 'stdio'
+      ? manualCommand.trim().length > 0 && manualRequiredMissing.length === 0
+      : /^https?:\/\//i.test(manualUrl.trim()));
 
-  const requiredMissing = requiredFields.some((field) => !(envValues[field.name] ?? '').trim());
+  const preview = useMemo(() => {
+    if (isManualOption) {
+      return buildManualPreview({
+        name,
+        transport: manualTransport,
+        command: manualCommand,
+        argsText: manualArgsText,
+        url: manualUrl,
+        envText: manualEnvText,
+        headersText: manualHeadersText,
+      });
+    }
+    return buildPreview(option, name, envValues);
+  }, [
+    isManualOption,
+    name,
+    manualTransport,
+    manualCommand,
+    manualArgsText,
+    manualUrl,
+    manualEnvText,
+    manualHeadersText,
+    option,
+    envValues,
+  ]);
+
+  const requiredMissing = !isManualOption &&
+    requiredFields.some((field) => !(envValues[field.name] ?? '').trim());
   const nameValid = SERVER_NAME_RE.test(name);
-  const disabled = busy || !option?.supported || requiredMissing || !nameValid;
+  const disabled =
+    busy ||
+    !option?.supported ||
+    requiredMissing ||
+    !nameValid ||
+    Boolean(activeTask) ||
+    !manualValid ||
+    manualLinesInvalid;
+
+  // 安装中每秒刷新用时（阶段结束即停止）
+  useEffect(() => {
+    if (!activeTask || activeTask.phase === 'done' || activeTask.phase === 'error') {
+      setElapsed(0);
+      return;
+    }
+    const update = (): void =>
+      setElapsed(Math.max(0, Math.floor((Date.now() - activeTask.startedAt) / 1000)));
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [activeTask?.key, activeTask?.startedAt, activeTask?.phase]);
+
+  // 日志自动滚到底
+  const logRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeTask?.log]);
 
   const copyPreview = useCallback(async (): Promise<void> => {
     if (await copyText(preview)) toast.success(t('plugins.mcpInstallCopied'));
@@ -563,14 +944,21 @@ function McpInstallDialog({
   }, [preview, t]);
 
   const submit = useCallback(async (): Promise<void> => {
-    if (!detail || !option || busy) return;
-    const missingNow = requiredFields
-      .filter((field) => !(envValues[field.name] ?? '').trim())
-      .map((field) => field.name);
-    if (missingNow.length > 0) {
-      setMissing(missingNow);
-      setError(t('plugins.mcpInstallMissingEnv'));
-      return;
+    if (!detail || !option || busy || activeTask) return;
+    if (isManualOption) {
+      if (!manualValid || manualLinesInvalid) {
+        setError(t('plugins.mcpInstallManualInvalid'));
+        return;
+      }
+    } else {
+      const missingNow = requiredFields
+        .filter((field) => !(envValues[field.name] ?? '').trim())
+        .map((field) => field.name);
+      if (missingNow.length > 0) {
+        setMissing(missingNow);
+        setError(t('plugins.mcpInstallMissingEnv'));
+        return;
+      }
     }
     if (!SERVER_NAME_RE.test(name)) {
       setError(t('plugins.mcpInstallNameInvalid'));
@@ -579,18 +967,43 @@ function McpInstallDialog({
     setBusy(true);
     setError(null);
     try {
-      // 安装任务由页面层托管：弹窗可随时关闭，后台继续安装/连接
-      await onInstall(
-        {
-          source: detail.source,
-          id: detail.id,
-          optionIndex: option.index,
-          env: envValues,
-          name,
-        },
-        detail,
-      );
-      onOpenChange(false);
+      const payload: InstallPayload = isManualOption
+        ? {
+            source: detail.source,
+            id: detail.id,
+            optionIndex: option.index,
+            name,
+            reconfiguring: Boolean(installedName),
+            manual: {
+              transport: manualTransport,
+              ...(manualTransport === 'stdio'
+                ? {
+                    command: manualCommand.trim(),
+                    ...(manualArgsText.trim()
+                      ? { args: manualArgsText.trim().split(/\s+/).filter(Boolean) }
+                      : {}),
+                    ...(Object.keys(manualEnvParsed.values).length > 0
+                      ? { env: manualEnvParsed.values }
+                      : {}),
+                  }
+                : {
+                    url: manualUrl.trim(),
+                    ...(Object.keys(manualHeadersParsed.values).length > 0
+                      ? { headers: manualHeadersParsed.values }
+                      : {}),
+                  }),
+            },
+          }
+        : {
+            source: detail.source,
+            id: detail.id,
+            optionIndex: option.index,
+            env: envValues,
+            name,
+            reconfiguring: Boolean(installedName),
+          };
+      // 安装任务由页面层托管：弹窗保持打开展示真实进度，可随时关闭
+      await onInstall(payload, detail);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('MCP_MARKET_NAME_CONFLICT')) {
@@ -606,7 +1019,27 @@ function McpInstallDialog({
     } finally {
       setBusy(false);
     }
-  }, [detail, option, busy, requiredFields, envValues, name, onInstall, onOpenChange, t]);
+  }, [
+    detail,
+    option,
+    busy,
+    activeTask,
+    isManualOption,
+    manualValid,
+    manualLinesInvalid,
+    requiredFields,
+    envValues,
+    name,
+    manualTransport,
+    manualCommand,
+    manualArgsText,
+    manualEnvParsed,
+    manualUrl,
+    manualHeadersParsed,
+    installedName,
+    onInstall,
+    t,
+  ]);
 
   const renderField = (field: McpMarketEnvField) => {
     const value = envValues[field.name] ?? '';
@@ -712,12 +1145,55 @@ function McpInstallDialog({
           {detail && option ? (
             <div className="flex flex-col gap-4">
               {activeTask && (
-                <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/30 p-3">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-foreground">{phaseLabel}</span>
-                    <span className="text-muted-foreground">{phasePercent}%</span>
+                <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="min-w-0 truncate font-medium text-foreground">
+                      {phaseLabel}
+                      {activeTask.detail ? ` · ${activeTask.detail}` : ''}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {t('plugins.mcpInstallElapsed', { seconds: elapsed })}
+                    </span>
                   </div>
-                  <Progress value={phasePercent} />
+                  <div className="relative h-1 w-full overflow-hidden rounded-full bg-muted">
+                    {phase === 'done' ? (
+                      <span className="absolute inset-0 rounded-full bg-success" />
+                    ) : (
+                      <span
+                        className={cn(
+                          'absolute inset-y-0 w-1/3 animate-[moss-running-bar_1.2s_ease-in-out_infinite] rounded-full',
+                          phase === 'error' ? 'bg-destructive' : 'bg-primary',
+                        )}
+                      />
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                    {activeTask.downloaded > 0 && (
+                      <span>
+                        {t('plugins.mcpInstallDownloaded', { count: activeTask.downloaded })}
+                      </span>
+                    )}
+                    <span>{t('plugins.mcpInstallBackgroundHint')}</span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[11px] font-medium text-foreground">
+                      {t('plugins.mcpInstallLog')}
+                    </span>
+                    <div
+                      ref={logRef}
+                      className="max-h-40 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
+                    >
+                      {activeTask.log.length === 0 ? (
+                        <span>{t('plugins.mcpInstallLogWaiting')}</span>
+                      ) : (
+                        activeTask.log.map((line, index) => (
+                          <div key={index} className="whitespace-pre-wrap break-all">
+                            {line}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -750,34 +1226,157 @@ function McpInstallDialog({
                 </div>
               )}
 
-              <section className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
+              {isManualOption ? (
+                <section className="flex flex-col gap-3">
                   <h4 className="text-sm font-medium text-foreground">
-                    {t('plugins.mcpInstallRequiredEnv')}
+                    {t('plugins.mcpInstallManual')}
                   </h4>
-                  <span className="text-xs text-muted-foreground">{requiredFields.length}</span>
-                </div>
-                {requiredFields.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">{t('plugins.mcpInstallNoEnv')}</p>
-                ) : (
-                  <div className="flex flex-col gap-3">{requiredFields.map(renderField)}</div>
-                )}
-              </section>
-
-              {optionalFields.length > 0 && (
-                <div className="rounded-lg border border-border px-3 py-2">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between text-xs text-muted-foreground hover:text-foreground"
-                    onClick={() => setShowOptional((prev) => !prev)}
-                  >
-                    <span>{t('plugins.mcpInstallOptionalEnv', { count: optionalFields.length })}</span>
-                    <span>{showOptional ? '−' : '+'}</span>
-                  </button>
-                  {showOptional && (
-                    <div className="mt-3 flex flex-col gap-3">{optionalFields.map(renderField)}</div>
+                  <p className="text-xs text-muted-foreground">
+                    {t('plugins.mcpInstallManualHint')}
+                  </p>
+                  {detail.readme && (
+                    <details className="rounded-lg border border-border px-3 py-2">
+                      <summary className="cursor-pointer text-xs font-medium text-foreground">
+                        {t('plugins.mcpInstallReadme')}
+                      </summary>
+                      <div className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+                        {detail.readme}
+                      </div>
+                    </details>
                   )}
-                </div>
+                  <div className="flex flex-col gap-1.5">
+                    <Label className="text-xs">{t('plugins.mcpInstallManualTransport')}</Label>
+                    <Select
+                      value={manualTransport}
+                      onValueChange={(value) =>
+                        setManualTransport(value as 'stdio' | 'http' | 'sse')
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="stdio">stdio</SelectItem>
+                        <SelectItem value="http">http</SelectItem>
+                        <SelectItem value="sse">sse</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {manualTransport === 'stdio' ? (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="mcp-manual-command" className="text-xs">
+                          {t('plugins.mcpInstallManualCommand')}
+                        </Label>
+                        <Input
+                          id="mcp-manual-command"
+                          value={manualCommand}
+                          onChange={(e) => setManualCommand(e.target.value)}
+                          placeholder="npx"
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="mcp-manual-args" className="text-xs">
+                          {t('plugins.mcpInstallManualArgs')}
+                        </Label>
+                        <Input
+                          id="mcp-manual-args"
+                          value={manualArgsText}
+                          onChange={(e) => setManualArgsText(e.target.value)}
+                          placeholder="-y @scope/mcp-server@1.0.0"
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="mcp-manual-env" className="text-xs">
+                          {t('plugins.mcpInstallManualEnv')}
+                        </Label>
+                        <Textarea
+                          id="mcp-manual-env"
+                          value={manualEnvText}
+                          onChange={(e) => setManualEnvText(e.target.value)}
+                          placeholder={'API_KEY=...\nLOG_LEVEL=info'}
+                          className="min-h-24 font-mono text-xs"
+                        />
+                        {manualEnvParsed.invalid.length > 0 && (
+                          <p className="text-[11px] text-destructive">
+                            {t('plugins.mcpInstallManualInvalid')}：{manualEnvParsed.invalid.join('; ')}
+                          </p>
+                        )}
+                        {manualRequiredMissing.length > 0 && (
+                          <p className="text-[11px] text-destructive">
+                            {t('plugins.mcpInstallMissingEnv')}：{manualRequiredMissing.join(', ')}
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="mcp-manual-url" className="text-xs">
+                          {t('plugins.mcpInstallManualUrl')}
+                        </Label>
+                        <Input
+                          id="mcp-manual-url"
+                          value={manualUrl}
+                          onChange={(e) => setManualUrl(e.target.value)}
+                          placeholder="https://mcp.example.com/mcp"
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="mcp-manual-headers" className="text-xs">
+                          {t('plugins.mcpInstallManualHeaders')}
+                        </Label>
+                        <Textarea
+                          id="mcp-manual-headers"
+                          value={manualHeadersText}
+                          onChange={(e) => setManualHeadersText(e.target.value)}
+                          placeholder={'Authorization: Bearer ...'}
+                          className="min-h-24 font-mono text-xs"
+                        />
+                        {manualHeadersParsed.invalid.length > 0 && (
+                          <p className="text-[11px] text-destructive">
+                            {t('plugins.mcpInstallManualInvalid')}：{manualHeadersParsed.invalid.join('; ')}
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </section>
+              ) : (
+                <>
+                  <section className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-medium text-foreground">
+                        {t('plugins.mcpInstallRequiredEnv')}
+                      </h4>
+                      <span className="text-xs text-muted-foreground">{requiredFields.length}</span>
+                    </div>
+                    {requiredFields.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">{t('plugins.mcpInstallNoEnv')}</p>
+                    ) : (
+                      <div className="flex flex-col gap-3">{requiredFields.map(renderField)}</div>
+                    )}
+                  </section>
+
+                  {optionalFields.length > 0 && (
+                    <div className="rounded-lg border border-border px-3 py-2">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => setShowOptional((prev) => !prev)}
+                      >
+                        <span>{t('plugins.mcpInstallOptionalEnv', { count: optionalFields.length })}</span>
+                        <span>{showOptional ? '−' : '+'}</span>
+                      </button>
+                      {showOptional && (
+                        <div className="mt-3 flex flex-col gap-3">{optionalFields.map(renderField)}</div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
 
               <div className="flex flex-col gap-1.5">
@@ -828,8 +1427,8 @@ function McpInstallDialog({
             {t('common.cancel')}
           </Button>
           <Button onClick={() => void submit()} disabled={disabled}>
-            {busy && <Loader2 className="size-3.5 animate-spin" />}
-            {busy
+            {(busy || activeTask) && <Loader2 className="size-3.5 animate-spin" />}
+            {busy || activeTask
               ? t('plugins.mcpInstalling')
               : installedName
                 ? t('plugins.mcpMarketReconfigure')

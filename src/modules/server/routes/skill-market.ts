@@ -102,12 +102,18 @@ export function createInstallMarketSkillHandler(
     if (!registry) {
       return { status: 404, body: { error: ErrorCode.SKILL_REGISTRY_UNAVAILABLE } };
     }
-    const body = req.body as { canonicalName?: unknown } | undefined;
+    const body = req.body as { canonicalName?: unknown; iconUrl?: unknown } | undefined;
     const canonicalName =
       typeof body?.canonicalName === 'string' ? body.canonicalName.trim() : '';
+    const iconUrl =
+      typeof body?.iconUrl === 'string' &&
+      body.iconUrl.length <= 2048 &&
+      /^https?:\/\//i.test(body.iconUrl)
+        ? body.iconUrl
+        : undefined;
 
     try {
-      const result = await installMarketSkill({ canonicalName, env, registry, config });
+      const result = await installMarketSkill({ canonicalName, iconUrl, env, registry, config });
       return { status: 200, body: result };
     } catch (err) {
       if (err instanceof SkillMarketError) {

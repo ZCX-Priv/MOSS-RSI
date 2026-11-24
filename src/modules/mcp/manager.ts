@@ -14,6 +14,8 @@ import {
   type McpClientHooks,
   type McpElicitOutcome,
   type McpElicitRequest,
+  type McpInstallPhase,
+  type McpInstallProgressPayload,
   type McpToolInfo,
   type McpToolResult,
   type ServerConfig,
@@ -45,12 +47,52 @@ interface ServerState {
 /** 自动重连退避序列（毫秒，之后固定 60s） */
 const RECONNECT_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
+/** 安装阶段顺序（只允许前进；error 直接覆盖） */
+const INSTALL_PHASE_RANK: Record<McpInstallPhase, number> = {
+  prepare: 0,
+  start: 1,
+  download: 2,
+  install: 3,
+  connect: 4,
+  done: 5,
+  error: 99,
+};
+
+/** 安装日志批量推送间隔（避免每个 stderr 行都触发前端重渲染） */
+const INSTALL_LOG_FLUSH_MS = 150;
+
+interface InstallProgressState {
+  phase: McpInstallPhase;
+  lines: string[];
+  detail?: string;
+  error?: string;
+  downloaded: number;
+  /** 已下载 tarball URL（去重计数） */
+  tarballs: Set<string>;
+  timer?: ReturnType<typeof setTimeout>;
+  finished: boolean;
+}
+
+/** 从包管理器 stderr 推断当前是“下载依赖”还是“安装依赖” */
+function inferInstallPhase(line: string): 'download' | 'install' | null {
+  if (/http fetch GET \d+ .*\.tgz/i.test(line)) return 'download';
+  if (/will be installed|downloading|downloaded|resolved \d+ packages/i.test(line)) {
+    return 'download';
+  }
+  if (/added \d+ packages|installed \d+ packages|prepared \d+ packages|reify/i.test(line)) {
+    return 'install';
+  }
+  return null;
+}
+
 export class MCPManagerImpl implements MCPManager {
   private readonly entries = new Map<string, McpClientEntry>();
   /** 每台服务器的运行状态（连接中/已连接/失败/断开 + 重试定时器） */
   private readonly states = new Map<string, ServerState>();
   /** 正在删除的服务器：阻止重连调度与 reload 期间的重新连接 */
   private readonly deleting = new Set<string>();
+  /** 市场安装实时进度（仅 verbose 首次连接期间存在） */
+  private readonly installProgress = new Map<string, InstallProgressState>();
   private readonly config: ConfigService;
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
@@ -179,6 +221,146 @@ export class MCPManagerImpl implements MCPManager {
       clearTimeout(state.retryTimer);
       state.retryTimer = undefined;
     }
+  }
+
+  /** 开始一次市场安装的实时进度跟踪（仅 verbose 首次连接） */
+  private beginInstallProgress(serverName: string): void {
+    const previous = this.installProgress.get(serverName);
+    if (previous?.timer) clearTimeout(previous.timer);
+    this.installProgress.set(serverName, {
+      phase: 'start',
+      lines: [],
+      downloaded: 0,
+      tarballs: new Set(),
+      finished: false,
+    });
+  }
+
+  /** 日志脱敏：把配置中的 env/header 值替换为 *** */
+  private redactInstallLog(text: string, def: ServerConfig): string {
+    let out = text;
+    const secrets = [...Object.values(def.env ?? {}), ...Object.values(def.headers ?? {})];
+    for (const value of secrets) {
+      if (typeof value === 'string' && value.length >= 4) {
+        out = out.split(value).join('***');
+      }
+    }
+    return out;
+  }
+
+  /** 接收 stdio stderr，推断下载/安装阶段并批量广播 */
+  private queueInstallLog(serverName: string, def: ServerConfig, chunk: string): void {
+    const state = this.installProgress.get(serverName);
+    if (!state || state.finished || !def.market) return;
+    const cleaned = this.redactInstallLog(
+      chunk.replace(/\u001b\[[0-9;]*m/g, ''),
+      def,
+    );
+    let phaseChanged = false;
+    for (const rawLine of cleaned.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const text = line.slice(0, 500);
+      const inferred = inferInstallPhase(text);
+      if (inferred && INSTALL_PHASE_RANK[inferred] > INSTALL_PHASE_RANK[state.phase]) {
+        state.phase = inferred;
+        phaseChanged = true;
+      }
+      const tarball = text.match(/https?:\/\/[^\s"'<>]+\.tgz/i)?.[0];
+      if (tarball) {
+        state.tarballs.add(tarball);
+        state.downloaded = state.tarballs.size;
+        if (INSTALL_PHASE_RANK[state.phase] < INSTALL_PHASE_RANK.download) {
+          state.phase = 'download';
+          phaseChanged = true;
+        }
+        const pkg = tarball.match(/registry\.npmjs\.org\/(.+?)\/-\//i)?.[1];
+        if (pkg) {
+          try {
+            state.detail = decodeURIComponent(pkg);
+          } catch {
+            state.detail = pkg;
+          }
+        }
+      }
+      if (state.lines.length < 40) state.lines.push(text);
+    }
+    if (phaseChanged) {
+      this.flushInstallProgress(serverName, def, true);
+    } else {
+      this.scheduleInstallFlush(serverName, def);
+    }
+  }
+
+  /** 定时批量推送日志（避免每行都触发 WS/前端重渲染） */
+  private scheduleInstallFlush(serverName: string, def: ServerConfig): void {
+    const state = this.installProgress.get(serverName);
+    if (!state || state.timer || state.finished) return;
+    const timer = setTimeout(() => {
+      state.timer = undefined;
+      this.flushInstallProgress(serverName, def, true);
+    }, INSTALL_LOG_FLUSH_MS);
+    (timer as { unref?: () => void }).unref?.();
+    state.timer = timer;
+  }
+
+  /** 立即推送当前阶段 + 缓冲日志 */
+  private flushInstallProgress(serverName: string, def: ServerConfig, force: boolean): void {
+    const state = this.installProgress.get(serverName);
+    if (!state || !def.market) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    if (!force && state.lines.length === 0) return;
+    const log = state.lines.join('\n');
+    state.lines = [];
+    const payload: McpInstallProgressPayload = {
+      source: def.market.source,
+      id: def.market.id,
+      server: serverName,
+      phase: state.phase,
+      ...(state.detail ? { detail: state.detail } : {}),
+      ...(log ? { log } : {}),
+      ...(state.downloaded > 0 ? { downloaded: state.downloaded } : {}),
+      ...(state.error ? { error: state.error } : {}),
+    };
+    void this.eventBus.broadcast('mcp:install:progress', payload).catch(() => {});
+  }
+
+  /** 清理安装进度缓冲（断开/删除时调用） */
+  private clearInstallProgress(serverName: string): void {
+    const state = this.installProgress.get(serverName);
+    if (state?.timer) clearTimeout(state.timer);
+    this.installProgress.delete(serverName);
+  }
+
+  /** 推进到指定阶段（只前进，error 直接覆盖） */
+  private advanceInstallPhase(
+    serverName: string,
+    def: ServerConfig,
+    phase: McpInstallPhase,
+    error?: string,
+  ): void {
+    const state = this.installProgress.get(serverName);
+    if (!state) return;
+    if (phase === 'error') {
+      state.phase = 'error';
+      state.error = error;
+      state.finished = true;
+      this.flushInstallProgress(serverName, def, true);
+      this.installProgress.delete(serverName);
+      return;
+    }
+    if (INSTALL_PHASE_RANK[phase] < INSTALL_PHASE_RANK[state.phase]) return;
+    state.phase = phase;
+    if (phase === 'done') {
+      state.finished = true;
+      this.flushInstallProgress(serverName, def, true);
+      this.installProgress.delete(serverName);
+      return;
+    }
+    this.flushInstallProgress(serverName, def, true);
   }
 
   /** 失败后按退避序列安排自动重连（持续重试，间隔封顶 60s） */
@@ -322,7 +504,10 @@ export class MCPManagerImpl implements MCPManager {
     }
   }
 
-  async connect(serverName: string, opts?: { timeoutMs?: number }): Promise<void> {
+  async connect(
+    serverName: string,
+    opts?: { timeoutMs?: number; verbose?: boolean },
+  ): Promise<void> {
     const serverCfg = this.serverDefs.get(serverName);
     if (!serverCfg) {
       throw new Error(
@@ -358,12 +543,17 @@ export class MCPManagerImpl implements MCPManager {
   }
 
   /** connect 的实际执行体：失败时记录错误、广播并安排自动重连 */
-  private async doConnect(serverName: string, opts?: { timeoutMs?: number }): Promise<void> {
+  private async doConnect(
+    serverName: string,
+    opts?: { timeoutMs?: number; verbose?: boolean },
+  ): Promise<void> {
     const serverCfg = this.serverDefs.get(serverName);
     if (!serverCfg) {
       throw new Error(`MCP server "${serverName}" definition is no longer available`);
     }
     const state = this.stateOf(serverName);
+    const verbose = opts?.verbose === true && Boolean(serverCfg.market);
+    if (verbose) this.beginInstallProgress(serverName);
 
     // 若已存在，先断开
     const existing = this.entries.get(serverName);
@@ -380,24 +570,30 @@ export class MCPManagerImpl implements MCPManager {
     hooks.onUnexpectedClose = () => {
       if (client) this.handleUnexpectedClose(serverName, client);
     };
+    if (verbose) {
+      hooks.onStderr = (chunk) => this.queueInstallLog(serverName, serverCfg, chunk);
+      hooks.onPhase = (phase) => this.advanceInstallPhase(serverName, serverCfg, phase);
+    }
     client = new McpClient(serverName, serverCfg, this.logger, this.eventBus, hooks);
 
     // 记录连接中的 client：disconnect/delete 可立即中止，不必等待初始化超时
     state.connectingClient = client;
     try {
       try {
-        await client.connect(opts?.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+        await client.connect(opts?.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS, { verbose });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (state.manualStop || this.deleting.has(serverName)) {
           // 用户中途断开/删除：不广播错误、不安排重连
           state.status = 'disconnected';
           state.lastError = undefined;
+          if (verbose) this.advanceInstallPhase(serverName, serverCfg, 'error', message);
           throw err;
         }
         state.status = 'error';
         state.lastError = message;
         this.logger.error(t('mcp.connectFailed', { name: serverName }), { error: message });
+        if (verbose) this.advanceInstallPhase(serverName, serverCfg, 'error', message);
         void this.eventBus
           .broadcast('mcp:server:error', { server: serverName, error: message })
           .catch(() => {});
@@ -434,6 +630,7 @@ export class MCPManagerImpl implements MCPManager {
 
   async disconnect(serverName: string): Promise<void> {
     const state = this.stateOf(serverName);
+    this.clearInstallProgress(serverName);
     // 主动断开：停止重试，并阻止连接完成后的“复活”
     state.manualStop = true;
     this.clearRetryTimer(state);

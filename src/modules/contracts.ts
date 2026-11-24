@@ -743,6 +743,8 @@ export interface MCPManager {
       source: 'mcpmarket' | 'official' | 'modelscope';
       id: string;
       version?: string;
+      /** 市场图标（管理面板优先展示） */
+      iconUrl?: string;
     };
   }>;
   /** 列出指定服务器的工具（仅已连接且启用的服务器；透传 annotations/title） */
@@ -786,8 +788,8 @@ export interface MCPManager {
     /** MCP structured output（2025-06-18 规范），存在时优先于 text 解析 */
     structured?: unknown;
   }>;
-  /** 启动/重启指定服务器 */
-  connect(serverName: string, opts?: { timeoutMs?: number }): Promise<void>;
+  /** 启动/重启指定服务器（verbose 用于市场安装时输出依赖下载/安装日志） */
+  connect(serverName: string, opts?: { timeoutMs?: number; verbose?: boolean }): Promise<void>;
   /** 断开指定服务器 */
   disconnect(serverName: string): Promise<void>;
   /** 重载所有服务器（配置变更后） */

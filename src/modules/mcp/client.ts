@@ -37,7 +37,32 @@ export interface ServerConfig {
     source: 'mcpmarket' | 'official' | 'modelscope';
     id: string;
     version?: string;
+    /** 市场图标（管理面板优先展示） */
+    iconUrl?: string;
   };
+}
+
+/** MCP 市场安装阶段（前端进度面板只展示阶段，不展示伪造百分比） */
+export type McpInstallPhase =
+  | 'prepare'
+  | 'start'
+  | 'download'
+  | 'install'
+  | 'connect'
+  | 'done'
+  | 'error';
+
+export interface McpInstallProgressPayload {
+  source?: 'mcpmarket' | 'official' | 'modelscope';
+  id?: string;
+  server?: string;
+  phase: McpInstallPhase;
+  detail?: string;
+  /** 一批真实 stderr 日志（可多行） */
+  log?: string;
+  /** 已下载的 npm tarball 去重计数 */
+  downloaded?: number;
+  error?: string;
 }
 
 export interface McpToolInfo {
@@ -178,10 +203,29 @@ export interface McpClientHooks {
   onSampling?: (req: McpSamplingRequest) => Promise<McpSamplingResult>;
   /** 非主动断开导致的连接关闭（子进程退出 / 远端断连），供 manager 触发自动重连 */
   onUnexpectedClose?: () => void;
+  /** stdio 子进程 stderr（市场安装 verbose 模式用于实时日志） */
+  onStderr?: (chunk: string) => void;
+  /** 连接阶段（manager 转换为 mcp:install:progress 事件） */
+  onPhase?: (phase: 'connect' | 'done') => void;
 }
 
 /** 连接超时默认值：stdio 首次启动 npx/uvx 需要下载依赖，SDK 默认 60s 不够 */
 export const DEFAULT_CONNECT_TIMEOUT_MS = 180_000;
+
+export type McpTransportKind = 'stdio' | 'http' | 'sse';
+
+/**
+ * 远端传输尝试顺序：配置声明的传输优先，失败后尝试另一种。
+ * 市场/手工配置的 transport 可能与真实端点不符（典型：标成 sse 但实际是 streamable-http）。
+ */
+export function transportAttempts(kind: McpTransportKind): McpTransportKind[] {
+  if (kind === 'stdio') return ['stdio'];
+  return kind === 'sse' ? ['sse', 'http'] : ['http', 'sse'];
+}
+
+function transportLabel(kind: McpTransportKind): string {
+  return kind === 'http' ? 'streamable-http' : kind;
+}
 
 export class McpClient {
   private sdkClient: McpSdkClient | null = null;
@@ -205,6 +249,8 @@ export class McpClient {
   private stderrTail = '';
   /** 外部取消标记：断开/删除服务器时立即中止进行中的连接 */
   private cancelled = false;
+  /** 本次连接是否输出依赖下载/安装日志（仅市场安装首次连接开启） */
+  private verbose = false;
 
   constructor(name: string, config: ServerConfig, logger: Logger, _eventBus: EventBus, hooks?: McpClientHooks) {
     this.name = name;
@@ -218,8 +264,9 @@ export class McpClient {
    * @param timeoutMs 初始化请求超时（含 create/listTools）；缺省 180s，兼容 npx/uvx 首次下载依赖。
    *   超时会显式关闭 transport，避免孤儿进程。
    */
-  async connect(timeoutMs?: number): Promise<void> {
+  async connect(timeoutMs?: number, opts?: { verbose?: boolean }): Promise<void> {
     this.cancelled = false;
+    this.verbose = opts?.verbose === true;
     const budget = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : DEFAULT_CONNECT_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_, reject) => {
@@ -258,12 +305,14 @@ export class McpClient {
     return new Error(tail ? `${message}\n[stderr] ${tail}` : message);
   }
 
-  /** 收集 stdio 子进程 stderr（仅保留尾部 4KB） */
+  /** 收集 stdio 子进程 stderr（保留尾部 4KB 诊断；verbose 时同时透传给 manager） */
   private attachStderr(transport: McpSdkTransport): void {
     const stream = transport.stderr;
     if (!stream) return;
     stream.on('data', (chunk: unknown) => {
-      this.stderrTail = (this.stderrTail + String(chunk)).slice(-4096);
+      const text = String(chunk);
+      this.stderrTail = (this.stderrTail + text).slice(-4096);
+      this.hooks?.onStderr?.(text);
     });
   }
 
@@ -278,86 +327,115 @@ export class McpClient {
     if (!Client) {
       throw new Error(t('mcp.sdkClientNotFound'));
     }
-
-    let transport: McpSdkTransport;
-    if (this.config.transport === 'stdio') {
-      transport = await this.createStdioTransport();
-      this.effectiveTransport = 'stdio';
-    } else if (this.config.transport === 'http') {
-      // 尝试新标准 StreamableHTTP，失败则自动回退到 SSE
-      try {
-        transport = await this.createHttpTransport();
-        this.effectiveTransport = 'http';
-      } catch (err) {
-        this.logger.warn(t('mcp.httpFallbackSse', { name: this.name }), {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        transport = await this.createSseTransport();
-        this.effectiveTransport = 'sse';
-      }
-    } else if (this.config.transport === 'sse') {
-      transport = await this.createSseTransport();
-      this.effectiveTransport = 'sse';
-    } else {
+    if (
+      this.config.transport !== 'stdio' &&
+      this.config.transport !== 'http' &&
+      this.config.transport !== 'sse'
+    ) {
       throw new Error(t('mcp.unknownTransport', { transport: this.config.transport }));
     }
-    this.transport = transport;
 
-    // 取消可能发生在 import / transport 构造阶段：立即回收资源，不再发起连接
-    if (this.cancelled || generation !== this.connectGeneration) {
-      if (transport.close) await transport.close().catch(() => {});
-      throw new Error('connect cancelled');
-    }
+    const attempts = transportAttempts(this.config.transport);
+    const failures: Array<{ transport: McpTransportKind; error: unknown; message: string }> = [];
+    this.hooks?.onPhase?.('connect');
 
-    // 创建 client 实例（elicitation 始终声明——agent 通道支持，无桥时 decline；sampling 按钩子注入声明）
-    this.sdkClient = new Client(
-      { name: 'moss', version: '1.1.0' },
-      { capabilities: this.buildCapabilities() },
-    );
-    // 本次连接拥有的 client（超时后迟到的完成只允许关闭自己的 client，不能误关新连接）
-    let ownedClient = this.sdkClient;
-    this.registerClientHandlers(ownedClient);
-
-    // 连接（http 若失败也尝试回退 SSE）
-    try {
-      await this.sdkClient.connect(transport, { timeout: timeoutMs });
-    } catch (err) {
-      if (this.config.transport === 'http' && this.effectiveTransport === 'http') {
-        // http connect 失败，回退 SSE
-        this.logger.warn(t('mcp.httpConnectFailedRetrySse', { name: this.name }), {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await this.sdkClient.close().catch(() => {});
-        this.sdkClient = null;
-        transport = await this.createSseTransport();
-        this.transport = transport;
-        this.effectiveTransport = 'sse';
-        this.sdkClient = new Client(
-          { name: 'moss', version: '1.1.0' },
-          { capabilities: this.buildCapabilities() },
-        );
-        ownedClient = this.sdkClient;
-        this.registerClientHandlers(ownedClient);
-        await this.sdkClient.connect(transport, { timeout: timeoutMs });
-      } else {
-        throw err;
+    for (const kind of attempts) {
+      if (this.cancelled || generation !== this.connectGeneration) {
+        throw new Error('connect cancelled');
       }
+
+      let transport: McpSdkTransport;
+      try {
+        transport = await this.createTransportOfKind(kind);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push({ transport: kind, error: err, message });
+        this.logger.warn(
+          t('mcp.transportAttemptFailed', {
+            transport: transportLabel(kind),
+            error: message,
+          }),
+        );
+        continue;
+      }
+      this.transport = transport;
+      this.effectiveTransport = kind;
+
+      // 每次尝试使用全新的 SDK Client，避免复用失败连接对象
+      const client = new Client(
+        { name: 'moss', version: '1.1.0' },
+        { capabilities: this.buildCapabilities() },
+      );
+      this.sdkClient = client;
+      this.registerClientHandlers(client);
+
+      try {
+        await client.connect(transport, { timeout: timeoutMs });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push({ transport: kind, error: err, message });
+        this.logger.warn(
+          t('mcp.transportAttemptFailed', {
+            transport: transportLabel(kind),
+            error: message,
+          }),
+        );
+        await client.close().catch(() => {});
+        if (this.sdkClient === client) this.sdkClient = null;
+        if (this.transport === transport) {
+          this.transport = null;
+          this.effectiveTransport = null;
+        }
+        if (this.cancelled || generation !== this.connectGeneration) {
+          throw new Error('connect cancelled');
+        }
+        continue;
+      }
+
+      // 超时/取消后迟到的连接：立刻关闭本次拥有的 client，避免“超时后客户端又悄悄连上”
+      if (this.cancelled || generation !== this.connectGeneration) {
+        await client.close().catch(() => {});
+        if (this.sdkClient === client) this.sdkClient = null;
+        if (this.transport === transport) {
+          this.transport = null;
+          this.effectiveTransport = null;
+        }
+        throw new Error('connect aborted');
+      }
+
+      this.logger.info(t('mcp.clientConnected', { name: this.name }), {
+        transport: this.config.transport,
+        effective: this.effectiveTransport,
+      });
+
+      // 列出工具
+      await this.refreshTools();
+      this.hooks?.onPhase?.('done');
+      return;
     }
 
-    // 超时/取消后迟到的连接：立刻关闭本次拥有的 client，避免“超时后客户端又悄悄连上”
-    if (this.cancelled || generation !== this.connectGeneration) {
-      await ownedClient.close().catch(() => {});
-      if (this.sdkClient === ownedClient) this.sdkClient = null;
-      throw new Error('connect aborted');
+    // 全部尝试失败
+    if (this.config.transport === 'stdio') {
+      const first = failures[0];
+      throw first?.error ?? new Error('connect failed');
     }
+    const attemptsLabel = attempts.map(transportLabel).join(' / ');
+    const errorsLabel = failures
+      .map((failure) => `${transportLabel(failure.transport)}: ${failure.message}`)
+      .join(' | ');
+    throw new Error(
+      t('mcp.remoteAllAttemptsFailed', {
+        attempts: attemptsLabel,
+        errors: errorsLabel,
+      }),
+    );
+  }
 
-    this.logger.info(t('mcp.clientConnected', { name: this.name }), {
-      transport: this.config.transport,
-      effective: this.effectiveTransport,
-    });
-
-    // 列出工具
-    await this.refreshTools();
+  /** 按传输类型创建 transport（远端回退循环使用） */
+  private async createTransportOfKind(kind: McpTransportKind): Promise<McpSdkTransport> {
+    if (kind === 'stdio') return this.createStdioTransport();
+    if (kind === 'http') return this.createHttpTransport();
+    return this.createSseTransport();
   }
 
   async disconnect(): Promise<void> {
@@ -574,6 +652,12 @@ export class McpClient {
     if (process.platform !== 'win32') {
       merged.LANG = merged.LANG ?? 'zh_CN.UTF-8';
       merged.LC_ALL = merged.LC_ALL ?? 'zh_CN.UTF-8';
+    }
+    // 市场安装首次连接：让 npx/npm 输出依赖解析与实际下载日志（非 TTY 默认会静默）
+    const baseCommand = (this.config.command ?? '').toLowerCase().replace(/\.cmd$/i, '');
+    if (this.verbose && (baseCommand === 'npx' || baseCommand === 'npm')) {
+      merged.npm_config_loglevel = merged.npm_config_loglevel ?? 'http';
+      merged.npm_config_update_notifier = merged.npm_config_update_notifier ?? 'false';
     }
     const transport = new StdioTransport({
       command: this.config.command,

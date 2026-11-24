@@ -29,6 +29,8 @@ export interface Skill {
   dir?: string;
   /** 扩展：图标（Lucide kebab-case 名，或 .svg 文件名——相对 skill 目录） */
   icon?: string;
+  /** 市场安装图标（.market.json 中的 http(s) URL；管理面板优先展示） */
+  iconUrl?: string;
   /** 标准字段：激活时建议允许的工具列表（提示性约束） */
   allowedTools?: string[];
   /** 附属文件清单（references/scripts/assets 下相对路径；LLM 按需 read） */
@@ -73,6 +75,7 @@ function skillSignature(skill: Skill): string {
     description: skill.description,
     prompt: skill.prompt,
     icon: skill.icon ?? '',
+    iconUrl: skill.iconUrl ?? '',
     allowedTools: skill.allowedTools ?? [],
     files: skill.files ?? [],
   });
@@ -572,6 +575,7 @@ function parseSkillFile(filePath: string, dir: string | undefined): Skill | null
           .map(s => s.trim())
           .filter(Boolean)
       : undefined;
+  const iconUrl = dir ? readMarketIconUrl(dir) : undefined;
   return {
     name,
     description,
@@ -579,9 +583,23 @@ function parseSkillFile(filePath: string, dir: string | undefined): Skill | null
     sourceFile: filePath,
     ...(dir ? { dir } : {}),
     ...(icon ? { icon } : {}),
+    ...(iconUrl ? { iconUrl } : {}),
     ...(allowedTools ? { allowedTools } : {}),
     ...(dir ? { files: collectSkillFiles(dir) } : {}),
   };
+}
+
+/** 读取市场安装写入的 .market.json 图标（仅接受 http(s) URL） */
+function readMarketIconUrl(dir: string): string | undefined {
+  try {
+    const raw = readFileSync(join(dir, '.market.json'), 'utf8');
+    const data = JSON.parse(raw) as { iconUrl?: unknown };
+    return typeof data.iconUrl === 'string' && /^https?:\/\//i.test(data.iconUrl)
+      ? data.iconUrl
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 收集目录式 skill 的附属文件（递归；排除 SKILL.md、隐藏项与 node_modules） */
