@@ -22,6 +22,7 @@ import {
 interface TodoUpdatePatch {
   id: string;
   text?: string;
+  describe?: string;
   status?: TodoStatus;
   priority?: TodoPriority;
 }
@@ -30,10 +31,18 @@ interface TodoUpdatePatch {
 interface TodoReplaceInput {
   id?: string;
   text: string;
+  describe?: string;
   status?: TodoStatus;
   priority?: TodoPriority;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/** describe 归一化：trim 后空串视为未提供（删除已有描述） */
+function normalizeDescribe(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text ? text : undefined;
 }
 
 /**
@@ -66,6 +75,7 @@ export default function createExecute(env: Environment) {
         action: 'create' | 'update' | 'list' | 'reorder' | 'batch_update';
         mode?: 'append' | 'replace';
         text?: string;
+        describe?: string;
         priority?: TodoPriority;
         id?: string;
         status?: TodoStatus;
@@ -113,9 +123,11 @@ export default function createExecute(env: Environment) {
                 usedIds.add(id);
                 next += 1;
               }
+              const describe = normalizeDescribe(it.describe);
               return {
                 id,
                 text: it.text,
+                ...(describe ? { describe } : {}),
                 status: it.status ?? 'pending',
                 priority: it.priority ?? 'medium',
                 createdAt: it.createdAt ?? now,
@@ -138,9 +150,11 @@ export default function createExecute(env: Environment) {
             return { content: [{ type: 'text', text: `Error: ${t('tools.todoTextRequired')}` }], isError: true };
           }
           const now = new Date().toISOString();
+          const describe = normalizeDescribe(p.describe);
           const item: TodoItem = {
             id: String(store.nextId),
             text: p.text,
+            ...(describe ? { describe } : {}),
             status: 'pending',
             priority: p.priority ?? 'medium',
             createdAt: now,
@@ -167,6 +181,11 @@ export default function createExecute(env: Environment) {
             return { content: [{ type: 'text', text: `Error: ${t('tools.todoNotFound', { id: p.id })}` }], isError: true };
           }
           if (p.text !== undefined) item.text = p.text;
+          if (p.describe !== undefined) {
+            const describe = normalizeDescribe(p.describe);
+            if (describe) item.describe = describe;
+            else delete item.describe;
+          }
           if (p.status !== undefined) item.status = p.status;
           if (p.priority !== undefined) item.priority = p.priority;
           item.updatedAt = new Date().toISOString();
@@ -181,7 +200,13 @@ export default function createExecute(env: Environment) {
         }
 
         case 'list': {
-          const todos = store.items.map(it => ({ id: it.id, text: it.text, status: it.status, priority: it.priority }));
+          const todos = store.items.map(it => ({
+            id: it.id,
+            text: it.text,
+            ...(it.describe ? { describe: it.describe } : {}),
+            status: it.status,
+            priority: it.priority,
+          }));
           return {
             content: [{ type: 'text', text: todos.length === 0 ? t('tools.todoEmpty') : `${t('tools.todoListHeader', { count: todos.length })}:\n${JSON.stringify(todos, null, 2)}` }],
             metadata: { action: 'list', count: todos.length },
@@ -221,6 +246,11 @@ export default function createExecute(env: Environment) {
           for (const u of updates) {
             const item = store.items.find(it => it.id === u.id)!;
             if (u.text !== undefined) item.text = u.text;
+            if (u.describe !== undefined) {
+              const describe = normalizeDescribe(u.describe);
+              if (describe) item.describe = describe;
+              else delete item.describe;
+            }
             if (u.status !== undefined) item.status = u.status;
             if (u.priority !== undefined) item.priority = u.priority;
             item.updatedAt = now;

@@ -16,6 +16,8 @@ export type TodoPriority = 'low' | 'medium' | 'high';
 export interface TodoItem {
   id: string;
   text: string;
+  /** 1–2 句详细描述（对话流步骤节点收起时的预览；可选，兼容旧数据） */
+  describe?: string;
   status: TodoStatus;
   priority: TodoPriority;
   createdAt: string;

@@ -20,6 +20,7 @@ import {
   subscribeAgentBus,
 } from '../../lib/agent-bus';
 import { useLazyToolResult } from '../../lib/lazy-tool-results';
+import { formatToolCopy, type ToolCopyState } from '../../lib/tool-copy';
 import { fallbackAvatarSeed, templateAvatarSeed } from '../../lib/agent-avatars';
 import { HumationAvatar } from './HumationAvatar';
 import { LazyModuleSlot } from '../shared/LazyModuleSlot';
@@ -131,9 +132,21 @@ const SubagentRow = memo(function SubagentRow({
 }) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const stepDisplay = useStore((s) => s.stepDisplay);
   const member = useAgentBusMember(call.toolCallId);
   const status = rowStatusOf(call, member?.status);
   const running = status === 'running';
+  // 非原始挡位：名称下方追加动作文案（agent 工具同样套用统一口径）
+  const copyState: ToolCopyState =
+    status === 'failed' ? 'error' : status === 'running' ? 'running' : 'done';
+  const actionCopy =
+    stepDisplay === 'raw'
+      ? null
+      : formatToolCopy(t, {
+          toolName: 'agent',
+          args: { name: displayName || call.template },
+          state: copyState,
+        });
   const boundSessionId = useSubagentSessionBinding(call.toolCallId);
   const [cancelling, setCancelling] = useState(false);
   /**
@@ -232,6 +245,14 @@ const SubagentRow = memo(function SubagentRow({
         </span>
         <TaskStatusIcon status={status} />
       </div>
+      {actionCopy && (
+        <div
+          className="mt-0.5 min-w-0 truncate pl-[32px] text-[11px] text-muted-foreground"
+          title={actionCopy}
+        >
+          {actionCopy}
+        </div>
+      )}
       {flowMounted && (
         <div className={expanded ? 'mt-2 flex flex-col gap-2' : 'hidden'}>
           {/* 任务流懒加载：失败只降级这一小块，不影响卡片头部、任务描述与最终报告 */}

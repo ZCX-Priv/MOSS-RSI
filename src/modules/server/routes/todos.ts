@@ -19,6 +19,8 @@ import { ErrorCode } from '../../../core/error-codes';
 interface TodoInput {
   id?: string;
   text: string;
+  /** 步骤详细描述（可选，原样透传） */
+  describe?: string;
   status: TodoStatus;
   priority: TodoPriority;
   createdAt?: string;
@@ -52,14 +54,18 @@ export function createReplaceTodosHandler(env: Environment): RouteHandler {
 
     // 整体替换该会话的 todos，补齐 id/时间戳
     const now = new Date().toISOString();
-    const newItems: TodoItem[] = body.todos.map((t, idx) => ({
-      id: t.id ?? String(store.nextId + idx),
-      text: t.text,
-      status: t.status,
-      priority: t.priority,
-      createdAt: t.createdAt ?? now,
-      updatedAt: t.updatedAt ?? now,
-    }));
+    const newItems: TodoItem[] = body.todos.map((t, idx) => {
+      const describe = typeof t.describe === 'string' ? t.describe.trim() : '';
+      return {
+        id: t.id ?? String(store.nextId + idx),
+        text: t.text,
+        ...(describe ? { describe } : {}),
+        status: t.status,
+        priority: t.priority,
+        createdAt: t.createdAt ?? now,
+        updatedAt: t.updatedAt ?? now,
+      };
+    });
 
     store.items = newItems;
     bumpNextId(store);

@@ -86,6 +86,8 @@ const PERSISTED_KEYS = [
   'moss-recent-dir-aliases',
   'moss-send-shortcut',
   'moss-follow-up-behavior',
+  // 任务步骤展示挡位（简洁 / 标准 / 详细 / 原始内容）
+  'moss-step-display',
   // 阻止标签页休眠（Screen Wake Lock）
   'moss-prevent-tab-sleep',
   'moss-permission-mode',
@@ -197,6 +199,13 @@ function buildPersistedState(data: Record<string, unknown>): PersistedState {
     followUpBehavior:
       data['moss-follow-up-behavior'] === 'queue' || data['moss-follow-up-behavior'] === 'guide'
         ? (data['moss-follow-up-behavior'] as 'queue' | 'guide')
+        : undefined,
+    stepDisplay:
+      data['moss-step-display'] === 'compact' ||
+      data['moss-step-display'] === 'standard' ||
+      data['moss-step-display'] === 'detailed' ||
+      data['moss-step-display'] === 'raw'
+        ? (data['moss-step-display'] as 'compact' | 'standard' | 'detailed' | 'raw')
         : undefined,
     preventTabSleep:
       data['moss-prevent-tab-sleep'] === true ? true : undefined,

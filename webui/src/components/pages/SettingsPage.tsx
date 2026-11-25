@@ -77,7 +77,7 @@ import { useCommands } from '../../hooks/useCommands';
 import { useConfig } from '../../hooks/useConfig';
 import { isWakeLockSupported } from '../../lib/tab-wake-lock';
 import { useReducedMotion } from '../../hooks/useAnimationClass';
-import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset } from '../../store';
+import { useStore, RIGHT_PANEL_PRESETS, rightPanelPresetOf, type RightPanelPreset, type StepDisplayLevel } from '../../store';
 import { eventToShortcut, formatShortcutLabel } from '../../utils/shortcut';
 import { api } from '../../api/http';
 import { BrandIcon } from '../../lib/brand-icons';
@@ -217,6 +217,7 @@ export const settingsSearchIndex: SearchableSetting[] = [
   { labelKey: 'settings.general.language', descriptionKey: 'settings.general.languageDesc', section: 'general' },
   { labelKey: 'settings.general.sendShortcut', descriptionKey: 'settings.general.sendShortcutDesc', section: 'general' },
   { labelKey: 'settings.general.followUpBehavior', descriptionKey: 'settings.general.followUpBehaviorDesc', section: 'general' },
+  { labelKey: 'settings.general.stepDisplay', descriptionKey: 'settings.general.stepDisplayDesc', section: 'general' },
   { labelKey: 'settings.general.thinkingTranslation', descriptionKey: 'settings.general.thinkingTranslationDesc', section: 'general' },
   { labelKey: 'settings.general.preventSleep', descriptionKey: 'settings.general.preventSleepDesc', section: 'general' },
   { labelKey: 'settings.general.preventTabSleep', descriptionKey: 'settings.general.preventTabSleepDesc', section: 'general' },
@@ -1735,6 +1736,8 @@ export function GeneralSettings() {
   const setSendShortcut = useStore((s) => s.setSendShortcut);
   const followUpBehavior = useStore((s) => s.followUpBehavior);
   const setFollowUpBehavior = useStore((s) => s.setFollowUpBehavior);
+  const stepDisplay = useStore((s) => s.stepDisplay);
+  const setStepDisplay = useStore((s) => s.setStepDisplay);
   // 电源/后台策略：电脑休眠写入后端配置，标签页休眠走前端 Wake Lock
   const { appConfig, apiConfig, updateAppConfig } = useConfig();
   const preventTabSleep = useStore((s) => s.preventTabSleep);
@@ -1970,6 +1973,27 @@ export function GeneralSettings() {
               <SelectContent>
                 <SelectItem value="queue">{t('settings.general.followUpQueue')}</SelectItem>
                 <SelectItem value="guide">{t('settings.general.followUpGuide')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {/* 任务步骤展示挡位（节点 / 正文 / 工具卡 / 思考的折叠程度） */}
+          <div className="flex items-center justify-between gap-4 py-3">
+            <div className="flex flex-col gap-0.5">
+              <div className="text-sm text-foreground">{t('settings.general.stepDisplay')}</div>
+              <div className="text-xs text-muted-foreground">{t('settings.general.stepDisplayDesc')}</div>
+            </div>
+            <Select
+              value={stepDisplay}
+              onValueChange={(v) => setStepDisplay(v as StepDisplayLevel)}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="compact">{t('settings.general.stepDisplayCompact')}</SelectItem>
+                <SelectItem value="standard">{t('settings.general.stepDisplayStandard')}</SelectItem>
+                <SelectItem value="detailed">{t('settings.general.stepDisplayDetailed')}</SelectItem>
+                <SelectItem value="raw">{t('settings.general.stepDisplayRaw')}</SelectItem>
               </SelectContent>
             </Select>
           </div>

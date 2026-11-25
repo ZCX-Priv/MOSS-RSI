@@ -289,6 +289,8 @@ interface UIState {
   bootPageReady: boolean;
   /** 启动里程碑：已就绪的会话 id（有 taskId 的路由据此判定首屏消息是否加载完） */
   bootSessionId: string | null;
+  /** 启动里程碑：侧边栏任务分组（分组快照 + 展开组首页）是否已就绪 */
+  bootSidebarReady: boolean;
   /** 分组任务加载态（按需加载 + 组内分页）：groupId → { loaded, loading, hasMore, total } */
   groupTasksMeta: Record<string, GroupTasksMeta | undefined>;
 
@@ -356,6 +358,8 @@ interface UIState {
 
   // --- 跟进行为（任务进行中发送消息时的处理方式） ---
   followUpBehavior: 'queue' | 'guide';
+  /** 任务步骤展示挡位（全局偏好；IndexedDB 持久化） */
+  stepDisplay: StepDisplayLevel;
   /** 阻止标签页休眠（Screen Wake Lock 开关；IndexedDB 持久化） */
   preventTabSleep: boolean;
   /** 排队消息队列（sessionId → 待发送消息；合并语义：每会话至多一条，多条用分隔符合并） */
@@ -427,12 +431,17 @@ interface UIState {
   prefersReducedMotion: boolean;
 }
 
+/** 任务步骤展示挡位：简洁 / 标准 / 详细 / 原始内容 */
+export type StepDisplayLevel = 'compact' | 'standard' | 'detailed' | 'raw';
+
 /** 从 IndexedDB 预填充后写入 store 的持久化状态（各字段可选，值非法时忽略） */
 export interface PersistedState {
   workingDirectory?: string;
   recentDirectories?: string[];
   sendShortcut?: string;
   followUpBehavior?: 'queue' | 'guide';
+  /** 任务步骤展示挡位（全局偏好） */
+  stepDisplay?: StepDisplayLevel;
   /** 阻止标签页休眠（Screen Wake Lock） */
   preventTabSleep?: boolean;
   accentColor?: string;
@@ -602,6 +611,8 @@ interface UIActions {
   markPageReady: () => void;
   /** 标记某会话首屏历史已就绪（Splash 进度里程碑） */
   markSessionReady: (sessionId: string) => void;
+  /** 标记侧边栏任务列表首屏已就绪（Splash 进度里程碑） */
+  markSidebarReady: () => void;
   /** 会话切换时清除就绪标记 */
   resetBootSession: () => void;
   /** 局部更新某分组任务加载态（发起请求前置 loading 等） */
@@ -717,6 +728,8 @@ interface UIActions {
 
   // 跟进行为
   setFollowUpBehavior: (v: UIState['followUpBehavior']) => void;
+  /** 任务步骤展示挡位（IndexedDB 持久化） */
+  setStepDisplay: (v: StepDisplayLevel) => void;
   /** 阻止标签页休眠（Screen Wake Lock；IndexedDB 持久化，页面可见时自动重申请） */
   setPreventTabSleep: (v: boolean) => void;
   /** 入队（合并语义）：该会话已有队列项则合并到同一条，否则新建 */
@@ -1188,6 +1201,7 @@ export const useStore = create<Store>((set, get) => ({
   activeTaskId: null,
   bootPageReady: false,
   bootSessionId: null,
+  bootSidebarReady: false,
   groupTasksMeta: {},
 
   // --- Todo / Context ---
@@ -1237,6 +1251,8 @@ export const useStore = create<Store>((set, get) => ({
 
   // --- 跟进行为 ---
   followUpBehavior: 'queue',
+  // --- 任务步骤展示挡位 ---
+  stepDisplay: 'standard',
   // --- 阻止标签页休眠（Screen Wake Lock） ---
   preventTabSleep: false,
   messageQueueBySession: {},
@@ -2104,6 +2120,7 @@ export const useStore = create<Store>((set, get) => ({
   // --- 启动里程碑（Splash 真实进度） ---
   markPageReady: () => set({ bootPageReady: true }),
   markSessionReady: (sessionId) => set({ bootSessionId: sessionId }),
+  markSidebarReady: () => set({ bootSidebarReady: true }),
   resetBootSession: () => set({ bootSessionId: null }),
   // --- 分组任务按需加载 / 组内分页 ---
   patchGroupTasksMeta: (groupId, patch) =>
@@ -2391,6 +2408,10 @@ export const useStore = create<Store>((set, get) => ({
   setFollowUpBehavior: (followUpBehavior) => {
     void idbSet('moss-follow-up-behavior', followUpBehavior);
     set({ followUpBehavior });
+  },
+  setStepDisplay: (stepDisplay) => {
+    void idbSet('moss-step-display', stepDisplay);
+    set({ stepDisplay });
   },
   setPreventTabSleep: (preventTabSleep) => {
     void idbSet('moss-prevent-tab-sleep', preventTabSleep);
@@ -2877,6 +2898,14 @@ export const useStore = create<Store>((set, get) => ({
       }
       if (patch.followUpBehavior === 'queue' || patch.followUpBehavior === 'guide') {
         next.followUpBehavior = patch.followUpBehavior;
+      }
+      if (
+        patch.stepDisplay === 'compact' ||
+        patch.stepDisplay === 'standard' ||
+        patch.stepDisplay === 'detailed' ||
+        patch.stepDisplay === 'raw'
+      ) {
+        next.stepDisplay = patch.stepDisplay;
       }
       if (typeof patch.preventTabSleep === 'boolean') {
         next.preventTabSleep = patch.preventTabSleep;

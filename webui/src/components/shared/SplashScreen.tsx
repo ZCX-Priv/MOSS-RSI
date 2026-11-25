@@ -24,7 +24,7 @@ const EXIT_MS = 600;
 const T_MOUNT = 30; // splash 挂载
 const T_CONFIG = 55; // 配置加载完成（appConfig 就绪）
 const T_PAGE = 80; // 当前路由页面真正渲染（Suspense 未挂起）
-const T_READY = 100; // 会话首屏历史就绪（无 taskId 的页面视为已就绪）
+const T_READY = 100; // 会话首屏历史 + 侧边栏任务列表均就绪（无 taskId 的页面只等侧边栏）
 
 export function SplashScreen() {
   const { t } = useTranslation();
@@ -32,6 +32,8 @@ export function SplashScreen() {
   // 当前路由的会话 id：有 taskId 时才等待该会话的首屏消息加载完成
   const { pathname } = useLocation();
   const routeTaskId = pathname.startsWith('/task/') ? pathname.slice('/task/'.length) : '';
+  // 设置页侧边栏展示的是设置导航（不含任务列表），无需等待任务分组
+  const isSettingsRoute = pathname.startsWith('/settings');
 
   // 渲染期同步判断（首帧即正确）：会话内已展示 / 动画总关 / 系统减弱动态 → 不展示
   const shouldShow = useMemo(() => {
@@ -77,7 +79,11 @@ export function SplashScreen() {
       // 否则 Splash 结束后可能仍停在 PageLoading（截图 2 的断层）。
       if (s.bootPageReady) bump(T_PAGE);
       // 有 taskId 的路由才等待该会话首屏历史；空白页（/task、/）视为已就绪
-      if (routeTaskId === '' || s.bootSessionId === routeTaskId) bump(T_READY);
+      const sessionReady = routeTaskId === '' || s.bootSessionId === routeTaskId;
+      // 侧边栏任务列表也必须就绪：否则 Splash 一退场就是「左侧列表空白」，
+      // 会话列表要再等一轮才出现（两大块空白的第一块）。
+      const sidebarReady = isSettingsRoute || s.bootSidebarReady;
+      if (sessionReady && sidebarReady) bump(T_READY);
     };
     // 挂载时信号可能已就绪（如 splash 晚于某个 hook 完成加载）
     checkState(useStore.getState());
@@ -88,7 +94,7 @@ export function SplashScreen() {
       unsubStore();
       window.clearTimeout(fallback);
     };
-  }, [shouldShow, routeTaskId]);
+  }, [shouldShow, routeTaskId, isSettingsRoute]);
 
   // rAF 追赶循环：display 平滑逼近 target，永不反超
   useEffect(() => {

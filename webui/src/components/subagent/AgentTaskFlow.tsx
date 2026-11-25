@@ -21,6 +21,7 @@ import { api } from '../../api/http';
 import { wsClient } from '../../api/ws';
 import { MarkdownRenderer } from '../../render';
 import { useStore } from '../../store';
+import { FoldableContent } from '../shared/FoldableContent';
 import { stripInjectBlock } from '../../lib/inject-block';
 import { formatThinkingSeconds, thinkingPreview } from '../../lib/thinking-preview';
 import {
@@ -151,8 +152,13 @@ const ThinkingLine = memo(function ThinkingLine({
     `${sessionId ?? ''}:${message.id}:thinkingView`,
     'original',
   );
-  /** 思维链展开态：原文/译文胶囊仅在展开后显示 */
-  const [thinkingOpen, setThinkingOpen] = useState(false);
+  /** 思维链展开态：原文/译文胶囊仅在展开后显示；详细/原始挡位默认展开 */
+  const stepDisplay = useStore((s) => s.stepDisplay);
+  const levelExpanded = stepDisplay === 'detailed' || stepDisplay === 'raw';
+  const [thinkingOpen, setThinkingOpen] = useState(levelExpanded);
+  useEffect(() => {
+    setThinkingOpen(levelExpanded);
+  }, [levelExpanded]);
   // 思维链已是当前界面语言时，无需「原文/译文」切换（只取首段采样，避免流式期间全量扫描）
   const thinkingLangSample = (message.thinking ?? '').slice(0, THINKING_LANGUAGE_SAMPLE_CHARS);
   const thinkingInUiLanguage = useMemo(
@@ -329,6 +335,7 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
 }) {
   /** 子代理自己的会话 todos（与主会话隔离；实时由 subagent.todo 写入） */
   const todos = useStore((s) => (sessionId ? s.todosBySession[sessionId] : undefined));
+  const stepDisplay = useStore((s) => s.stepDisplay);
   if (message.isError) {
     return (
       <pre className="mono whitespace-pre-wrap break-words text-[10px] text-destructive">
@@ -370,14 +377,19 @@ const FlowAssistantMessage = memo(function FlowAssistantMessage({
       )}
       {visibleContent && (
         <div className="text-sm text-foreground">
-          <MarkdownRenderer
-            text={visibleContent}
-            streaming={!!message.streaming}
-            defer={!message.streaming}
-            cursor={
-              message.streaming ? <Loader2 className="ml-1 inline size-2.5 animate-spin" /> : undefined
-            }
-          />
+          <FoldableContent
+            folded={stepDisplay === 'compact'}
+            stateKey={`${sessionId ?? ''}:${message.id}:content:${stepDisplay}`}
+          >
+            <MarkdownRenderer
+              text={visibleContent}
+              streaming={!!message.streaming}
+              defer={!message.streaming}
+              cursor={
+                message.streaming ? <Loader2 className="ml-1 inline size-2.5 animate-spin" /> : undefined
+              }
+            />
+          </FoldableContent>
         </div>
       )}
       {otherCalls.map((tc, cardIndex) => {

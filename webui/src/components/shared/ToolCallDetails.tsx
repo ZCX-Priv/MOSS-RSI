@@ -31,6 +31,7 @@ import { useLazyToolResult } from '../../lib/lazy-tool-results';
 import { useStore } from '../../store';
 import { wsClient } from '../../api/ws';
 import { copyText } from '../../lib/clipboard';
+import { formatToolCopy, type ToolCopyState } from '../../lib/tool-copy';
 import { fileNameOf } from '../../render/file/detector';
 import {
   buildToolPreview,
@@ -592,16 +593,29 @@ export const ToolCallDetails = memo(function ToolCallDetails({
 }: ToolCallDetailsProps) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const stepDisplay = useStore((s) => s.stepDisplay);
+  /** 详细 / 原始内容挡位：工具卡默认展开 */
+  const levelExpanded = stepDisplay === 'detailed' || stepDisplay === 'raw';
+  const initialExpanded = defaultExpanded === true || levelExpanded;
   /** 结果所属会话：子代理卡片必须传自己的 session，否则懒加载会去主会话找 tool-result */
   const resultSessionId = sessionId ?? activeSessionId;
-  const [localExpanded, setLocalExpanded] = useState(defaultExpanded === true);
+  const [localExpanded, setLocalExpanded] = useState(initialExpanded);
   const [persistedExpanded, setPersistedExpanded] = usePersistentState(
-    stateKey ?? '',
-    defaultExpanded === true,
+    // 挡位拼进 key：切换挡位时按新挡位默认值重置；同挡位内手动开合可跨卸载保持
+    stateKey ? `${stateKey}:${stepDisplay}` : '',
+    initialExpanded,
   );
   const internalExpanded = stateKey ? persistedExpanded : localExpanded;
   const setInternalExpanded = stateKey ? setPersistedExpanded : setLocalExpanded;
   const isOpen = expanded ?? internalExpanded;
+  /** 无 stateKey 的非受控卡片：挡位变化时同步默认展开态（有 stateKey 时由 key 切换生效） */
+  const prevLevelRef = useRef(stepDisplay);
+  useEffect(() => {
+    if (prevLevelRef.current === stepDisplay) return;
+    prevLevelRef.current = stepDisplay;
+    if (expanded !== undefined || stateKey) return;
+    setLocalExpanded(defaultExpanded === true || levelExpanded);
+  }, [stepDisplay, expanded, stateKey, defaultExpanded, levelExpanded]);
   const [mode, setMode] = useState<CardMode>('preview');
   const [copied, setCopied] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -709,8 +723,33 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   const running =
     !hasResult && (toolCall.status === 'generating' || toolCall.status === 'executing');
 
+  // 动作文案：非原始挡位用「正在读取…/已读取…/读取失败：…」替代工具名 + 参数摘要。
+  // 参数过大且仍在流式生成时先走 generic，executing/done 后再解析一次（避免每帧 parse 大 JSON）。
+  const copyArgs = useMemo<Record<string, unknown> | null>(() => {
+    if (stepDisplay === 'raw') return null;
+    if (parsedArgs) return parsedArgs;
+    if (!toolCall.arguments) return null;
+    if (toolCall.status === 'generating' && toolCall.arguments.length > 4096) return null;
+    try {
+      const value: unknown = JSON.parse(toolCall.arguments);
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+      return value as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }, [stepDisplay, parsedArgs, toolCall.arguments, toolCall.status]);
+  const actionCopy = useMemo(() => {
+    if (stepDisplay === 'raw') return null;
+    const state: ToolCopyState = isError ? 'error' : running ? 'running' : 'done';
+    return formatToolCopy(t, { toolName: toolCall.name, args: copyArgs, state });
+  }, [stepDisplay, isError, running, t, toolCall.name, copyArgs]);
+
   const ToolIcon = resolveToolIcon(toolCall.name, iconMap);
-  const displayName = titleOverride ?? formatToolDisplayName(toolCall.name);
+  // 原始内容挡位显示传输层原始工具名（run_code 也不显示「代码」标题覆盖）
+  const displayName =
+    stepDisplay === 'raw'
+      ? formatToolDisplayName(toolCall.name)
+      : titleOverride ?? formatToolDisplayName(toolCall.name);
 
   const sourceText = useMemo(() => {
     if (!isOpen) return '';
@@ -821,24 +860,33 @@ export const ToolCallDetails = memo(function ToolCallDetails({
         ) : (
           <ToolIcon className="size-3.5 shrink-0" />
         )}
-        <span className="max-w-[45%] shrink-0 truncate" title={displayName}>
-          {displayName}
-        </span>
-        {summary && (
-          toolCall.name === 'terminal' ? (
-            /* 终端命令：折叠行也保持单行横向滚动，不省略任何字符
-               nowrap 会把命令中的换行折叠为空格，避免多行命令撑高工具行 */
-            <span
-              className="min-w-0 max-w-[60%] overflow-x-auto no-scrollbar whitespace-nowrap text-muted-foreground/70"
-              title={summary}
-            >
-              {summary}
+        {actionCopy ? (
+          /* 非原始挡位：完整动作文案替代「工具名 + 参数摘要」；完整目标由 title 兜底 */
+          <span className="min-w-0 flex-1 truncate text-muted-foreground" title={actionCopy}>
+            {actionCopy}
+          </span>
+        ) : (
+          <>
+            <span className="max-w-[45%] shrink-0 truncate" title={displayName}>
+              {displayName}
             </span>
-          ) : (
-            <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={summary}>
-              {summary}
-            </span>
-          )
+            {summary && (
+              toolCall.name === 'terminal' ? (
+                /* 终端命令：折叠行也保持单行横向滚动，不省略任何字符
+                   nowrap 会把命令中的换行折叠为空格，避免多行命令撑高工具行 */
+                <span
+                  className="min-w-0 max-w-[60%] overflow-x-auto no-scrollbar whitespace-nowrap text-muted-foreground/70"
+                  title={summary}
+                >
+                  {summary}
+                </span>
+              ) : (
+                <span className="min-w-0 max-w-[60%] truncate text-muted-foreground/70" title={summary}>
+                  {summary}
+                </span>
+              )
+            )}
+          </>
         )}
         {diffStats && (
           <span className="shrink-0 text-[10px] tabular-nums">

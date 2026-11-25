@@ -1331,6 +1331,8 @@ export interface TaskGroup {
 export interface TodoItem {
   id: string;
   text: string;
+  /** 步骤详细描述（1–2 句；对话流节点收起时的预览） */
+  describe?: string;
   /** blocked = 未解决（遇阻/失败），前端用红叉 + 删除线呈现 */
   status: 'pending' | 'in_progress' | 'completed' | 'blocked';
   priority?: 'low' | 'medium' | 'high';

@@ -757,7 +757,14 @@ export function Sidebar({ onOpenOverlay }: SidebarProps) {
                 </div>
               </div>
             )}
-            {!groupsLoaded ? null : taskGroups.length === 0 ? (
+            {!groupsLoaded ? (
+              /* 分组快照未到：显示总 loading（此前渲染 null → 任务列表整块空白）。
+                 分组快照到达后本 loading 消失，由各分组自己的组内 loading 接替。 */
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                <span>{t('common.loading')}</span>
+              </div>
+            ) : taskGroups.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
                 <Inbox className="size-7 text-muted-foreground/40" />
                 <div className="text-xs text-muted-foreground">{t('sidebar.emptyTasks')}</div>

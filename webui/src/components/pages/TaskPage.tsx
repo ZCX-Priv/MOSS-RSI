@@ -60,6 +60,7 @@ import { stripInjectBlock } from '@/lib/inject-block';
 import { onSessionTruncated } from '@/lib/ws-events';
 import { thinkingPreview, formatThinkingSeconds } from '@/lib/thinking-preview';
 import { computeReplyEnds, isEmptyAssistantPlaceholder, isSystemCard } from '@/lib/reply-end';
+import { buildChatItems, type ChatListItem } from '@/lib/task-steps';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -105,6 +106,8 @@ import { useSessionHistory } from '../../hooks/useSessionHistory';
 import { useSessionNodes } from '../../hooks/useSessionNodes';
 import { useTabBarScroll } from '../../hooks/useTabBarScroll';
 import { TodoProgressCard, TodoRow } from '../shared/TodoProgressCard';
+import { TaskStepNode } from '../shared/TaskStepNode';
+import { FoldableContent } from '../shared/FoldableContent';
 import { AskPromptCard } from '../shared/AskPromptCard';
 import { AskAttachmentStrip } from '../shared/AskAttachmentStrip';
 import { ConfirmPromptCard } from '../shared/ConfirmPromptCard';
@@ -284,48 +287,12 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
     return undefined;
   }, [messages]);
   /**
-   * 列表项：过滤不可见的空 assistant 占位。
-   * 这类条目渲染为 0 高度，但虚拟列表会把「未测量项」按中位数估算，
-   * 留在 items 里会让前缀和与实际高度不一致（回复开始瞬间的轻微位移来源）。
-   *
-   * 流式更新通常是「长度不变、仅尾部对象替换」：此时复用旧数组前缀，
-   * 避免每帧 filter + isEmptyAssistantPlaceholder 全量扫描。
+   * 虚拟列表项：消息 / 任务步骤节点。
+   * - 用户消息、系统卡、错误卡独立成项（key 仍为消息 id，左侧会话刻度跳转不受影响）；
+   * - todo 生命周期与「无正文的思考/工具段」合并为步骤节点（见 lib/task-steps.ts）。
+   * 分组是 O(n) 纯计算（不解析参数 JSON），流式期间可安全重算。
    */
-  const listItemsCacheRef = useRef<{ messages: readonly TaskMessage[]; items: TaskMessage[] }>({
-    messages: EMPTY_MESSAGES,
-    items: [],
-  });
-  const listItems = useMemo(() => {
-    const prev = listItemsCacheRef.current;
-    let prefixSame = messages.length > 0 && messages.length === prev.messages.length;
-    if (prefixSame) {
-      for (let i = 0; i < messages.length - 1; i += 1) {
-        if (messages[i] !== prev.messages[i]) {
-          prefixSame = false;
-          break;
-        }
-      }
-    }
-    if (
-      prefixSame &&
-      messages[messages.length - 1] !== prev.messages[prev.messages.length - 1]
-    ) {
-      const oldTail = prev.messages[prev.messages.length - 1];
-      const newTail = messages[messages.length - 1];
-      const oldEmpty = isEmptyAssistantPlaceholder(oldTail);
-      const newEmpty = isEmptyAssistantPlaceholder(newTail);
-      if (oldEmpty === newEmpty) {
-        if (newEmpty) return prev.items;
-        const next = prev.items.slice();
-        next[next.length - 1] = newTail;
-        listItemsCacheRef.current = { messages, items: next };
-        return next;
-      }
-    }
-    const items = messages.filter((m) => !isEmptyAssistantPlaceholder(m));
-    listItemsCacheRef.current = { messages, items };
-    return items;
-  }, [messages]);
+  const chatItems = useMemo<ChatListItem[]>(() => buildChatItems(messages), [messages]);
   /**
    * 工具结果全局索引（toolCallId → 结果文本/错误标记）。
    * 长耗时工具（subagent / 建队）的结果消息不保证紧邻其 assistant 消息，
@@ -442,6 +409,7 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   // 隐藏会话（subagent 衍生任务）不在侧边栏列表，store.tasks 查不到 → 直连接口兜底标题
   const [fallbackTitle, setFallbackTitle] = useState<string | null>(null);
   const todos = useStore((s) => s.todosBySession[taskId] ?? EMPTY_TODOS);
+  const stepDisplay = useStore((s) => s.stepDisplay);
   const pendingAsks = useStore((s) => s.pendingAsks);
   const pendingConfirms = useStore((s) => s.pendingConfirms);
   /** 自动审查进行中的会话计数（主会话 key；子代理审查已归属到父会话） */
@@ -1414,12 +1382,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
   );
 
   /**
-   * 消息条目渲染（稳定引用）：避免 TaskPage 任意状态变化都让虚拟列表整片重渲。
+   * 单条消息气泡渲染（稳定引用）：独立消息与步骤节点内的子消息共用。
    * inViewport（精确视口内）→ deferContent=false：可见项首帧直接渲染终态（完整 Markdown/思考），
    * 不再先出「纯文本占位」再升级；overscan 区条目仍走占位→渐进水合（升级发生在视口外，不可见）。
+   * contentOnly=true：折叠节点内只渲染正文（隐藏思考/工具），用于「节点收起但正文不折叠」。
    */
-  const renderItem = useCallback(
-    (msg: TaskMessage, index: number, inViewport: boolean) => {
+  const renderMessage = useCallback(
+    (msg: TaskMessage, index: number, inViewport: boolean, contentOnly = false) => {
       // 空 assistant 占位整条不渲染（含外层 padding）：否则会在页脚「响应中」上方
       // 留下几 px 幽灵高度，表现为「响应中先出现、随后下移几 px 才出现正文」。
       if (isEmptyAssistantPlaceholder(msg)) return null;
@@ -1429,12 +1398,6 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       const showActions = !isGenerating && replyEndIds.has(msg.id);
       // 重新生成 / 诊断(Harness)：仅最新的一段回复结尾
       const isLastReply = msg.id === lastReplyEndId;
-      // 续接气泡（同一段回复内的中间轮次：assistant 且非回复结尾、非系统卡）→ 收紧底部留白，
-      // 使多轮工具调用（每轮一个气泡）读起来像紧凑的工具序列；段结尾/用户/系统卡保留 16px 分隔。
-      const isContinuation = msg.role === 'assistant' && !replyEndIds.has(msg.id) && !isSystemCard(msg);
-      const needsTodos =
-        msg.todoSnapshot !== undefined ||
-        (msg.toolCalls?.some((tc) => tc.name === 'todo') ?? false);
       // 稳定排序键：相同错误合并时，靠前的消息展示唯一一张完整错误卡。
       // 历史消息优先用持久化下标（加载更早历史时不会整体位移，避免无谓重渲）。
       const orderIndex = typeof msg.historyIndex === 'number' && msg.historyIndex >= 0
@@ -1442,41 +1405,38 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
         : index;
       const orderBase = `${String(orderIndex).padStart(6, '0')}:${msg.id}`;
       return (
-        <div className={cn('min-w-0', isContinuation ? 'px-4 pb-1' : 'px-4 pb-4')}>
-          <MessageErrorBoundary
-            scope="message"
-            orderKey={orderBase}
-            resetKey={`${msg.id}|${msg.content.length}|${msg.streaming ? 1 : 0}|${msg.toolCalls?.length ?? 0}`}
-          >
-            <MessageBubble
-              sessionId={taskId}
-              message={msg}
-              orderBase={orderBase}
-              todos={needsTodos ? todos : undefined}
-              toolIconMap={toolIconMap}
-              toolResults={toolResultIndex}
-              truncateDisabled={isGenerating}
-              onTruncate={handleTruncateClick}
-              onCopy={handleCopyMessage}
-              onRegenerate={handleRegenerate}
-              regenerateDisabled={isGenerating}
-              showActions={showActions}
-              showRegenerate={isLastReply}
-              showDiagnose={isLastReply}
-              onDiagnose={handleDiagnose}
-              onDiagnoseHarness={handleDiagnoseHarness}
-              onContinue={handleContinue}
-              continueDisabled={isGenerating}
-              onOpenAttachment={openAttachment}
-              deferContent={!inViewport}
-            />
-          </MessageErrorBoundary>
-        </div>
+        <MessageErrorBoundary
+          scope="message"
+          orderKey={orderBase}
+          resetKey={`${msg.id}|${msg.content.length}|${msg.streaming ? 1 : 0}|${msg.toolCalls?.length ?? 0}`}
+        >
+          <MessageBubble
+            sessionId={taskId}
+            message={msg}
+            orderBase={orderBase}
+            contentOnly={contentOnly}
+            toolIconMap={toolIconMap}
+            toolResults={toolResultIndex}
+            truncateDisabled={isGenerating}
+            onTruncate={handleTruncateClick}
+            onCopy={handleCopyMessage}
+            onRegenerate={handleRegenerate}
+            regenerateDisabled={isGenerating}
+            showActions={showActions}
+            showRegenerate={isLastReply}
+            showDiagnose={isLastReply}
+            onDiagnose={handleDiagnose}
+            onDiagnoseHarness={handleDiagnoseHarness}
+            onContinue={handleContinue}
+            continueDisabled={isGenerating}
+            onOpenAttachment={openAttachment}
+            deferContent={!inViewport}
+          />
+        </MessageErrorBoundary>
       );
     },
     [
       taskId,
-      todos,
       toolIconMap,
       toolResultIndex,
       replyEndIds,
@@ -1490,6 +1450,37 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
       handleContinue,
       openAttachment,
     ],
+  );
+
+  /** 虚拟列表条目：消息 → 标准气泡；步骤 → TaskStepNode（子消息复用 renderMessage） */
+  const renderItem = useCallback(
+    (item: ChatListItem, index: number, inViewport: boolean) => {
+      if (item.kind === 'step') {
+        return (
+          <div className="min-w-0 px-4 pb-3 pt-0.5">
+            <TaskStepNode
+              step={item.step}
+              sessionId={taskId}
+              level={stepDisplay}
+              renderChild={(child, contentOnly) =>
+                renderMessage(child, index, inViewport, contentOnly)
+              }
+            />
+          </div>
+        );
+      }
+      const msg = item.message;
+      if (isEmptyAssistantPlaceholder(msg)) return null;
+      // 续接气泡（同一段回复内的中间轮次：assistant 且非回复结尾、非系统卡）→ 收紧底部留白，
+      // 使多轮工具调用（每轮一个气泡）读起来像紧凑的工具序列；段结尾/用户/系统卡保留 16px 分隔。
+      const isContinuation = msg.role === 'assistant' && !replyEndIds.has(msg.id) && !isSystemCard(msg);
+      return (
+        <div className={cn('min-w-0', isContinuation ? 'px-4 pb-1' : 'px-4 pb-4')}>
+          {renderMessage(msg, index, inViewport)}
+        </div>
+      );
+    },
+    [renderMessage, taskId, stepDisplay, replyEndIds],
   );
 
   return (
@@ -1571,10 +1562,10 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             relative wrapper 让「返回底部」按钮悬浮于滚动区上方、不随内容滚动） */}
         <div className="relative min-h-0 flex-1">
           {/* 三态门控：有消息 → 列表；空白页或**已确认**为空 → 欢迎页；
-              非空白页且历史尚未加载 → 不渲染（纯空白）。
+              非空白页且历史尚未加载 → 「加载中…」占位（不再是纯空白）。
               「加载中（状态未知）」与「确认为空（状态已知）」必须区分：前者渲染欢迎页会与随后的
               记录形成「欢迎页 → 记录」整块内容切换（用户看到的「闪两次」根因）。
-              加载态刻意不放 spinner/骨架屏，保持与页面底色一致的空白，记录到达后直接出现。 */}
+              但加载中也不能留白：打开已有会话时先出明确的载入占位，记录到达后直接替换。 */}
           {messages.length > 0 ? (
             /* 仅在已有消息时才挂载虚拟列表：空数据时先挂载会让列表停在顶部
                （切回会话/刷新后不显示最新消息）。自建列表 initialBottom 兜底首帧定位；
@@ -1582,11 +1573,11 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
             <VirtualList
               className="task-scroll-area"
               apiRef={listApiRef}
-              items={listItems}
+              items={chatItems}
               // 会话标识：合并路由后切换会话不再重挂组件，列表需据此重置贴底跟随与高度缓存
               sessionKey={taskId}
-              // 稳定 key：分页 prepend 后同一消息的 key 不变（不会整列表重挂载）
-              itemKey={(m) => m.id}
+              // 稳定 key：用户消息保持消息 id（左侧刻度跳转依赖它）；步骤节点用 step:<首条消息 id>
+              itemKey={(item) => item.key}
               // 滚动容器句柄：startReached 需据 scrollTop 判定「是否真的在顶部」；
               // 同步一份 state 给对话节点导航（滚动监听 / 当前节点判定）
               registerScroller={(el) => {
@@ -1659,7 +1650,13 @@ export function TaskPage({ onOpenOverlay }: TaskPageProps) {
                 </div>
               )}
             </div>
-          ) : null}
+          ) : (
+            /* 会话历史加载中：显示明确的载入占位，避免打开会话后先看到整块空白 */
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
+              <Loader2 className="size-5 animate-spin" />
+              <span className="text-sm">{t('common.loading')}</span>
+            </div>
+          )}
           {/* 返回底部按钮：不在底部时显示；流式生成中显示顺时针跑马灯 */}
           <ScrollToBottomButton
             // 仅在列表存在（有消息）时才可能显示；空白页 / 未加载时按钮无语义，直接隐藏
@@ -2540,8 +2537,8 @@ interface MessageBubbleProps {
   message: TaskMessage;
   /** 消息级稳定排序键：相同错误合并时决定哪条消息展示完整错误卡 */
   orderBase: string;
-  /** 仅含 todo 卡片的消息才传（避免 todos 更新导致所有消息重渲） */
-  todos?: TodoItem[];
+  /** 折叠节点内只渲染正文：隐藏思考/工具/子代理/ask/代码卡（节点收起但正文不折叠） */
+  contentOnly?: boolean;
   toolIconMap: Record<string, string>;
   /** 工具结果全局索引（跨消息匹配；见页面内的 buildToolResultIndex） */
   toolResults: Map<string, ToolResultEntry>;
@@ -2576,14 +2573,17 @@ interface MessageBubbleProps {
    */
   deferContent?: boolean;
 }
-const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBase, todos, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBase, contentOnly = false, toolIconMap, toolResults, truncateDisabled, onTruncate, onCopy, onRegenerate, regenerateDisabled, showActions, showRegenerate, showDiagnose, onDiagnose, onDiagnoseHarness, onContinue, continueDisabled, onOpenAttachment, deferContent = true }: MessageBubbleProps) {
   const { t, i18n } = useTranslation();
+  const stepDisplay = useStore((s) => s.stepDisplay);
+  /** 详细 / 原始内容挡位：思考区默认展开 */
+  const levelExpanded = stepDisplay === 'detailed' || stepDisplay === 'raw';
   // 思考区折叠状态：折叠时不挂载 MarkdownRenderer（长会话单条思考可达 6~13 万字符，
   // 折叠态仍渲染会同步解析全文并产生大量 DOM/水合任务，是上滑黑屏与启动卡死的主因）。
-  // key 带 sessionId：旧消息 id 可能是 `h<index>`，不带会话前缀会跨会话冲突
+  // key 带会话与挡位：旧消息 id 可能是 `h<index>`，不带会话前缀会跨会话冲突；切挡位按新默认值重置。
   const [thinkingOpen, setThinkingOpen] = usePersistentState(
-    `${sessionId}:${message.id}:thinking`,
-    false,
+    `${sessionId}:${message.id}:thinking:${stepDisplay}`,
+    levelExpanded,
   );
   // 原文/译文显示选择：按消息记住；默认原文，点击「译文」后才按需翻译
   const [thinkingView, setThinkingView] = usePersistentState<ThinkingView>(
@@ -2843,11 +2843,6 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
     message.toolCalls?.filter(
       (tc) => tc.name !== 'todo' && tc.name !== 'ask' && tc.name !== 'run_code' && !isAgentCall(tc),
     ) ?? [];
-  // todo 卡片：原生 todo 调用或 run_code 嵌套 todo（快照挂在外层消息上）
-  const todoSnapshot = message.todoSnapshot ?? todos ?? EMPTY_TODOS;
-  const showTodoCard =
-    todoSnapshot.length > 0 &&
-    (message.todoSnapshot !== undefined || (message.toolCalls?.some((tc) => tc.name === 'todo') ?? false));
 
   // 模型请求失败「系统错误卡片」：实时（WS error）与历史恢复（system-error 消息）同构渲染。
   // 顶部固定标题 + 右侧「错误诊断」按钮；底部操作栏（复制 + 重新生成）仅在回复结尾出现，且不含 Harness 诊断。
@@ -2876,7 +2871,7 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
     <div className="group/message flex min-w-0 flex-col gap-2">
       {/* thinking 折叠区：显式思考状态行（默认折叠；流式中展示实时秒数与最新片段预览，完成后保留总耗时）。
           折叠态不渲染正文：长会话 thinking 总量可达百万字符，折叠时仍解析/水合会把主线程打死。 */}
-      {message.thinking && (
+      {!contentOnly && message.thinking && (
         <details
           className="group min-w-0 overflow-hidden"
           open={thinkingOpen}
@@ -2940,21 +2935,26 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
           )}
         </details>
       )}
-      {/* 正文 */}
+      {/* 正文：简洁挡位折成约 3 行预览，其余挡位完整显示 */}
       {message.content && !message.isError && (
         <div className="text-sm text-foreground">
-          {/* 流式 spinner 经 cursor 渲染进文本流末尾，与最后一行文字同行（见 MarkdownRenderer / markdown.css） */}
-          <MarkdownRenderer
-            text={visibleContent}
-            streaming={!!message.streaming}
-            defer={deferContent && !message.streaming}
-            cursor={message.streaming ? <Loader2 className="ml-1 inline size-3 animate-spin" /> : undefined}
-          />
+          <FoldableContent
+            folded={stepDisplay === 'compact'}
+            stateKey={`${sessionId}:${message.id}:content:${stepDisplay}`}
+          >
+            {/* 流式 spinner 经 cursor 渲染进文本流末尾，与最后一行文字同行（见 MarkdownRenderer / markdown.css） */}
+            <MarkdownRenderer
+              text={visibleContent}
+              streaming={!!message.streaming}
+              defer={deferContent && !message.streaming}
+              cursor={message.streaming ? <Loader2 className="ml-1 inline size-3 animate-spin" /> : undefined}
+            />
+          </FoldableContent>
         </div>
       )}
       {/* agent 工具调用 → 合并为一张 Subagent 大卡片（头部 + 每行一个子代理，行可展开过程/报告）：
           结果统一从全局索引取（长耗时工具的结果消息未必紧邻本消息） */}
-      {agentCalls.length > 0 && (
+      {!contentOnly && agentCalls.length > 0 && (
         <MessageErrorBoundary scope="card" orderKey={`${orderBase}:agent`}>
           <SubagentCard
             calls={agentCalls.map((tc): SubagentCallItem => {
@@ -2976,11 +2976,9 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
           />
         </MessageErrorBoundary>
       )}
-      {/* todo 工具调用（含 run_code 嵌套 todo）→ 在任务流中渲染 TodoProgressCard。
-          渲染条件基于消息自身快照（?? 回落到 store）：store 被清空不牵连历史卡片。 */}
-      {showTodoCard && <TodoProgressCard todos={todoSnapshot} variant="inline" />}
+      {/* todo 工具调用由「任务步骤节点」代表（lib/task-steps.ts），不再单独渲染进度卡 */}
       {/* ask 工具调用 → 渲染为可折叠问答卡片（默认折叠；仅已完成、有结果时渲染；进行中的由底部 AskPromptCard 处理） */}
-      {message.toolCalls?.filter((tc) => tc.name === 'ask').map((tc) => {
+      {!contentOnly && message.toolCalls?.filter((tc) => tc.name === 'ask').map((tc) => {
         const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
         if (!matchedResult) return null; // 只渲染已完成的 ask
         const fullText = matchedResult.result.content
@@ -3047,7 +3045,10 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
           <details key={tc.id} className="group rounded-lg border border-border bg-card shadow-sm">
             <summary className="flex cursor-pointer items-center gap-1.5 rounded-lg p-3">
               <HelpCircle className="size-3.5 shrink-0 text-primary-strong" />
-              <span className="shrink-0 text-xs font-medium text-foreground">{t('task.askTitle')}</span>
+              <span className="shrink-0 text-xs font-medium text-foreground">
+                {/* 非原始挡位套用统一工具文案；原始内容挡位显示原始工具名 ask */}
+                {stepDisplay === 'raw' ? 'ask' : t('task.toolCopy.ask.done')}
+              </span>
               {display[0]?.question && (
                 <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                   {display[0].question}
@@ -3103,7 +3104,7 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
         );
       })}
       {/* run_code 专属卡片：程序 / 日志 / 工具调用 / 界面 */}
-      {runCodeCalls.length > 0 && (
+      {!contentOnly && runCodeCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {runCodeCalls.map((tc, cardIndex) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);
@@ -3132,7 +3133,7 @@ const MessageBubble = memo(function MessageBubble({ sessionId, message, orderBas
       )}
       {/* 非 todo/ask/agent/run_code 工具调用（可折叠：展开显示参数与结果）。
           agent 工具已由上方专属卡片渲染。 */}
-      {otherCalls.length > 0 && (
+      {!contentOnly && otherCalls.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {otherCalls.map((tc, cardIndex) => {
             const matchedResult = message.toolResults?.find((tr) => tr.toolCallId === tc.id);

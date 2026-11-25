@@ -139,9 +139,14 @@ export function useTasks() {
         // 所有分组条目瞬间消失再重新加载（「关一个组，另一个组重新加载」的放大来源）。
         if (!opts?.preserveTasks && !loadedOnceRef.current) resetGroupTasks();
         loadedOnceRef.current = true;
+        // 分组快照已到达：侧边栏「总 loading」立即消失，改为各分组自己的首屏加载态
+        //（组内 loading 由 ensureGroupLoaded 置 meta.loading 后由分组行渲染）。
+        setGroupsLoaded(true);
         // 只加载「展开且非空」的分组：折叠分组默认零请求（首次点击展开时才懒加载）。
         // 展开状态来自后端 TaskGroup.expanded（默认分组缺省展开，其余缺省折叠）。
-        void Promise.all(
+        // 必须 await：首屏就绪（Splash 放行）要求「可见分组的第一页已物化」，
+        // 否则 Splash 退场时侧边栏仍是「有分组标题、没有任务」的半空状态。
+        await Promise.all(
           groups
             .filter(
               (g) =>
@@ -179,6 +184,9 @@ export function useTasks() {
     } finally {
       loadInFlightRef.current = null;
       setGroupsLoaded(true);
+      // 无论首载成功 / 降级 / 失败都放行 Splash：失败时侧边栏显示空态，
+      // 避免后端异常导致首屏加载屏永久停留（Splash 侧另有 8s 兜底）。
+      useStore.getState().markSidebarReady();
     }
   }, [setTaskGroups, resetGroupTasks, ensureGroupLoaded, applyFullTaskSnapshot]);
 

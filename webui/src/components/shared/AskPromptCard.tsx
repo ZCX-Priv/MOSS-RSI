@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from '../../store';
 import {
   HelpCircle,
   Pencil,
@@ -112,6 +113,7 @@ function baseOptions(q: AskQuestion, yes: string, no: string): AskOption[] {
 
 export function AskPromptCard({ asks, onOpenAttachment, className }: AskPromptCardProps) {
   const { t } = useTranslation();
+  const stepDisplay = useStore((s) => s.stepDisplay);
   const { replyAsk } = useTask();
   const [sending, setSending] = useState(false);
   const [step, setStep] = useState(0);
@@ -324,7 +326,10 @@ export function AskPromptCard({ asks, onOpenAttachment, className }: AskPromptCa
       {/* 头部：标题 + 进度 + 取消 */}
       <div className="flex items-center gap-1.5">
         <HelpCircle className="size-3.5 text-primary-strong" />
-        <span className="text-xs font-medium text-foreground">{t('task.askTitle')}</span>
+        <span className="text-xs font-medium text-foreground">
+          {/* 非原始挡位套用统一工具文案；原始内容挡位显示原始工具名 ask */}
+          {stepDisplay === 'raw' ? 'ask' : t('task.toolCopy.ask.running')}
+        </span>
         {steps.length > 1 && (
           <span className="text-[11px] text-muted-foreground">
             {t('task.askStepOf', { current: step + 1, total: steps.length })}

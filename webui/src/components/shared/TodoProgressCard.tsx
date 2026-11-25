@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CircleCheck, Circle, CircleX, Loader2, ListTodo, ChevronDown } from 'lucide-react';
 import type { TodoItem } from '../../types/api';
+import { useStore } from '../../store';
 import { cn } from '@/lib/utils';
 
 interface TodoProgressCardProps {
@@ -24,6 +25,7 @@ export function TodoProgressCard({
   className,
 }: TodoProgressCardProps) {
   const { t } = useTranslation();
+  const stepDisplay = useStore((s) => s.stepDisplay);
   const [collapsed, setCollapsed] = useState(false);
 
   const total = todos.length;
@@ -67,7 +69,9 @@ export function TodoProgressCard({
         <div className="flex items-center gap-1.5">
           <ListTodo className="size-3.5 text-muted-foreground" />
           <span className="text-xs font-medium text-foreground">
-            {completed}/{total} {t('task.todoCompleted')}
+            {/* 非原始挡位套用工具动作文案；原始内容挡位显示原始工具名 todo */}
+            {stepDisplay === 'raw' ? 'todo' : t('task.toolCopy.todoUpdate.done')} · {completed}/{total}{' '}
+            {t('task.todoCompleted')}
           </span>
         </div>
         {isInline && (

@@ -354,7 +354,7 @@ export default function App() {
             {/* 欢迎页与任务页同一条路由（可选段）：`/` 重定向到 `/task`；发送消息后
                 URL 从 /task → /task/xxx 是**同一路由内参数切换，TaskPage 不卸载重挂**——
                 根治「发送后任务页整页重挂 + 浮出动画起点黑帧」；刷新/前进后退保持任务页 */}
-            <Route path="/" element={<Navigate to="/task" replace />} />
+            <Route path="/" element={<RedirectToTask />} />
             <Route path="/task/:taskId?" element={<TaskPage />} />
             {/* 插件库：主页为 SkillHub 技能市场，管理页为技能/MCP 管理 */}
             <Route path="/plugins" element={<SkillMarketPage />} />
@@ -455,6 +455,19 @@ function RouteReadySignal() {
     useStore.getState().markPageReady();
   }, [pathname]);
   return null;
+}
+
+/**
+ * 根路径 → /task 重定向。
+ * 不用 <Navigate>（它渲染 null）：路由切换尚未提交时主区域是纯背景，
+ * 刷新/首启会表现为「右侧整块空白」。这里改为渲染加载占位，切换完成后被任务页自然替换。
+ */
+function RedirectToTask() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate('/task', { replace: true });
+  }, [navigate]);
+  return <PageLoading />;
 }
 
 /** 懒加载页面占位（不阻塞 TaskPage 主路径；进入设置等页面时短暂显示） */
