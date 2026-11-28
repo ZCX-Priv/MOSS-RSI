@@ -3418,25 +3418,15 @@ export function CommandsSettings() {
         </DialogContent>
       </Dialog>
 
-      {/* 删除确认弹窗 */}
-      <Dialog open={deleting !== null} onOpenChange={(o) => !o && setDeleting(null)}>
-        <DialogContent size="sm">
-          <DialogHeader>
-            <DialogTitle>{t('common.delete')}</DialogTitle>
-            <DialogDescription>
-              {t('settings.commands.deleteConfirm', { name: deleting ?? '' })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setDeleting(null)}>
-              {t('common.cancel')}
-            </Button>
-            <Button variant="destructive" size="sm" onClick={() => void confirmDelete()}>
-              {t('common.delete')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* 删除确认弹窗（确认类弹窗保持自适应高度） */}
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        title={t('common.delete')}
+        description={t('settings.commands.deleteConfirm', { name: deleting ?? '' })}
+        variant="danger"
+        onConfirm={() => void confirmDelete()}
+      />
     </div>
   );
 }

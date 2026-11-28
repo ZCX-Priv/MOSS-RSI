@@ -21,7 +21,7 @@ export function FilePreviewDialog({ path, open, onOpenChange }: FilePreviewDialo
           </DialogTitle>
         </DialogHeader>
         <DialogBody className="gap-0 overflow-y-hidden px-0 py-0">
-          <FilePreviewPane path={path} active={open} heightClass="h-[calc(80dvh-9rem)]" />
+          <FilePreviewPane path={path} active={open} heightClass="h-full" />
         </DialogBody>
       </DialogContent>
     </Dialog>

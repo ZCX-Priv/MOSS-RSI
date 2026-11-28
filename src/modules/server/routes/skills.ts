@@ -42,6 +42,56 @@ function toSkillItem(
   };
 }
 
+/** 技能文件条目（详情页「文件」板块） */
+interface SkillFileEntry {
+  path: string;
+  size: number;
+}
+
+/**
+ * 读取技能详情内容：SKILL.md 原文（≤1MB）+ 文件清单大小。
+ * 任何读取失败都静默降级，不影响既有字段。
+ */
+function buildSkillContent(
+  skill: Skill,
+): { markdown?: string; fileEntries?: SkillFileEntry[] } {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('node:fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('node:path');
+  const fileEntries: SkillFileEntry[] = [];
+  let markdown: string | undefined;
+
+  if (skill.sourceFile) {
+    try {
+      const st = fs.statSync(skill.sourceFile);
+      fileEntries.push({ path: path.basename(skill.sourceFile), size: st.size });
+      // 超过 1MB 不内联原文（前端回退 prompt）
+      if (st.size <= 1024 * 1024) {
+        markdown = fs.readFileSync(skill.sourceFile, 'utf8');
+      }
+    } catch {
+      // 忽略：文件被移动/无权限
+    }
+  }
+
+  if (skill.dir && skill.files && skill.files.length > 0) {
+    for (const rel of skill.files) {
+      try {
+        const st = fs.statSync(path.join(skill.dir, rel));
+        if (st.isFile()) fileEntries.push({ path: rel, size: st.size });
+      } catch {
+        // 忽略单个文件失败
+      }
+    }
+  }
+
+  return {
+    ...(markdown !== undefined ? { markdown } : {}),
+    ...(fileEntries.length > 0 ? { fileEntries } : {}),
+  };
+}
+
 export function createListSkillsHandler(services: ServiceRegistry, env: Environment): RouteHandler {
   return async (): Promise<HttpResponse> => {
     const registry = services.tryResolve<SkillRegistry>('skill.registry');
@@ -90,6 +140,7 @@ export function createGetSkillHandler(services: ServiceRegistry, env: Environmen
         skill: {
           ...toSkillItem(skill, registry, env),
           ...(iconSvg ? { iconSvg } : {}),
+          ...buildSkillContent(skill),
         },
       },
     };

@@ -1772,11 +1772,42 @@ export interface MarketCategoryItem {
   nameEn: string;
 }
 
+/** 技能文件条目（详情页「文件」板块） */
+export interface SkillFileEntry {
+  path: string;
+  size: number;
+}
+
 export interface SkillDetail extends SkillItem {
   prompt: string;
   sourceFile?: string;
   /** 自定义 svg 图标内容（icon 以 .svg 结尾时后端返回） */
   iconSvg?: string;
+  /** SKILL.md 原文（含 frontmatter；后端超过 1MB 时省略，前端回退 prompt） */
+  markdown?: string;
+  /** 文件清单（含 SKILL.md 与 size；后端读取失败时省略） */
+  fileEntries?: SkillFileEntry[];
+}
+
+/** 市场技能内容（逆向 SkillHub /api/v1/skills/{slug}/... 接口） */
+export interface MarketSkillFileEntry {
+  path: string;
+  size: number;
+}
+
+export interface MarketSkillContent {
+  canonicalName: string;
+  slug: string;
+  name: string;
+  /** 「简介」：详情接口的中文摘要（summary_zh → summary） */
+  summaryMarkdown: string;
+  files: MarketSkillFileEntry[];
+  /** 「预览」Tab：SKILL.md 原文 */
+  preview: { path: string; content: string } | null;
+  version: string;
+  stats?: { downloads: number; stars: number; installs: number; versions: number };
+  publisher?: { name: string; verified: boolean };
+  security?: Array<{ vendor: string; status: string; statusText: string; reportUrl: string }>;
 }
 
 /** 自定义斜杠命令（~/.moss/commands/<name>.md；一次性注入的提示词模板） */

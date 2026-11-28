@@ -20,6 +20,9 @@ const OverviewSettings = lazy(() =>
 const PluginMarketPage = lazy(() =>
   import('./components/pages/PluginMarketPage').then((m) => ({ default: m.PluginMarketPage })),
 );
+const PluginDetailPage = lazy(() =>
+  import('./components/pages/PluginDetailPage').then((m) => ({ default: m.PluginDetailPage })),
+);
 const SkillMarketPage = lazy(() =>
   import('./components/pages/SkillMarketPage').then((m) => ({ default: m.SkillMarketPage })),
 );
@@ -172,10 +175,14 @@ export default function App() {
   const isPluginsSkillsRoute = pathname === '/plugins/skills';
   // 插件库管理页（技能 / MCP）：标题「管理插件」并显示返回插件库按钮
   const isPluginsManageRoute = isPluginsMcpRoute || isPluginsSkillsRoute;
+  // 插件详情页：移动端标题「插件详情」并提供返回
+  const isPluginsDetailRoute = pathname === '/plugins/detail';
   const isAutomationRoute = pathname.startsWith('/automation');
   const isSettingsRoute = pathname.startsWith('/settings');
   const isProviderRoute = pathname.startsWith('/settings/provider');
-  const mobileTitle = isPluginsManageRoute
+  const mobileTitle = isPluginsDetailRoute
+    ? t('plugins.detailTitle')
+    : isPluginsManageRoute
     ? t('plugins.manageTitle')
     : isPluginsRoute
       ? t('plugins.title')
@@ -226,14 +233,17 @@ export default function App() {
             <header className="grid h-12 grid-cols-3 items-center border-b border-border px-3 md:hidden">
               <div className="flex items-center gap-1">
                 <SidebarTrigger />
-                {/* 插件库管理页：返回插件库（桌面返回键在页面标题区） */}
-                {isPluginsManageRoute && (
+                {/* 插件库管理页：返回插件库；详情页：返回上一页 */}
+                {(isPluginsManageRoute || isPluginsDetailRoute) && (
                   <Button
                     variant="ghost"
                     size="icon-xs"
-                    title={t('plugins.backToMarket')}
-                    aria-label={t('plugins.backToMarket')}
-                    onClick={() => navigate('/plugins')}
+                    title={isPluginsDetailRoute ? t('plugins.detailBack') : t('plugins.backToMarket')}
+                    aria-label={isPluginsDetailRoute ? t('plugins.detailBack') : t('plugins.backToMarket')}
+                    onClick={() => {
+                      if (isPluginsDetailRoute) navigate(-1);
+                      else navigate('/plugins');
+                    }}
                   >
                     <ArrowLeft />
                   </Button>
@@ -360,7 +370,7 @@ export default function App() {
             <Route path="/plugins" element={<SkillMarketPage />} />
             <Route path="/plugins/skills" element={<PluginMarketPage />} />
             <Route path="/plugins/mcp" element={<PluginMarketPage />} />
-            {/* 未匹配的插件路径回主页（绝对路径：splat 内相对 to 会以完整 pathname 为基准） */}
+            <Route path="/plugins/detail" element={<PluginDetailPage />} />
             <Route path="/plugins/*" element={<Navigate to="/plugins" replace />} />
             <Route path="/automation" element={<AutomationPage />}>
               <Route index element={<Navigate to="configured" replace />} />

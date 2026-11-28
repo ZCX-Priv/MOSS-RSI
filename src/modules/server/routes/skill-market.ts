@@ -14,7 +14,9 @@ import {
   installMarketSkill,
   normalizeSkillName,
   queryMarketSkills,
+  fetchMarketSkillContent,
   SkillMarketError,
+  CANONICAL_NAME_RE,
 } from '../../tools/shared/skill-market';
 
 /** 保留既有导出（外部若引用过该工具函数，行为不变） */
@@ -85,6 +87,49 @@ export function createMarketCategoriesHandler(): RouteHandler {
           nameEn: asString(c.nameEn),
         }));
       return { status: 200, body: { categories } };
+    } catch {
+      return upstreamError();
+    }
+  };
+}
+
+/**
+ * POST /api/skills/market/detail —— 按 canonicalName 检索市场技能详情 + 内容。
+ * 元数据来自市场列表；内容（说明/文件/预览）来自逆向的 SkillHub 公开接口。
+ * 内容失败不阻断元数据返回：content=null + contentError，前端可重试。
+ */
+export function createMarketSkillDetailHandler(): RouteHandler {
+  return async (req: HttpRequest): Promise<HttpResponse> => {
+    const body = req.body as { canonicalName?: unknown } | undefined;
+    const canonicalName =
+      typeof body?.canonicalName === 'string' ? body.canonicalName.trim() : '';
+    if (!CANONICAL_NAME_RE.test(canonicalName)) {
+      return { status: 400, body: { error: ErrorCode.SKILL_NAME_INVALID } };
+    }
+    const slug = canonicalName.slice(canonicalName.lastIndexOf('/') + 1);
+    try {
+      const [list, contentResult] = await Promise.all([
+        queryMarketSkills({ keyword: slug, pageSize: 50 }),
+        fetchMarketSkillContent(canonicalName).then(
+          (content) => ({ content, error: '' }),
+          (err: unknown) => ({
+            content: null,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+      ]);
+      const skill = list.skills.find((item) => item.canonicalName === canonicalName);
+      if (!skill) {
+        return { status: 404, body: { error: 'MARKET_SKILL_NOT_FOUND' } };
+      }
+      return {
+        status: 200,
+        body: {
+          skill,
+          content: contentResult.content,
+          ...(contentResult.error ? { contentError: contentResult.error } : {}),
+        },
+      };
     } catch {
       return upstreamError();
     }

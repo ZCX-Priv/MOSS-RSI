@@ -177,6 +177,18 @@ export function SkillMarketPage() {
     [navigate],
   );
 
+  const openDetail = useCallback(
+    (item: MarketSkillItem): void => {
+      const params = new URLSearchParams({
+        type: 'skill',
+        from: 'market',
+        id: item.canonicalName,
+      });
+      navigate(`/plugins/detail?${params.toString()}`, { state: { marketItem: item } });
+    },
+    [navigate],
+  );
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* 桌面标题区（移动端由全局 header 承载标题与管理入口） */}
@@ -284,7 +296,18 @@ export function SkillMarketPage() {
             const installed = installedNames.has(item.installName);
             const busy = installing === item.canonicalName;
             return (
-              <Card key={item.canonicalName} className="flex flex-row items-center gap-3 p-3">
+              <Card
+                key={item.canonicalName}
+                role="button"
+                tabIndex={0}
+                className="flex cursor-pointer flex-row items-center gap-3 p-3 transition-colors hover:bg-muted/40"
+                onClick={() => openDetail(item)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return;
+                  e.preventDefault();
+                  openDetail(item);
+                }}
+              >
                 <SkillIcon item={item} />
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <h3 className="truncate text-sm font-medium text-foreground">{item.name}</h3>
@@ -292,33 +315,35 @@ export function SkillMarketPage() {
                     {item.description || item.subCategory}
                   </p>
                 </div>
-                {installed ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0 gap-1"
-                    onClick={() => useSkill(item)}
-                  >
-                    <ArrowRight className="size-3.5" />
-                    {t('plugins.marketUse')}
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="relative shrink-0 gap-1 overflow-hidden"
-                    disabled={busy}
-                    onClick={() => void install(item)}
-                  >
-                    {busy && <RunningBar />}
-                    {busy ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Download className="size-3.5" />
-                    )}
-                    {busy ? t('plugins.marketInstalling') : t('plugins.marketInstall')}
-                  </Button>
-                )}
+                <div onClick={(e) => e.stopPropagation()}>
+                  {installed ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0 gap-1"
+                      onClick={() => useSkill(item)}
+                    >
+                      <ArrowRight className="size-3.5" />
+                      {t('plugins.marketUse')}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="relative shrink-0 gap-1 overflow-hidden"
+                      disabled={busy}
+                      onClick={() => void install(item)}
+                    >
+                      {busy && <RunningBar />}
+                      {busy ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Download className="size-3.5" />
+                      )}
+                      {busy ? t('plugins.marketInstalling') : t('plugins.marketInstall')}
+                    </Button>
+                  )}
+                </div>
               </Card>
             );
           })}

@@ -62,6 +62,28 @@ function asNumber(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
+/**
+ * SkillHub 列表接口的 homepage 指向 API 域名（浏览器访问 405），
+ * 规范化为网页详情地址：https://www.skillhub.cn/skills/{owner}/{slug}
+ * 非 API 域名（如 GitHub 等真实主页）原样保留。
+ */
+function normalizeSkillHomepage(rawHomepage: string, canonicalName: string): string {
+  const homepage = rawHomepage.trim();
+  if (homepage === '') return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(homepage);
+  } catch {
+    return homepage;
+  }
+  if (parsed.hostname !== 'api.skillhub.cn') return homepage;
+  // 优先 canonicalName（@owner/slug）；缺失时用 URL 路径兜底
+  const publicPath =
+    canonicalName.replace(/^@/, '').trim() ||
+    parsed.pathname.replace(/^\/+|\/+$/g, '');
+  return publicPath === '' ? homepage : `https://www.skillhub.cn/skills/${publicPath}`;
+}
+
 /** 技能身份指纹：内容描述一致（含跨 owner / 跨 slug 副本）视为同一个技能；无描述时退回 slug */
 function marketDedupeKey(slug: string, identityText: string): string {
   const text = identityText.trim();
@@ -129,7 +151,7 @@ function toMarketSkill(s: SkillHubSkill): MarketSkill {
     downloads: asNumber(s.downloads),
     stars: asNumber(s.stars),
     version: asString(s.version),
-    homepage: asString(s.homepage),
+    homepage: normalizeSkillHomepage(asString(s.homepage), canonicalName),
     verified: s.verified === true,
     source: asString(s.source),
   };
@@ -192,6 +214,170 @@ export async function queryMarketSkills(
     skills.push(item);
   }
   return { skills, total: asNumber(data.data?.total) || raw.length };
+}
+
+/* ============================================================================
+ * 市场技能内容（详情页「预览 / 文件」）
+ * 逆向 SkillHub 公开接口：
+ *   GET /api/v1/skills/{slug}                → 详情（summary / stats）
+ *   GET /api/v1/skills/{slug}/files          → 文件清单（path / size）
+ *   GET /api/v1/skills/{slug}/file?path=xxx  → 单文件原文（纯文本）
+ * ========================================================================== */
+
+export interface MarketSkillFileEntry {
+  path: string;
+  size: number;
+}
+
+export interface MarketSkillContent {
+  canonicalName: string;
+  slug: string;
+  name: string;
+  /** 「简介」：详情接口的中文摘要（summary_zh → summary） */
+  summaryMarkdown: string;
+  files: MarketSkillFileEntry[];
+  /** 「预览」Tab：SKILL.md 原文 */
+  preview: { path: string; content: string } | null;
+  version: string;
+  stats?: { downloads: number; stars: number; installs: number; versions: number };
+  publisher?: { name: string; verified: boolean };
+  security?: Array<{ vendor: string; status: string; statusText: string; reportUrl: string }>;
+}
+
+interface MarketSkillDetailPayload {
+  latestVersion?: { version?: unknown };
+  publisher?: { name?: unknown; verified?: unknown };
+  skill?: {
+    displayName?: unknown;
+    summary?: unknown;
+    summary_zh?: unknown;
+    stats?: { downloads?: unknown; stars?: unknown; installs?: unknown; versions?: unknown };
+  };
+  securityReports?: Record<
+    string,
+    { status?: unknown; statusText?: unknown; reportUrl?: unknown }
+  >;
+}
+
+interface MarketSkillFilesPayload {
+  files?: Array<{ path?: unknown; size?: unknown }>;
+}
+
+/** 内容接口超时（比列表略短，详情页允许失败降级） */
+const CONTENT_TIMEOUT_MS = 15_000;
+const CONTENT_CACHE_MS = 5 * 60_000;
+const MAX_CONTENT_FILES = 1000;
+const MAX_PREVIEW_CHARS = 512 * 1024;
+
+/** canonicalName → 内容缓存（5 分钟；避免切换 Tab/刷新重复打上游） */
+const contentCache = new Map<string, { at: number; value: MarketSkillContent }>();
+
+async function fetchJsonOrNull<T>(url: string): Promise<T | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(CONTENT_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTextOrNull(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(CONTENT_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    return (await res.text()).slice(0, MAX_PREVIEW_CHARS);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 拉取市场技能内容（简介 / 文件 / SKILL.md 预览）。
+ * 单个上游失败按空值降级；三项全部失败才抛 DOWNLOAD_FAILED。
+ */
+export async function fetchMarketSkillContent(
+  canonicalName: string,
+): Promise<MarketSkillContent> {
+  const name = canonicalName.trim();
+  if (!CANONICAL_NAME_RE.test(name)) {
+    throw new SkillMarketError('INVALID_NAME', 'canonicalName must match @owner/slug');
+  }
+  const cached = contentCache.get(name);
+  if (cached && Date.now() - cached.at < CONTENT_CACHE_MS) return cached.value;
+
+  const slug = name.slice(name.lastIndexOf('/') + 1);
+  const base = `${SKILLHUB_BASE}/api/v1/skills/${encodeURIComponent(slug)}`;
+  const [detail, filesPayload, previewText] = await Promise.all([
+    fetchJsonOrNull<MarketSkillDetailPayload>(base),
+    fetchJsonOrNull<MarketSkillFilesPayload>(`${base}/files`),
+    fetchTextOrNull(`${base}/file?path=${encodeURIComponent('SKILL.md')}`),
+  ]);
+
+  if (detail === null && filesPayload === null && previewText === null) {
+    throw new SkillMarketError('DOWNLOAD_FAILED', 'SkillHub content unavailable');
+  }
+
+  const skill = detail?.skill;
+  const summaryMarkdown = asString(skill?.summary_zh) || asString(skill?.summary);
+
+  const rawFiles = Array.isArray(filesPayload?.files) ? filesPayload.files : [];
+  const files: MarketSkillFileEntry[] = rawFiles
+    .map((item) => ({
+      path: asString(item.path),
+      size: Math.max(0, asNumber(item.size)),
+    }))
+    .filter((item) => item.path !== '')
+    .sort((a, b) => {
+      if (a.path === 'SKILL.md') return -1;
+      if (b.path === 'SKILL.md') return 1;
+      return a.path.localeCompare(b.path);
+    })
+    .slice(0, MAX_CONTENT_FILES);
+
+  const stats = skill?.stats
+    ? {
+        downloads: asNumber(skill.stats.downloads),
+        stars: asNumber(skill.stats.stars),
+        installs: asNumber(skill.stats.installs),
+        versions: asNumber(skill.stats.versions),
+      }
+    : undefined;
+
+  const security = detail?.securityReports
+    ? Object.entries(detail.securityReports).map(([vendor, report]) => ({
+        vendor,
+        status: asString(report?.status),
+        statusText: asString(report?.statusText),
+        reportUrl: asString(report?.reportUrl),
+      }))
+    : undefined;
+
+  const value: MarketSkillContent = {
+    canonicalName: name,
+    slug,
+    name: asString(skill?.displayName) || slug,
+    summaryMarkdown,
+    files,
+    preview:
+      previewText !== null && previewText.trim() !== ''
+        ? { path: 'SKILL.md', content: previewText }
+        : null,
+    version: asString(detail?.latestVersion?.version),
+    ...(stats ? { stats } : {}),
+    ...(detail?.publisher
+      ? {
+          publisher: {
+            name: asString(detail.publisher.name),
+            verified: detail.publisher.verified === true,
+          },
+        }
+      : {}),
+    ...(security && security.length > 0 ? { security } : {}),
+  };
+
+  contentCache.set(name, { at: Date.now(), value });
+  return value;
 }
 
 /**

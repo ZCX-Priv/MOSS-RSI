@@ -142,7 +142,8 @@ interface TaskMeta {
   hidden: boolean;
 }
 
-const INDEX_VERSION = 5;
+// v6：技能使用改为从 skill 工具 use 调用与用户消息 /技能名 注入中提取
+const INDEX_VERSION = 6;
 const AGGREGATE_TTL_MS = 5000;
 const SCAN_CONCURRENCY = 4;
 const DAYS_WINDOW = 56;
@@ -256,11 +257,63 @@ function isUserMessage(msg: Record<string, unknown>): boolean {
   return name === undefined;
 }
 
+/**
+ * 用户可见正文：剥离尾部命令/技能注入块。
+ * 注入块格式见 webui/src/lib/inject-block.ts：`<正文>\n\n<<<MOSS-INJECT>>>\n<模板>`
+ * （模板里可能含 `/xxx` 文本，不能参与技能 token 提取）
+ */
+function visibleUserContent(content: string): string {
+  const marker = '\n\n<<<MOSS-INJECT>>>';
+  const idx = content.lastIndexOf(marker);
+  if (idx >= 0) return content.slice(0, idx);
+  if (content.startsWith('<<<MOSS-INJECT>>>')) return '';
+  return content;
+}
+
+/** 已安装技能名合法格式（与 SkillRegistry 的 frontmatter name 规则一致） */
+const SKILL_NAME_RE = /^[a-z][a-z0-9-]*$/;
+
+/** 正文中的 `/技能名` token（编辑器线格式；仅命中已安装技能名才算使用） */
+const SKILL_TOKEN_RE = /(?:^|\s)\/([a-z][a-z0-9-]*)(?![a-z0-9-])/g;
+
+/** 提取正文里命中的技能名（去重前交给调用方按次数计） */
+function skillTokensOf(text: string, skillNames: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  SKILL_TOKEN_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = SKILL_TOKEN_RE.exec(text);
+  while (match !== null) {
+    const name = match[1];
+    if (skillNames.has(name)) out.push(name);
+    match = SKILL_TOKEN_RE.exec(text);
+  }
+  return out;
+}
+
+/** 已安装技能名集合（~/.moss/skills 下的目录名与单文件 .md 名） */
+async function loadSkillNames(env: Environment): Promise<Set<string>> {
+  const names = new Set<string>();
+  const entries = await readdir(join(env.dataDir, 'skills'), { withFileTypes: true }).catch(() => null);
+  for (const entry of entries ?? []) {
+    const name = entry.isDirectory()
+      ? entry.name
+      : entry.isFile() && entry.name.endsWith('.md')
+        ? entry.name.slice(0, -'.md'.length)
+        : '';
+    if (name !== '' && SKILL_NAME_RE.test(name)) names.add(name);
+  }
+  return names;
+}
+
 // ============================================================================
 // 单文件解析
 // ============================================================================
 
-function extractEntry(raw: unknown, dir: string, fallbackUpdatedAt: string): UsageEntry | null {
+function extractEntry(
+  raw: unknown,
+  dir: string,
+  fallbackUpdatedAt: string,
+  skillNames: ReadonlySet<string>,
+): UsageEntry | null {
   const rec = asRecord(raw);
   if (!rec) return null;
   const id = asString(rec.id);
@@ -346,8 +399,14 @@ function extractEntry(raw: unknown, dir: string, fallbackUpdatedAt: string): Usa
     if (day) activeDays.add(day);
     if (isUserMessage(msg)) {
       entry.turns += 1;
-      const text = (asString(msg.content) ?? '').replace(/\s+/g, ' ').trim();
+      const content = asString(msg.content) ?? '';
+      const text = content.replace(/\s+/g, ' ').trim();
       if (text !== '') entry.lastUser = text.slice(0, LAST_USER_MAX);
+      // 输入框 /技能名 注入：正文 token 命中已安装技能名才算一次使用
+      for (const skillName of skillTokensOf(visibleUserContent(content), skillNames)) {
+        bump(entry.skills, skillName);
+        touch(entry.skillLastAt, skillName, at);
+      }
     }
     if (msg.role === 'system' && msg.name === 'skill-inject') {
       const name = skillNameOf(msg);
@@ -364,6 +423,24 @@ function extractEntry(raw: unknown, dir: string, fallbackUpdatedAt: string): Usa
       if (!name) continue;
       bump(entry.toolCalls, name);
       touch(entry.toolLastAt, name, at);
+      // LLM 经 skill 工具激活技能：action=use + skill=<name>
+      if (name === 'skill') {
+        const argsRaw = asString(call?.arguments);
+        if (argsRaw) {
+          try {
+            const parsed = asRecord(JSON.parse(argsRaw));
+            if (parsed?.action === 'use') {
+              const target = asString(parsed.skill);
+              if (target) {
+                bump(entry.skills, target);
+                touch(entry.skillLastAt, target, at);
+              }
+            }
+          } catch {
+            // 参数非合法 JSON：忽略
+          }
+        }
+      }
       if (name === 'terminal') {
         const argsRaw = asString(call?.arguments);
         let command = '';
@@ -583,7 +660,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 async function scanEntries(env: Environment): Promise<UsageEntry[]> {
   const tasksDir = join(env.dataDir, 'tasks');
   await loadDiskIndex(env);
-  const files = await listSessionFiles(tasksDir);
+  const [files, skillNames] = await Promise.all([listSessionFiles(tasksDir), loadSkillNames(env)]);
   const live = new Set<string>();
   const extracted = await mapLimit(files, SCAN_CONCURRENCY, async (file) => {
     let info: Awaited<ReturnType<typeof stat>>;
@@ -597,7 +674,7 @@ async function scanEntries(env: Environment): Promise<UsageEntry[]> {
     if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) return cached.entry;
     const raw = await readJsonOrNull(file.path);
     if (raw === null) return null;
-    const entry = extractEntry(raw, file.dir, info.mtime.toISOString());
+    const entry = extractEntry(raw, file.dir, info.mtime.toISOString(), skillNames);
     if (!entry) return null;
     fileCache.set(file.path, { mtimeMs: info.mtimeMs, size: info.size, entry });
     diskDirty = true;

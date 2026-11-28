@@ -19,6 +19,17 @@ export const dialogSizeClasses: Record<DialogSize, string> = {
   xl: "sm:max-w-5xl",
 }
 
+/**
+ * 档位 → 固定高度映射：内容类弹窗高度不随内容多少变化，正文区（DialogBody）滚动、头尾固定。
+ * max-h-[90dvh] 仅用于超短视口兜底；调用方传入的 h-* 类可覆盖（如 SearchModal）。
+ */
+export const dialogHeightClasses: Record<DialogSize, string> = {
+  sm: "h-[360px] max-h-[90dvh]",
+  md: "h-[520px] max-h-[90dvh]",
+  lg: "h-[640px] max-h-[90dvh]",
+  xl: "h-[760px] max-h-[90dvh]",
+}
+
 function Dialog({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
@@ -72,10 +83,11 @@ function DialogContent({
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
-        // 三段式容器：自身 overflow-hidden 不滚动，仅 DialogBody 滚动；不再渲染 absolute X（移入 DialogHeader）
+        // 三段式容器：按档位固定高度（不随内容伸缩），自身 overflow-hidden 不滚动，仅 DialogBody 滚动
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 flex max-h-[80dvh] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl bg-popover text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "fixed top-1/2 left-1/2 z-50 flex w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl bg-popover text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           dialogSizeClasses[size],
+          dialogHeightClasses[size],
           className
         )}
         {...props}

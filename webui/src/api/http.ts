@@ -26,6 +26,7 @@ import type {
   SkillItem,
   SkillDetail,
   MarketSkillItem,
+  MarketSkillContent,
   MarketCategoryItem,
   CommandItem,
   CommandUpsertBody,
@@ -764,6 +765,13 @@ export const api = {
   /** SkillHub 场景分类（后端代理 /api/v1/categories） */
   marketCategories: () =>
     request<{ categories: MarketCategoryItem[] }>('GET', '/api/skills/market/categories'),
+  /** 市场技能详情（后端按 slug 检索并精确匹配 canonicalName；content 为逆向 SkillHub 的说明/文件/预览） */
+  marketSkillDetail: (canonicalName: string) =>
+    request<{ skill: MarketSkillItem; content: MarketSkillContent | null; contentError?: string }>(
+      'POST',
+      '/api/skills/market/detail',
+      { canonicalName },
+    ),
   /** 安装 SkillHub 技能：后端下载 zip 写入本地技能目录并启用 */
   installMarketSkill: (data: { canonicalName: string; iconUrl?: string }) =>
     request<{ name: string; installed: boolean }>('POST', '/api/skills/market/install', data),

@@ -2,14 +2,13 @@
 // 插件库：两 tab 路由化
 //   /plugins/skills（技能，默认）| /plugins/mcp（MCP 服务器）
 
-import { useState, useCallback, useEffect, useMemo, type ChangeEvent, type CSSProperties, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useMemo, type CSSProperties, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import JSZip from 'jszip';
 import {
   Search, WandSparkles, Wrench, Cable,
   Loader2, Plus, RefreshCw, Trash2, PlugZap, Unplug,
   BookOpen, ListChecks, Eye, Lightbulb, Sparkles, ShieldAlert, FlaskConical,
-  Server, Copy, FileUp, Terminal,
+  Server, Copy, Terminal,
   ArrowLeft, Check, CheckCheck, GripVertical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -45,11 +44,12 @@ import { api } from '../../api/http';
 import { copyText } from '../../lib/clipboard';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import { PluginIcon } from '../shared/PluginIcon';
+import { PluginZipImport } from '../shared/PluginZipImport';
 import { savePluginOrder, SKILL_ORDER_KEY, MCP_ORDER_KEY } from '../../lib/plugin-order';
 import type { McpServer } from '../../types/api';
 
 /** skill.icon（Lucide kebab-case 名）→ 图标组件；未命中回退 WandSparkles */
-const SKILL_ICON_MAP: Record<string, typeof WandSparkles> = {
+export const SKILL_ICON_MAP: Record<string, typeof WandSparkles> = {
   'book-open': BookOpen,
   'list-checks': ListChecks,
   'eye': Eye,
@@ -70,21 +70,37 @@ export function PluginMarketPage() {
   // Badge 计数在布局层拉取
   const { skills, reload: reloadSkills } = useSkills();
   const { servers, reload } = useMcp();
-  const requestMcpDialog = useStore((s) => s.requestMcpDialog);
 
-  // 技能弹窗：本地开关 + 移动端全局 header 信号
-  const [skillsOpen, setSkillsOpen] = useState(false);
+  // 统一「添加」弹窗：技能 / MCP 两类，默认类型跟随当前页面 tab
+  const [addOpen, setAddOpen] = useState(false);
+  const [addDefaultTab, setAddDefaultTab] = useState<'skills' | 'mcp'>('skills');
+  const openAdd = useCallback((kind: 'skills' | 'mcp') => {
+    setAddDefaultTab(kind);
+    setAddOpen(true);
+  }, []);
+
+  // 移动端全局 header 信号
   const skillsDialogRequest = useStore((s) => s.skillsDialogRequest);
   const clearSkillsDialogRequest = useStore((s) => s.clearSkillsDialogRequest);
   const skillsRefreshSeq = useStore((s) => s.skillsRefreshSeq);
+  const mcpDialogRequest = useStore((s) => s.mcpDialogRequest);
+  const clearMcpDialogRequest = useStore((s) => s.clearMcpDialogRequest);
 
-  // header"添加技能"信号 → 打开技能弹窗
+  // header"添加技能"信号 → 打开添加弹窗（默认技能）
   useEffect(() => {
     if (skillsDialogRequest) {
       clearSkillsDialogRequest();
-      setSkillsOpen(true);
+      openAdd('skills');
     }
-  }, [skillsDialogRequest, clearSkillsDialogRequest]);
+  }, [skillsDialogRequest, clearSkillsDialogRequest, openAdd]);
+
+  // header"添加服务器"信号 → 打开添加弹窗（默认 MCP）
+  useEffect(() => {
+    if (mcpDialogRequest) {
+      clearMcpDialogRequest();
+      openAdd('mcp');
+    }
+  }, [mcpDialogRequest, clearMcpDialogRequest, openAdd]);
 
   // 移动端全局 header 刷新按钮 → 重拉技能列表
   useEffect(() => {
@@ -186,7 +202,7 @@ export function PluginMarketPage() {
     else void reload();
   }, [batchDeleting, reload, reloadSkills, selected, t, tab]);
 
-  const openCreate = tab === 'skills' ? () => setSkillsOpen(true) : requestMcpDialog;
+  const openCreate = useCallback(() => openAdd(tab), [openAdd, tab]);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -207,10 +223,6 @@ export function PluginMarketPage() {
         </div>
         {manageMode ? (
           <div className="flex items-center gap-2">
-            <Button size="sm" className="h-8 gap-1" onClick={openCreate}>
-              <Plus className="size-3.5" />
-              {tab === 'skills' ? t('plugins.createSkill') : t('plugins.createMcp')}
-            </Button>
             <Button
               variant="destructive"
               size="sm"
@@ -229,6 +241,10 @@ export function PluginMarketPage() {
           </div>
         ) : (
           <div className="flex items-center gap-2">
+            <Button size="sm" className="h-8 gap-1" onClick={openCreate}>
+              <Plus className="size-3.5" />
+              {t('plugins.add')}
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -291,7 +307,7 @@ export function PluginMarketPage() {
         </div>
       </Tabs>
 
-      {/* 管理工具条：全选 / 已选数（移动端另含新建与批量删除入口） */}
+      {/* 管理工具条：全选 / 已选数（移动端另含批量删除入口） */}
       {manageMode && (
         <ManageToolbar
           className="px-6"
@@ -299,8 +315,6 @@ export function PluginMarketPage() {
           selectableCount={selectableNames.length}
           allSelected={allSelected}
           batchDisabled={selected.size === 0}
-          createLabel={tab === 'skills' ? t('plugins.createSkill') : t('plugins.createMcp')}
-          onCreate={openCreate}
           onBatchDelete={() => setBatchDeleteOpen(true)}
           onToggleSelectAll={toggleSelectAll}
         />
@@ -325,8 +339,16 @@ export function PluginMarketPage() {
         )}
       </div>
 
-      {/* 添加技能弹窗（新建 / 导入 zip；桌面 header 与移动端全局 header 按钮共用） */}
-      <SkillsDialog open={skillsOpen} onOpenChange={setSkillsOpen} onDone={() => void reloadSkills()} />
+      {/* 添加插件弹窗（技能 / MCP；含新建、JSON 与 zip 批量导入） */}
+      <AddPluginDialog
+        open={addOpen}
+        defaultTab={addDefaultTab}
+        onOpenChange={setAddOpen}
+        onDone={() => {
+          void reloadSkills();
+          void reload();
+        }}
+      />
 
       {/* 批量删除确认弹窗（技能 / MCP 共用，文案按 tab 区分） */}
       <ConfirmDialog
@@ -346,15 +368,13 @@ export function PluginMarketPage() {
   );
 }
 
-/* ===== 管理模式工具条（全选 / 已选数 / 移动端操作入口） ===== */
+/* ===== 管理模式工具条（全选 / 已选数 / 移动端批量删除入口） ===== */
 function ManageToolbar({
   className,
   selectedCount,
   selectableCount,
   allSelected,
   batchDisabled,
-  createLabel,
-  onCreate,
   onBatchDelete,
   onToggleSelectAll,
 }: {
@@ -363,8 +383,6 @@ function ManageToolbar({
   selectableCount: number;
   allSelected: boolean;
   batchDisabled: boolean;
-  createLabel: string;
-  onCreate: () => void;
   onBatchDelete: () => void;
   onToggleSelectAll: () => void;
 }) {
@@ -384,11 +402,8 @@ function ManageToolbar({
       <span className="text-xs text-muted-foreground">
         {t('plugins.selectedCount', { count: selectedCount })}
       </span>
-      {/* 移动端：桌面标题区按钮的替代入口 */}
+      {/* 移动端：桌面标题区批量删除的替代入口 */}
       <div className="ml-auto flex items-center gap-1 md:hidden">
-        <Button variant="outline" size="icon-sm" title={createLabel} aria-label={createLabel} onClick={onCreate}>
-          <Plus />
-        </Button>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -483,10 +498,18 @@ export function SkillsTab({
   onToggleSelect: (name: string) => void;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { skills, toggleSkill } = useSkills();
   const setSkills = useStore((s) => s.setSkills);
   // 拖拽排序：PointerSensor 距离阈值 5px，避免与复选框/开关点击冲突
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const openDetail = useCallback(
+    (name: string): void => {
+      navigate(`/plugins/detail?type=skill&from=installed&id=${encodeURIComponent(name)}`);
+    },
+    [navigate],
+  );
 
   const q = query.trim().toLowerCase();
   // 管理模式下展示全量（搜索框已禁用并清空），保证拖拽顺序与保存的序列一致
@@ -538,7 +561,18 @@ export function SkillsTab({
                   selectable={skill.builtin !== true}
                   undeletableHint={t('plugins.builtinUndeletable')}
                 >
-                  <Card className="flex flex-row items-center gap-3 p-3">
+                  <Card
+                    role="button"
+                    tabIndex={0}
+                    className="flex cursor-pointer flex-row items-center gap-3 p-3 transition-colors hover:bg-muted/40"
+                    onClick={() => (managing ? onToggleSelect(skill.name) : openDetail(skill.name))}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                      e.preventDefault();
+                      if (managing) onToggleSelect(skill.name);
+                      else openDetail(skill.name);
+                    }}
+                  >
                     <PluginIcon src={skill.iconUrl} fallback={<Icon className="size-5" />} />
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <div className="flex items-center gap-2">
@@ -561,6 +595,7 @@ export function SkillsTab({
                     </div>
                     <Switch
                       checked={enabled}
+                      onClick={(e) => e.stopPropagation()}
                       onCheckedChange={(checked) =>
                         void toggleSkill(skill.name, checked).catch(() => toast.error(t('plugins.skillToggleFailed')))
                       }
@@ -582,56 +617,96 @@ export function SkillsTab({
 /** 技能名合法字符（与后端 SKILL_NAME_RE 一致） */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
-/** 文本扩展名白名单：白名单内以 utf8 文本传输，其余走 base64 */
-const TEXT_EXT_RE = /\.(md|markdown|txt|json|js|mjs|cjs|ts|tsx|jsx|py|sh|bat|ps1|yml|yaml|toml|csv|html|css|xml|svg)$/i;
+/** MCP 服务器名合法字符（与后端 createServer 一致） */
+const SERVER_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
-/** Uint8Array → base64（分块避免 String.fromCharCode 栈溢出） */
-function u8ToBase64(u8: Uint8Array): string {
-  let s = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < u8.length; i += chunk) {
-    s += String.fromCharCode(...u8.subarray(i, i + chunk));
-  }
-  return btoa(s);
+/** 添加/编辑 MCP 服务器弹窗的表单状态 */
+interface McpServerForm {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command: string;
+  args: string;
+  url: string;
+  headers: string;
 }
 
-/** zip 待导入状态：JSZip 实例 + SKILL.md 所在前缀（根为 '' 或单一顶层目录） */
-interface ZipParsed {
-  zip: JSZip;
-  prefix: string;
-  entryCount: number;
-}
+const EMPTY_MCP_FORM: McpServerForm = {
+  name: '',
+  transport: 'stdio',
+  command: '',
+  args: '',
+  url: '',
+  headers: '',
+};
 
-/** 解析 zip：识别根 SKILL.md 或单一顶层 <dir>/SKILL.md，提取 frontmatter name/description */
-async function parseSkillZip(file: File): Promise<ZipParsed & { name: string; description: string }> {
-  const zip = await JSZip.loadAsync(file);
-  const entries = Object.keys(zip.files).filter((p) => !zip.files[p].dir);
-  let prefix = '';
-  if (!entries.includes('SKILL.md')) {
-    const tops = new Set(entries.map((p) => p.split('/')[0]));
-    if (tops.size !== 1 || !entries.includes(`${[...tops][0]}/SKILL.md`)) {
-      throw new Error('SKILL.md not found in zip root or single top-level directory');
-    }
-    prefix = `${[...tops][0]}/`;
-  }
-  const md = await zip.files[`${prefix}SKILL.md`].async('text');
-  const fm = md.match(/^---\s*\n([\s\S]*?)\n---/)?.[1] ?? '';
-  const name = fm.match(/^name\s*:\s*(.+)$/m)?.[1].trim() ?? '';
-  const description = fm.match(/^description:\s*"?([^"\n]*)"?/m)?.[1].trim() ?? '';
-  return { zip, prefix, entryCount: entries.filter((p) => p.startsWith(prefix)).length, name, description };
-}
+/* ===== 统一「添加」弹窗：技能 / MCP（新建、JSON 粘贴、zip 批量导入） ===== */
 
-function SkillsDialog({
+function AddPluginDialog({
   open,
+  defaultTab,
   onOpenChange,
   onDone,
 }: {
   open: boolean;
+  defaultTab: 'skills' | 'mcp';
   onOpenChange: (o: boolean) => void;
   onDone: () => void;
 }) {
   const { t } = useTranslation();
-  const [mode, setMode] = useState<'create' | 'import'>('create');
+  const [kind, setKind] = useState<'skills' | 'mcp'>(defaultTab);
+  // 导入/保存进行中禁止关闭，避免中断写盘
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setKind(defaultTab);
+    setBusy(false);
+  }, [open, defaultTab]);
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle>{t('plugins.addTitle')}</DialogTitle>
+          <DialogDescription>{t('plugins.addDesc')}</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <Tabs value={kind} onValueChange={(v) => setKind(v as 'skills' | 'mcp')}>
+            <TabsList>
+              <TabsTrigger value="skills">{t('plugins.addSkillTab')}</TabsTrigger>
+              <TabsTrigger value="mcp">{t('plugins.addMcpTab')}</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {kind === 'skills' ? (
+            <SkillAddPanel
+              onDone={onDone}
+              onFinish={() => onOpenChange(false)}
+              onBusyChange={setBusy}
+            />
+          ) : (
+            <McpAddPanel
+              onDone={onDone}
+              onFinish={() => onOpenChange(false)}
+              onBusyChange={setBusy}
+            />
+          )}
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SkillAddPanel({
+  onDone,
+  onFinish,
+  onBusyChange,
+}: {
+  onDone: () => void;
+  onFinish: () => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [mode, setMode] = useState<'create' | 'zip'>('create');
   const [busy, setBusy] = useState(false);
 
   // 新建表单
@@ -640,21 +715,9 @@ function SkillsDialog({
   const [icon, setIcon] = useState('');
   const [prompt, setPrompt] = useState('');
 
-  // 导入状态
-  const [zipFile, setZipFile] = useState('');
-  const [importName, setImportName] = useState('');
-  const [importDesc, setImportDesc] = useState('');
-  const [parsed, setParsed] = useState<ZipParsed | null>(null);
-  const [zipError, setZipError] = useState<string | null>(null);
-
-  // 打开时重置
   useEffect(() => {
-    if (open) {
-      setMode('create');
-      setName(''); setDescription(''); setIcon(''); setPrompt('');
-      setZipFile(''); setImportName(''); setImportDesc(''); setParsed(null); setZipError(null);
-    }
-  }, [open]);
+    onBusyChange(busy);
+  }, [busy, onBusyChange]);
 
   /** 后端错误 → 可读 toast */
   const showSkillError = useCallback((err: unknown) => {
@@ -676,213 +739,291 @@ function SkillsDialog({
         icon: icon.trim() || undefined,
       });
       toast.success(t('plugins.skillCreated', { name: name.trim() }));
-      onOpenChange(false);
+      onFinish();
       onDone();
     } catch (err) {
       showSkillError(err);
     } finally {
       setBusy(false);
     }
-  }, [busy, name, description, prompt, icon, onOpenChange, onDone, showSkillError, t]);
-
-  const onZipChange = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // 允许重复选择同一文件
-    if (!file) return;
-    setZipError(null);
-    setParsed(null);
-    setZipFile(file.name);
-    try {
-      const result = await parseSkillZip(file);
-      setParsed({ zip: result.zip, prefix: result.prefix, entryCount: result.entryCount });
-      // 名称默认取 frontmatter name，非法时回退 zip 文件名（去扩展名）
-      const fallback = file.name.replace(/\.zip$/i, '').replace(/[^a-zA-Z0-9_-]/g, '-');
-      setImportName(SKILL_NAME_RE.test(result.name) ? result.name : fallback);
-      setImportDesc(result.description);
-    } catch {
-      setZipError(t('plugins.skillZipInvalid'));
-    }
-  }, [t]);
-
-  const submitImport = useCallback(async () => {
-    if (busy || !parsed || !SKILL_NAME_RE.test(importName.trim())) return;
-    setBusy(true);
-    try {
-      // 逐文件转传输体：白名单扩展名 utf8 文本，其余 base64
-      const entries = Object.keys(parsed.zip.files).filter(
-        (p) => !parsed.zip.files[p].dir && p.startsWith(parsed.prefix),
-      );
-      const files: Array<{ path: string; content?: string; base64?: string }> = [];
-      for (const p of entries) {
-        const rel = p.slice(parsed.prefix.length);
-        if (!rel) continue;
-        if (TEXT_EXT_RE.test(rel)) {
-          files.push({ path: rel, content: await parsed.zip.files[p].async('text') });
-        } else {
-          const u8 = await parsed.zip.files[p].async('uint8array');
-          files.push({ path: rel, base64: u8ToBase64(u8) });
-        }
-      }
-      await api.importSkill({ name: importName.trim(), files });
-      toast.success(t('plugins.skillImported', { name: importName.trim() }));
-      onOpenChange(false);
-      onDone();
-    } catch (err) {
-      showSkillError(err);
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, parsed, importName, onOpenChange, onDone, showSkillError, t]);
+  }, [busy, name, description, prompt, icon, onFinish, onDone, showSkillError, t]);
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
-      <DialogContent size="lg">
-        <DialogHeader>
-          <DialogTitle>{t('plugins.skillsAdd')}</DialogTitle>
-          <DialogDescription>{t('plugins.skillAddDesc')}</DialogDescription>
-        </DialogHeader>
-        <DialogBody>
-          <Tabs value={mode} onValueChange={(v) => setMode(v as 'create' | 'import')}>
-            <TabsList>
-              <TabsTrigger value="create">{t('plugins.skillCreateTab')}</TabsTrigger>
-              <TabsTrigger value="import">{t('plugins.skillImportTab')}</TabsTrigger>
-            </TabsList>
-          </Tabs>
+    <>
+      <Tabs value={mode} onValueChange={(v) => setMode(v as 'create' | 'zip')}>
+        <TabsList>
+          <TabsTrigger value="create">{t('plugins.skillCreateTab')}</TabsTrigger>
+          <TabsTrigger value="zip">{t('plugins.zipImportTab')}</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
-          {mode === 'create' ? (
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="skill-name">{t('plugins.skillName')}</Label>
-                <Input
-                  id="skill-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={t('plugins.skillNamePlaceholder')}
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="skill-desc">{t('plugins.skillDesc')}</Label>
-                <Input
-                  id="skill-desc"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder={t('plugins.skillDescPlaceholder')}
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="skill-icon">{t('plugins.skillIcon')}</Label>
-                <Input
-                  id="skill-icon"
-                  value={icon}
-                  onChange={(e) => setIcon(e.target.value)}
-                  placeholder="sparkles"
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="skill-prompt">{t('plugins.skillPrompt')}</Label>
-                <Textarea
-                  id="skill-prompt"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder={t('plugins.skillPromptPlaceholder')}
-                  className="min-h-32"
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <label
-                htmlFor="skill-zip"
-                className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground transition-colors hover:bg-muted/40"
-              >
-                <FileUp className="size-5" />
-                {zipFile ? (
-                  <span className="text-foreground">{zipFile}</span>
-                ) : (
-                  <span>{t('plugins.skillZipPick')}</span>
-                )}
-              </label>
-              <input
-                id="skill-zip"
-                type="file"
-                accept=".zip"
-                className="hidden"
-                onChange={(e) => void onZipChange(e)}
-              />
-              {zipError && <p className="text-sm text-destructive">{zipError}</p>}
-              {parsed && (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    {t('plugins.skillZipDetected', { count: parsed.entryCount })}
-                  </p>
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="import-skill-name">{t('plugins.skillName')}</Label>
-                    <Input
-                      id="import-skill-name"
-                      value={importName}
-                      onChange={(e) => setImportName(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="import-skill-desc">{t('plugins.skillDesc')}</Label>
-                    <Input
-                      id="import-skill-desc"
-                      value={importDesc}
-                      onChange={(e) => setImportDesc(e.target.value)}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-            {t('common.cancel')}
+      {mode === 'create' ? (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="skill-name">{t('plugins.skillName')}</Label>
+            <Input
+              id="skill-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t('plugins.skillNamePlaceholder')}
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="skill-desc">{t('plugins.skillDesc')}</Label>
+            <Input
+              id="skill-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder={t('plugins.skillDescPlaceholder')}
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="skill-icon">{t('plugins.skillIcon')}</Label>
+            <Input
+              id="skill-icon"
+              value={icon}
+              onChange={(e) => setIcon(e.target.value)}
+              placeholder="sparkles"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="skill-prompt">{t('plugins.skillPrompt')}</Label>
+            <Textarea
+              id="skill-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={t('plugins.skillPromptPlaceholder')}
+              className="min-h-32"
+            />
+          </div>
+          <Button
+            onClick={() => void submitCreate()}
+            disabled={busy || !SKILL_NAME_RE.test(name.trim()) || !description.trim()}
+          >
+            {busy && <Loader2 className="size-3.5 animate-spin" />}
+            {t('common.create')}
           </Button>
-          {mode === 'create' ? (
-            <Button
-              onClick={() => void submitCreate()}
-              disabled={busy || !SKILL_NAME_RE.test(name.trim()) || !description.trim()}
+        </div>
+      ) : (
+        <PluginZipImport onDone={onDone} onFinish={onFinish} onBusyChange={onBusyChange} />
+      )}
+    </>
+  );
+}
+
+function McpAddPanel({
+  onDone,
+  onFinish,
+  onBusyChange,
+}: {
+  onDone: () => void;
+  onFinish: () => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [mode, setMode] = useState<'form' | 'json' | 'zip'>('form');
+  const [form, setForm] = useState<McpServerForm>(EMPTY_MCP_FORM);
+  const [jsonText, setJsonText] = useState('');
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    onBusyChange(saving);
+  }, [saving, onBusyChange]);
+
+  const submitForm = useCallback(async () => {
+    if (!form.name.trim() || !SERVER_NAME_RE.test(form.name.trim()) || saving) return;
+    setSaving(true);
+    try {
+      const def: Parameters<typeof api.createMcpServer>[0] = {
+        name: form.name.trim(),
+        transport: form.transport,
+        ...(form.transport === 'stdio'
+          ? {
+              command: form.command.trim(),
+              ...(form.args.trim()
+                ? { args: form.args.trim().split(/\s+/).filter(Boolean) }
+                : {}),
+            }
+          : { url: form.url.trim() }),
+      };
+      await api.createMcpServer(def);
+      setForm(EMPTY_MCP_FORM);
+      toast.success(t('plugins.mcpCreated', { name: def.name }));
+      onFinish();
+      onDone();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('plugins.mcpCreateFailed'));
+    } finally {
+      setSaving(false);
+    }
+  }, [form, saving, t, onFinish, onDone]);
+
+  const submitJson = useCallback(async () => {
+    if (saving || !jsonText.trim()) return;
+    setSaving(true);
+    setJsonError(null);
+    let defs: ParsedMcpDef[];
+    try {
+      defs = parseMcpJsonInput(jsonText);
+    } catch {
+      setJsonError(t('plugins.mcpJsonInvalid'));
+      setSaving(false);
+      return;
+    }
+    if (defs.length === 0) {
+      setJsonError(t('plugins.mcpJsonInvalid'));
+      setSaving(false);
+      return;
+    }
+    let okCount = 0;
+    const failures: string[] = [];
+    for (const def of defs) {
+      try {
+        await api.createMcpServer(def);
+        okCount++;
+      } catch (err) {
+        failures.push(`${def.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (okCount > 0) {
+      toast.success(t('plugins.mcpCreatedMulti', { count: okCount }));
+      setJsonText('');
+      onFinish();
+      onDone();
+    }
+    if (failures.length > 0) {
+      toast.error(t('plugins.mcpCreateFailedMulti', { failures: failures.join('; ') }));
+    }
+    setSaving(false);
+  }, [jsonText, saving, t, onFinish, onDone]);
+
+  return (
+    <>
+      <Tabs
+        value={mode}
+        onValueChange={(v) => {
+          setMode(v as 'form' | 'json' | 'zip');
+          setJsonError(null);
+        }}
+      >
+        <TabsList>
+          <TabsTrigger value="form">{t('plugins.mcpAddModeForm')}</TabsTrigger>
+          <TabsTrigger value="json">{t('plugins.mcpAddModeJson')}</TabsTrigger>
+          <TabsTrigger value="zip">{t('plugins.zipImportTab')}</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {mode === 'form' && (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mcp-name">{t('plugins.mcpName')}</Label>
+            <Input
+              id="mcp-name"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+              placeholder="github"
+              disabled={saving}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>{t('plugins.mcpTransport')}</Label>
+            <Select
+              value={form.transport}
+              onValueChange={(v) => setForm((f) => ({ ...f, transport: v as McpServerForm['transport'] }))}
+              disabled={saving}
             >
-              {busy && <Loader2 className="size-3.5 animate-spin" />}
-              {t('common.create')}
-            </Button>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="stdio">stdio</SelectItem>
+                <SelectItem value="http">http</SelectItem>
+                <SelectItem value="sse">sse</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {form.transport === 'stdio' ? (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="mcp-command">{t('plugins.mcpCommand')}</Label>
+                <Input
+                  id="mcp-command"
+                  value={form.command}
+                  onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
+                  placeholder="npx -y @modelcontextprotocol/server-github"
+                  disabled={saving}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="mcp-args">{t('plugins.mcpArgs')}</Label>
+                <Input
+                  id="mcp-args"
+                  value={form.args}
+                  onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))}
+                  placeholder="--port 3000 --verbose"
+                  disabled={saving}
+                />
+              </div>
+            </>
           ) : (
-            <Button
-              onClick={() => void submitImport()}
-              disabled={busy || !parsed || !SKILL_NAME_RE.test(importName.trim())}
-            >
-              {busy && <Loader2 className="size-3.5 animate-spin" />}
-              {t('plugins.skillImportTab')}
-            </Button>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="mcp-url">URL</Label>
+              <Input
+                id="mcp-url"
+                value={form.url}
+                onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                placeholder="https://mcp.example.com/mcp"
+                disabled={saving}
+              />
+            </div>
           )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <Button
+            onClick={() => void submitForm()}
+            disabled={
+              saving ||
+              !SERVER_NAME_RE.test(form.name.trim()) ||
+              (form.transport === 'stdio' ? !form.command.trim() : !form.url.trim())
+            }
+          >
+            {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+            {t('common.create')}
+          </Button>
+        </>
+      )}
+
+      {mode === 'json' && (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mcp-json">{t('plugins.mcpJsonLabel')}</Label>
+            <Textarea
+              id="mcp-json"
+              value={jsonText}
+              spellCheck={false}
+              onChange={(e) => {
+                setJsonText(e.target.value);
+                setJsonError(null);
+              }}
+              placeholder={'{\n  "github": {\n    "command": "npx",\n    "args": ["-y", "@modelcontextprotocol/server-github"]\n  }\n}'}
+              className="min-h-40 font-mono text-xs"
+              disabled={saving}
+            />
+            <p className="text-xs text-muted-foreground">{t('plugins.mcpJsonHint')}</p>
+            {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
+          </div>
+          <Button onClick={() => void submitJson()} disabled={saving || !jsonText.trim()}>
+            {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+            {t('common.create')}
+          </Button>
+        </>
+      )}
+
+      {mode === 'zip' && (
+        <PluginZipImport onDone={onDone} onFinish={onFinish} onBusyChange={onBusyChange} />
+      )}
+    </>
   );
 }
 
 /* ===== MCP tab ===== */
-
-/** 添加/编辑服务器弹窗的表单状态 */
-interface McpServerForm {
-  name: string;
-  transport: 'stdio' | 'http' | 'sse';
-  command: string;
-  args: string;
-  url: string;
-  headers: string;
-}
-
-const EMPTY_MCP_FORM: McpServerForm = {
-  name: '',
-  transport: 'stdio',
-  command: '',
-  args: '',
-  url: '',
-  headers: '',
-};
 
 /**
  * MOSS 自身 MCP 服务器置顶卡片：
@@ -1070,40 +1211,30 @@ export function McpTab({
   onToggleSelect: (name: string) => void;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { servers, tools, reload, connect, disconnect, remove, setEnabled } = useMcp();
   const setMcpServers = useStore((s) => s.setMcpServers);
   // 拖拽排序：PointerSensor 距离阈值 5px，避免与按钮/开关点击冲突
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
-  const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState<McpServerForm>(EMPTY_MCP_FORM);
-  const [saving, setSaving] = useState(false);
-  // 添加模式：表单 / JSON 粘贴
-  const [addMode, setAddMode] = useState<'form' | 'json'>('form');
-  const [jsonText, setJsonText] = useState('');
-  const [jsonError, setJsonError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // 删除确认弹窗（替代原生 confirm）
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  // 页面头部/移动端全局 header 按钮信号
-  const mcpDialogRequest = useStore((s) => s.mcpDialogRequest);
-  const clearMcpDialogRequest = useStore((s) => s.clearMcpDialogRequest);
   const mcpRefreshSeq = useStore((s) => s.mcpRefreshSeq);
-
-  // header"添加服务器"按钮 → 打开添加弹窗
-  useEffect(() => {
-    if (mcpDialogRequest) {
-      clearMcpDialogRequest();
-      setAddOpen(true);
-    }
-  }, [mcpDialogRequest, clearMcpDialogRequest]);
 
   // 移动端全局 header 刷新按钮
   useEffect(() => {
     if (mcpRefreshSeq > 0) void reload();
   }, [mcpRefreshSeq, reload]);
+
+  const openDetail = useCallback(
+    (name: string): void => {
+      navigate(`/plugins/detail?type=mcp&from=installed&id=${encodeURIComponent(name)}`);
+    },
+    [navigate],
+  );
 
   const q = query.trim().toLowerCase();
   // 管理模式下展示全量（搜索框已禁用并清空），保证拖拽顺序与保存的序列一致
@@ -1130,81 +1261,6 @@ export function McpTab({
     },
     [servers, setMcpServers],
   );
-
-  const submitForm = useCallback(async () => {
-    if (!form.name.trim() || saving) return;
-    setSaving(true);
-    try {
-      const def: Parameters<typeof api.createMcpServer>[0] = {
-        name: form.name.trim(),
-        transport: form.transport,
-        ...(form.transport === 'stdio'
-          ? {
-              command: form.command.trim(),
-              ...(form.args.trim()
-                ? { args: form.args.trim().split(/\s+/).filter(Boolean) }
-                : {}),
-            }
-          : { url: form.url.trim() }),
-      };
-      await api.createMcpServer(def);
-      setAddOpen(false);
-      setForm(EMPTY_MCP_FORM);
-      toast.success(t('plugins.mcpCreated', { name: def.name }));
-      void reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('plugins.mcpCreateFailed'));
-    } finally {
-      setSaving(false);
-    }
-  }, [form, saving, t, reload]);
-
-  const submitJson = useCallback(async () => {
-    if (saving || !jsonText.trim()) return;
-    setSaving(true);
-    setJsonError(null);
-    let defs: ParsedMcpDef[];
-    try {
-      defs = parseMcpJsonInput(jsonText);
-    } catch {
-      setJsonError(t('plugins.mcpJsonInvalid'));
-      setSaving(false);
-      return;
-    }
-    if (defs.length === 0) {
-      setJsonError(t('plugins.mcpJsonInvalid'));
-      setSaving(false);
-      return;
-    }
-    let okCount = 0;
-    const failures: string[] = [];
-    for (const def of defs) {
-      try {
-        await api.createMcpServer(def);
-        okCount++;
-      } catch (err) {
-        failures.push(`${def.name}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    if (okCount > 0) {
-      toast.success(t('plugins.mcpCreatedMulti', { count: okCount }));
-      setAddOpen(false);
-      setJsonText('');
-      void reload();
-    }
-    if (failures.length > 0) {
-      toast.error(t('plugins.mcpCreateFailedMulti', { failures: failures.join('; ') }));
-    }
-    setSaving(false);
-  }, [jsonText, saving, t, reload]);
-
-  const submit = useCallback(async () => {
-    if (addMode === 'json') {
-      await submitJson();
-    } else {
-      await submitForm();
-    }
-  }, [addMode, submitForm, submitJson]);
 
   const statusColor = (s: McpServer['status']): string =>
     s === 'connected'
@@ -1241,7 +1297,18 @@ export function McpTab({
                   selected={selected.has(server.name)}
                   onToggleSelect={onToggleSelect}
                 >
-                  <Card className="flex flex-col gap-2 p-3">
+                  <Card
+                    role="button"
+                    tabIndex={0}
+                    className="flex cursor-pointer flex-col gap-2 p-3 transition-colors hover:bg-muted/40"
+                    onClick={() => (managing ? onToggleSelect(server.name) : openDetail(server.name))}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                      e.preventDefault();
+                      if (managing) onToggleSelect(server.name);
+                      else openDetail(server.name);
+                    }}
+                  >
                     <div className="flex flex-row items-center gap-3">
                       <div className="relative">
                         <PluginIcon
@@ -1277,7 +1344,10 @@ export function McpTab({
                           </p>
                         )}
                       </div>
-                      <div className="flex shrink-0 items-center gap-1">
+                      <div
+                        className="flex shrink-0 items-center gap-1"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         {server.status === 'connected' ? (
                           <Button
                             variant="ghost" size="icon-sm" title={t('plugins.mcpDisconnect')}
@@ -1312,7 +1382,10 @@ export function McpTab({
                     </div>
                     {/* 工具清单（可折叠）：name + annotations 徽章 */}
                     {serverTools.length > 0 && (
-                      <details className="group rounded-md border border-border px-2 py-1.5">
+                      <details
+                        className="group rounded-md border border-border px-2 py-1.5"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
                           <Wrench className="size-3" />
                           {t('plugins.mcpToolsOf', { name: server.name, count: serverTools.length })}
@@ -1367,131 +1440,6 @@ export function McpTab({
         }}
         onOpenChange={(o) => !o && setDeleteTarget(null)}
       />
-
-      {/* 添加服务器弹窗 */}
-      <Dialog open={addOpen} onOpenChange={(o) => !saving && setAddOpen(o)}>
-        <DialogContent size="md">
-          <DialogHeader>
-            <DialogTitle>{t('plugins.mcpAdd')}</DialogTitle>
-            <DialogDescription>{t('plugins.mcpAddDesc')}</DialogDescription>
-          </DialogHeader>
-          <DialogBody>
-            <Tabs
-              value={addMode}
-              onValueChange={(v) => {
-                setAddMode(v as 'form' | 'json');
-                setJsonError(null);
-              }}
-            >
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="form">{t('plugins.mcpAddModeForm')}</TabsTrigger>
-                <TabsTrigger value="json">{t('plugins.mcpAddModeJson')}</TabsTrigger>
-              </TabsList>
-            </Tabs>
-            {addMode === 'form' && (
-              <>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="mcp-name">{t('plugins.mcpName')}</Label>
-              <Input
-                id="mcp-name"
-                value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="github"
-                disabled={saving}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>{t('plugins.mcpTransport')}</Label>
-              <Select
-                value={form.transport}
-                onValueChange={(v) => setForm((f) => ({ ...f, transport: v as McpServerForm['transport'] }))}
-                disabled={saving}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="stdio">stdio</SelectItem>
-                  <SelectItem value="http">http</SelectItem>
-                  <SelectItem value="sse">sse</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {form.transport === 'stdio' ? (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="mcp-command">{t('plugins.mcpCommand')}</Label>
-                  <Input
-                    id="mcp-command"
-                    value={form.command}
-                    onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
-                    placeholder="npx -y @modelcontextprotocol/server-github"
-                    disabled={saving}
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="mcp-args">{t('plugins.mcpArgs')}</Label>
-                  <Input
-                    id="mcp-args"
-                    value={form.args}
-                    onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))}
-                    placeholder="--port 3000 --verbose"
-                    disabled={saving}
-                  />
-                </div>
-              </>
-            ) : (
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="mcp-url">URL</Label>
-                <Input
-                  id="mcp-url"
-                  value={form.url}
-                  onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-                  placeholder="https://mcp.example.com/mcp"
-                  disabled={saving}
-                />
-              </div>
-            )}
-              </>
-            )}
-            {addMode === 'json' && (
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="mcp-json">{t('plugins.mcpJsonLabel')}</Label>
-                <Textarea
-                  id="mcp-json"
-                  value={jsonText}
-                  spellCheck={false}
-                  onChange={(e) => {
-                    setJsonText(e.target.value);
-                    setJsonError(null);
-                  }}
-                  placeholder={'{\n  "github": {\n    "command": "npx",\n    "args": ["-y", "@modelcontextprotocol/server-github"]\n  }\n}'}
-                  className="min-h-40 font-mono text-xs"
-                  disabled={saving}
-                />
-                <p className="text-xs text-muted-foreground">{t('plugins.mcpJsonHint')}</p>
-                {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
-              </div>
-            )}
-          </DialogBody>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setAddOpen(false)} disabled={saving}>
-              {t('common.cancel')}
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => void submit()}
-              disabled={
-                saving ||
-                (addMode === 'form'
-                  ? !form.name.trim() || (form.transport === 'stdio' ? !form.command.trim() : !form.url.trim())
-                  : !jsonText.trim())
-              }
-            >
-              {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-              {t('common.create')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

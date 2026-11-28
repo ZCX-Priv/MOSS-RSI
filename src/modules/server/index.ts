@@ -52,6 +52,7 @@ import {
 import {
   createMarketSkillsHandler,
   createMarketCategoriesHandler,
+  createMarketSkillDetailHandler,
   createInstallMarketSkillHandler,
 } from './routes/skill-market';
 import {
@@ -426,6 +427,7 @@ class ServerModule implements Module {
     // SkillHub 技能市场（静态路由必须先于 /api/skills/:name 注册，否则 market 会被当作技能名）
     this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/query', handler: createMarketSkillsHandler(), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/skills/market/categories', handler: createMarketCategoriesHandler(), auth: true });
+    this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/detail', handler: createMarketSkillDetailHandler(), auth: true });
     this.router.addRoute({ method: 'POST', pattern: '/api/skills/market/install', handler: createInstallMarketSkillHandler(services, config, env), auth: true });
     this.router.addRoute({ method: 'GET', pattern: '/api/skills/:name', handler: createGetSkillHandler(services, env), auth: true });
     this.router.addRoute({ method: 'PATCH', pattern: '/api/skills/:name', handler: createUpdateSkillHandler(services, config), auth: true });
