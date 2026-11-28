@@ -4,8 +4,9 @@
 // 设计（与业务用法一一对应，无多余能力）：
 // - 高度模型：Map<key, 实测高度>（ResizeObserver）+ 未测条目用「已测平均值」估算；
 //   前缀和数组描述滚动内容，spacer 撑起未渲染区间。
-// - prepend 锚定：anchorPrepend() 在数据合入前捕获 scrollHeight，返回 apply()；
-//   提交后按「新增内容高度 = scrollHeight 增量」修正 scrollTop，视口纹丝不动。
+// - prepend 锚定：scrollTop 只由「视口顶部消息 key + 项内偏移」在 layoutEffect
+//   （paint 前）修正一次；anchorPrepend() 仅标记「本次是 prepend」（抑制级联加载 +
+//   触发重排），不再按 scrollHeight 增量二次移动 scrollTop，避免双倍补偿把视口推向底部。
 // - 贴底跟随（sticky 状态机，取代「atBottom 阈值 + 无条件拉回」）：
 //   sticky=true 时每次布局后贴底（测量估算→实测的收敛期间持续重贴，视觉不跳）；
 //   退出通道三重覆盖输入方式与竞态窗口——wheel 向上（滚轮一档未超阈值也立即退出）、
@@ -60,8 +61,6 @@ const VELOCITY_OVERSCAN_FACTOR = 250;
 const SCROLL_METRICS_THROTTLE_MS = 100;
 /** scrollTop 低于该值视为「接近顶部」（触发加载更早一页；可由 startReachedThreshold 覆盖） */
 const DEFAULT_START_REACH_THRESHOLD = 600;
-/** anchorPrepend.apply 等待数据提交的重试帧数上限 */
-const PREPEND_APPLY_RETRIES = 10;
 /** 滚动后距底小于该值才恢复贴底跟随（比对外 atBottom 宽阈值严——真贴底才恢复） */
 const STICKY_RESUME_PX = 32;
 /**
@@ -152,7 +151,10 @@ function clampRenderRange(
 }
 
 export interface PrependAnchor {
-  /** 在 prepend 数据提交后调用：按 scrollHeight 增量修正 scrollTop（自动等待提交） */
+  /**
+   * 在 prepend 数据合入后调用：标记「本次为前置加载」并触发一次重排。
+   * 实际 scrollTop 补偿由内部 key 锚定在 paint 前完成（避免二次补偿）。
+   */
   apply: () => void;
 }
 
@@ -324,6 +326,13 @@ export function VirtualList<T>({
   const lastScrollDeltaRef = useRef(0);
   /** 上一帧滚动内容高度（px）：区分「内容缩短导致浏览器钳制 scrollTop」与「用户主动上滑」 */
   const lastScrollHeightRef = useRef(0);
+  /** Header/Footer 实测高度：常驻 DOM 不虚拟化，但异步内容（如会话产物卡）会增高，
+   *  必须纳入布局与贴底计算，否则新内容会停留在视口下方直到用户滚动触发一次布局。 */
+  const headerElRef = useRef<HTMLDivElement | null>(null);
+  const footerElRef = useRef<HTMLDivElement | null>(null);
+  const headerHeightRef = useRef(0);
+  const footerHeightRef = useRef(0);
+  const chromeObserverRef = useRef<ResizeObserver | null>(null);
   /** 最近一次用户上滑意图时间戳（ms）：贴底重贴的冷却窗口，吸收同帧竞态 */
   const userIntentAtRef = useRef(0);
   /**
@@ -420,15 +429,29 @@ export function VirtualList<T>({
       prevItems.length > 0 &&
       prevPrefix.length > 1
     ) {
-      const prevTopIdx = findItemAt(prevPrefix, sc.scrollTop);
+      const headerH = headerHeightRef.current;
+      // scrollTop 是「滚动内容」坐标（含 header），前缀和是「条目区」坐标 → 减去 header 高度
+      const itemTop = Math.max(0, sc.scrollTop - headerH);
+      const prevTopIdx = findItemAt(prevPrefix, itemTop);
       if (prevTopIdx >= 0 && prevTopIdx < prevItems.length) {
         const anchorKey = keyFn(prevItems[prevTopIdx]);
-        const offsetInItem = sc.scrollTop - prevPrefix[prevTopIdx];
-        let newIdx = -1;
-        for (let i = 0; i < cur.length; i++) {
-          if (keyFn(cur[i]) === anchorKey) {
-            newIdx = i;
-            break;
+        let offsetInItem = itemTop - prevPrefix[prevTopIdx];
+        const findNewIdx = (key: string): number => {
+          for (let i = 0; i < cur.length; i++) {
+            if (keyFn(cur[i]) === key) return i;
+          }
+          return -1;
+        };
+        let newIdx = findNewIdx(anchorKey);
+        if (newIdx < 0) {
+          // 分组结构可能因 prepend 改变（如正文被并入 todo 容器）：原 key 消失时
+          // 退化为最近的、仍存在的条目 key，锚定其顶部，避免视口整页跳变。
+          offsetInItem = 0;
+          for (let j = prevTopIdx + 1; j < prevItems.length && newIdx < 0; j += 1) {
+            newIdx = findNewIdx(keyFn(prevItems[j]));
+          }
+          for (let j = prevTopIdx - 1; j >= 0 && newIdx < 0; j -= 1) {
+            newIdx = findNewIdx(keyFn(prevItems[j]));
           }
         }
         if (newIdx >= 0) {
@@ -437,11 +460,14 @@ export function VirtualList<T>({
             nextPrefix[newIdx] + offsetInItem,
             Math.max(nextPrefix[newIdx], itemBottom - 1),
           );
-          if (Math.abs(newTop - sc.scrollTop) > 4) {
-            // 记录自身程序滚动的预期值，避免 handleScroll 把这次修正误判为「用户上滑」而脱离跟随
-            selfScrollTopRef.current = newTop;
-            lastScrollTopRef.current = newTop;
-            sc.scrollTop = newTop;
+          const nextScrollTop = newTop + headerH;
+          if (Math.abs(nextScrollTop - sc.scrollTop) > 4) {
+            // 记录自身程序滚动的预期值，避免 handleScroll 把这次修正误判为「用户上滑」而脱离跟随。
+            // 这是 prepend / 实测修正的唯一 scrollTop 补偿点（anchorPrepend 不再二次补偿）。
+            selfScrollTopRef.current = nextScrollTop;
+            lastScrollTopRef.current = nextScrollTop;
+            lastScrollHeightRef.current = sc.scrollHeight;
+            sc.scrollTop = nextScrollTop;
           }
         }
       }
@@ -465,7 +491,13 @@ export function VirtualList<T>({
       // 程序滚动窗口期（平滑「返回底部」）例外：期间由 handleScroll 驱动区间，沿动画路径挂载。
       const total = prefixRef.current[prefixRef.current.length - 1] ?? 0;
       const bottomIntent = canFollowSticky();
-      const effectiveTop = bottomIntent ? Math.max(0, total - sc.clientHeight) : sc.scrollTop;
+      // 贴底落点必须包含 header/footer 高度（footer 里的产物卡会异步增高）；
+      // 统一换算回「条目区」坐标再做区间计算。
+      const headerH = headerHeightRef.current;
+      const chromeTotal = headerH + total + footerHeightRef.current;
+      const effectiveTop = bottomIntent
+        ? Math.max(0, Math.min(total, chromeTotal - sc.clientHeight - headerH))
+        : Math.max(0, Math.min(total, sc.scrollTop - headerH));
       // 速度预测 + 单帧跳变：跳变幅度直接计入 overscan（覆盖拖动滚动条一步到位），
       // 由 MAX_DYNAMIC_OVERSCAN_PX 与 MAX_RENDER_ITEMS 双重兜底，不会无限挂载。
       const jumpPx = Math.max(
@@ -628,6 +660,13 @@ export function VirtualList<T>({
         scheduleLayout();
       }
     });
+    // 首帧 cell 在 ref 回调时 observer 尚未创建 → 创建后补观察，
+    // 否则初始挂载条目的异步高度变化（流式正文 / 操作栏出现）不会被测量
+    const sc0 = scrollerRef.current;
+    if (sc0) {
+      const existing = sc0.querySelectorAll<HTMLElement>('[data-vl-key]');
+      for (const el of existing) cellObserverRef.current.observe(el);
+    }
     scrollerObserverRef.current = new ResizeObserver(() => {
       dirtyRef.current = true;
       scheduleLayout();
@@ -639,6 +678,63 @@ export function VirtualList<T>({
       scrollerObserverRef.current = null;
     };
   }, [scheduleLayout, syncAtBottom, canFollowSticky]);
+
+  /**
+   * Header/Footer 高度观察：两者常驻 DOM（不虚拟化），但内容可能异步增高
+   * （会话产物卡挂载 / 文档卡片组加载完成）。不观察时布局与贴底不会重跑，
+   * 新内容会停在视口下方，直到用户滚动触发一次布局。
+   */
+  useEffect(() => {
+    const ro = new ResizeObserver(() => {
+      const headerH = headerElRef.current?.offsetHeight ?? 0;
+      const footerH = footerElRef.current?.offsetHeight ?? 0;
+      const headerChanged = Math.abs(headerHeightRef.current - headerH) > 0.5;
+      const footerChanged = Math.abs(footerHeightRef.current - footerH) > 0.5;
+      if (!headerChanged && !footerChanged) return;
+      headerHeightRef.current = headerH;
+      footerHeightRef.current = footerH;
+      const sc = scrollerRef.current;
+      if (sc && canFollowSticky()) {
+        selfScrollTopRef.current = Math.max(0, sc.scrollHeight - sc.clientHeight);
+        sc.scrollTop = sc.scrollHeight;
+        lastScrollTopRef.current = sc.scrollTop;
+        lastScrollHeightRef.current = sc.scrollHeight;
+        syncAtBottom();
+      }
+      dirtyRef.current = true;
+      scheduleLayout();
+    });
+    chromeObserverRef.current = ro;
+    // 首帧元素在 ref 回调时 observer 尚未创建：创建后补一次 observe
+    if (headerElRef.current) ro.observe(headerElRef.current);
+    if (footerElRef.current) ro.observe(footerElRef.current);
+    return () => {
+      ro.disconnect();
+      chromeObserverRef.current = null;
+    };
+  }, [scheduleLayout, syncAtBottom, canFollowSticky]);
+
+  /** Header 包裹层 ref（稳定回调；later mount 时由已创建的 observer 接管） */
+  const headerRefCb = useCallback((el: HTMLDivElement | null) => {
+    headerElRef.current = el;
+    if (!el) return undefined;
+    chromeObserverRef.current?.observe(el);
+    return () => {
+      chromeObserverRef.current?.unobserve(el);
+      if (headerElRef.current === el) headerElRef.current = null;
+    };
+  }, []);
+
+  /** Footer 包裹层 ref（稳定回调；later mount 时由已创建的 observer 接管） */
+  const footerRefCb = useCallback((el: HTMLDivElement | null) => {
+    footerElRef.current = el;
+    if (!el) return undefined;
+    chromeObserverRef.current?.observe(el);
+    return () => {
+      chromeObserverRef.current?.unobserve(el);
+      if (footerElRef.current === el) footerElRef.current = null;
+    };
+  }, []);
 
   /** 条目包裹层 ref（稳定回调 + React19 cleanup 卸载时反注册） */
   const cellRef = useCallback((el: HTMLElement | null) => {
@@ -815,6 +911,9 @@ export function VirtualList<T>({
     rangeStateRef.current = { start: 0, end: 0 };
     visibleStateRef.current = { start: 0, end: 0 };
     autoFillDepthRef.current = 0;
+    // Header/Footer 是常驻节点（跨会话复用），高度需重新实测，避免沿用上一会话的值
+    headerHeightRef.current = headerElRef.current?.offsetHeight ?? 0;
+    footerHeightRef.current = footerElRef.current?.offsetHeight ?? 0;
     // 新会话初始化窗口：贴底与实测收敛期间不触发 startReached
     startArmedAtRef.current = Date.now() + 400;
     dirtyRef.current = true;
@@ -827,7 +926,12 @@ export function VirtualList<T>({
     const sc = scrollerRef.current;
     if (!sc || items.length === 0) return;
     const total = prefixRef.current[prefixRef.current.length - 1] ?? 0;
-    if (total >= sc.clientHeight * 1.5) {
+    // 判定「是否已填满一屏半」必须计入 header/footer：底部产物卡也占据真实视口高度
+    const chromeTotal = headerHeightRef.current + total + footerHeightRef.current;
+    // 内容不足一屏半（折叠态常见）时不抑制 startReached：否则 prepend 后
+    // scrollTop 仍 <= 阈值，抑制标记无法清除，上滑分页会永久卡住。
+    if (chromeTotal < sc.clientHeight * 1.5) suppressStartRef.current = false;
+    if (chromeTotal >= sc.clientHeight * 1.5) {
       autoFillDepthRef.current = 0;
       return;
     }
@@ -946,10 +1050,12 @@ export function VirtualList<T>({
       lastScrollHeightRef.current = sc.scrollHeight;
       if (top > startThresholdRef.current) suppressStartRef.current = false;
       if (prefixRef.current.length > 1) {
+        // 前缀和是「条目区」坐标；scrollTop 含 header 高度 → 换算后再算区间
+        const itemTop = Math.max(0, sc.scrollTop - headerHeightRef.current);
         const r = clampRenderRange(
-          computeRange(prefixRef.current, sc.scrollTop, sc.clientHeight, dynamicOverscan),
+          computeRange(prefixRef.current, itemTop, sc.clientHeight, dynamicOverscan),
           prefixRef.current,
-          sc.scrollTop,
+          itemTop,
           sc.clientHeight,
         );
         const prevRange = rangeStateRef.current;
@@ -957,7 +1063,7 @@ export function VirtualList<T>({
           rangeStateRef.current = r;
           setRange(r);
         }
-        const vr = computeVisibleRange(prefixRef.current, sc.scrollTop, sc.clientHeight);
+        const vr = computeVisibleRange(prefixRef.current, itemTop, sc.clientHeight);
         const prevVisible = visibleStateRef.current;
         if (prevVisible.start !== vr.start || prevVisible.end !== vr.end) {
           visibleStateRef.current = vr;
@@ -1032,40 +1138,30 @@ export function VirtualList<T>({
         dirtyRef.current = true;
         runLayout();
       }
-      return prefixRef.current[index] ?? null;
+      const top = prefixRef.current[index];
+      if (top === undefined) return null;
+      // 转为「滚动内容」坐标（前缀和从条目区起点算起；header 常驻在条目区上方）
+      return top + headerHeightRef.current;
     },
     [indexOfKey, runLayout],
   );
 
   const api = useMemo<VirtualListApi>(() => ({
     anchorPrepend: () => {
-      // 同一帧内多次 prepend（缓存页连消费 / 多来源合并）复用同一个锚点：
-      // 若每次重新捕获 h0 并各自加 delta，scrollTop 会被重复累加 → 位置错乱。
+      // 同一帧内多次 prepend（缓存页连消费 / 多来源合并）复用同一个 apply
       const pending = pendingAnchorRef.current;
       if (pending) return { apply: pending.apply };
-      const h0 = scrollerRef.current?.scrollHeight ?? 0;
       let applied = false;
       const apply = (): void => {
         if (applied) return;
         applied = true;
         pendingAnchorRef.current = null;
-        const tryOnce = (retries: number): void => {
-          const s = scrollerRef.current;
-          if (!s) return;
-          const delta = s.scrollHeight - h0;
-          // 数据尚未提交（增量仍为 0）：等待下一帧再试
-          if (delta === 0 && retries > 0) {
-            requestAnimationFrame(() => tryOnce(retries - 1));
-            return;
-          }
-          if (delta > 0) {
-            s.scrollTop += delta;
-            suppressStartRef.current = true;
-            dirtyRef.current = true;
-            scheduleLayout();
-          }
-        };
-        requestAnimationFrame(() => tryOnce(PREPEND_APPLY_RETRIES));
+        // 滚动位置由 runLayout 的「视口顶部消息 key + 项内偏移」在 paint 前统一补偿；
+        // 这里不再按 scrollHeight 增量移动 scrollTop——两者叠加会把视口向下多推一页，
+        // 内容较短时直接落到/接近底部（「上滑反而回到底部」的根因）。
+        suppressStartRef.current = true;
+        dirtyRef.current = true;
+        scheduleLayout();
       };
       pendingAnchorRef.current = { apply };
       return { apply };
@@ -1155,7 +1251,7 @@ export function VirtualList<T>({
       onWheel={handleWheel}
       onTouchMove={handleTouchMove}
     >
-      {header}
+      <div ref={headerRefCb}>{header}</div>
       <div style={{ height: topSpacer }} aria-hidden="true" />
       {items.slice(rangeStart, rangeEnd).map((item, i) => {
         const index = rangeStart + i;
@@ -1168,7 +1264,7 @@ export function VirtualList<T>({
         );
       })}
       <div style={{ height: bottomSpacer }} aria-hidden="true" />
-      {footer}
+      <div ref={footerRefCb}>{footer}</div>
     </div>
   );
 }

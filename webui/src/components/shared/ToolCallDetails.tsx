@@ -594,28 +594,19 @@ export const ToolCallDetails = memo(function ToolCallDetails({
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
   const stepDisplay = useStore((s) => s.stepDisplay);
-  /** 详细 / 原始内容挡位：工具卡默认展开 */
-  const levelExpanded = stepDisplay === 'detailed' || stepDisplay === 'raw';
-  const initialExpanded = defaultExpanded === true || levelExpanded;
+  /** 工具卡默认收起（详细 / 原始内容挡位也不再自动展开，仅点击单卡时展开） */
+  const initialExpanded = defaultExpanded === true;
   /** 结果所属会话：子代理卡片必须传自己的 session，否则懒加载会去主会话找 tool-result */
   const resultSessionId = sessionId ?? activeSessionId;
   const [localExpanded, setLocalExpanded] = useState(initialExpanded);
   const [persistedExpanded, setPersistedExpanded] = usePersistentState(
-    // 挡位拼进 key：切换挡位时按新挡位默认值重置；同挡位内手动开合可跨卸载保持
+    // 挡位拼进 key：切换挡位时重置手动开合；同挡位内手动开合可跨卸载保持
     stateKey ? `${stateKey}:${stepDisplay}` : '',
     initialExpanded,
   );
   const internalExpanded = stateKey ? persistedExpanded : localExpanded;
   const setInternalExpanded = stateKey ? setPersistedExpanded : setLocalExpanded;
   const isOpen = expanded ?? internalExpanded;
-  /** 无 stateKey 的非受控卡片：挡位变化时同步默认展开态（有 stateKey 时由 key 切换生效） */
-  const prevLevelRef = useRef(stepDisplay);
-  useEffect(() => {
-    if (prevLevelRef.current === stepDisplay) return;
-    prevLevelRef.current = stepDisplay;
-    if (expanded !== undefined || stateKey) return;
-    setLocalExpanded(defaultExpanded === true || levelExpanded);
-  }, [stepDisplay, expanded, stateKey, defaultExpanded, levelExpanded]);
   const [mode, setMode] = useState<CardMode>('preview');
   const [copied, setCopied] = useState(false);
   const [stopping, setStopping] = useState(false);

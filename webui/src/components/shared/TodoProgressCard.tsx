@@ -69,8 +69,8 @@ export function TodoProgressCard({
         <div className="flex items-center gap-1.5">
           <ListTodo className="size-3.5 text-muted-foreground" />
           <span className="text-xs font-medium text-foreground">
-            {/* 非原始挡位套用工具动作文案；原始内容挡位显示原始工具名 todo */}
-            {stepDisplay === 'raw' ? 'todo' : t('task.toolCopy.todoUpdate.done')} · {completed}/{total}{' '}
+            {/* 原始内容挡位显示原始工具名 todo；其余挡位只显示「待办」标题 */}
+            {stepDisplay === 'raw' ? 'todo' : t('task.todo')} · {completed}/{total}{' '}
             {t('task.todoCompleted')}
           </span>
         </div>

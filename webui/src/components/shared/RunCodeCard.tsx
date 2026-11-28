@@ -59,17 +59,9 @@ export const RunCodeCard = memo(function RunCodeCard({
 }: RunCodeCardProps) {
   const { t } = useTranslation();
   const activeSessionId = useStore((s) => s.activeSessionId);
-  const stepDisplay = useStore((s) => s.stepDisplay);
-  const levelExpanded = stepDisplay === 'detailed' || stepDisplay === 'raw';
   const resultSessionId = sessionId ?? activeSessionId ?? undefined;
-  const [open, setOpen] = useState(levelExpanded);
-  // 挡位切换：详细/原始内容默认展开程序卡，简洁/标准默认折叠
-  const prevLevelRef = useRef(stepDisplay);
-  useEffect(() => {
-    if (prevLevelRef.current === stepDisplay) return;
-    prevLevelRef.current = stepDisplay;
-    setOpen(stepDisplay === 'detailed' || stepDisplay === 'raw');
-  }, [stepDisplay]);
+  // 程序卡默认收起（详细 / 原始内容挡位也不再自动展开）
+  const [open, setOpen] = useState(false);
   const [nestedOpenIds, setNestedOpenIds] = useState<Set<string>>(new Set());
   // 历史轻量投影只保留 hasUi（不含 uiSpec）：折叠态也要按需补拉完整结果，
   // 保证刷新后 IntelligentUI 仍显示在折叠代码卡下方（与对话流一致）。

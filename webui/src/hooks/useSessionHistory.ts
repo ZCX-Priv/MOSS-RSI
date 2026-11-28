@@ -67,6 +67,25 @@ export interface UseSessionHistoryResult {
   prefetchMore: () => void;
 }
 
+export interface UseSessionHistoryOptions {
+  /**
+   * 折叠状态下加载整个会话（全部更早历史）：
+   * 折叠行收起时列表总高度可能不足一屏，滚动分页永远不会触发；此时改为串行补齐全部页。
+   * 折叠行内部内容仍不挂载（展开才渲染），因此不会增加可见 DOM。
+   */
+  loadAllOlder?: boolean;
+}
+
+/** load-all 安全阀：约 9000 条消息，防止后端游标异常导致无限循环 */
+const LOAD_ALL_MAX_PAGES = 300;
+/** load-all 遇到 busy 时的重试间隔（ms） */
+const LOAD_ALL_BUSY_RETRY_MS = 60;
+/** 单次加载更早一页的结果：advanced=已合入；busy=有在途；failed=网络/接口失败；end=没有更早 */
+type LoadOlderResult = 'advanced' | 'busy' | 'failed' | 'end';
+/** load-all 失败重试间隔与连续失败上限 */
+const LOAD_ALL_FAIL_RETRY_MS = 300;
+const LOAD_ALL_MAX_FAILURES = 2;
+
 /** 首屏空结果重试间隔：等待后端把 task.stream 的 user 消息持久化到内存会话 */
 const FIRST_PAGE_RETRY_DELAY_MS = 250;
 
@@ -90,6 +109,7 @@ const RUN_STALE_GRACE_MS = 90_000;
 export function useSessionHistory(
   taskId: string,
   apiRef?: RefObject<VirtualListApi | null>,
+  options: UseSessionHistoryOptions = {},
 ): UseSessionHistoryResult {
   /** 已请求过首屏的会话（避免重复拉取；切换会话时重置） */
   const loadedRef = useRef<string | null>(null);
@@ -106,6 +126,9 @@ export function useSessionHistory(
   const prefetchLastAtRef = useRef<Map<string, number>>(new Map());
   /** loadOlder 同步防重入（按会话）：一次只合并一页，避免同一帧连续消费多页缓存 */
   const loadOlderBusyRef = useRef<Set<string>>(new Set());
+  /** 折叠状态 load-all 的进度（按会话）：已加载页数，切会话重置 */
+  const loadAllPagesRef = useRef<{ session: string; pages: number }>({ session: '', pages: 0 });
+  const loadAllOlder = options.loadAllOlder === true;
 
   const hasMoreBefore = useStore((s) => s.historyMetaBySession[taskId]?.hasMoreBefore ?? false);
   const loadingBefore = useStore((s) => s.historyMetaBySession[taskId]?.loadingBefore ?? false);
@@ -235,6 +258,8 @@ export function useSessionHistory(
     useStore.getState().clearHistoryCache(taskId);
     prefetchCursorRef.current.delete(taskId);
     prefetchLastAtRef.current.delete(taskId);
+    // 历史整体重载后重新计数，避免 load-all 安全阀被上次的页数提前耗尽
+    loadAllPagesRef.current = { session: '', pages: 0 };
     try {
       // withRetry：后端内核启动窗口内 agent 引擎未就绪会返回 503（可重试）
       const resp = await withRetry(() => api.getSessionHistory(taskId, { limit: HISTORY_PAGE_SIZE }));
@@ -715,14 +740,19 @@ export function useSessionHistory(
   // ==========================================================================
   // 上滑加载更早的一页
   // ==========================================================================
-  const loadOlder = useCallback(() => {
-    if (!taskId) return;
+  /**
+   * 加载更早一页（可 await）：缓存命中同步合入，否则走网络。
+   * 返回值供折叠态的 load-all 循环判断进度；公共 loadOlder 仍是 fire-and-forget。
+   */
+  const loadOlderOnce = useCallback(async (): Promise<LoadOlderResult> => {
+    if (!taskId) return 'end';
     // 同步防重入：同一帧内滚动事件可能多次进入（缓存命中路径没有 loadingBefore 异步窗口），
     // 这里保证一次只合并一页、只 apply 一次 prepend 锚定。
-    if (loadOlderBusyRef.current.has(taskId)) return;
+    if (loadOlderBusyRef.current.has(taskId)) return 'busy';
     const st = useStore.getState();
     const meta = st.historyMetaBySession[taskId];
-    if (!meta || !meta.hasMoreBefore || meta.loadingBefore) return;
+    if (!meta || !meta.hasMoreBefore) return 'end';
+    if (meta.loadingBefore) return 'busy';
 
     // 缓存优先：命中时同步合并（无网络等待，毫秒级跟手）
     const cached = st.takeCachedHistoryPage(taskId);
@@ -732,38 +762,108 @@ export function useSessionHistory(
       anchor?.apply();
       // 消费一页后再补足缓冲（有冷却与「缓存已满」判定，不会连环请求）
       prefetchOlder(taskId, HISTORY_PREFETCH_PAGES);
-      return;
+      return 'advanced';
     }
 
     loadOlderBusyRef.current.add(taskId);
     st.patchHistoryMeta(taskId, { loadingBefore: true });
-    void api
-      .getSessionHistory(taskId, { limit: HISTORY_PAGE_SIZE, before: meta.oldestIndex })
-      .then((resp) => {
-        const cur = useStore.getState();
-        if (cur.activeSessionId && cur.activeSessionId !== taskId) return;
-        if (!resp.page) {
-          cur.patchHistoryMeta(taskId, { loadingBefore: false, hasMoreBefore: false });
-          return;
-        }
-        if (resp.messages.length === 0) {
-          cur.patchHistoryMeta(taskId, { loadingBefore: false, hasMoreBefore: false });
-          return;
-        }
-        // prepend 锚定：合入前捕获 scrollHeight，合入提交后按增量修正 scrollTop（视口不跳动）
-        const anchor = apiRef?.current?.anchorPrepend();
-        cur.mergeHistory(taskId, resp.messages, 'prepend', resp.page);
-        anchor?.apply();
-        // 实时请求成功后继续预取，恢复缓冲
-        prefetchOlder(taskId, HISTORY_PREFETCH_PAGES);
-      })
-      .catch(() => {
-        useStore.getState().patchHistoryMeta(taskId, { loadingBefore: false });
-      })
-      .finally(() => {
-        loadOlderBusyRef.current.delete(taskId);
+    try {
+      const resp = await api.getSessionHistory(taskId, {
+        limit: HISTORY_PAGE_SIZE,
+        before: meta.oldestIndex,
       });
+      const cur = useStore.getState();
+      if (cur.activeSessionId && cur.activeSessionId !== taskId) {
+        // 迟到结果丢弃，但必须清掉加载态：否则切回该会话后 loadingBefore 永远为 true
+        cur.patchHistoryMeta(taskId, { loadingBefore: false });
+        return 'failed';
+      }
+      if (!resp.page) {
+        cur.patchHistoryMeta(taskId, { loadingBefore: false, hasMoreBefore: false });
+        return 'end';
+      }
+      if (resp.messages.length === 0) {
+        cur.patchHistoryMeta(taskId, { loadingBefore: false, hasMoreBefore: false });
+        return 'end';
+      }
+      // prepend 锚定：滚动位置由 VirtualList 按「顶部消息 key + 项内偏移」在 paint 前修正；
+      // anchorPrepend.apply 现在只负责抑制级联加载与触发重排（不再二次移动 scrollTop）。
+      const anchor = apiRef?.current?.anchorPrepend();
+      cur.mergeHistory(taskId, resp.messages, 'prepend', resp.page);
+      anchor?.apply();
+      // 实时请求成功后继续预取，恢复缓冲
+      prefetchOlder(taskId, HISTORY_PREFETCH_PAGES);
+      return 'advanced';
+    } catch {
+      useStore.getState().patchHistoryMeta(taskId, { loadingBefore: false });
+      return 'failed';
+    } finally {
+      loadOlderBusyRef.current.delete(taskId);
+    }
   }, [taskId, apiRef, prefetchOlder]);
+
+  const loadOlder = useCallback(() => {
+    void loadOlderOnce();
+  }, [loadOlderOnce]);
+
+  /**
+   * 折叠状态：串行加载整个会话的更早历史。
+   *
+   * 为什么需要：折叠行收起后单页高度可能只有几百 px，列表总高度不足一屏 → 没有滚动事件，
+   * startReached 永远不触发；autoFill 的 2 页上限与 prepend 后的 startReached 抑制会一起把
+   * 分页卡死。折叠态下改为逐页补齐（折叠行内部仍不挂载，展开才渲染）。
+   *
+   * 保护：一页一请求串行；游标必须严格减小（防死循环）；连续失败 2 次熔断；
+   * 300 页安全阀；切会话 / 关闭折叠态 / 卸载时立即取消。
+   */
+  useEffect(() => {
+    if (!loadAllOlder || !taskId) return;
+    let cancelled = false;
+    const sessionId = taskId;
+    if (loadAllPagesRef.current.session !== sessionId) {
+      loadAllPagesRef.current = { session: sessionId, pages: 0 };
+    }
+    const run = async (): Promise<void> => {
+      let failures = 0;
+      let lastOldest =
+        useStore.getState().historyMetaBySession[sessionId]?.oldestIndex ?? -1;
+      while (!cancelled) {
+        const meta = useStore.getState().historyMetaBySession[sessionId];
+        if (!meta || !meta.loaded || !meta.hasMoreBefore) return;
+        if (loadAllPagesRef.current.session !== sessionId) return;
+        if (loadAllPagesRef.current.pages >= LOAD_ALL_MAX_PAGES) return;
+        // 预取在途时先等它落缓存，避免与 load-all 用同一游标重复请求
+        const result: LoadOlderResult = prefetchBusyRef.current.has(sessionId)
+          ? 'busy'
+          : await loadOlderOnce();
+        if (cancelled) return;
+        if (result === 'end') return;
+        if (result === 'busy') {
+          await new Promise((resolve) => setTimeout(resolve, LOAD_ALL_BUSY_RETRY_MS));
+          continue;
+        }
+        if (result === 'failed') {
+          failures += 1;
+          if (failures >= LOAD_ALL_MAX_FAILURES) return;
+          await new Promise((resolve) => setTimeout(resolve, LOAD_ALL_FAIL_RETRY_MS));
+          continue;
+        }
+        failures = 0;
+        loadAllPagesRef.current.pages += 1;
+        const nextOldest =
+          useStore.getState().historyMetaBySession[sessionId]?.oldestIndex ?? lastOldest;
+        // 游标必须严格前进，否则视为后端异常，停止（防死循环）
+        if (nextOldest >= lastOldest) return;
+        lastOldest = nextOldest;
+        // 让出主线程，保证加载过程中滚动/流式仍可响应
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAllOlder, taskId, metaLoaded, hasMoreBefore, loadOlderOnce]);
 
   return {
     loadOlder,
